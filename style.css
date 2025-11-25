@@ -1,0 +1,218 @@
+/* === 全局字体 === */
+    .stApp {
+        font-family: 'Microsoft YaHei', sans-serif;
+        background-color: #f5f7f9;
+    }
+
+/* === 核心修改：隐藏 Streamlit 默认的顶部栏和页脚 === */
+
+    /* 1. 隐藏右上角的 Deploy 按钮和汉堡菜单
+     header[data-testid="stHeader"] {
+        visibility: hidden;
+    }
+        */
+    /* 2. 隐藏底部的 "Made with Streamlit" */
+    footer {
+        visibility: hidden;
+    }
+
+    /* 3. 调整顶部空白 (因为隐藏了 header，内容可以往上移) */
+    .block-container {
+        padding-top: 1rem !important; /* 减少顶部留白 */
+    }
+
+
+    /* === 响应式适配 (关键) === */
+    @media (max-width: 768px) {
+        /* 手机端：隐藏侧边栏 (Streamlit 会自动收起) */
+
+        /* 手机端：顶部容器样式优化 */
+        .mobile-top-container {
+            background-color: white;
+            padding: 15px;
+            border-radius: 10px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.05);
+            margin-bottom: 15px;
+            border: 1px solid #eee;
+        }
+
+        /* 手机端：标题文字变小 */
+        .main-title {
+            font-size: 1.5rem !important;
+        }
+
+        /* 手机端：隐藏部分不重要的装饰 */
+        .hide-on-mobile {
+            display: none;
+        }
+    }
+
+    /* === 桌面端侧边栏 === */
+    [data-testid="stSidebar"] {
+        background-color: #1E1E1E;
+    }
+    [data-testid="stSidebar"] * {
+        color: #E0E0E0 !important;
+    }
+    [data-testid="stSidebar"] h1 {
+        color: #FF4B4B !important;
+        font-size: 24px !important;
+    }
+
+    /* === 组件样式 === */
+    /* 顶部标题栏 (桌面) */
+    .desktop-header {
+        background-color: #fff;
+        padding: 1.5rem;
+        border-radius: 10px;
+        margin-bottom: 1.5rem;
+        box-shadow: 0 2px 6px rgba(0,0,0,0.05);
+    }
+
+    /* 小秘书区域 */
+/* === 客服区域样式 (优化版) === */
+    .service-box {
+        background-color: #252526; /* 深色背景 */
+        border: 1px solid #444;
+        border-radius: 8px;
+        padding: 15px;
+        margin-top: 20px;
+
+        /* 使用 Flexbox 居中对齐所有内容 */
+        display: flex;
+        flex-direction: column; /* 垂直排列 */
+        align-items: center;    /* 水平居中 */
+        justify-content: center;
+    }
+
+    .service-title {
+        color: #FF4B4B !important;
+        font-size: 14px;
+        font-weight: bold;
+        margin-bottom: 8px;
+        border-bottom: 1px dashed #555; /* 加个虚线分隔 */
+        padding-bottom: 5px;
+        width: 100%; /* 标题占满宽度 */
+        text-align: center;
+    }
+
+    .service-phone {
+        color: white !important;
+        font-size: 18px; /* 字体加大一点 */
+        font-family: 'Arial', sans-serif;
+        font-weight: bold;
+        margin-bottom: 10px;
+        letter-spacing: 1px; /* 增加字间距 */
+    }
+
+    .qr-img {
+        width: 120px; /* 固定二维码大小 */
+        height: 120px;
+        border-radius: 4px;
+        border: 4px solid #fff; /* 加个白边框更好看 */
+        margin-bottom: 5px;
+    }
+
+    .service-desc {
+        font-size: 12px !important;
+        color: #aaa !important;
+        margin-top: 5px;
+    }
+
+    .secretary-img {
+    width: 60px;
+    height: 60px;
+    border-radius: 10px;
+    object-fit: cover;
+    margin-right: 15px;
+    border: 2px solid #f0f0f0;
+    min-width: 60px; /* 防止手机挤压 */
+}
+
+
+/* === 新增：通用卡片容器樣式 (.card-box) === */
+    .card-box {
+        background-color: #ffffff;      /* 白底 */
+        border: 1px solid #e0e0e0;      /* 淺灰邊框 */
+        border-radius: 10px;            /* 圓角 */
+        padding: 20px;                  /* 內邊距 */
+        box-shadow: 0 2px 5px rgba(0,0,0,0.05); /* 淡淡的陰影 */
+        margin-bottom: 20px;            /* 下方留白 */
+    }
+
+    /* AI 决策区域 */
+    .ai-container {
+        background-color: #fffcf0;
+        border: 1px solid #f0e6d2;
+        border-left: 4px solid #f59e0b;
+        border-radius: 10px;
+        padding: 15px;
+        margin-bottom: 15px;
+    }
+
+    /* 标题样式 */
+    .main-title {
+        font-size: 2rem;
+        font-weight: bold;
+        color: #333;
+        margin-bottom: 5px;
+    }
+
+    /* 按钮优化 */
+    .stButton button {
+        width: 100%;
+        border-radius: 8px;
+    }
+    /* === 新增：指标卡片样式 (Metric Card) === */
+    .metric-card {
+        background-color: #ffffff;
+        border: 1px solid #e0e0e0;
+        border-radius: 10px;
+        padding: 15px;
+        text-align: center;
+        box-shadow: 0 2px 5px rgba(0,0,0,0.05);
+        margin-bottom: 10px;
+        /* 手机端适配：保证最小高度，防止太扁 */
+        min-height: 100px;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        align-items: center;
+    }
+
+        .metric-card2 {
+        background-color: #ffffff;
+        border: 1px solid #e0e0e0;
+        border-radius: 10px;
+        padding: 15px;
+        display: flex; justify-content: flex-start; align-items: flex-start;
+        box-shadow: 0 2px 5px rgba(0,0,0,0.05);
+        margin-bottom: 10px;
+        /* 手机端适配：保证最小高度，防止太扁 */
+        min-height: 100px;
+    }
+
+    .metric-label {
+        font-size: 14px;
+        color: #666;
+        margin-bottom: 5px;
+        font-weight: 500;
+    }
+
+    .metric-value {
+        font-size: 1.4rem; /* 大字体 */
+        font-weight: bold;
+        color: #333;
+    }
+
+    .metric-delta {
+        font-size: 0.9rem;
+        margin-top: 5px;
+        font-weight: bold;
+        padding: 2px 8px;
+        border-radius: 12px;
+    }
+
+    /* 涨跌颜色背景 */
+    .delta-pos { color: #D32F2F; background-color: #FFEBEE; } /* 红字红底 */
+    .delta-neg { color: #2E7D32; background-color: #E8F5E9; } /* 绿字绿底 */
