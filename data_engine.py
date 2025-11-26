@@ -1,6 +1,6 @@
 import pandas as pd
 import os
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from dotenv import load_dotenv
 from langchain_core.tools import tool
 from langchain.agents import create_agent
@@ -309,6 +309,39 @@ def get_expert_sentiment(date_str, symbol):
     except:
         return None
 
+#極速的查排行榜函數
+@st.cache_data(ttl=6000)
+def get_cross_market_ranking(days=200, top_n=5):
+    """
+    直接從數據庫讀取預計算好的全市場排行榜
+    """
+    if engine is None: return pd.DataFrame(), pd.DataFrame()
+
+    try:
+        # 獲取最新的統計日期
+        date_sql = "SELECT MAX(trade_date) FROM market_rank_daily"
+        with engine.connect() as conn:
+            latest_date = conn.execute(text(date_sql)).scalar()
+
+        if not latest_date:
+            # 如果表是空的，臨時回退到實時計算 (作為兜底)
+            # 或者直接返回空
+            print("[-] 緩存表為空")
+            return pd.DataFrame(), pd.DataFrame()
+
+        # 查詢數據
+        sql = f"SELECT * FROM market_rank_daily WHERE trade_date='{latest_date}'"
+        df = pd.read_sql(sql, engine)
+
+        # 拆分
+        top_winners = df[df['rank_type'] == 'WIN'].sort_values('score', ascending=False).head(top_n)
+        top_losers = df[df['rank_type'] == 'LOSE'].sort_values('score', ascending=True).head(top_n)
+
+        return top_winners, top_losers
+
+    except Exception as e:
+        print(f"查詢排行出錯: {e}")
+        return pd.DataFrame(), pd.DataFrame()
 
 
 # 4. AI 生成报告 (新增 commodity_name 参数)

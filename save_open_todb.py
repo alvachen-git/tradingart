@@ -143,7 +143,7 @@ def run_job(start_date, end_date):
 if __name__ == "__main__":
     # 自动补全最近 5 天的数据
     today = datetime.now().strftime('%Y%m%d')
-    start = (datetime.now() - timedelta(days=2)).strftime('%Y%m%d')
+    start = (datetime.now() - timedelta(days=210)).strftime('%Y%m%d')
 
     # 或者您可以手动指定日期测试
     # start = '20251114'

@@ -7,23 +7,6 @@ import os
 # 1. 页面配置
 st.set_page_config(page_title="商品期货", page_icon="📡", layout="wide", initial_sidebar_state="collapsed")
 
-
-# ----- 隐藏顶部 Header 的 CSS -----
-hide_header_style = """
-<style>
-    /* 隐藏顶部的白色横条 (Deploy, Stop, 汉堡菜单) */
-    [data-testid="stHeader"] {
-        display: none;
-    }
-
-    /* 可选：如果你觉得隐藏后顶部留白太多，可以用下面的代码把内容往上提 */
-    .block-container {
-        padding-top: 2rem; /* 默认是 6rem 左右，改小一点就上去了 */
-    }   
-</style>
-"""
-st.markdown(hide_header_style, unsafe_allow_html=True)
-
 # --- 路径修复: 确保能导入根目录的 data_engine ---
 current_dir = os.path.dirname(os.path.abspath(__file__))
 root_dir = os.path.dirname(current_dir)
