@@ -128,7 +128,9 @@ def card(label, value, delta, delta_color="pos"):
 # (以下代码无需修改，继续使用之前的逻辑)
 
 # 数据加载
-df_scores = de.calculate_broker_rankings(symbol=current_code)
+with st.spinner(f"正在扫描持仓数据..."):
+    df_scores = de.calculate_broker_rankings(symbol=current_code)
+
 if df_scores.empty:
     st.error(f"暂无 {current_name} 数据。")
     st.stop()

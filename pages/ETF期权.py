@@ -15,6 +15,22 @@ css_path = os.path.join(root_dir, 'style.css')
 with open(css_path, encoding='utf-8') as f:
     st.markdown(f'<style>{f.read()}</style>', unsafe_allow_html=True)
 
+# ----- 隐藏顶部 Header 的 CSS -----
+hide_header_style = """
+<style>
+    /* 隐藏顶部的白色横条 (Deploy, Stop, 汉堡菜单) */
+    [data-testid="stHeader"] {
+        display: none;
+    }
+
+    /* 可选：如果你觉得隐藏后顶部留白太多，可以用下面的代码把内容往上提 */
+    .block-container {
+        padding-top: 2rem; /* 默认是 6rem 左右，改小一点就上去了 */
+    }   
+</style>
+"""
+st.markdown(hide_header_style, unsafe_allow_html=True)
+
 # --- 页面逻辑 ---
 st.markdown('<div class="mobile-top-container">', unsafe_allow_html=True)
 c1, c2 = st.columns([1, 2])
