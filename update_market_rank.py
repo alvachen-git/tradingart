@@ -50,13 +50,18 @@ def calculate_and_save_rank(days=200, top_n=10):
         print("[-] 無有效數據")
         return
 
-    # 3. 匯總計算
+    if not all_scores:
+        print("[-] 无有效数据")
+        return
+
+        # 3. 汇总计算
     big_df = pd.concat(all_scores)
 
-    # 清洗機構名稱
+    # --- 【关键修改】在这里清洗机构名称 ---
+    # 必须在 groupby 之前清洗，这样 "永安" 和 "永安(代客)" 才能合并成一个
     big_df['broker'] = big_df['broker'].str.replace(r'[（\(]代客[）\)]', '', regex=True).str.strip()
 
-    # 分組求和
+    # 分组求和 (清洗后，同名机构的分数会自动加在一起)
     rank_df = big_df.groupby('broker')['score'].sum().reset_index()
 
     # 4. 提取前 N 名
