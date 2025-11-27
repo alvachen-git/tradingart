@@ -66,7 +66,7 @@ def update_today_price(symbol, name):
 
         # 5. 准备入库字段
         target_cols = ['trade_date', 'ts_code', 'name', 'open_price', 'high_price', 'low_price', 'close_price',
-                       'settle_price', 'vol', 'oi', 'pct_chg']
+                       'vol', 'oi', 'pct_chg']
         # 补全缺失列
         for c in target_cols:
             if c not in df_today.columns: df_today[c] = 0
