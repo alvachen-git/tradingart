@@ -3,7 +3,25 @@ import pandas as pd
 import os
 import sys
 import plotly.express as px
+from dotenv import load_dotenv
+from fed_data import get_fed_probabilities
 
+# --- AI 相关导入 (LangGraph 版) ---
+from langchain_community.chat_models import ChatTongyi
+from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
+# 【关键修改】使用 LangGraph 的预构建 Agent
+try:
+    from langgraph.prebuilt import create_react_agent
+except ImportError:
+    st.error("❌ 请先安装 LangGraph: `pip install langgraph`")
+    st.stop()
+
+from kline_tools import analyze_kline_pattern
+
+
+
+# 1. 初始化环境
+load_dotenv(override=True)
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(current_dir)
@@ -22,9 +40,114 @@ st.set_page_config(
 with open('style.css', encoding='utf-8') as f:
     st.markdown(f'<style>{f.read()}</style>', unsafe_allow_html=True)
 
+
+# ==========================================
+#  AI Agent 初始化 (LangGraph 版)
+# ==========================================
+def get_agent():
+    # 1. 定义工具箱
+    tools = [analyze_kline_pattern]
+
+    # 2. LLM
+    if not os.getenv("DASHSCOPE_API_KEY"):
+        st.error("未配置 API KEY")
+        return None
+
+    llm = ChatTongyi(model="qwen-plus", temperature=0.1)
+
+    # 3. 系统提示词 (System Prompt)
+    system_message = """
+    你是一位专业的K线技术分析师。
+    你拥有一个强大的工具 `analyze_kline_pattern`，可以计算任何品种的 K 线形态、均线趋势。
+
+    【你的行为准则】
+    1. 当用户询问某个品种（如碳酸锂、螺纹钢）的“走势”、“技术面”、“形态”时，**必须**调用工具获取数据。
+    2. 拿到工具返回的报告后，请用通俗易懂的语言解读给用户听。
+    3. 如果形态是“大阳线”或“金针探底”，提示机会；如果是“大阴线”或“射击之星”，提示风险。
+    4. 如果用户没有明确说明什么品种，你就反问客户把问题说详细点
+    """
+
+    # 4. 创建 Agent (自动适配参数名)
+    try:
+        # 尝试使用新版参数 state_modifier
+        agent = create_react_agent(llm, tools, state_modifier=system_message)
+    except TypeError:
+        # 如果报错，尝试使用旧版参数 messages_modifier
+        try:
+            agent = create_react_agent(llm, tools, messages_modifier=system_message)
+        except TypeError:
+            # 如果还不行，就不传 modifier，先保证不崩
+            agent = create_react_agent(llm, tools)
+
+    return agent
+
+
+
 # --- 首页内容 ---
 
-st.title("📱 交易汇-情报局")
+# ==========================================
+#  (新) 顶部 AI 操盘手 (普通输入框模式)
+# ==========================================
+st.markdown("### 🤖 陈老师分身")
+st.caption("您可以问我：**“碳酸锂技术面怎么样？”** 或 **“螺纹钢现在是多头趋势吗？”**")
+
+# 1. 初始化聊天记录
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+
+# 2. 输入区域 (放在顶部)
+col_input, col_btn = st.columns([4, 1])
+
+with col_input:
+    # 使用普通的 text_input，不固定在底部
+    user_query = st.text_input("请输入您的问题...", key="ai_query_input", label_visibility="collapsed",
+                               placeholder="请输入品种代码或名称（例如：lc, 碳酸锂）...")
+
+with col_btn:
+    # 提交按钮
+    submit_btn = st.button("发问", type="primary", width='stretch')
+
+# 3. 处理提交逻辑
+if submit_btn and user_query:
+    # 添加用户消息到历史
+    st.session_state.messages.append({"role": "user", "content": user_query})
+
+    # 获取 Agent
+    agent = get_agent()
+    if agent:
+        with st.spinner("正在思考，请稍候..."):
+            try:
+                # 构建历史记录对象
+                history = [
+                    HumanMessage(content=m["content"]) if m["role"] == "user" else AIMessage(content=m["content"]) for m
+                    in st.session_state.messages[:-1]]
+                history.append(HumanMessage(content=user_query))
+
+                # 调用 Agent
+                response = agent.invoke({"messages": history})
+
+                # 获取 AI 回复
+                ai_response = response["messages"][-1].content
+
+                # 添加 AI 回复到历史
+                st.session_state.messages.append({"role": "ai", "content": ai_response})
+
+            except Exception as e:
+                st.error(f"分析失败: {e}")
+
+# 4. 显示最新的 AI 回复 (醒目展示)
+if st.session_state.messages:
+    last_msg = st.session_state.messages[-1]
+    if last_msg["role"] == "ai":
+        st.info(f"**AI 分析师回复：**\n\n{last_msg['content']}")
+
+# 5. 折叠显示历史记录 (不占用主屏幕)
+with st.expander("查看历史对话记录"):
+    for msg in st.session_state.messages:
+        role_label = "👤 用户" if msg["role"] == "user" else "🤖 AI"
+        st.markdown(f"**{role_label}:** {msg['content']}")
+        st.markdown("---")
+
 st.markdown("---")
 
 # --- 外资动向卡片 ---
@@ -190,3 +313,35 @@ if not df_win.empty:
 else:
     st.warning("暂无足够数据进行全市场排名。")
 
+st.subheader("🏦 美联储降息概率预测 (CME FedWatch)")
+
+# 获取数据
+df_fed = get_fed_probabilities()
+
+if df_fed is not None and not df_fed.empty:
+    # 获取最近的一次会议日期
+    next_meeting = df_fed['会议日期'].iloc[0]
+
+    # 筛选出最近一次会议的数据
+    df_next = df_fed[df_fed['会议日期'] == next_meeting]
+
+    st.info(f"📅 下一次议息会议日期：**{next_meeting}**")
+
+    # 画图 (柱状图)
+    fig = px.bar(
+        df_next,
+        x='目标利率',
+        y='概率(%)',
+        text='概率(%)',
+        title=f"{next_meeting} 利率决议概率分布",
+        color='概率(%)',
+        color_continuous_scale='Blues'
+    )
+    fig.update_traces(texttemplate='%{text:.1f}%', textposition='outside')
+    st.plotly_chart(fig, use_container_width=True)
+
+    # 显示完整表格 (放在折叠栏里)
+    with st.expander("查看未来所有会议的详细数据"):
+        st.dataframe(df_fed, use_container_width=True)
+else:
+    st.error("无法获取 CME 数据，请检查服务器网络连接。")

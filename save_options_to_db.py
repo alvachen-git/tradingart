@@ -195,7 +195,7 @@ def fetch_and_save_options(etf_code="510050.SH", start_date=None, end_date=None)
                 })
                 print(f"    - {date}: 存入 {len(df_save)} 条记录")
 
-            time.sleep(0.2)
+            time.sleep(0.3)
 
     except Exception as e:
         print(f"  [!] 发生错误: {e}")
@@ -207,7 +207,7 @@ if __name__ == "__main__":
 
     # 2. 设置抓取范围 (建议抓最近 20 天，构建完整趋势图)
     today = datetime.now().strftime('%Y%m%d')
-    start = (datetime.now() - timedelta(days=120)).strftime('%Y%m%d')
+    start = (datetime.now() - timedelta(days=300)).strftime('%Y%m%d')
 
     # 3. 抓取 50ETF 和 300ETF
     fetch_and_save_options(etf_code="510050.SH", start_date=start, end_date=today)

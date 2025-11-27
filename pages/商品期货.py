@@ -72,7 +72,7 @@ with st.sidebar:
     current_name = COMMODITIES[current_code].split(' (')[0]
 
     st.write("")
-    if st.button("🔄 刷新数据"):
+    if st.button("刷新數據 :material/refresh:", use_container_width=True):
         st.cache_data.clear()
         st.rerun()
 
@@ -135,7 +135,7 @@ total_score_10d = df_recent_10['score'].sum()
 # 6.1 顶部标题区
 st.markdown(f"""
 <div class="desktop-header">
-    <div class="main-title">📊 {current_name} ({current_code})</div>
+    <div class="main-title">📊{current_name} ({current_code})</div>
     <div style="color:#666;">分析日期: {latest_date} | 监控机构: {len(rank_df)} 家</div>
 </div>
 """, unsafe_allow_html=True)
@@ -169,7 +169,7 @@ with c_ai:
 
 
         with c_btn:
-            if st.button("✨ 生成报告", type="primary", use_container_width=True):
+            if st.button("生成報告 :material/analytics:", type="primary", use_container_width=True):
 
                     with st.spinner("AI 思考中..."):
                         rpt = de.generate_ai_report_agent(rank_df, expert_data, latest_date, current_name)
