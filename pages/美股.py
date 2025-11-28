@@ -2,10 +2,23 @@ import streamlit as st
 import pandas as pd
 from sqlalchemy import create_engine
 import plotly.graph_objects as go
+import sys
+import os
 
 # --- 【修改点 1】设置页面为宽屏模式 ---
 # 注意：这行代码必须放在所有 st 命令之前！
 st.set_page_config(layout="wide", page_title="美股K线")
+
+current_dir = os.path.dirname(os.path.abspath(__file__))
+root_dir = os.path.dirname(current_dir)
+sys.path.append(root_dir)
+
+# 加载 CSS (注意路径)
+css_path = os.path.join(root_dir, 'style.css')
+with open(css_path, encoding='utf-8') as f:
+    st.markdown(f'<style>{f.read()}</style>', unsafe_allow_html=True)
+
+
 
 # 数据库连接
 DB_USER = 'root'
@@ -104,3 +117,52 @@ if not df.empty:
 else:
     st.warning(f"⚠️ 数据库里还没有 【{symbol}】 的数据。")
     st.info("💡 请先运行数据更新脚本 `update_stock_tiingo.py` 来下载数据。")
+
+# 假设 symbol 是用户当前在 selectbox 里选中的股票，例如 'AAPL'
+# symbol = st.selectbox("请选择股票", ['AAPL', 'TSLA', 'NVDA', 'AMD', 'MSFT'])
+
+st.divider()  # 画一条分割线
+
+# --- 🎯 核心修改：建立 代码 -> 中文搜索词 的映射字典 ---
+# 必须和你 update_news_google.py 里用的搜索词一致
+symbol_map = {
+    'AAPL': '苹果公司',
+    'TSLA': '特斯拉',
+    'NVDA': '英伟达',
+    'AMD': 'AMD',  # 如果当时搜的是 AMD
+    'MSFT': '微软'
+}
+
+# 获取对应的中文搜索词
+target_keyword = symbol_map.get(symbol)
+
+st.subheader(f"📰 {symbol} 相关新闻")
+
+if target_keyword:
+    try:
+        # --- 🔍 核心修改：SQL 语句增加 WHERE 筛选 ---
+        # 只从数据库里拿 tickers 字段等于 target_keyword 的新闻
+        query = f"SELECT * FROM stock_news WHERE tickers = '{target_keyword}' ORDER BY publishedDate DESC LIMIT 10"
+        df_news = pd.read_sql(query, engine)
+
+        if not df_news.empty:
+            for index, row in df_news.iterrows():
+                # 显示新闻
+                st.markdown(f"### [{row['title']}]({row['url']})")
+
+                # 格式化一下时间，把秒去掉，看起来更干净
+                pub_time = pd.to_datetime(row['publishedDate']).strftime('%Y-%m-%d %H:%M')
+                st.caption(f"🗓️ {pub_time} | 📢 {row['source']}")
+
+                if row['description']:
+                    st.write(row['description'])
+
+                st.markdown("---")  # 细分割线
+        else:
+            st.info(f"暂无关于 {symbol} ({target_keyword}) 的最新新闻。")
+
+    except Exception as e:
+        st.error(f"读取新闻出错: {e}")
+else:
+    st.warning(f"未配置 {symbol} 的新闻映射，请检查代码。")
+

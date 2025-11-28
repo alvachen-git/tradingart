@@ -21,7 +21,7 @@ TARGET_BROKERS = ['摩根大通', '乾坤期货', '瑞银期货']
 
 # 【关键修改】只关注这 4 个品种
 # au=黄金, ag=白银, sc=原油, m=豆粕
-WATCH_LIST = ['au', 'ag', 'i', 'm']
+WATCH_LIST = ['au', 'ag', 'i', 'IF']
 
 
 def run_foreign_analysis():
