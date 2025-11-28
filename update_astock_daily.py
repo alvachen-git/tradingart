@@ -110,7 +110,7 @@ def fetch_and_save_data(ts_code, start_date, end_date, asset_type='E'):
 # --- 4. 批量運行 ---
 if __name__ == "__main__":
     today = datetime.now().strftime('%Y%m%d')
-    start = (datetime.now() - timedelta(days=365)).strftime('%Y%m%d')
+    start = (datetime.now() - timedelta(days=1)).strftime('%Y%m%d')
 
     print(f"=== 開始抓取 ({start} - {today}) ===")
 
