@@ -1,5 +1,6 @@
 import pandas as pd
 import os
+import streamlit as st
 from sqlalchemy import create_engine, text
 from dotenv import load_dotenv
 from langchain_core.tools import tool
@@ -14,15 +15,17 @@ DB_HOST = os.getenv("DB_HOST")
 DB_PORT = os.getenv("DB_PORT")
 DB_NAME = os.getenv("DB_NAME")
 
-
+@st.cache_resource
 def get_db_engine():
     if not all([DB_USER, DB_PASSWORD, DB_HOST, DB_NAME]):
         return None
     db_url = f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
-    return create_engine(db_url)
+    return create_engine(db_url, pool_recycle=3600, pool_pre_ping=True)
 
 
 engine = get_db_engine()
+
+
 
 
 # --- 2. 核心工具定义 ---
@@ -35,10 +38,16 @@ def analyze_kline_pattern(query: str):
     包含：单根K线形状（大阳/大阴/影线）、吞噬形态、均线位置（5/10/20日线）、趋势判断。
     当用户询问“技术面怎么看”、“走势如何”、“K线形态”时，**必须**调用此工具。
     """
-    if engine is None: return "数据库连接失败，无法分析 K 线。"
+    if engine is None: return "数据库连接失败"
+    if not query: return "请输入有效的品种名称或代码。"  # 【新增】空值拦截
 
     # 1. 智能解析名称
-    symbol, asset_type = symbol_map.resolve_symbol(query)
+    # 【核心修复】安全拆包
+    result = symbol_map.resolve_symbol(query)
+    if not result or result[0] is None:
+        return f"未找到与'{query}'相关的品种，请尝试输入全名。"
+
+    symbol, asset_type = result
 
 
     # 1. 容错处理
@@ -52,7 +61,7 @@ def analyze_kline_pattern(query: str):
             sql = f"""
                 SELECT trade_date, open_price, high_price, low_price, close_price 
                 FROM stock_price
-                WHERE ts_code='{target_code_1}' OR ts_code='{target_code_2}'
+                WHERE ts_code='{symbol}' 
                 ORDER BY trade_date DESC LIMIT 60
             """
             df = pd.read_sql(sql, engine)

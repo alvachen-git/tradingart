@@ -44,7 +44,7 @@ def get_data_from_db(symbol):
 st.title("美股K线图")
 
 # 这里可以换成你数据库里实际有的股票
-available_symbols = ['AAPL', 'TSLA', 'NVDA', 'MSFT', 'AMD']
+available_symbols = ['TSLA','NVDA', 'GOOG','AAPL', 'MSFT', 'AVGO', 'AMD', 'META', 'AMZN']
 symbol = st.selectbox("请选择股票", available_symbols)
 
 # 1. 读取数据
@@ -82,6 +82,24 @@ if not df.empty:
         decreasing_fillcolor='#2e7d32'
     ))
 
+    # Config 设置
+    my_config = {
+        'scrollZoom': True,
+        'displayModeBar': True,
+
+        # 🟢 关键设置 1：开启全局编辑模式
+        # 这会让 Plotly 监听键盘事件，选中图形后按 Delete 键就能删除了！
+        'editable': True,
+
+        # 🟢 确保 eraseshape 在列表里
+        'modeBarButtonsToAdd': [
+            'drawline',
+            'drawrect',
+            'drawcircle',
+            'eraseshape'  # <--- 必须有这个
+        ]
+    }
+
     # --- 图表布局美化 ---
     fig.update_layout(
         title=f'📈 {symbol} - 日 K 线图',
@@ -93,9 +111,16 @@ if not df.empty:
         dragmode='pan',
         # 稍微调整一下边距，让图表撑满
         margin=dict(l=20, r=20, t=60, b=20),
+        # 2. 設置畫出來的線條樣式
+        newshape=dict(
+            line_color='blue',  # 線條顏色
+            line_width=2,  # 線寬
+            opacity=0.7  # 透明度
+        ),
         # 🟢 【關鍵修改】設置 X 軸的初始顯示範圍
         # 這樣打開時只顯示半年，K線會變得很清楚，但用戶依然可以往左拖動看歷史
         xaxis_range=[start_date, latest_date]
+
     )
 
     # 解決空白間隙問題 (可選优化)
@@ -107,7 +132,7 @@ if not df.empty:
     )
     # 在 Streamlit 中展示交互式图表
     # use_container_width=True 让图表自动充满宽度
-    st.plotly_chart(fig, width='stretch', config={'scrollZoom': True})
+    st.plotly_chart(fig, width='stretch', config=my_config)
 
     # --- 展示原始数据表格 (可选，放在折叠框里不占地) ---
     with st.expander("查看详细历史数据表格"):

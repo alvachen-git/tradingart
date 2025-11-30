@@ -3,17 +3,21 @@ import pandas as pd
 import plotly.express as px
 import sys
 import os
+import data_engine as de
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+from lightweight_charts.widgets import StreamlitChart
 
 # 路径修复
 current_dir = os.path.dirname(os.path.abspath(__file__))
 root_dir = os.path.dirname(current_dir)
 sys.path.append(root_dir)
-import data_engine as de
+
 
 
 # 加载 CSS
-css_path = os.path.join(root_dir, 'style.css')
-with open(css_path, encoding='utf-8') as f:
+
+with open('style.css', encoding='utf-8') as f:
     st.markdown(f'<style>{f.read()}</style>', unsafe_allow_html=True)
 
 
@@ -27,7 +31,15 @@ with c2:
                                        "159915 (创业板ETF)"], label_visibility="collapsed")
 st.markdown('</div>', unsafe_allow_html=True)
 
-etf_code = target.split(' ')[0]
+# 1. 获取基础代码
+etf_code = target.split(' ')[0] # 得到 "510050"
+
+# --- 【关键修复】补全后缀 (匹配数据库格式) ---
+if "." not in etf_code:
+    if etf_code.startswith("15") or etf_code.startswith("16"):
+        etf_code = etf_code + ".SZ" # 深市
+    else:
+        etf_code = etf_code + ".SH" # 沪市 (50/300/500/科创)
 
 # 数据获取
 with st.spinner(f"正在扫描 {etf_code} 全市场持仓数据..."):
@@ -112,6 +124,84 @@ except Exception as e:
 
 st.markdown("---")
 
+# --- 新增：加載波動率數據 ---
+# 修復：使用 'etf_code' 代替 'target_code'
+iv_sql = f"SELECT * FROM etf_iv_history WHERE etf_code='{etf_code}' ORDER BY trade_date"
+df_iv = pd.read_sql(iv_sql, de.engine)
+
+# 获取 K 线数据 (用于画主图)
+# 【关键修复】使用 AS 别名，把数据库的 open_price 映射回 open，适配画图代码
+kline_sql = f"""
+     SELECT 
+         trade_date, 
+         open_price as open, 
+         high_price as high, 
+         low_price as low, 
+         close_price as close 
+     FROM stock_price 
+     WHERE ts_code='{etf_code}' 
+     ORDER BY trade_date DESC LIMIT 200
+ """
+df_kline = pd.read_sql(kline_sql, de.engine).sort_values('trade_date')
+
+if not df_kline.empty and not df_iv.empty:
+    st.subheader("📊 价格与波动率 (K线 + IV)")
+
+    # --- 1. 数据清洗 ---
+    # K线
+    k_df = df_kline[['trade_date', 'open', 'high', 'low', 'close']].copy()
+    k_df.columns = ['date', 'open', 'high', 'low', 'close']
+    k_df['date'] = pd.to_datetime(k_df['date']).dt.strftime('%Y-%m-%d')
+
+    # IV
+    iv_df = df_iv[['trade_date', 'iv']].copy()
+    iv_df.columns = ['date', '隐含波动率']
+    iv_df = iv_df[iv_df['隐含波动率'] > 0]
+    iv_df['date'] = pd.to_datetime(iv_df['date']).dt.strftime('%Y-%m-%d')
+
+
+    # --- 2. 创建图表 ---
+    chart = StreamlitChart(height=500, width=None)
+
+    # 【关键修复 1】去除背景网格线
+    chart.grid(vert_enabled=False, horz_enabled=False)
+
+    # 【修正 1】使用 layout 方法设置背景和文字颜色
+    chart.layout(background_color='white', text_color='#333333')
+
+    # 【修正 2】设置图例
+    chart.legend(visible=True, font_size=14, color='#333333')
+
+    # --- 3. 设置 K 线 (默认在右轴) ---
+    # 注意：candle_style 只负责颜色，不要传 price_scale_id
+    chart.candle_style(
+        up_color='#ef232a', down_color='#14b143',
+        border_up_color='#ef232a', border_down_color='#14b143',
+        wick_up_color='#ef232a', wick_down_color='#14b143'
+    )
+    chart.set(k_df)
+
+    # --- 4. 设置 IV 曲线 (绑定到左轴) ---
+    # 【关键】在这里指定 price_scale_id='left'，这会自动开启左轴
+    line = chart.create_line(
+        name='隐含波动率',
+        color='#2962FF',
+        width=2,
+        price_scale_id='left'
+    )
+    line.set(iv_df)
+
+    # --- 5. 渲染 ---
+    chart.load()
+
+else:
+    st.info("暂无波动率数据。")
+
+
+
+
+st.markdown("---")
+
 # --- 2. 趋势图表：防线移动 ---
 st.subheader("📊 主力持仓防线移动 (近20日)")
 st.caption(
@@ -162,3 +252,4 @@ with st.expander("查看详细数据表"):
         },
         use_container_width=True
     )
+

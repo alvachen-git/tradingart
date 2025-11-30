@@ -28,7 +28,7 @@ if not TIINGO_KEY:
     raise ValueError("❌ 错误：未找到 TIINGO_API_KEY，请检查 .env 文件！")
 
 # 3. 你想抓取的股票列表
-SYMBOLS = ['AAPL', 'TSLA', 'NVDA', 'MSFT', 'AMD']
+SYMBOLS = ['NVDA', 'TSLA', 'GOOG','AAPL', 'MSFT', 'AVGO', 'AMD', 'META', 'AMZN']
 
 # --- 初始化 ---
 config = {

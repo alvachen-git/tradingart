@@ -75,6 +75,7 @@ def query_broker_history(broker_name: str):
 
 
 # 2. 核心计算 (移除默认值，强制要求传入 symbol)
+@st.cache_data(ttl=3600)
 def calculate_broker_rankings(symbol, lookback_days=150):  # <-这里设置扫描过去的天数
     """
     计算指定品种(symbol)的期货商得分

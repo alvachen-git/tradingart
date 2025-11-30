@@ -4,9 +4,14 @@ import plotly.express as px
 import sys
 import os
 
-# 1. 页面配置
-st.set_page_config(page_title="商品期货", page_icon="📡", layout="wide", initial_sidebar_state="collapsed")
 
+# 1. 页面配置
+st.set_page_config(
+    page_title="爱波塔-期货持仓透视",
+    page_icon="favicon.ico",
+    layout="wide",
+    initial_sidebar_state="collapsed"
+)
 # --- 路径修复: 确保能导入根目录的 data_engine ---
 current_dir = os.path.dirname(os.path.abspath(__file__))
 root_dir = os.path.dirname(current_dir)
@@ -73,7 +78,7 @@ with st.sidebar:
 
     st.write("")
     if st.button("刷新數據 :material/refresh:", use_container_width=True):
-        st.cache_data.clear()
+        st.cache_datast.cache_data.clear()
         st.rerun()
 
     st.markdown("---")
@@ -81,7 +86,7 @@ with st.sidebar:
     st.markdown("""
         <div class="service-box">
             <div class="service-title">📞实战课程咨询</div>
-            <div class="service-phone">175-2159-1756</div>
+            <div class="service-phone">17521591756</div>
             <img src="https://img.wanwang.xin/contents/sitefiles2048/10242148/images/51515307.png" class="qr-img">
             <div class="service-desc">扫码添加客服入群</div>
         </div>

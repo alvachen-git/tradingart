@@ -30,8 +30,8 @@ import data_engine as de
 
 # 1. 页面配置
 st.set_page_config(
-    page_title="Alpha 智能期货终端",
-    page_icon="📈",
+    page_title="爱波塔-你的交易战情室|股票、期货、期权",
+    page_icon="favicon.ico",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -312,6 +312,8 @@ if not df_win.empty:
 
 else:
     st.warning("暂无足够数据进行全市场排名。")
+
+st.markdown("---")
 
 st.subheader("🏦 美联储降息概率预测 (CME FedWatch)")
 
