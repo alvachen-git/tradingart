@@ -3,10 +3,10 @@ import pandas as pd
 import plotly.express as px
 import sys
 import os
-import data_engine as de
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 from lightweight_charts.widgets import StreamlitChart
+# 【关键修改】导入新的独立工具模块，不再依赖 data_engine
+import etf_option_tool as de
+
 
 # 路径修复
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -74,78 +74,49 @@ except Exception as e:
 latest_date = df['date_str'].max()  # 使用格式化后的字符串取最大值
 latest_data = df[df['date_str'] == latest_date]
 
+# --- 核心指标卡片 ---
+# (此处调用 tool.get_iv_rank_data)
+iv_stats = de.get_iv_rank_data(etf_code, window=252)
+
 try:
-    # 容错：如果某天只有认购或只有认沽，避免报错
-    call_row = latest_data[latest_data['type'].str.contains('认购')]
-    put_row = latest_data[latest_data['type'].str.contains('认沽')]
-
-    call_strike = f"{call_row.iloc[0]['strike']:.3f}" if not call_row.empty else "N/A"
-    call_oi = int(call_row.iloc[0]['oi']) if not call_row.empty else 0
-
-    put_strike = f"{put_row.iloc[0]['strike']:.3f}" if not put_row.empty else "N/A"
-    put_oi = int(put_row.iloc[0]['oi']) if not put_row.empty else 0
+    call_row = latest_data[latest_data['type'].str.contains('认购')].iloc[0]
+    put_row = latest_data[latest_data['type'].str.contains('认沽')].iloc[0]
 
     st.info(f"📅 分析日期：**{latest_date}**")
-
-    # 计算区间
-    spread = f"{put_strike} ~ {call_strike}"
-
-    col1, col2, col3 = st.columns(3)
+    col1, col2, col3, col4 = st.columns(4)
 
     with col1:
-        st.markdown(f"""
-        <div class="metric-card">
-            <div class="metric-label">上方压力 (认购最大OI)</div>
-            <div class="metric-value" style="color:#d32f2f">{call_strike}</div>
-            <div class="metric-delta">持仓 {call_oi:,} 手</div>
-        </div>
-        """, unsafe_allow_html=True)
-
+        st.markdown(
+            f"""<div class="metric-card"><div class="metric-label">上方压力</div><div class="metric-value" style="color:#d32f2f">{call_row['strike']:.3f}</div><div class="metric-delta">持仓 {int(call_row['oi']):,}</div></div>""",
+            unsafe_allow_html=True)
     with col2:
-        st.markdown(f"""
-        <div class="metric-card">
-            <div class="metric-label">下方支撑 (认沽最大OI)</div>
-            <div class="metric-value" style="color:#2e7d32">{put_strike}</div>
-            <div class="metric-delta">持仓 {put_oi:,} 手</div>
-        </div>
-        """, unsafe_allow_html=True)
-
+        st.markdown(
+            f"""<div class="metric-card"><div class="metric-label">下方支撑</div><div class="metric-value" style="color:#2e7d32">{put_row['strike']:.3f}</div><div class="metric-delta">持仓 {int(put_row['oi']):,}</div></div>""",
+            unsafe_allow_html=True)
     with col3:
-        st.markdown(f"""
-        <div class="metric-card">
-            <div class="metric-label">主力博弈区间</div>
-            <div class="metric-value" style="font-size:1.2rem">{spread}</div>
-            <div class="metric-delta delta-neu">多空分界</div>
-        </div>
-        """, unsafe_allow_html=True)
-
-except Exception as e:
-    st.warning(f"今日数据解析不完整: {e}")
-
+        spread = f"{put_row['strike']:.3f} ~ {call_row['strike']:.3f}"
+        st.markdown(
+            f"""<div class="metric-card"><div class="metric-label">博弈区间</div><div class="metric-value" style="font-size:1.2rem">{spread}</div><div class="metric-delta delta-neu">多空分界</div></div>""",
+            unsafe_allow_html=True)
+    with col4:
+        if iv_stats:
+            iv_color = "#d32f2f" if iv_stats['iv_percentile'] > 80 else "#2e7d32" if iv_stats[
+                                                                                         'iv_percentile'] < 20 else "#555"
+            st.markdown(
+                f"""<div class="metric-card" style="border-top: 3px solid {iv_color};"><div class="metric-label">IV 等级</div><div class="metric-value" style="color:{iv_color}">{iv_stats['iv_percentile']:.0f}</div><div class="metric-delta">（1~100）</div></div>""",
+                unsafe_allow_html=True)
+except:
+    pass
 st.markdown("---")
 
-# --- 新增：加載波動率數據 ---
-# 修復：使用 'etf_code' 代替 'target_code'
-iv_sql = f"SELECT * FROM etf_iv_history WHERE etf_code='{etf_code}' ORDER BY trade_date"
-df_iv = pd.read_sql(iv_sql, de.engine)
+# --- 3. 价格与波动率 (K线 + IV) ---
+# 【核心调用】从新文件获取数据
+df_kline, df_iv = de.get_kline_and_iv_data(etf_code, limit=300)
 
-# 获取 K 线数据 (用于画主图)
-# 【关键修复】使用 AS 别名，把数据库的 open_price 映射回 open，适配画图代码
-kline_sql = f"""
-     SELECT 
-         trade_date, 
-         open_price as open, 
-         high_price as high, 
-         low_price as low, 
-         close_price as close 
-     FROM stock_price 
-     WHERE ts_code='{etf_code}' 
-     ORDER BY trade_date DESC LIMIT 200
- """
-df_kline = pd.read_sql(kline_sql, de.engine).sort_values('trade_date')
+
 
 if not df_kline.empty and not df_iv.empty:
-    st.subheader("📊 价格与波动率 (K线 + IV)")
+    st.subheader("📊 价格与波动率")
 
     # --- 1. 数据清洗 ---
     # K线
@@ -162,6 +133,20 @@ if not df_kline.empty and not df_iv.empty:
 
     # --- 2. 创建图表 ---
     chart = StreamlitChart(height=500, width=None)
+
+    # --- 【新增】设置背景水印 (显示中文名) ---
+    if 'name' in df_kline.columns and not df_kline['name'].empty:
+        # 获取第一行的名字 (例如 "华夏上证50ETF")
+        etf_name_cn = df_kline['name'].iloc[0]
+        # 设置水印文字
+        #chart.watermark(
+            #f"{etf_name_cn} ({etf_code})",
+        # color='rgba(0, 0, 0, 0.1)',  # 淡淡的灰色
+            #font_size=24,  # 大字體
+        #)
+    else:
+        # 兜底：如果数据库没名字，就用 target 变量
+        chart.watermark(target, color='rgba(0, 0, 0, 0.1)', font_size=48)
 
     # 【关键修复 1】去除背景网格线
     chart.grid(vert_enabled=False, horz_enabled=False)
