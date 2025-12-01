@@ -10,28 +10,20 @@ echo "⏰ 任务开始: $(date)" >> update.log
 
 # 3. 运行【价格】更新脚本
 # 使用 python3 运行，将输出追加到 update.log，错误也追加到 update.log
-echo ">>> [1/6] 开始更新期货席位数据..." >> update.log
+echo ">>> [1/4] 开始更新期货席位数据..." >> update.log
 /usr/bin/python3 update_open_oneday.py >> update.log 2>&1
 
 # 4. 更新【期货数据】
-echo ">>> [2/6] 开始更新期货价格数据..." >> update.log
+echo ">>> [2/4] 开始更新期货价格数据..." >> update.log
 /usr/bin/python3 update_future_price_daily.py >> update.log 2>&1
-
-# 5. 更新【期权数据】
-echo ">>> [3/6] 开始更新期权持仓数据..." >> update.log
-/usr/bin/python3 update_options_daily.py >> update.log 2>&1
-
-# 5. 更新【A股数据】
-echo ">>> [4/6] 开始股票价格数据..." >> update.log
-/usr/bin/python3 update_astock_daily.py >> update.log 2>&1
 
 
 # 6. 更新【外资数据】
-echo ">>> [5/6] 开始更新外资数据..." >> update.log
+echo ">>> [3/4] 开始更新外资数据..." >> update.log
 /usr/bin/python3 calc_foreign_capital.py >> update.log 2>&1
 
 # 6. 更新【外资数据】
-echo ">>> [6/6] 开始更新排行榜数据..." >> update.log
+echo ">>> [4/4] 开始更新排行榜数据..." >> update.log
 /usr/bin/python3 update_market_rank.py >> update.log 2>&1
 
 
