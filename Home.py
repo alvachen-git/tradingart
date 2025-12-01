@@ -5,6 +5,7 @@ import sys
 import plotly.express as px
 from dotenv import load_dotenv
 from fed_data import get_fed_probabilities
+from knowledge_tools import search_investment_knowledge
 
 # --- AI 相关导入 (LangGraph 版) ---
 from langchain_community.chat_models import ChatTongyi
@@ -27,6 +28,9 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(current_dir)
 import data_engine as de
 
+# --- 【新增】清除代理，解决 SSL 报错 ---
+for key in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"]:
+    os.environ.pop(key, None)
 
 # 1. 页面配置
 st.set_page_config(
@@ -46,7 +50,7 @@ with open('style.css', encoding='utf-8') as f:
 # ==========================================
 def get_agent():
     # 1. 定义工具箱
-    tools = [analyze_kline_pattern]
+    tools = [analyze_kline_pattern, search_investment_knowledge]
 
     # 2. LLM
     if not os.getenv("DASHSCOPE_API_KEY"):
@@ -57,14 +61,17 @@ def get_agent():
 
     # 3. 系统提示词 (System Prompt)
     system_message = """
-    你是一位专业的K线技术分析师。
-    你拥有一个强大的工具 `analyze_kline_pattern`，可以计算任何品种的 K 线形态、均线趋势。
+    你是一位专业的K线技术分析师和期权专家。
+    你拥有两个强大的工具：
+    1. `analyze_kline_pattern`: 用于分析实时行情、K线形态和趋势。
+    2. `search_investment_knowledge`: 用于查阅期权知识、交易策略。
 
     【你的行为准则】
-    1. 当用户询问某个品种（如碳酸锂、螺纹钢）的“走势”、“技术面”、“形态”时，**必须**调用工具获取数据。
-    2. 拿到工具返回的报告后，请用通俗易懂的语言解读给用户听。
-    3. 如果形态是“大阳线”或“金针探底”，提示机会；如果是“大阴线”或“射击之星”，提示风险。
-    4. 如果用户没有明确说明什么品种，你就反问客户把问题说详细点
+    1. 当用户询问某个品种（如碳酸锂、螺纹钢）的“走势”、“技术分析”、“K线形态”时，必须调用工具获取数据。
+    2. 当用户问期权策略、期权交易问题时，必须以知识库工具为优先参考回答。
+    3. 拿到工具返回的报告后，请用通俗易懂的语言解读给用户听。
+    4. 如果形态是“大阳线”或“金针探底”，提示机会；如果是“大阴线”或“射击之星”，提示风险。
+    5. 如果用户没有问基本面，你就不用回答基本面信息
     """
 
     # 4. 创建 Agent (自动适配参数名)

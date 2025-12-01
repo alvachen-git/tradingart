@@ -20,6 +20,13 @@ sys.path.append(root_dir)
 with open('style.css', encoding='utf-8') as f:
     st.markdown(f'<style>{f.read()}</style>', unsafe_allow_html=True)
 
+# 1. 页面配置
+st.set_page_config(
+    page_title="爱波塔-ETF期权分析",
+    page_icon="favicon.ico",
+    layout="wide",
+    initial_sidebar_state="collapsed"
+)
 
 # --- 页面逻辑 ---
 st.markdown('<div class="mobile-top-container">', unsafe_allow_html=True)

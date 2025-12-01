@@ -33,7 +33,7 @@ def update_news_google():
     # max_results=5: 每只股票抓 5 条
     google_news = GNews(language='zh-Hans', country='CN', max_results=5)
 
-    tickers = ['苹果公司', '特斯拉', '英伟达', 'AMD', '微软']  # 建议用中文名搜，效果更好
+    tickers = ['苹果公司', '特斯拉', '英伟达', 'AMD', '微软','谷歌','亚马逊','博通','META']  # 建议用中文名搜，效果更好
     # 或者依然用代码: tickers = ['AAPL', 'TSLA', 'NVDA', 'AMD', 'MSFT']
 
     all_news = []

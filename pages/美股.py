@@ -153,9 +153,13 @@ st.divider()  # 画一条分割线
 symbol_map = {
     'AAPL': '苹果公司',
     'TSLA': '特斯拉',
+    'GOOG': '谷歌',
     'NVDA': '英伟达',
+    'AVGO': '博通',
     'AMD': 'AMD',  # 如果当时搜的是 AMD
-    'MSFT': '微软'
+    'MSFT': '微软',
+    'AMZN': '亚马逊',
+    'META': 'META'
 }
 
 # 获取对应的中文搜索词
