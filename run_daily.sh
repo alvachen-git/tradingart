@@ -23,8 +23,6 @@ echo ">>> [3/4] 开始更新外资数据..." >> update.log
 /usr/bin/python3 calc_foreign_capital.py >> update.log 2>&1
 
 # 6. 更新【外资数据】
-echo ">>> [4/4] 开始更新排行榜数据..." >> update.log
-/usr/bin/python3 update_market_rank.py >> update.log 2>&1
 
 
 

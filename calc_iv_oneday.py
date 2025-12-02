@@ -18,7 +18,7 @@ db_url = f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}
 engine = create_engine(db_url)
 
 
-def calculate_and_save_iv(etf_code="510050.SH", days=1):
+def calculate_and_save_iv(etf_code="510050.SH", days=3):
     print(f"[*] 正在计算 {etf_code} 的波动率数据...")
 
     # A. 获取标的 ETF 价格 (S)
