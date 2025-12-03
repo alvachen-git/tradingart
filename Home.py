@@ -185,16 +185,20 @@ with st.sidebar:
                     st.success("注册成功！正在为您自动登录...")
                     # 1. 我们需要拿到刚注册的 user_id (为了后续功能使用)
                     try:
-                        with de.engine.connect() as conn:
-                            # 通过用户名反查 ID
-                            res = conn.execute(text("SELECT user_id FROM users WHERE username = :u"), {"u": new_user})
-                            user_id = res.scalar()
+                        login_success, login_msg, token = auth.login_user(new_user, new_pass)
 
                         # 2. 关键步骤：修改 Session 状态
                         # 这几行代码就是“告诉 Streamlit 我已经登录了”
                         st.session_state['is_logged_in'] = True
-                        st.session_state['user_id'] = user_id
-                        st.session_state['username'] = new_user
+                        st.session_state['user_id'] = new_user
+
+                        # 設置 Cookie (保持登錄狀態)
+                        expires = datetime.now() + timedelta(days=7)
+                        cookie_manager.set("username", new_user, expires_at=expires, key="reg_set_user")
+                        cookie_manager.set("token", token, expires_at=expires, key="reg_set_token")
+
+                        time.sleep(0.3)
+                        st.rerun()
 
                         # 3. 清理注册时用的验证码 (防止返回后还在)
                         if 'captcha_code' in st.session_state:
