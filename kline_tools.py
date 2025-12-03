@@ -94,6 +94,7 @@ def analyze_kline_pattern(query: str):
         # 提取今日和昨日数据
         curr = df.iloc[-1]
         prev = df.iloc[-2]
+        pprev = df.iloc[-3]
 
         date = curr['trade_date']
         close = curr['close_price']
@@ -101,9 +102,11 @@ def analyze_kline_pattern(query: str):
         high = curr['high_price']
         low = curr['low_price']
 
-        # 昨日数据
+        # 昨日和前日数据
         prev_close = prev['close_price']
+        pprev_close = pprev['close_price']
         prev_open = prev['open_price']
+        pprev_open = pprev['open_price']
 
         # --- 5. 形态识别逻辑 (核心算法) ---
 
@@ -114,8 +117,8 @@ def analyze_kline_pattern(query: str):
         total_range = high - low if high != low else 0.01
 
         body_pct = body_size / total_range
-        upper_pct = upper_shadow / total_range
-        lower_pct = lower_shadow / total_range
+        upper_pct = upper_shadow / body_size
+        lower_pct = lower_shadow / body_size
 
         # 今日涨跌幅
         chg_pct = (close - prev_close) / prev_close
@@ -149,19 +152,19 @@ def analyze_kline_pattern(query: str):
         # --- 基础形态 ---
 
         # 3. 大阳/大阴
-        if body_pct > 0.6 and abs(chg_pct) > 0.015:
+        if body_pct > 0.8 and abs(chg_pct) > 0.03:
             if close > open_p:
                 patterns.append("【大阳线】(买盘强劲)")
             else:
                 patterns.append("【大阴线】(抛压沉重)")
 
         # 4. 长下影
-        if lower_pct > 0.5 and lower_pct > body_pct * 2:
-            patterns.append("【金针探底】(下方有强支撑)")
+        if lower_pct > 2 and body_pct < 0.3 and curr['MA5'] < curr['MA20']:
+            patterns.append("【锤子】(下方有强支撑)")
 
         # 5. 长上影
-        if upper_pct > 0.5 and upper_pct > body_pct * 2:
-            patterns.append("【射击之星】(上方压力巨大)")
+        if upper_pct > 2 and body_pct < 0.3 and curr['MA5'] > curr['MA20'] and close> prev_close and prev_close > pprev_close:
+            patterns.append("【倒状锤子】(上方压力巨大)")
 
         # 6. 十字星
         if body_pct < 0.1:
@@ -195,7 +198,6 @@ def analyze_kline_pattern(query: str):
         2. **趋势结构**：{'，'.join(trends)}。
         3. **关键数据**：
            - 收盘：{close} (涨跌 {chg_pct * 100:.2f}%)
-           - 均线：MA5={curr['MA5']:.1f}, MA20={curr['MA20']:.1f}
         """
 
         return report

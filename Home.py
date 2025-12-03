@@ -3,9 +3,38 @@ import pandas as pd
 import os
 import sys
 import plotly.express as px
+import auth_utils as auth
+from datetime import datetime, timedelta
+import time
+import extra_streamlit_components as stx
+
+# --- 1. 【关键修复】强制清除系统代理 (解决 SSL 报错) ---
+# 必须放在其他网络库加载之前
+for key in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"]:
+    if key in os.environ:
+        del os.environ[key]
+
+from captcha_utils import generate_captcha_image
+from sqlalchemy import text
 from dotenv import load_dotenv
 from fed_data import get_fed_probabilities
 from knowledge_tools import search_investment_knowledge
+
+# 1. 初始化环境
+load_dotenv(override=True)
+
+# 1. 初始化 Cookie 管理器 (必须在页面内容之前)
+# 注意：這個函數本身就有緩存機制，不需要額外加 @st.cache_resource
+def get_manager():
+    return stx.CookieManager()
+
+cookie_manager = get_manager()
+
+# 獲取所有 Cookies (用於讀取)
+# 注意：stx 需要一點時間從瀏覽器讀取，首次加載可能為 None
+cookies = cookie_manager.get_all()
+
+
 
 # --- AI 相关导入 (LangGraph 版) ---
 from langchain_community.chat_models import ChatTongyi
@@ -19,10 +48,6 @@ except ImportError:
 
 from kline_tools import analyze_kline_pattern
 
-
-
-# 1. 初始化环境
-load_dotenv(override=True)
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(current_dir)
@@ -44,11 +69,180 @@ st.set_page_config(
 with open('style.css', encoding='utf-8') as f:
     st.markdown(f'<style>{f.read()}</style>', unsafe_allow_html=True)
 
+# ==========================================
+#  【关键修复】 全局状态初始化 (必须放在最前面！)
+# ==========================================
+
+
+
+# ==========================================
+#  會話狀態初始化
+# ==========================================
+
+# 尝试从 Cookie 恢复登录
+if not st.session_state.get('is_logged_in', False):
+    c_user = cookies.get("username")
+    c_token = cookies.get("token")
+
+    if c_user and c_token and c_user.strip() != "":
+        # 去数据库验证 Token
+        if auth.check_token(c_user, c_token):
+            st.session_state['is_logged_in'] = True
+            st.session_state['user_id'] = c_user
+            st.toast(f"欢迎回来，{c_user} (自动登录)")
+            time.sleep(0.3)  # 給一點 UI 反應時間
+            st.rerun()
+
+
+# 只有第一次运行时才初始化，如果已经登录了，不要重置它
+if 'is_logged_in' not in st.session_state:
+    st.session_state['is_logged_in'] = False
+    st.session_state['user_id'] = None
+    st.session_state['username'] = None
+
+# --- 1. 初始化验证码 (如果还没生成过) ---
+if 'captcha_code' not in st.session_state:
+    img, code = generate_captcha_image()
+    st.session_state['captcha_img'] = img
+    st.session_state['captcha_code'] = code
+
+def refresh_captcha():
+    """刷新验证码的回调函数"""
+    img, code = generate_captcha_image()
+    st.session_state['captcha_img'] = img
+    st.session_state['captcha_code'] = code
+
+# ==========================================
+#  側邊欄：統一的登錄/用戶中心
+# ==========================================
+with st.sidebar:
+
+    if not st.session_state['is_logged_in']:
+        # --- A. 未登錄狀態 ---
+        st.info("👋 欢迎老板！")
+        tab1, tab2 = st.tabs(["登录", "注册"])
+
+        with tab1:
+            with st.form("login_form_sidebar"):
+                u = st.text_input("账号", key="login_user")
+                p = st.text_input("密码", type="password", key="login_pass")
+                if st.form_submit_button("登录", type="primary", use_container_width=True):
+                    success, msg, token = auth.login_user(u, p)
+                    if success:
+                        st.session_state['is_logged_in'] = True
+                        st.session_state['user_id'] = u
+
+                        # 【關鍵修改】寫入 Cookie (設置 7 天過期)
+                        # expires_at 是 datetime 對象
+                        expires = datetime.now() + timedelta(days=7)
+
+                        cookie_manager.set("username", u, expires_at=expires, key="set_user_cookie")
+                        cookie_manager.set("token", token, expires_at=expires, key="set_token_cookie")
+
+                        st.success("登录成功")
+                        time.sleep(0.5)
+                        st.rerun()
+                    else:
+                        st.error(msg)
+
+        with tab2:
+            with st.form("reg_form_sidebar"):
+                st.write("### 注册新账号")
+                new_user = st.text_input("新账号", key="reg_user")
+                new_pass = st.text_input("新密码", type="password", key="reg_pass")
+                # --- 2. 显示验证码 ---
+                col1, col2 = st.columns([1, 1])
+                with col1:
+                    # 显示图片
+                    st.image(st.session_state['captcha_img'], caption="请输入右侧数字", width=120)
+                with col2:
+                    # 验证码输入框
+                    captcha_input = st.text_input("验证码", placeholder="4位数字", label_visibility="collapsed")
+
+                # 刷新按钮 (放在 form 外面或者用特殊处理，最简单是让用户输错自动刷新)
+                # 这里我们直接放提交按钮
+                submit_btn = st.form_submit_button("注册")
+        # --- 3. 处理提交逻辑 ---
+        if submit_btn:
+            # 🛑 第一关：检查输入是否为空
+            if not new_user or not new_pass or not captcha_input:
+                st.warning("⚠️ 请填写完整的账号、密码和验证码！")
+
+                # 🛑 第二关：检查验证码
+                # 注意：这里判断是否不相等
+            elif captcha_input != st.session_state.get('captcha_code'):
+                st.error("❌ 验证码错误！已为您更换一张，请重新输入。")
+                refresh_captcha()
+                # 注意：这里不要加 st.rerun()，否则错误提示会瞬间消失！
+                # 用户看到错误后，手动再次点击注册即可。
+
+
+            # C. 执行注册 (调用之前的 register_user 函数)
+            else:
+                success, msg = auth.register_user(new_user, new_pass)
+                if success:
+                    # --- 🎉 注册成功后的自动登录逻辑 ---
+                    st.success("注册成功！正在为您自动登录...")
+                    # 1. 我们需要拿到刚注册的 user_id (为了后续功能使用)
+                    try:
+                        with de.engine.connect() as conn:
+                            # 通过用户名反查 ID
+                            res = conn.execute(text("SELECT user_id FROM users WHERE username = :u"), {"u": new_user})
+                            user_id = res.scalar()
+
+                        # 2. 关键步骤：修改 Session 状态
+                        # 这几行代码就是“告诉 Streamlit 我已经登录了”
+                        st.session_state['is_logged_in'] = True
+                        st.session_state['user_id'] = user_id
+                        st.session_state['username'] = new_user
+
+                        # 3. 清理注册时用的验证码 (防止返回后还在)
+                        if 'captcha_code' in st.session_state:
+                            del st.session_state['captcha_code']
+
+                        # 4. 强制刷新页面
+                        # 刷新后，Streamlit 会重新运行，发现 logged_in=True，就会直接显示主页，而不是登录页
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"自动登录失败，请尝试手动登录: {e}")
+                else:
+                    # === ❌ 注册失败 (比如密码太短、用户已存在) ===
+                    # 这里直接显示 register_user 函数返回的错误消息
+                    st.error(f"❌ {msg}")
+                    # 同样，这里也不要 rerun，让用户看到错误并去修改
+                    refresh_captcha()  # 为了安全，失败时最好也刷新验证码
+
+        # 加一个小按钮允许用户手动刷新看不清的图片
+        if st.button("🔄 看不清？换一张"):
+            refresh_captcha()
+            st.rerun()
+
+    else:
+        # --- B. 已登錄狀態 ---
+        user = st.session_state['user_id']
+        st.success(f"👤 欢迎回来，{user}")
+
+        # 顯示資產 (模擬)
+        try:
+            info = pd.read_sql(f"SELECT level, capital FROM users WHERE username='{user}'", de.engine).iloc[0]
+            st.metric("爱波币", f"¥{int(info['capital']):,}", f"Lv.{info['level']}")
+        except:
+            pass
+
+        if st.button("登出", type="primary"):
+            st.session_state['is_logged_in'] = False
+            st.session_state['user_id'] = None
+            # 【關鍵修改】刪除 Cookie
+            cookie_manager.delete("username", key="del_user_cookie")
+            cookie_manager.delete("token", key="del_token_cookie")
+            st.rerun()
+
+    st.markdown("---")
 
 # ==========================================
 #  AI Agent 初始化 (LangGraph 版)
 # ==========================================
-def get_agent():
+def get_agent(user_name="访客"):
     # 1. 定义工具箱
     tools = [analyze_kline_pattern, search_investment_knowledge]
 
@@ -57,21 +251,28 @@ def get_agent():
         st.error("未配置 API KEY")
         return None
 
-    llm = ChatTongyi(model="qwen-plus", temperature=0.1)
+    llm = ChatTongyi(model="qwen-plus", temperature=0.2)
 
     # 3. 系统提示词 (System Prompt)
     system_message = """
     你是一位专业的K线技术分析师和期权专家。
+
+
     你拥有两个强大的工具：
     1. `analyze_kline_pattern`: 用于分析实时行情、K线形态和趋势。
-    2. `search_investment_knowledge`: 用于查阅期权知识、交易策略。
+    2. `search_investment_knowledge`: 用于查阅期权知识、交易策略、未来行情判断。
 
     【你的行为准则】
-    1. 当用户询问某个品种（如碳酸锂、螺纹钢）的“走势”、“技术分析”、“K线形态”时，必须调用工具获取数据。
-    2. 当用户问期权策略、期权交易问题时，必须以知识库工具为优先参考回答。
-    3. 拿到工具返回的报告后，请用通俗易懂的语言解读给用户听。
-    4. 如果形态是“大阳线”或“金针探底”，提示机会；如果是“大阴线”或“射击之星”，提示风险。
-    5. 如果用户没有问基本面，你就不用回答基本面信息
+    1. **情绪感知**：在回答前，先在心里分析用户的情绪（贪婪/恐惧/愤怒/理性）。
+    2. **风险评估**：根据用户的问题判断其风险偏好（激进/保守）。
+    3. 对于用户问的商品，如果用户没特别说明，都默认是国内品种。
+    4. 当用户询问某个品种（如碳酸锂、螺纹钢）的“走势”、“技术分析”、“K线形态”时，可以调用`analyze_kline_pattern`工具。
+    5. 当用户问期权或实战技术问题，优先以知识库工具为信息参考。
+    6. 如果客户问期权实战交易问题，要结合行情和期权知识，给出明确的建议，风险偏好高的可以给积极的期权策略，风险偏好低的就给保守策略。
+    
+    【回答格式】
+    先说结论（看多/看空/震荡），然后根据客户的风险属性给出具体的操作建议，最后解释理由，技术分析理由只说明K线，不说任何技术指标。
+
     """
 
     # 4. 创建 Agent (自动适配参数名)
@@ -95,65 +296,123 @@ def get_agent():
 # ==========================================
 #  (新) 顶部 AI 操盘手 (普通输入框模式)
 # ==========================================
-st.markdown("### 🤖 陈老师分身")
-st.caption("您可以问我：**“碳酸锂技术面怎么样？”** 或 **“螺纹钢现在是多头趋势吗？”**")
 
-# 1. 初始化聊天记录
-if "messages" not in st.session_state:
-    st.session_state.messages = []
+st.caption("我是陈老师分身：你可以问我各种行情或期权实战问题")
 
-# 2. 输入区域 (放在顶部)
-col_input, col_btn = st.columns([4, 1])
+if st.session_state['is_logged_in']:
+    # === 已登錄：顯示完整功能 ===
+    current_user = st.session_state['user_id']
+    st.caption(f"正在為 **{current_user}** 提供個性化服務...")
 
-with col_input:
-    # 使用普通的 text_input，不固定在底部
-    user_query = st.text_input("请输入您的问题...", key="ai_query_input", label_visibility="collapsed",
-                               placeholder="请输入品种代码或名称（例如：lc, 碳酸锂）...")
+    # 1. 初始化聊天记录
+    if "messages" not in st.session_state:
+        st.session_state.messages = []
 
-with col_btn:
-    # 提交按钮
-    submit_btn = st.button("发问", type="primary", width='stretch')
 
-# 3. 处理提交逻辑
-if submit_btn and user_query:
-    # 添加用户消息到历史
-    st.session_state.messages.append({"role": "user", "content": user_query})
+    # 2. 定义回调函数 (核心魔法)
+    def submit_query():
+        """
+        当用户按回车或点击发送时触发：
+        1. 把输入框的内容转存到 'current_query' 变量
+        2. 把输入框清空
+        """
+        if st.session_state.ai_query_input:  # 如果输入框不为空
+            st.session_state.current_query = st.session_state.ai_query_input
+            st.session_state.ai_query_input = ""  # 清空输入框
 
-    # 获取 Agent
-    agent = get_agent()
-    if agent:
-        with st.spinner("正在思考，请稍候..."):
-            try:
-                # 构建历史记录对象
-                history = [
-                    HumanMessage(content=m["content"]) if m["role"] == "user" else AIMessage(content=m["content"]) for m
-                    in st.session_state.messages[:-1]]
-                history.append(HumanMessage(content=user_query))
 
-                # 调用 Agent
-                response = agent.invoke({"messages": history})
+    # 初始化中间变量
+    if "current_query" not in st.session_state:
+        st.session_state.current_query = None
 
-                # 获取 AI 回复
-                ai_response = response["messages"][-1].content
+    # 3. 输入区域 (绑定回调)
+    col_input, col_btn = st.columns([4, 1])
 
-                # 添加 AI 回复到历史
-                st.session_state.messages.append({"role": "ai", "content": ai_response})
+    with col_input:
+        # 注意：这里绑定了 on_change=submit_query，按回车会自动触发
+        st.text_input(
+            "请输入您的问题...",
+            key="ai_query_input",
+            label_visibility="collapsed",
+            placeholder="请输入品种代码或名称（例如：lc, 碳酸锂）...",
+            on_change=submit_query
+        )
 
-            except Exception as e:
-                st.error(f"分析失败: {e}")
+    with col_btn:
+        # 注意：这里绑定了 on_click=submit_query，点击也会触发
+        st.button("发送", type="primary", use_container_width=True, on_click=submit_query)
 
-# 4. 显示最新的 AI 回复 (醒目展示)
-if st.session_state.messages:
-    last_msg = st.session_state.messages[-1]
-    if last_msg["role"] == "ai":
-        st.info(f"**AI 分析师回复：**\n\n{last_msg['content']}")
+    # 4. 处理逻辑 (只检查 current_query)
+    # 只有当回调函数把内容存进 current_query 时，才执行 AI
+    if st.session_state.current_query:
+        prompt = st.session_state.current_query
 
-# 5. 折叠显示历史记录 (不占用主屏幕)
-with st.expander("查看历史对话记录"):
-    for msg in st.session_state.messages:
-        role_label = "👤 用户" if msg["role"] == "user" else "🤖 AI"
-        st.markdown(f"**{role_label}:** {msg['content']}")
-        st.markdown("---")
+        # --- 立即清除 current_query，防止刷新页面后重复执行 ---
+        st.session_state.current_query = None
+
+        # --- 下面是正常的 AI 处理逻辑 (和之前一样) ---
+        st.chat_message("user").markdown(prompt)
+        st.session_state.messages.append({"role": "user", "content": prompt})
+
+        # 获取 Agent
+        # 注意：这里要获取当前登录用户
+        current_user = st.session_state.get('user_id', "访客")
+        agent = get_agent(current_user)
+
+        if agent:
+            with st.chat_message("assistant"):
+                with st.spinner("AI 正在思考..."):
+                    try:
+                        # 构建历史
+                        history = [HumanMessage(content=m["content"]) if m["role"] == "user" else AIMessage(
+                            content=m["content"]) for m in st.session_state.messages[:-1]]
+                        history.append(HumanMessage(content=prompt))
+
+                        # 注入用户画像 (可选，之前写的)
+                        user_profile = de.get_user_profile(current_user)
+                        risk = user_profile.get('risk_preference', '未知')
+                        assets = user_profile.get('focus_assets', '暂无')
+
+                        # 2. 构建一条"系统指令"，强行塞给 AI
+                        # 这比 system_prompt 更管用，因为它是当前对话的一部分
+                        system_instruction = SystemMessage(content=f"""
+                                            【当前对话元数据】
+                                            - 用户名：{current_user}
+                                            - 风险偏好：{risk}
+                                            - 关注品种：{assets}
+
+                                            """)
+
+                        # 调用 Agent
+                        response = agent.invoke(
+                            {"messages": history},
+                            config={"recursion_limit": 50}
+                        )
+                        ai_response = response["messages"][-1].content
+
+                        st.markdown(ai_response)
+                        st.session_state.messages.append({"role": "ai", "content": ai_response})
+
+                        # 更新记忆
+                        if hasattr(de, 'update_user_memory_async'):
+                            de.update_user_memory_async(current_user, prompt)
+
+                    except Exception as e:
+                        st.error(f"分析失败: {e}")
+
+
+
+    with st.expander("查看历史对话记录"):
+        for msg in st.session_state.messages:
+            role_label = "👤 用户" if msg["role"] == "user" else "🤖 AI"
+            st.markdown(f"**{role_label}:** {msg['content']}")
+            st.markdown("---")
+
+else:
+    # === 未登錄：顯示鎖定狀態 ===
+    st.warning("🔒 此功能僅對會員開放。請在左側登錄後使用。")
+
+
 
 st.markdown("---")
 

@@ -37,7 +37,7 @@ engine = get_db_engine()
 # ==========================================
 #   功能 1: ETF 期权主力持仓防线分析
 # ==========================================
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=600)
 def get_etf_option_analysis(etf_code="510050", days=100):
     if engine is None: return None
 
@@ -140,6 +140,7 @@ def get_etf_option_analysis(etf_code="510050", days=100):
 # ==========================================
 #   功能 2: IV Rank 计算
 # ==========================================
+@st.cache_data(ttl=600)
 def get_iv_rank_data(etf_code, window=252):
     if engine is None: return None
     if "." not in etf_code:
@@ -173,6 +174,7 @@ def get_iv_rank_data(etf_code, window=252):
 # ==========================================
 #   功能 3: 获取绘图数据 (K线 + IV) - 新增
 # ==========================================
+@st.cache_data(ttl=600)
 def get_kline_and_iv_data(etf_code, limit=100):
     """
     一次性获取清洗好的 K 线和 IV 数据，供前端直接绘图

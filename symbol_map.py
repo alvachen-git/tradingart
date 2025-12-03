@@ -6,6 +6,12 @@ from functools import lru_cache
 
 # 1. 初始化
 load_dotenv(override=True)
+
+# --- 【关键修复】强制清除代理 (防止 Tushare 连接失败) ---
+for key in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"]:
+    if key in os.environ:
+        del os.environ[key]
+
 ts_token = os.getenv("TUSHARE_TOKEN")
 
 # 2. 期貨字典 (手動維護常用)
@@ -16,7 +22,7 @@ FUTURES_DICT = {
     "豆粕": "m", "豆油": "y", "棕榈": "p", "棕榈油": "p",
     "玻璃": "fg", "纯碱": "sa", "甲醇": "ma", "尿素": "ur","棉花": "cf",
     "沪深300": "IF", "上证50": "IH", "中证500": "IC", "中证1000": "IM",
-    "黃金": "au", "白银": "ag", "原油": "sc", "燃油": "fu", "铜": "cu", "铝": "al", "锌": "zn"
+    "黄金": "au", "白银": "ag", "原油": "sc", "燃油": "fu", "铜": "cu", "铝": "al", "锌": "zn"
 }
 
 
