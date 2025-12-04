@@ -131,6 +131,6 @@ if __name__ == "__main__":
     ]
     for code in STOCK_TARGETS:
         fetch_and_save_data(code, start, today, asset_type='S')
-        time.sleep(0.3)
+        time.sleep(1)
 
     print("=== 全部完成 ===")

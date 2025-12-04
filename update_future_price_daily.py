@@ -5,6 +5,7 @@ from datetime import datetime
 import os
 from dotenv import load_dotenv
 import time
+import gc
 
 # --- 1. 初始化配置 ---
 load_dotenv(override=True)
@@ -24,7 +25,7 @@ if not DB_USER:
     DB_NAME = 'finance_data'
 
 db_url = f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
-engine = create_engine(db_url)
+engine = create_engine(db_url, pool_recycle=3600)
 
 
 # --- 2. 核心函数：只更新当天 ---
@@ -59,6 +60,10 @@ def update_today_price(symbol, name):
         # 4. 【关键】只保留“今天”的数据
         df['trade_date_str'] = df['trade_date'].dt.strftime('%Y%m%d')
         df_today = df[df['trade_date_str'] == today_str].copy()
+
+        # --- 3. 优化：df 已经完成使命（计算完涨跌幅了），立即销毁 ---
+        del df
+        gc.collect()
 
         if df_today.empty:
             print(f" [-] 今日数据尚未生成 (最新日期: {df['trade_date_str'].iloc[-1]})")
@@ -107,9 +112,9 @@ if __name__ == "__main__":
 
         # 全品种列表
         ALL_SYMBOLS = [
-            ('lc0', '碳酸锂'), ('si0', '工业硅'),('ps0', '多晶硅'),
+            ('lc0', '碳酸锂'), ('si0', '工业硅'),('ps0', '多晶硅'),('pt0', '铂金'),('pd0', '钯金')
             ('rb0', '螺纹钢'), ('hc0', '热卷'), ('au0', '黄金'), ('ag0', '白银'), ('cu0', '沪铜'), ('al0', '沪铝'),
-            ('zn0', '沪锌'),('ni0', '镍'),('sp0', '纸浆'),('ru0', '橡胶'),
+            ('zn0', '沪锌'),('ni0', '镍'),('sp0', '纸浆'),('ru0', '橡胶'),('ao0', '氧化铝'),
             ('m0', '豆粕'), ('i0', '铁矿石'), ('p0', '棕榈油'), ('y0', '豆油'), ('c0', '玉米'),('lh0', '生猪'),
             ('fg0', '玻璃'), ('sa0', '纯碱'), ('ma0', '甲醇'), ('ta0', 'PTA'), ('sr0', '白糖'), ('cf0', '棉花'), ('ap0', '苹果'),
             ('IF0', '沪深300'), ('IM0', '中证1000'), ('IC0', '中证500'), ('IH0', '上证50'), ('T0', '10年国债'), ('TS0', '2年国债'), ('Tl0', '30年国债')
@@ -117,6 +122,6 @@ if __name__ == "__main__":
 
         for code, name in ALL_SYMBOLS:
             update_today_price(code, name)
-            time.sleep(0.5)  # 稍微停顿
+            time.sleep(1)  # 稍微停顿
 
         print("=== 更新结束 ===")
