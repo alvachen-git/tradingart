@@ -6,19 +6,21 @@ import re
 from dotenv import load_dotenv
 import time
 from datetime import datetime, timedelta
+import gc  # <--- 1. 新增：引入垃圾回收模块
 
 # --- 1. 初始化配置 ---
 load_dotenv(override=True)
 
 # 数据库配置
 DB_USER = 'root'
-DB_PASSWORD = 'alva13557941'
+DB_PASSWORD = 'alva13557941'  # 建议也放入 .env 文件
 DB_HOST = '39.102.215.198'
 DB_PORT = '3306'
 DB_NAME = 'finance_data'
 
 db_url = f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
-engine = create_engine(db_url)
+# 增加 pool_recycle 防止数据库连接超时断开
+engine = create_engine(db_url, pool_recycle=3600)
 
 # Tushare 配置
 token = os.getenv("TUSHARE_TOKEN")
@@ -46,21 +48,20 @@ def fetch_and_save_tushare(date_str, exchange):
             return
 
         # 2. 数据预处理
-        # 提取品种代码 (如 RB2501 -> rb)
         df['ts_code'] = df['symbol'].apply(lambda x: re.sub(r'\d+', '', x).lower().strip())
 
-        # 确保数值列是数字
         num_cols = ['long_hld', 'long_chg', 'short_hld', 'short_chg']
         for c in num_cols:
             df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0)
 
-        # 3. 聚合 (Group By)
-        # 将同一品种下所有合约的数据加总
-        # 注意：我们只聚合需要的列，故意忽略 vol (成交量)
+        # 3. 聚合
         df_agg = df.groupby(['trade_date', 'ts_code', 'broker'])[num_cols].sum().reset_index()
 
-        # 4. 重命名 (匹配数据库字段名)
-        # Tushare名 -> 数据库名
+        # --- 2. 优化：原始 df 已经没用了，立即删除并回收内存 ---
+        del df
+        gc.collect()
+
+        # 4. 重命名
         df_agg = df_agg.rename(columns={
             'long_hld': 'long_vol',
             'long_chg': 'long_chg',
@@ -71,25 +72,23 @@ def fetch_and_save_tushare(date_str, exchange):
         # 5. 计算净持仓
         df_agg['net_vol'] = df_agg['long_vol'] - df_agg['short_vol']
 
-        # --- 【核心修正】字段白名单过滤 ---
-        # 您的数据库只接受这 8 个字段，多余的字段(如 vol)会导致报错
-        # 我们在这里强制只取这 8 列
         db_columns = [
-            'trade_date',
-            'ts_code',
-            'broker',
-            'long_vol',
-            'long_chg',
-            'short_vol',
-            'short_chg',
-            'net_vol'
+            'trade_date', 'ts_code', 'broker',
+            'long_vol', 'long_chg', 'short_vol', 'short_chg', 'net_vol'
         ]
 
-        # 筛选数据
         df_final = df_agg[db_columns].copy()
+
+        # --- 3. 优化：df_agg 也没用了，再次释放 ---
+        del df_agg
+        gc.collect()
 
         # 6. 入库
         save_to_db(df_final, date_str)
+
+        # 最后再清理一次 df_final
+        del df_final
+        gc.collect()
 
     except Exception as e:
         print(f" [!] 异常: {e}")
@@ -98,19 +97,41 @@ def fetch_and_save_tushare(date_str, exchange):
 def save_to_db(df, date_str):
     if df.empty: return
     try:
-        # 获取本次涉及的品种列表
         symbols = df['ts_code'].unique().tolist()
         symbols_str = "', '".join(symbols)
 
         with engine.connect() as conn:
-            # 覆盖逻辑：先删除当天、这些品种的旧数据
+            # 先删除旧数据
             sql = f"DELETE FROM futures_holding WHERE trade_date='{date_str}' AND ts_code IN ('{symbols_str}')"
             conn.execute(text(sql))
             conn.commit()
 
-        # 写入
-        df.to_sql('futures_holding', engine, if_exists='append', index=False)
-        print(f" [√] 入库成功 ({len(df)}条)")
+        # --- 4. 核心优化：手动分批写入 + 强制休眠 ---
+        # 你的服务器只有2G内存，这里必须切得很细，给Web服务留喘息时间
+
+        batch_size = 1000  # 每次只写入 1000 条
+        total_len = len(df)
+        print(f" [Saving {total_len} rows] ", end="")
+
+        for i in range(0, total_len, batch_size):
+            # 切片
+            chunk = df.iloc[i: i + batch_size]
+
+            # 写入数据库
+            chunk.to_sql('futures_holding', engine, if_exists='append', index=False)
+
+            # 打印进度点
+            print(".", end="", flush=True)
+
+            # 关键：每写 1000 条，强制睡 0.5 秒
+            # 这就是防止网站 502 的关键，把 CPU 让给 Nginx
+            time.sleep(0.5)
+
+            # 清理这一小块的内存
+            del chunk
+            gc.collect()
+
+        print(f" [√] 完成")
 
     except Exception as e:
         print(f" [X] 数据库写入失败: {e}")
@@ -120,33 +141,25 @@ def save_to_db(df, date_str):
 def run_job(start_date, end_date):
     dates = pd.date_range(start=start_date, end=end_date)
 
-    # Tushare 官方标准交易所代码
-    EXCHANGES = [
-        'GFEX',  # 广期所
-        'SHFE',  # 上期所
-        'DCE',  # 大商所
-        'CZCE',  # 郑商所
-        'CFFEX'  # 中金所
-    ]
+    EXCHANGES = ['GFEX', 'SHFE', 'DCE', 'CZCE', 'CFFEX']
 
     for single_date in dates:
         date_str = single_date.strftime('%Y%m%d')
-        if single_date.weekday() >= 5: continue  # 跳过周末
+        if single_date.weekday() >= 5: continue
 
         print(f"\n--- 处理日期: {date_str} ---")
         for ex in EXCHANGES:
             fetch_and_save_tushare(date_str, ex)
-            # Tushare 限制每分钟访问次数，稍微停顿
-            time.sleep(0.4)
+
+            # 处理完一个交易所后，再休息一下
+            time.sleep(1)
 
 
 if __name__ == "__main__":
-    # 自动补全最近 5 天的数据
     today = datetime.now().strftime('%Y%m%d')
     start = (datetime.now() - timedelta(days=1)).strftime('%Y%m%d')
 
-    # 或者您可以手动指定日期测试
-    # start = '20251114'
-    # today = '20251114'
+    # start = '20251114' # 调试用
 
+    print(f"开始任务: {start} -> {today}")
     run_job(start, today)
