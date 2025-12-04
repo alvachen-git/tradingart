@@ -3,6 +3,9 @@
 # 1. 进入项目目录 (非常重要！确保找到 .env 文件)
 cd /root/finance_app/future-app
 
+# 激活虚拟环境
+source venv/bin/activate
+
 # 2. 打印开始时间到日志
 echo "" >> update.log
 echo "========================================" >> update.log

@@ -7,7 +7,7 @@ from dotenv import load_dotenv  # 引入库
 
 # 1. 加载 .env 文件里的变量到系统中
 # (如果在服务器上没这个文件，这行代码也不会报错，只是什么都不做)
-load_dotenv()
+load_dotenv(override=True)
 
 # 2. 安全地读取变量
 # 如果读取不到，会返回 None，你可以加个判断防止报错
