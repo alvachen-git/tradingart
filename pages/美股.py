@@ -44,7 +44,7 @@ def get_data_from_db(symbol):
 st.title("美股K线图")
 
 # 这里可以换成你数据库里实际有的股票
-available_symbols = ['TSLA','NVDA', 'GOOG','AAPL', 'MSFT', 'AVGO', 'AMD', 'META', 'AMZN', 'TSM', 'INTC']
+available_symbols = ['AAPL','AVGO', 'AMD', 'AMZN', 'GOOG','INTC', 'MSFT', 'META','NVDA', 'TSM', 'TSLA']
 symbol = st.selectbox("请选择股票", available_symbols)
 
 # 1. 读取数据

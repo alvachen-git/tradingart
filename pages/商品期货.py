@@ -27,9 +27,6 @@ with open(css_path, encoding='utf-8') as f:
 with st.sidebar:
 
     COMMODITIES = {
-        "lc0": "碳酸锂",
-        "si0": "工业硅",
-        "ps0": "多晶硅 ",
         "ih0": "上证50",
         "if0": "沪深300",
         "ic0": "中证500 ",
@@ -37,6 +34,9 @@ with st.sidebar:
         "ts0": "2年期国债",
         "t0": "10年期国债",
         "tl0": "30年期国债",
+        "lc0": "碳酸锂",
+        "si0": "工业硅",
+        "ps0": "多晶硅 ",
         "au0": "黄金",
         "ag0": "白银",
         "cu0": "沪铜",

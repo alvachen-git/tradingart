@@ -7,6 +7,7 @@ import auth_utils as auth
 from datetime import datetime, timedelta
 import time
 import extra_streamlit_components as stx
+from market_tools import get_market_snapshot, get_price_statistics
 
 # --- 1. 【关键修复】强制清除系统代理 (解决 SSL 报错) ---
 # 必须放在其他网络库加载之前
@@ -17,7 +18,6 @@ for key in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"]:
 from captcha_utils import generate_captcha_image
 from sqlalchemy import text
 from dotenv import load_dotenv
-from fed_data import get_fed_probabilities
 from knowledge_tools import search_investment_knowledge
 
 # 1. 初始化环境
@@ -59,7 +59,7 @@ for key in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"]:
 
 # 1. 页面配置
 st.set_page_config(
-    page_title="爱波塔-你的交易战情室|股票、期货、期权",
+    page_title="爱波塔-你的交易战情室| 股票、期货、期权",
     page_icon="favicon.ico",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -239,6 +239,7 @@ with st.sidebar:
             # 【關鍵修改】刪除 Cookie
             cookie_manager.delete("username", key="del_user_cookie")
             cookie_manager.delete("token", key="del_token_cookie")
+            time.sleep(0.3)
             st.rerun()
 
     st.markdown("---")
@@ -248,7 +249,7 @@ with st.sidebar:
 # ==========================================
 def get_agent(user_name="访客"):
     # 1. 定义工具箱
-    tools = [analyze_kline_pattern, search_investment_knowledge]
+    tools = [analyze_kline_pattern, search_investment_knowledge,get_market_snapshot,get_price_statistics]
 
     # 2. LLM
     if not os.getenv("DASHSCOPE_API_KEY"):
@@ -261,21 +262,23 @@ def get_agent(user_name="访客"):
     system_message = """
     你是一位专业的K线技术分析师和期权专家。
 
-
-    你拥有两个强大的工具：
-    1. `analyze_kline_pattern`: 用于分析实时行情、K线形态和趋势。
-    2. `search_investment_knowledge`: 用于查阅期权知识、交易策略、未来行情判断。
+    【工具使用指南】：
+    1. 被问商品价格或需要某时段的价格数据时 -> 用 `get_market_snapshot`。
+    2. 分析行情技术面、K线形态和趋势-> 用 `analyze_kline_pattern`。
+    3. 查阅期权知识、期权策略、进出场方法-> 用 `search_investment_knowledge`
+    4. 被問 **「上个月涨了多少」、「本周黃金和白银誰強」、「历史最高价」** -> 用 `get_price_statistics`。
+       - **注意**：調用`get_price_statistics`这工具時，必須根据当前日期（{datetime.now().strftime('%Y%m%d')}），自动计算出准确的 start_date 和 end_date 参数传给工具。
 
     【你的行为准则】
     1. **情绪感知**：在回答前，先在心里分析用户的情绪（贪婪/恐惧/愤怒/理性）。
     2. **风险评估**：根据用户的问题判断其风险偏好（激进/保守）。
     3. 对于用户问的商品，如果用户没特别说明，都默认是国内品种。
-    4. 当用户询问某个品种（如碳酸锂、螺纹钢）的“走势”、“技术分析”、“K线形态”时，可以调用`analyze_kline_pattern`工具。
+    4. 当用户询问某个品种（如碳酸锂、中证1000）的“走势”、“技术分析”、“K线形态”时，你要调用工具来回答。
     5. 当用户问期权或实战技术问题，优先以知识库工具为信息参考。
-    6. 如果客户问期权实战交易问题，要结合行情和期权知识，给出明确的建议，风险偏好高的可以给积极的期权策略，风险偏好低的就给保守策略。
+    6. 要结合K线分析和期权知识，给出明确的操作建议，风险偏好高的可以给积极的策略，风险偏好低的就给保守策略。
     
     【回答格式】
-    先说结论（看多/看空/震荡），然后根据客户的风险属性给出具体的操作建议，最后解释理由，技术分析理由只说明K线，不说任何技术指标。
+    先说结论（看多/看空/震荡），最后解释理由，技术分析理由只说明K线，不说其他技术指标，期权策略的建议是根据技术分析和IV。
 
     """
 
@@ -300,8 +303,6 @@ def get_agent(user_name="访客"):
 # ==========================================
 #  (新) 顶部 AI 操盘手 (普通输入框模式)
 # ==========================================
-
-st.caption("我是陈老师分身：你可以问我各种行情或期权实战问题")
 
 if st.session_state['is_logged_in']:
     # === 已登錄：顯示完整功能 ===
@@ -338,7 +339,7 @@ if st.session_state['is_logged_in']:
             "请输入您的问题...",
             key="ai_query_input",
             label_visibility="collapsed",
-            placeholder="请输入品种代码或名称（例如：lc, 碳酸锂）...",
+            placeholder="我是陈老师分身，你可以问实战问题（例如：50ETF现在能买期权吗）...",
             on_change=submit_query
         )
 
@@ -421,7 +422,7 @@ else:
 st.markdown("---")
 
 # --- 外资动向卡片 ---
-st.markdown("### 🌍 外资动向 (摩根/瑞银/乾坤)")
+st.caption("### 🌍 外资动向 (摩根/瑞银/乾坤)")
 
 # 读库
 try:
@@ -584,36 +585,3 @@ else:
     st.warning("暂无足够数据进行全市场排名。")
 
 st.markdown("---")
-
-st.subheader("🏦 美联储降息概率预测 (CME FedWatch)")
-
-# 获取数据
-df_fed = get_fed_probabilities()
-
-if df_fed is not None and not df_fed.empty:
-    # 获取最近的一次会议日期
-    next_meeting = df_fed['会议日期'].iloc[0]
-
-    # 筛选出最近一次会议的数据
-    df_next = df_fed[df_fed['会议日期'] == next_meeting]
-
-    st.info(f"📅 下一次议息会议日期：**{next_meeting}**")
-
-    # 画图 (柱状图)
-    fig = px.bar(
-        df_next,
-        x='目标利率',
-        y='概率(%)',
-        text='概率(%)',
-        title=f"{next_meeting} 利率决议概率分布",
-        color='概率(%)',
-        color_continuous_scale='Blues'
-    )
-    fig.update_traces(texttemplate='%{text:.1f}%', textposition='outside')
-    st.plotly_chart(fig, use_container_width=True)
-
-    # 显示完整表格 (放在折叠栏里)
-    with st.expander("查看未来所有会议的详细数据"):
-        st.dataframe(df_fed, use_container_width=True)
-else:
-    st.error("无法获取 CME 数据，请检查服务器网络连接。")
