@@ -1,10 +1,12 @@
 import streamlit as st
 import pandas as pd
+import data_engine as de
 import os
 import sys
 import plotly.express as px
 import auth_utils as auth
 from datetime import datetime, timedelta
+from kline_tools import analyze_kline_pattern
 import time
 import extra_streamlit_components as stx
 from market_tools import get_market_snapshot, get_price_statistics
@@ -19,14 +21,86 @@ from captcha_utils import generate_captcha_image
 from sqlalchemy import text
 from dotenv import load_dotenv
 from knowledge_tools import search_investment_knowledge
+# --- AI 相关导入 (LangGraph 版) ---
+from langchain_community.chat_models import ChatTongyi
+from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 
 # 1. 初始化环境
 load_dotenv(override=True)
+
+# 页面配置
+st.set_page_config(
+    page_title="爱波塔-你的交易战情室| 股票、期货、期权",
+    page_icon="favicon.ico",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# B. 【核心修复】强制注入深色主题 CSS (解决手机端白屏问题)
+st.markdown("""
+<style>
+    /* 1. 强制全局背景为深空蓝黑 */
+    .stApp {
+        background-color: #0b1121 !important;
+        background-image: radial-gradient(circle at 50% 0%, #1e293b 0%, #0b1121 70%);
+        color: white !important; /* 强制全局文字变白 */
+    }
+
+ /* --- 修复：输入框样式 --- */
+    div[data-testid="stTextInput"] input {
+        background-color: #1e293b !important; /* 深色背景 */
+        color: #ffffff !important;             /* 白色文字 */
+        border: 1px solid #475569 !important;  /* 灰色边框 */
+        border-radius: 8px !important;
+    }
+    /* 输入框的占位符 (Placeholder) 颜色 */
+    div[data-testid="stTextInput"] input::placeholder {
+        color: #94a3b8 !important;
+    }
+    
+    /* --- 修复：聊天气泡样式 --- */
+    /* 聊天消息容器 */
+    div[data-testid="stChatMessage"] {
+        background-color: rgba(30, 41, 59, 0.6) !important; /* 半透明深底 */
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        border-radius: 12px;
+        padding: 15px;
+        margin-bottom: 10px;
+    }
+    
+    /* 强制消息内的文字变白 */
+    div[data-testid="stChatMessage"] p,
+    div[data-testid="stChatMessage"] div,
+    div[data-testid="stChatMessage"] span {
+        color: #ffffff !important;
+    }
+
+    /* 3. 侧边栏文字强制变白 */
+    [data-testid="stSidebar"] {
+        background-color: #0f172a !important;
+    }
+    [data-testid="stSidebar"] p, [data-testid="stSidebar"] span, [data-testid="stSidebar"] div {
+        color: #cbd5e1 !important;
+    }
+
+    /* 4. 修复 Expander 在首页的样式 */
+    .streamlit-expanderHeader {
+        color: white !important;
+        background-color: rgba(255,255,255,0.05) !important;
+    }
+
+    /* 5. 隐藏顶部装饰条 */
+    header[data-testid="stHeader"] {
+        background-color: transparent !important;
+    }
+</style>
+""", unsafe_allow_html=True)
 
 # 1. 初始化 Cookie 管理器 (必须在页面内容之前)
 # 注意：這個函數本身就有緩存機制，不需要額外加 @st.cache_resource
 def get_manager():
     return stx.CookieManager()
+
 
 cookie_manager = get_manager()
 
@@ -35,10 +109,6 @@ cookie_manager = get_manager()
 cookies = cookie_manager.get_all()
 
 
-
-# --- AI 相关导入 (LangGraph 版) ---
-from langchain_community.chat_models import ChatTongyi
-from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 # 【关键修改】使用 LangGraph 的预构建 Agent
 try:
     from langgraph.prebuilt import create_react_agent
@@ -46,24 +116,11 @@ except ImportError:
     st.error("❌ 请先安装 LangGraph: `pip install langgraph`")
     st.stop()
 
-from kline_tools import analyze_kline_pattern
-
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(current_dir)
-import data_engine as de
 
-# --- 【新增】清除代理，解决 SSL 报错 ---
-for key in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"]:
-    os.environ.pop(key, None)
 
-# 1. 页面配置
-st.set_page_config(
-    page_title="爱波塔-你的交易战情室| 股票、期货、期权",
-    page_icon="favicon.ico",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
 
 # 加载 CSS
 with open('style.css', encoding='utf-8') as f:
@@ -72,7 +129,6 @@ with open('style.css', encoding='utf-8') as f:
 # ==========================================
 #  【关键修复】 全局状态初始化 (必须放在最前面！)
 # ==========================================
-
 
 
 # ==========================================
@@ -93,7 +149,6 @@ if not st.session_state.get('is_logged_in', False):
             time.sleep(0.3)  # 給一點 UI 反應時間
             st.rerun()
 
-
 # 只有第一次运行时才初始化，如果已经登录了，不要重置它
 if 'is_logged_in' not in st.session_state:
     st.session_state['is_logged_in'] = False
@@ -106,20 +161,20 @@ if 'captcha_code' not in st.session_state:
     st.session_state['captcha_img'] = img
     st.session_state['captcha_code'] = code
 
+
 def refresh_captcha():
     """刷新验证码的回调函数"""
     img, code = generate_captcha_image()
     st.session_state['captcha_img'] = img
     st.session_state['captcha_code'] = code
 
+
 # ==========================================
 #  側邊欄：統一的登錄/用戶中心
 # ==========================================
 with st.sidebar:
-
     if not st.session_state['is_logged_in']:
         # --- A. 未登錄狀態 ---
-        st.info("👋 欢迎老板！")
         tab1, tab2 = st.tabs(["登录", "注册"])
 
         with tab1:
@@ -244,12 +299,13 @@ with st.sidebar:
 
     st.markdown("---")
 
+
 # ==========================================
 #  AI Agent 初始化 (LangGraph 版)
 # ==========================================
 def get_agent(user_name="访客"):
     # 1. 定义工具箱
-    tools = [analyze_kline_pattern, search_investment_knowledge,get_market_snapshot,get_price_statistics]
+    tools = [analyze_kline_pattern, search_investment_knowledge, get_market_snapshot, get_price_statistics]
 
     # 2. LLM
     if not os.getenv("DASHSCOPE_API_KEY"):
@@ -276,7 +332,7 @@ def get_agent(user_name="访客"):
     4. 当用户询问某个品种（如碳酸锂、中证1000）的“走势”、“技术分析”、“K线形态”时，你要调用工具来回答。
     5. 当用户问期权或实战技术问题，优先以知识库工具为信息参考。
     6. 要结合K线分析和期权知识，给出明确的操作建议，风险偏好高的可以给积极的策略，风险偏好低的就给保守策略。
-    
+
     【回答格式】
     先说结论（看多/看空/震荡），最后解释理由，技术分析理由只说明K线，不说其他技术指标，期权策略的建议是根据技术分析和IV。
 
@@ -295,7 +351,6 @@ def get_agent(user_name="访客"):
             agent = create_react_agent(llm, tools)
 
     return agent
-
 
 
 # --- 首页内容 ---
@@ -405,8 +460,6 @@ if st.session_state['is_logged_in']:
                     except Exception as e:
                         st.error(f"分析失败: {e}")
 
-
-
     with st.expander("查看历史对话记录"):
         for msg in st.session_state.messages:
             role_label = "👤 用户" if msg["role"] == "user" else "🤖 AI"
@@ -416,8 +469,6 @@ if st.session_state['is_logged_in']:
 else:
     # === 未登錄：顯示鎖定狀態 ===
     st.warning("🔒 此功能僅對會員開放。請在左側登錄後使用。")
-
-
 
 st.markdown("---")
 
@@ -451,7 +502,7 @@ try:
                                             <div class="metric-value" style="color:{color}">{row['direction']}</div>
                                             <div class="metric-delta" style="font-size:0.8rem; color:#888;">
                                                {cleaned_brokers} </div>
-                                            <div style="font-size:0.8rem; margin-top:5px;">
+                                            <div style="font-size:0.8rem; margin-top:5px; color:#3b3b3b;">
                                                淨量: {int(row['total_net_vol']):,}
                                             </div>
                                         </div>
@@ -518,10 +569,6 @@ except Exception as e:
 
 st.markdown("---")
 
-
-
-
-
 # 2. 【新增】全市场风云榜
 st.markdown("### 🏆 全品种盈亏排行榜")
 st.caption("统计范围：近200天, (部分期货商亏损是因为做套保)")
@@ -555,7 +602,6 @@ if not df_win.empty:
             coloraxis_showscale=False  # 隐藏色条
         )
         st.plotly_chart(fig_win, use_container_width=True)
-
 
     with col_lose:
 

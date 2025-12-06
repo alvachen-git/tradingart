@@ -31,7 +31,7 @@ engine = get_db_engine()
 # --- 2. 核心工具定义 ---
 
 @tool
-def analyze_kline_pattern(query: str):
+def analyze_kline_pattern(query: str, ppprev_open=None):
     """
     【K线形态计算器】
     根据用户输入的商品，分析其最近的 K 线形态，判断多空方向。
@@ -95,6 +95,9 @@ def analyze_kline_pattern(query: str):
         curr = df.iloc[-1]
         prev = df.iloc[-2]
         pprev = df.iloc[-3]
+        tprev = df.iloc[-4]
+        pppprev = df.iloc[-5]
+        fprev = df.iloc[-6]
 
         date = curr['trade_date']
         close = curr['close_price']
@@ -102,11 +105,27 @@ def analyze_kline_pattern(query: str):
         high = curr['high_price']
         low = curr['low_price']
 
-        # 昨日和前日数据
+        # 前几日数据
         prev_close = prev['close_price']
         pprev_close = pprev['close_price']
         prev_open = prev['open_price']
         pprev_open = pprev['open_price']
+        tprev_close = tprev['close_price']
+        pppprev_close = pppprev['close_price']
+        fprev_close = fprev['close_price']
+        tprev_open = tprev['open_price']
+        pppprev_open = pppprev['open_price']
+        fprev_open = fprev['open_price']
+        prev_high = prev['high_price']
+        pprev_high = pprev['high_price']
+        tprev_high = tprev['high_price']
+        pppprev_high = pppprev['high_price']
+        fprev_high = fprev['high_price']
+        prev_low = prev['low_price']
+        pprev_low = pprev['low_price']
+        tprev_low = tprev['low_price']
+        pppprev_low = pppprev['low_price']
+        fprev_low = fprev['low_price']
 
         # --- 5. 形态识别逻辑 (核心算法) ---
 
@@ -125,6 +144,14 @@ def analyze_kline_pattern(query: str):
 
         # 昨日实体涨跌幅 (用于判断大阴/大阳)
         prev_chg_pct = (prev_close - prev_open) / prev_open
+        pprev_chg_pct = (pprev_close - pprev_open) / pprev_open
+        tprev_chg_pct = (tprev_close - tprev_open) / tprev_open
+        pppprev_chg_pct = (pppprev_close - pppprev_open) / pppprev_open
+        fprev_chg_pct = (fprev_close - fprev_open) / fprev_open
+
+        # 计算一段时间的最高价最低价
+        prev_2_days_high = df['high_price'].iloc[-3:-1].max()
+        prev_2_days_low = df['low_price'].iloc[-3:-1].min()
 
         # B. K线形态判断列表
         patterns = []
@@ -149,14 +176,35 @@ def analyze_kline_pattern(query: str):
                 (close < prev_open):
             patterns.append("【空头吞噬】(多头趋势末端，一阴吞一阳，强力见顶信号！)")
 
+        # 3. 上升三法
+        if (curr['MA5'] > curr['MA10']) and chg_pct > 0.01:
+            if pprev_chg_pct > 0.015 and prev_close < pprev_close and close > pprev_high:
+                patterns.append("【上升三法】(中继再涨，多头持续上攻！)")
+            elif tprev_chg_pct > 0.015 and pprev_close < tprev_close and prev_close < tprev_close and close > tprev_high:
+                patterns.append("【上升三法】(中继再涨，多头持续上攻！！)")
+            elif pppprev_chg_pct > 0.015 and tprev_close < pppprev_close and pprev_close < pppprev_close and prev_close < pppprev_close and close > pppprev_high:
+                patterns.append("【上升三法】(中继再涨，多头持续上攻！！)")
+            elif fprev_chg_pct > 0.015 and pppprev_close < fprev_close and tprev_close < fprev_close and pprev_close < fprev_close and prev_close < fprev_close and close > fprev_high:
+                patterns.append("【上升三法】(中继再涨，多头持续上攻！！)")
+        # 4. 下降三法
+        if (curr['MA5'] < curr['MA10']) and chg_pct < -0.01:
+            if pprev_chg_pct < -0.015 and prev_close > pprev_close and close < prev_2_days_low:
+                patterns.append("【下降三法】(中继再跌，空头持续发力！)")
+            elif tprev_chg_pct < -0.015 and pprev_close > tprev_close and prev_close > tprev_close and close < tprev_low:
+                patterns.append("【下降三法】(中继再跌，空头持续发力！)")
+            elif pppprev_chg_pct < -0.015 and tprev_close > pppprev_close and pprev_close > pppprev_close and prev_close > pppprev_close and close < pppprev_low:
+                patterns.append("【下降三法】(中继再跌，空头持续发力！)")
+            elif fprev_chg_pct < -0.015 and pppprev_close > fprev_close and tprev_close > fprev_close and pprev_close > fprev_close and prev_close > fprev_close and close < fprev_low:
+                patterns.append("【下降三法】(中继再跌，空头持续发力！)")
+
         # --- 基础形态 ---
 
         # 3. 大阳/大阴
         if body_pct > 0.8 and abs(chg_pct) > 0.03:
             if close > open_p:
-                patterns.append("【大阳线】(买盘强劲)")
+                patterns.append("【大阳线】(多头气势强)")
             else:
-                patterns.append("【大阴线】(抛压沉重)")
+                patterns.append("【大阴线】(空头气势强)")
 
         # 4. 长下影
         if lower_pct > 2 and body_pct < 0.3 and curr['MA5'] < curr['MA20']:
@@ -185,9 +233,14 @@ def analyze_kline_pattern(query: str):
         else:
             trends.append("跌破20日线(中空)")
 
-        if curr['MA5'] > curr['MA10'] > curr['MA20']:
+        if curr['MA5'] > curr['MA20'] > curr['MA60']:
             trends.append("均线多头排列")
-        elif curr['MA5'] < curr['MA10'] < curr['MA20']:
+        elif curr['MA5'] < curr['MA20'] < curr['MA60']:
+            trends.append("均线空头排列")
+
+        if curr['MA5'] > curr['MA10'] and curr['MA20'] > curr['MA10']:
+            trends.append("横盘震荡格局")
+        elif curr['MA5'] < curr['MA20'] < curr['MA60']:
             trends.append("均线空头排列")
 
         # --- 6. 输出报告 ---

@@ -9,7 +9,7 @@ import gc  # <--- 2. 引入 gc (好习惯)
 
 load_dotenv(override=True)
 
-TIINGO_KEY = os.getenv("TIINGO_API_KEY")
+TIINGO_KEY = "ddb0de2f922b0e2e02c6b50516b2b87cb9dc1bda"
 
 # 数据库配置
 DB_USER = 'root'
