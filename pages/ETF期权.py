@@ -13,13 +13,6 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 root_dir = os.path.dirname(current_dir)
 sys.path.append(root_dir)
 
-
-
-# 加载 CSS
-
-with open('style.css', encoding='utf-8') as f:
-    st.markdown(f'<style>{f.read()}</style>', unsafe_allow_html=True)
-
 # 1. 页面配置
 st.set_page_config(
     page_title="爱波塔-ETF期权分析",
@@ -27,6 +20,14 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="collapsed"
 )
+
+
+# 加载 CSS
+
+css_path = os.path.join(root_dir, 'style.css')
+with open(css_path, encoding='utf-8') as f:
+    st.markdown(f'<style>{f.read()}</style>', unsafe_allow_html=True)
+
 
 # --- 页面逻辑 ---
 st.markdown('<div class="mobile-top-container">', unsafe_allow_html=True)
