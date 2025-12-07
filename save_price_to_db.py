@@ -142,7 +142,7 @@ if __name__ == "__main__":
 
     # --- 批量写入 ---
     # 设定过滤时间 (例如只取2023年以后的)
-    FILTER_START = '20230102'
+    FILTER_START = '20220102'
 
     # 1. 股指
     save_futures_price(symbol="ih0", name="上证50", start_date=FILTER_START)
@@ -152,11 +152,14 @@ if __name__ == "__main__":
     save_futures_price(symbol="t0", name="10年期国债", start_date=FILTER_START)
     save_futures_price(symbol="tl0", name="30年期国债", start_date=FILTER_START)
     save_futures_price(symbol="ts0", name="2年期国债", start_date=FILTER_START)
+    save_futures_price(symbol="sc0", name="原油", start_date=FILTER_START)
 
     # 2. 广期所
     save_futures_price(symbol="lc0", name="碳酸锂", start_date=FILTER_START)
     save_futures_price(symbol="si0", name="工业硅", start_date=FILTER_START)
     save_futures_price(symbol="ps0", name="多晶硅", start_date=FILTER_START)
+    save_futures_price(symbol="pd0", name="钯金", start_date=FILTER_START)
+    save_futures_price(symbol="pt0", name="铂金", start_date=FILTER_START)
 
     # 3. 上期所
     save_futures_price(symbol="cu0", name="沪铜", start_date=FILTER_START)
@@ -166,22 +169,35 @@ if __name__ == "__main__":
     save_futures_price(symbol="ag0", name="沪银", start_date=FILTER_START)
     save_futures_price(symbol="ni0", name="沪镍", start_date=FILTER_START)
     save_futures_price(symbol="ao0", name="氧化铝", start_date=FILTER_START)
+    save_futures_price(symbol="rb0", name="螺纹钢", start_date=FILTER_START)
     save_futures_price(symbol="ru0", name="橡胶", start_date=FILTER_START)
     save_futures_price(symbol="sp0", name="纸浆", start_date=FILTER_START)
+    save_futures_price(symbol="ss0", name="不锈钢", start_date=FILTER_START)
+    save_futures_price(symbol="ad0", name="铝合金", start_date=FILTER_START)
+    save_futures_price(symbol="pb0", name="沪铅", start_date=FILTER_START)
+    save_futures_price(symbol="sn0", name="沪锡", start_date=FILTER_START)
+    save_futures_price(symbol="bu0", name="沥青", start_date=FILTER_START)
+    save_futures_price(symbol="fu0", name="燃料油", start_date=FILTER_START)
 
     # 4. 大商所
     save_futures_price(symbol="m0", name="豆粕", start_date=FILTER_START)
+    save_futures_price(symbol="a0", name="豆一", start_date=FILTER_START)
+    save_futures_price(symbol="b0", name="豆二", start_date=FILTER_START)
     save_futures_price(symbol="lh0", name="生猪", start_date=FILTER_START)
     save_futures_price(symbol="i0", name="铁矿石", start_date=FILTER_START)
     save_futures_price(symbol="p0", name="棕榈油", start_date=FILTER_START)
     save_futures_price(symbol="y0", name="豆油", start_date=FILTER_START)
     save_futures_price(symbol="c0", name="玉米", start_date=FILTER_START)
     save_futures_price(symbol="jm0", name="焦煤", start_date=FILTER_START)
+    save_futures_price(symbol="j0", name="焦炭", start_date=FILTER_START)
     save_futures_price(symbol="jd0", name="鸡蛋", start_date=FILTER_START)
     save_futures_price(symbol="v0", name="PVC", start_date=FILTER_START)
     save_futures_price(symbol="l0", name="塑料", start_date=FILTER_START)
     save_futures_price(symbol="eb0", name="苯乙烯", start_date=FILTER_START)
+    save_futures_price(symbol="bz0", name="纯苯", start_date=FILTER_START)
     save_futures_price(symbol="eg0", name="乙二醇", start_date=FILTER_START)
+    save_futures_price(symbol="pg0", name="液化气", start_date=FILTER_START)
+    save_futures_price(symbol="lg0", name="原木", start_date=FILTER_START)
 
     # 5. 郑商所
     save_futures_price(symbol="fg0", name="玻璃", start_date=FILTER_START)
@@ -190,8 +206,12 @@ if __name__ == "__main__":
     save_futures_price(symbol="cf0", name="棉花", start_date=FILTER_START)
     save_futures_price(symbol="ma0", name="甲醇", start_date=FILTER_START)
     save_futures_price(symbol="ta0", name="PTA", start_date=FILTER_START)
-    save_futures_price(symbol="ap0", name="苹果", start_date=FILTER_START)
     save_futures_price(symbol="ur0", name="尿素", start_date=FILTER_START)
     save_futures_price(symbol="sh0", name="烧碱", start_date=FILTER_START)
     save_futures_price(symbol="rm0", name="菜粕", start_date=FILTER_START)
     save_futures_price(symbol="oi0", name="菜油", start_date=FILTER_START)
+    save_futures_price(symbol="pk0", name="花生", start_date=FILTER_START)
+    save_futures_price(symbol="sf0", name="硅铁", start_date=FILTER_START)
+    save_futures_price(symbol="sm0", name="锰硅", start_date=FILTER_START)
+    save_futures_price(symbol="ap0", name="苹果", start_date=FILTER_START)
+    save_futures_price(symbol="cj0", name="红枣", start_date=FILTER_START)

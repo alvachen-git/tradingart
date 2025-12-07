@@ -22,7 +22,7 @@ st.markdown("""
 <style>
     /* 全局纯黑背景 */
     .stApp {
-        background-color: #000000 !important;
+        background-color: #0b1121 !important;
         font-family: 'JetBrains Mono', 'Courier New', monospace;
     }
 

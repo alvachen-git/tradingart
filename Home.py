@@ -30,7 +30,7 @@ load_dotenv(override=True)
 
 # 页面配置
 st.set_page_config(
-    page_title="爱波塔-你的交易战情室| 股票、期货、期权",
+    page_title="爱波塔-懂期权的AI-陪你在市场奋斗",
     page_icon="favicon.ico",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -44,6 +44,7 @@ st.markdown("""
         background-color: #0b1121 !important;
         background-image: radial-gradient(circle at 50% 0%, #1e293b 0%, #0b1121 70%);
         color: white !important; /* 强制全局文字变白 */
+        font-family: 'JetBrains Mono', 'Courier New', monospace;
     }
 
  /* --- 修复：输入框样式 --- */
@@ -328,7 +329,7 @@ def get_agent(user_name="访客"):
     【你的行为准则】
     1. **情绪感知**：在回答前，先在心里分析用户的情绪（贪婪/恐惧/愤怒/理性）。
     2. **风险评估**：根据用户的问题判断其风险偏好（激进/保守）。
-    3. 对于用户问的商品，如果用户没特别说明，都默认是国内品种。
+    3. 如果用户问题不具体，可以反问客户，多用反问来引导用户做交易决策。
     4. 当用户询问某个品种（如碳酸锂、中证1000）的“走势”、“技术分析”、“K线形态”时，你要调用工具来回答。
     5. 当用户问期权或实战技术问题，优先以知识库工具为信息参考。
     6. 要结合K线分析和期权知识，给出明确的操作建议，风险偏好高的可以给积极的策略，风险偏好低的就给保守策略。
@@ -518,7 +519,7 @@ except Exception as e:
 st.markdown("---")
 
 # --- 新增：多空巔峰對決 (Smart vs Dumb) ---
-st.markdown("### ⚔️ 多空巅峰对决")
+st.caption("### ⚔️ 多空巅峰对决")
 st.caption("筛选逻辑：机构与散户差异最大的持仓对比")
 
 # 1. 獲取數據 (直接讀表)
@@ -570,7 +571,7 @@ except Exception as e:
 st.markdown("---")
 
 # 2. 【新增】全市场风云榜
-st.markdown("### 🏆 全品种盈亏排行榜")
+st.caption("### 🏆 全品种盈亏排行榜")
 st.caption("统计范围：近200天, (部分期货商亏损是因为做套保)")
 
 # 获取数据

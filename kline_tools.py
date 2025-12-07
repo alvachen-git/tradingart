@@ -152,6 +152,14 @@ def analyze_kline_pattern(query: str, ppprev_open=None):
         # 计算一段时间的最高价最低价
         prev_2_days_high = df['high_price'].iloc[-3:-1].max()
         prev_2_days_low = df['low_price'].iloc[-3:-1].min()
+        prev_3_days_high = df['high_price'].iloc[-4:-1].max()
+        prev_3_days_low = df['low_price'].iloc[-4:-1].min()
+        prev_4_days_high = df['high_price'].iloc[-5:-1].max()
+        prev_4_days_low = df['low_price'].iloc[-5:-1].min()
+        prev_5_days_high = df['high_price'].iloc[-6:-1].max()
+        prev_5_days_low = df['low_price'].iloc[-6:-1].min()
+        prev_6_days_high = df['high_price'].iloc[-7:-1].max()
+        prev_6_days_low = df['low_price'].iloc[-7:-1].min()
 
         # B. K线形态判断列表
         patterns = []
@@ -178,23 +186,23 @@ def analyze_kline_pattern(query: str, ppprev_open=None):
 
         # 3. 上升三法
         if (curr['MA5'] > curr['MA10']) and chg_pct > 0.01:
-            if pprev_chg_pct > 0.015 and prev_close < pprev_close and close > pprev_high:
+            if pprev_chg_pct > 0.015 and prev_close < pprev_high and close > prev_2_days_high:
                 patterns.append("【上升三法】(中继再涨，多头持续上攻！)")
-            elif tprev_chg_pct > 0.015 and pprev_close < tprev_close and prev_close < tprev_close and close > tprev_high:
+            elif tprev_chg_pct > 0.015 and pprev_close < tprev_high and prev_close < tprev_high and close > prev_3_days_high:
                 patterns.append("【上升三法】(中继再涨，多头持续上攻！！)")
-            elif pppprev_chg_pct > 0.015 and tprev_close < pppprev_close and pprev_close < pppprev_close and prev_close < pppprev_close and close > pppprev_high:
+            elif pppprev_chg_pct > 0.015 and tprev_close < pppprev_high and pprev_close < pppprev_high and prev_close < pppprev_high and close > prev_4_days_high:
                 patterns.append("【上升三法】(中继再涨，多头持续上攻！！)")
-            elif fprev_chg_pct > 0.015 and pppprev_close < fprev_close and tprev_close < fprev_close and pprev_close < fprev_close and prev_close < fprev_close and close > fprev_high:
+            elif fprev_chg_pct > 0.015 and pppprev_close < fprev_high and tprev_close < fprev_high and pprev_close < fprev_high and prev_close < fprev_high and close > prev_5_days_high:
                 patterns.append("【上升三法】(中继再涨，多头持续上攻！！)")
         # 4. 下降三法
         if (curr['MA5'] < curr['MA10']) and chg_pct < -0.01:
-            if pprev_chg_pct < -0.015 and prev_close > pprev_close and close < prev_2_days_low:
+            if pprev_chg_pct < -0.015 and prev_close > pprev_low and close < prev_2_days_low:
                 patterns.append("【下降三法】(中继再跌，空头持续发力！)")
-            elif tprev_chg_pct < -0.015 and pprev_close > tprev_close and prev_close > tprev_close and close < tprev_low:
+            elif tprev_chg_pct < -0.015 and pprev_close > tprev_low and prev_close > tprev_low and close < prev_3_days_low:
                 patterns.append("【下降三法】(中继再跌，空头持续发力！)")
-            elif pppprev_chg_pct < -0.015 and tprev_close > pppprev_close and pprev_close > pppprev_close and prev_close > pppprev_close and close < pppprev_low:
+            elif pppprev_chg_pct < -0.015 and tprev_close > pppprev_low and pprev_close > pppprev_low and prev_close > pppprev_low and close < prev_4_days_low:
                 patterns.append("【下降三法】(中继再跌，空头持续发力！)")
-            elif fprev_chg_pct < -0.015 and pppprev_close > fprev_close and tprev_close > fprev_close and pprev_close > fprev_close and prev_close > fprev_close and close < fprev_low:
+            elif fprev_chg_pct < -0.015 and pppprev_close > fprev_low and tprev_close > fprev_low and pprev_close > fprev_low and prev_close > fprev_low and close < prev_5_days_low:
                 patterns.append("【下降三法】(中继再跌，空头持续发力！)")
 
         # --- 基础形态 ---
@@ -207,12 +215,12 @@ def analyze_kline_pattern(query: str, ppprev_open=None):
                 patterns.append("【大阴线】(空头气势强)")
 
         # 4. 长下影
-        if lower_pct > 2 and body_pct < 0.3 and curr['MA5'] < curr['MA20']:
-            patterns.append("【锤子】(下方有强支撑)")
+        if lower_pct > 2 and body_pct < 0.3 and body_pct > 0.05 and curr['MA5'] < curr['MA20']and close < prev_close:
+            patterns.append("【锤子】(多头抵抗)")
 
         # 5. 长上影
-        if upper_pct > 2 and body_pct < 0.3 and curr['MA5'] > curr['MA20'] and close> prev_close and prev_close > pprev_close:
-            patterns.append("【倒状锤子】(上方压力巨大)")
+        if upper_pct > 2 and body_pct < 0.3 and body_pct > 0.05 and curr['MA5'] > curr['MA20'] and close > prev_close:
+            patterns.append("【倒状锤子】(卖压沉重)")
 
         # 6. 十字星
         if body_pct < 0.1:
@@ -238,10 +246,14 @@ def analyze_kline_pattern(query: str, ppprev_open=None):
         elif curr['MA5'] < curr['MA20'] < curr['MA60']:
             trends.append("均线空头排列")
 
-        if curr['MA5'] > curr['MA10'] and curr['MA20'] > curr['MA10']:
-            trends.append("横盘震荡格局")
-        elif curr['MA5'] < curr['MA20'] < curr['MA60']:
-            trends.append("均线空头排列")
+        if curr['MA20'] > curr['MA5'] > curr['MA10']:
+            trends.append("震荡横盘格局")
+        elif curr['MA5'] > curr['MA20'] > curr['MA10']:
+            trends.append("震荡偏多格局")
+        elif curr['MA20'] < curr['MA5'] < curr['MA10']:
+            trends.append("震荡横盘格局")
+        elif curr['MA5'] < curr['MA20'] < curr['MA10']:
+            trends.append("震荡偏空格局")
 
         # --- 6. 输出报告 ---
         report = f"""

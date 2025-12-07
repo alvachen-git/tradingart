@@ -55,7 +55,7 @@ with st.spinner(f"正在扫描 {etf_code} 全市场持仓数据..."):
 
 if df is None or df.empty:
     st.error("暂无数据，可能是非交易时间或 Tushare 接口受限。")
-    st.stop()
+    #st.stop()
 
 # --- 【关键修复】健壮的日期处理 ---
 try:

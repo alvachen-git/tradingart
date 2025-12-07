@@ -4,6 +4,7 @@ import os
 from sqlalchemy import create_engine, text
 from dotenv import load_dotenv
 from langchain_core.tools import tool
+from sqlalchemy.exc import SQLAlchemyError
 from langchain.agents import create_agent
 import tushare as ts
 from datetime import datetime, timedelta
@@ -474,7 +475,7 @@ def update_user_memory_async(user_id, user_input):
     for key in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"]:
         if key in os.environ: os.environ.pop(key, None)
 
-    try:
+
         # 3. 讀取舊畫像
         old_profile = get_user_profile(user_id)
         old_assets = old_profile.get('focus_assets', '')  # 假設格式是 "茅台,寧德時代,螺紋鋼"
@@ -546,29 +547,45 @@ def update_user_memory_async(user_id, user_input):
         final_assets_str = ','.join(final_list)
 
         # 6. 寫入數據庫
-        with engine.connect() as conn:
-            check = conn.execute(text(f"SELECT 1 FROM user_profile WHERE user_id=:u"), {"u": user_id}).fetchone()
-            if not check:
-                conn.execute(text("INSERT INTO user_profile (user_id) VALUES (:u)"), {"u": user_id})
+        try:
+            with engine.connect() as conn:
+                # 开启事务
+                trans = conn.begin()
+                try:
+                    # A. 检查用户是否存在
+                    check = conn.execute(text(f"SELECT 1 FROM user_profile WHERE user_id=:u"),
+                                         {"u": user_id}).fetchone()
+                    if not check:
+                        conn.execute(text("INSERT INTO user_profile (user_id) VALUES (:u)"), {"u": user_id})
 
-            sql = text("""
-                       UPDATE user_profile
-                       SET risk_preference=:risk,
-                           current_mood=:mood,
-                           focus_assets=:assets,
-                           investment_style=:style
-                       WHERE user_id = :uid
-                       """)
-            conn.execute(sql, {
-                "risk": new_risk,
-                "mood": new_mood,
-                "assets": final_assets_str,
-                "style": new_style,
-                "uid": user_id
-            })
-            conn.commit()
+                    # B. 更新画像
+                    sql = text("""
+                               UPDATE user_profile
+                               SET risk_preference=:risk,
+                                   current_mood=:mood,
+                                   focus_assets=:assets,
+                                   investment_style=:style
+                               WHERE user_id = :uid
+                               """)
+                    conn.execute(sql, {
+                        "risk": new_risk,
+                        "mood": new_mood,
+                        "assets": final_assets_str,
+                        "style": new_style,
+                        "uid": user_id
+                    })
 
-        print(f" [✅] 記憶更新成功！关注列表(Top5): {final_assets_str}")
+                    # C. 提交事务
+                    trans.commit()
+                    print(f" [✅] 記憶更新成功！关注列表(Top5): {final_assets_str}")
 
-    except Exception as e:
-        print(f" [X] 記憶更新失敗: {e}")
+                except SQLAlchemyError as db_err:
+                    # 这里的代码专门处理数据库报错，比如回滚
+                    if 'trans' in locals():
+                        trans.rollback()
+                    print(f" [!] 数据库操作失败: {db_err}")
+                    raise db_err  # 抛出异常，中断程序
+
+        except Exception as e:
+            print(f" [X] 記憶更新失敗: {e}")
+
