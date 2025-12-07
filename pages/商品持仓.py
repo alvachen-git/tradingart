@@ -27,47 +27,51 @@ with open(css_path, encoding='utf-8') as f:
 with st.sidebar:
 
     COMMODITIES = {
-        "ih0": "上证50",
-        "if0": "沪深300",
-        "ic0": "中证500 ",
-        "im0": "中证1000",
-        "ts0": "2年期国债",
-        "t0": "10年期国债",
-        "tl0": "30年期国债",
-        "lc0": "碳酸锂",
-        "si0": "工业硅",
-        "ps0": "多晶硅 ",
-        "au0": "黄金",
-        "ag0": "白银",
-        "cu0": "沪铜",
-        "cu0": "沪铝",
-        "cu0": "沪锌",
-        "ni0": "沪镍",
-        "rb0": "螺纹钢",
-        "hc0": "热卷 ",
-        "sp0": "纸浆 ",
-        "m0": "豆粕",
-        "c0": "玉米",
-        "lh0": "生猪",
-        "jd0": "鸡蛋",
-        "jm0": "焦煤",
-        "i0": "铁矿石",
-        "p0": "棕榈油",
-        "y0": "豆油",
-        "v0": "PVC",
-        "eb0": "苯乙烯",
-        "eg0": "乙二醇",
-        "fg0": "玻璃",
-        "sa0": "纯碱 ",
-        "rm0": "菜粕 ",
-        "oi0": "菜油 ",
-        "ur0": "尿素 ",
-        "sr0": "白糖",
-        "cf0": "棉花",
-        "ap0": "苹果",
-        "sh0": "烧碱",
-        "ma0": "甲醇",
-        "ta0": "PTA"
+        "ih": "上证50",
+        "if": "沪深300",
+        "ic": "中证500 ",
+        "im": "中证1000",
+        "ts": "2年期国债",
+        "t": "10年期国债",
+        "tl": "30年期国债",
+        "lc": "碳酸锂",
+        "si": "工业硅",
+        "ps": "多晶硅 ",
+        "au": "黄金",
+        "ag": "白银",
+        "cu": "沪铜",
+        "al": "沪铝",
+        "zn": "沪锌",
+        "ni": "沪镍",
+        "zn": "沪锡",
+        "rb": "螺纹钢",
+        "hc": "热卷 ",
+        "sp": "纸浆 ",
+        "m": "豆粕",
+        "a": "豆一",
+        "b": "豆二",
+        "c": "玉米",
+        "lh": "生猪",
+        "jd": "鸡蛋",
+        "jm": "焦煤",
+        "j": "焦炭",
+        "i": "铁矿石",
+        "p": "棕榈油",
+        "y": "豆油",
+        "v": "PVC",
+        "eb": "苯乙烯",
+        "eg": "乙二醇",
+        "fg": "玻璃",
+        "sa": "纯碱 ",
+        "rm": "菜粕 ",
+        "oi": "菜油 ",
+        "ur": "尿素 ",
+        "sr": "白糖",
+        "cf": "棉花",
+        "ap": "苹果",
+        "sh": "烧碱",
+        "ma": "甲醇",
+        "ta": "PTA"
     }
     option_list = [f"{code} - {name}" for code, name in COMMODITIES.items()]
     # 这里使用 key 保持状态
@@ -271,7 +275,7 @@ with c_info:
             history,
             x='trade_date',
             y='累计积分',
-            title=f"{selected_broker} · 资金曲线",
+            title=f"{selected_broker} · 得分曲线",
             markers=True,  # 显示数据点
         )
 
@@ -315,10 +319,13 @@ with c_info:
         for c in ['oi', 'weight', 'type']:
             if c in history.columns: cols.append(c)
         display_df = history[cols].sort_values('trade_date', ascending=False).copy()
-        if 'pct_chg' in display_df.columns: display_df['pct_chg'] = display_df['pct_chg'] * 100
+        if 'pct_chg' in display_df.columns: display_df['pct_chg'] = display_df['pct_chg']
         st.dataframe(display_df, column_config={
             "trade_date": "日期", "net_vol": st.column_config.NumberColumn("净持仓", format="%d"),
             "pct_chg": st.column_config.NumberColumn("涨跌", format="%.2f%%"),
             "score": st.column_config.ProgressColumn("得分", min_value=-5, max_value=5, format="%.2f")
         }, use_container_width=True, hide_index=True, height=200)
-                
+
+
+
+
