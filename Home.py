@@ -100,7 +100,7 @@ st.markdown("""
 # 1. 初始化 Cookie 管理器 (必须在页面内容之前)
 # 注意：這個函數本身就有緩存機制，不需要額外加 @st.cache_resource
 def get_manager():
-    return stx.CookieManager()
+    return stx.CookieManager(key="master_cookie_manager")
 
 
 cookie_manager = get_manager()
