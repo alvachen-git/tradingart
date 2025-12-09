@@ -5,7 +5,7 @@ import os
 import sys
 import plotly.express as px
 import auth_utils as auth
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from kline_tools import analyze_kline_pattern
 import time
 import extra_streamlit_components as stx
@@ -109,12 +109,6 @@ cookie_manager = get_manager()
 # 注意：stx 需要一點時間從瀏覽器讀取，首次加載可能為 None
 cookies = cookie_manager.get_all()
 
-# === ✅ 替换为 (更安全的做法) ===
-# 如果 cookies 没读到，且我们还没登录，稍微等一下然后刷新页面，让它读第二次
-if not cookies and 'is_logged_in' not in st.session_state:
-    # 只有在非常必要时才在这里 sleep，或者直接 rerun
-    time.sleep(0.2)
-    st.rerun()  # 重新运行脚本，这样 get_all 只会被调用一次
 
 # 【关键修改】使用 LangGraph 的预构建 Agent
 try:
@@ -196,7 +190,7 @@ with st.sidebar:
 
                         # 【關鍵修改】寫入 Cookie (設置 7 天過期)
                         # expires_at 是 datetime 對象
-                        expires = datetime.now(timezone.utc) + timedelta(days=7)
+                        expires = datetime.now() + timedelta(days=7)
 
                         cookie_manager.set("username", u, expires_at=expires, key="set_user_cookie")
                         cookie_manager.set("token", token, expires_at=expires, key="set_token_cookie")
@@ -255,7 +249,7 @@ with st.sidebar:
                         st.session_state['user_id'] = new_user
 
                         # 設置 Cookie (保持登錄狀態)
-                        expires = datetime.now(timezone.utc) + timedelta(days=7)
+                        expires = datetime.now() + timedelta(days=7)
                         cookie_manager.set("username", new_user, expires_at=expires, key="reg_set_user")
                         cookie_manager.set("token", token, expires_at=expires, key="reg_set_token")
 
