@@ -22,113 +22,126 @@ ts_token = os.getenv("TUSHARE_TOKEN")
 ts.set_token(ts_token)
 pro = ts.pro_api()
 
-# 交易所列表 (上期所、大商所、郑商所、广期所、上能源)
-EXCHANGES = ['SHFE', 'DCE', 'CZCE', 'GFEX', 'INE']
+# 交易所全列表
+# 包括: 上期所, 大商所, 郑商所, 广期所, 上能源, 中金所
+EXCHANGES = ['SHFE', 'DCE', 'CZCE', 'GFEX', 'INE', 'CFFEX']
 
-SUFFIX_MAP = {
-    'SHFE': '.SHF',  # 上期所是 .SHF
-    'DCE':  '.DCE',  # 大商所是 .DCE
-    'CZCE': '.ZCE',  # 鄭商所是 .ZCE
-    'GFEX': '.GFE',  # 廣期所是 .GFE
-    'INE':  '.INE'   # 上能源是 .INE
-}
 
 def get_trade_cal(start_date, end_date):
-    """获取交易日历，判断某天是否开盘"""
-    df = pro.trade_cal(exchange='SHFE', start_date=start_date, end_date=end_date, is_open='1')
-    return df['cal_date'].tolist() if not df.empty else []
+    """获取交易日历"""
+    try:
+        df = pro.trade_cal(exchange='SHFE', start_date=start_date, end_date=end_date, is_open='1')
+        return df['cal_date'].tolist() if not df.empty else []
+    except:
+        # 如果获取日历失败，默认返回结束日期作为尝试
+        return [end_date]
 
 
 def save_daily_option_price(trade_date):
     """
-    抓取指定日期的所有商品期权价格 -> 存入数据库
+    抓取指定日期的所有商品期权价格 -> 使用 INSERT IGNORE 存入数据库
     """
-    print(f"[*] 正在抓取 {trade_date} 的期权行情...")
-
+    print(f"[*] 正在启动期权更新: {trade_date} ...")
     start_time = time.time()
     total_records = 0
 
     for ex in EXCHANGES:
         try:
-            # 1. 调用 Tushare 接口 (每次只取一个交易所，减少内存压力)
-            # fields: 代码, 日期, 收盘价, 开高低, 持仓量, 成交量
+            # 1. 调用 Tushare 接口
+            # 获取字段: 代码, 日期, 收盘, 开, 高, 低, 量, 持仓
             df = pro.opt_daily(trade_date=trade_date, exchange=ex,
-                               fields='ts_code,trade_date,close,open,high,low,vol,oi')
+                               fields='ts_code,trade_date,close,open,high,low,vol,oi,settle')
 
             if df.empty:
                 continue
 
-            # 2. 简单清洗
-            df['ts_code'] = df['ts_code'].astype(str)
-            df.fillna(0, inplace=True)
+            # 2. 数据清洗
+            # 填充空值为 0
+            df = df.fillna(0)
 
-            # 【修復 1】強制去重，防止數據源自帶重複
-            df.drop_duplicates(subset=['ts_code', 'trade_date'], inplace=True)
+            # 确保列名与数据库一致 (数据库通常是 close, open...)
+            # Tushare 返回的就是这些，无需重命名
 
-            row_count = len(df)
-            total_records += row_count
+            # 3. 构造批量插入 SQL (INSERT IGNORE)
+            # 这种方式比 to_sql 更快且不会因为主键重复而报错
+            values_list = []
+            for _, row in df.iterrows():
+                vals = (
+                    row['trade_date'],
+                    row['ts_code'],
+                    row.get('open', 0),
+                    row.get('high', 0),
+                    row.get('low', 0),
+                    row.get('close', 0),
+                    row.get('vol', 0),
+                    row.get('oi', 0),
+                    row.get('settle', 0)  # 新增字段
+                )
+                values_list.append(str(vals))
 
-            # 3. 入库 (幂等操作)
-            with engine.connect() as conn:
-                # 【修復 2】使用正確的後綴進行刪除
-                suffix = SUFFIX_MAP.get(ex, f".{ex}")
-                del_sql = text(
-                    f"DELETE FROM commodity_opt_daily WHERE trade_date='{trade_date}' AND ts_code LIKE '%{suffix}'")
-                conn.execute(del_sql)
+            if values_list:
+                # 分批写入，防止 SQL 语句过长
+                batch_size = 2000
+                for i in range(0, len(values_list), batch_size):
+                    batch = values_list[i: i + batch_size]
+                    sql_vals = ",".join(batch)
 
-                # 4. 流式写入
-                # chunksize=2000 确保即使这一个交易所数据很多，也不会卡死数据库
-                df.to_sql('commodity_opt_daily', conn, if_exists='append', index=False, chunksize=2000)
-                conn.commit()
+                    sql = f"""
+                        INSERT IGNORE INTO commodity_opt_daily 
+                        (trade_date, ts_code, open, high, low, close, vol, oi, settle)
+                        VALUES {sql_vals}
+                    """
 
-            print(f"   -> {ex}: {row_count} 条入库")
+                    with engine.connect() as conn:
+                        conn.execute(text(sql))
+                        conn.commit()
 
-            # 5. 【关键】主动释放内存
-            del df
+                count = len(df)
+                total_records += count
+                print(f"   -> {ex}: 成功入库 {count} 条")
 
         except Exception as e:
-            if "Duplicate entry" in str(e):
-                print(f"   [!] {ex} 重复数据，已跳过")
-            else:
-                print(f"   [!] {ex} 抓取失敗: {e}")
+            print(f"   [!] {ex} 更新异常: {e}")
 
-        # 避免触发 API 频率限制
+        # 避免触发 API 频率限制 (尤其是包含 CFFEX 时)
         time.sleep(0.3)
 
     duration = time.time() - start_time
-    print(f" [√] {trade_date} 更新完毕，共 {total_records} 条，耗时 {duration:.2f}秒\n")
+    if total_records > 0:
+        print(f" [√] {trade_date} 全部完成，共更新 {total_records} 条数据，耗时 {duration:.2f}s\n")
+    else:
+        print(f" [-] {trade_date} 无数据或非交易日\n")
 
 
-def run_update_task(mode='daily', days_back=0):
+def run_update_task(mode='daily', days_back=5):
     """
-    mode='daily': 只跑今天 (适合 crontab)
-    mode='history': 补跑最近 N 天
+    主运行函数
+    :param mode: 'daily' (只跑今天), 'history' (补跑历史)
+    :param days_back: 补跑天数
     """
     today = datetime.now().strftime('%Y%m%d')
 
     if mode == 'daily':
-        # 检查今天是否是交易日 (如果是晚上跑，就跑今天)
-        # 建议设置定时任务在 18:00 以后
-        dates = get_trade_cal(today, today)
-        if not dates:
-            print(f" [x] 今天 ({today}) 是非交易日，无需更新。")
-            return
+        # 即使是非交易日，尝试跑一下也没坏处，Tushare 会返回空
         target_dates = [today]
-
     else:
-        # 补跑历史
-        start = (datetime.now() - timedelta(days=days_back)).strftime('%Y%m%d')
-        dates = get_trade_cal(start, today)
-        target_dates = dates
+        # 补跑模式
+        start_date = (datetime.now() - timedelta(days=days_back)).strftime('%Y%m%d')
+        # 获取期间的所有交易日
+        target_dates = get_trade_cal(start_date, today)
+        print(f"=== 准备补全历史数据: {len(target_dates)} 个交易日 ===")
 
-        # 循环处理每一天
     for d in target_dates:
         save_daily_option_price(d)
 
 
 if __name__ == "__main__":
-    # 用法 A: 服务器每日定时任务 (默认)
-    #run_update_task(mode='daily')
+    # --- 配置区域 ---
 
-    # 用法 B: 手动补数据 (例如补最近 5 天)
-    run_update_task(mode='history', days_back=200)
+    # 场景 1: 日常更新 (每天运行一次)
+    # run_update_task(mode='daily')
+
+    # 场景 2: 首次修复/补全数据 (建议先运行这个！)
+    # 补全最近 30 天，确保 M, IO 等数据都齐了
+    print(">>> 开始执行全市场期权数据补全...")
+    run_update_task(mode='history', days_back=300)

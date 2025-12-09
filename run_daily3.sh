@@ -10,7 +10,7 @@ echo "⏰ 任务开始: $(date)" >> update.log
 
 
 # 1. 更新【期权数据】
-echo ">>> [1/3] 开始更新期权持仓数据..." >> update.log
+echo ">>> [1/3] 开始更新ETF期权数据..." >> update.log
 /usr/bin/python3 update_options_daily.py >> update.log 2>&1
 
 # 2. 更新【A股数据】
