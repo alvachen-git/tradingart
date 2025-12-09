@@ -1,71 +1,69 @@
 import tushare as ts
 import pandas as pd
+import numpy as np
 from sqlalchemy import create_engine, text
 import os
 from dotenv import load_dotenv
 import time
 from datetime import datetime
-import gc  # 引入垃圾回收模块
-import warnings
+import sys
 
-# 忽略 SQLAlchemy 的一些警告
-warnings.filterwarnings('ignore')
+# --- 1. 初始化配置 ---
+# 获取脚本所在目录的绝对路径，确保在服务器 crontab 运行时能找到 .env
+current_dir = os.path.dirname(os.path.abspath(__file__))
+load_dotenv(os.path.join(current_dir, '.env'), override=True)
 
-# 1. 初始化
-load_dotenv(override=True)
+# 检查配置
+if not os.getenv("DB_USER"):
+    print("❌ [Error] 环境变量未加载，请检查 .env 文件路径")
+    sys.exit(1)
 
-DB_USER = os.getenv("DB_USER")
-DB_PASSWORD = os.getenv("DB_PASSWORD")
-DB_HOST = os.getenv("DB_HOST")
-DB_PORT = os.getenv("DB_PORT")
-DB_NAME = os.getenv("DB_NAME")
+# 数据库连接
+db_url = f"mysql+pymysql://{os.getenv('DB_USER')}:{os.getenv('DB_PASSWORD')}@{os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/{os.getenv('DB_NAME')}"
+engine = create_engine(db_url, pool_recycle=3600)  # pool_recycle 防止数据库连接超时
 
-db_url = f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
-engine = create_engine(db_url)
-
-ts_token = os.getenv("TUSHARE_TOKEN")
-ts.set_token(ts_token)
+# Tushare 初始化
+ts.set_token(os.getenv("TUSHARE_TOKEN"))
 pro = ts.pro_api()
 
 # 交易所列表
 EXCHANGES = ['SHFE', 'DCE', 'CZCE', 'CFFEX', 'GFEX', 'INE']
 
 
-def is_trading_day(date_str):
-    """检查是否是交易日，避免非交易日空跑浪费资源"""
+def get_trade_cal(date_str):
+    """判断今天是否是交易日"""
     try:
-        # 查上期所的日历即可代表全市场
         df = pro.trade_cal(exchange='SHFE', start_date=date_str, end_date=date_str)
-        if not df.empty and df.iloc[0]['is_open'] == 1:
-            return True
-        return False
+        if not df.empty:
+            return df.iloc[0]['is_open'] == 1
     except:
-        # 如果接口报错，为了保险起见，假设它是交易日，让程序尝试去抓数据
-        return True
+        return True  # 如果接口挂了，默认尝试跑一下
+    return False
 
 
-def save_daily_all_contracts(trade_date):
-    """抓取某一天全市场所有合约的日线 (低内存版)"""
-    print(f"[*] [Daily Job] 正在启动 {trade_date} 全市场期货更新...")
+def update_daily_data(trade_date):
+    """
+    执行单日数据更新：抓取 -> 清洗 -> 修复 -> 生成主力 -> 入库
+    """
+    print(f"[*] 启动每日更新任务: {trade_date}")
+    start_t = time.time()
 
-    # 1. 交易日检查 (省流第一步)
-    if not is_trading_day(trade_date):
-        print(f" [-] {trade_date} 是非交易日，任务跳过。")
-        return
+    # 1. 安全清理：先删除当天的旧数据 (防止重跑时主键冲突)
+    #    这样做是幂等的，一天跑多次也没关系
+    with engine.connect() as conn:
+        conn.execute(text(f"DELETE FROM futures_price WHERE trade_date = '{trade_date}'"))
+        conn.commit()
 
-    start_time = time.time()
-    total_count = 0
+    total_records = 0
 
+    # 2. 逐个交易所处理 (内存优化关键：处理完一个就释放)
     for ex in EXCHANGES:
         try:
-            # 获取数据
+            # A. 抓取
             df = pro.fut_daily(trade_date=trade_date, exchange=ex)
+            if df.empty: continue
 
-            if df.empty:
-                time.sleep(0.5)
-                continue
-
-            # --- 数据清洗 ---
+            # B. 基础清洗
             # 去除后缀 (rb2505.SHF -> rb2505)
             df['ts_code'] = df['ts_code'].apply(lambda x: x.split('.')[0] if '.' in x else x)
 
@@ -73,66 +71,100 @@ def save_daily_all_contracts(trade_date):
             df = df.rename(columns={
                 'open': 'open_price', 'high': 'high_price',
                 'low': 'low_price', 'close': 'close_price',
-                'settle': 'settle_price', 'change1': 'change'
+                'settle': 'settle_price'
             })
 
+            # 填充空值
+            cols = ['open_price', 'high_price', 'low_price', 'close_price', 'settle_price', 'vol', 'oi']
+            for c in cols:
+                if c not in df.columns: df[c] = 0
+            df[cols] = df[cols].fillna(0)
+
+            # C. 价格修复 (解决大商所 Close=0 问题)
+            # 逻辑：如果 Close <= 0 且 Settle > 0，强制用 Settle
+            mask_fix = (df['close_price'] <= 0.001) & (df['settle_price'] > 0)
+            df.loc[mask_fix, 'close_price'] = df.loc[mask_fix, 'settle_price']
+
+            # 辅助修复 OHLC
+            for c in ['open_price', 'high_price', 'low_price']:
+                df.loc[df[c] <= 0.001, c] = df['close_price']
+
             # 计算涨跌幅
-            if 'pre_close' in df.columns and 'close_price' in df.columns:
-                df['pct_chg'] = (df['close_price'] - df['pre_close']) / df['pre_close'] * 100
-            else:
-                df['pct_chg'] = 0.0
+            if 'pct_chg' not in df.columns:
+                if 'pre_close' in df.columns:
+                    df['pre_close'] = df['pre_close'].fillna(0)
+                    df['pct_chg'] = np.where(df['pre_close'] > 0,
+                                             (df['close_price'] - df['pre_close']) / df['pre_close'] * 100,
+                                             0)
+                else:
+                    df['pct_chg'] = 0.0
+
+            # D. 生成【主力连续】合约 (内存优化版)
+            # 直接在当前交易所的数据里找主力，不需要全市场合并
+            # 提取品种代码 (正则匹配开头字母)
+            df['symbol'] = df['ts_code'].str.extract(r'^([a-zA-Z]+)')
+
+            # 找到 OI 最大的行
+            # dropna 防止提取失败报错
+            idx_max = df.dropna(subset=['symbol']).groupby('symbol')['oi'].idxmax()
+
+            # 复制出主力数据
+            df_dom = df.loc[idx_max].copy()
+            df_dom['ts_code'] = df_dom['symbol']  # 改名为 rb, M 等
+
+            # E. 合并与入库
+            # 将原始分合约 + 主力连续合约 合并
+            df_final = pd.concat([df, df_dom], ignore_index=True)
+
+            # 去重 (防止万一 Tushare 本身就有 'M' 这种代码)
+            df_final = df_final.drop_duplicates(subset=['ts_code'], keep='last')
 
             # 筛选字段
-            cols = ['trade_date', 'ts_code', 'open_price', 'high_price', 'low_price', 'close_price', 'settle_price',
-                    'vol', 'oi', 'pct_chg']
-            df_save = df[cols].copy()
-            df_save.fillna(0, inplace=True)
+            final_cols = ['trade_date', 'ts_code', 'open_price', 'high_price',
+                          'low_price', 'close_price', 'settle_price',
+                          'vol', 'oi', 'pct_chg']
 
-            # --- 关键：先删后写 (防止重复) ---
-            # 使用 SQL 删除当天、该交易所的数据
-            # 这样即使脚本重复运行，也不会导致数据重复
-            codes = tuple(df_save['ts_code'].tolist())
-            if not codes: continue
+            df_save = df_final[final_cols]
 
-            with engine.connect() as conn:
-                # 删除旧数据 (幂等性保证)
-                # 注意：这里我们简单粗暴地删除当天该交易所的所有数据，然后重新插入
-                # 这种方式比 delete where ts_code in (...) 更快且不容易出错
-                # 假设 futures_price 里 ts_code 是纯代码 (rb2505)，无法直接通过后缀判断交易所
-                # 所以我们还是得用 ts_code 列表来删除
-
-                # 优化 SQL：如果列表太长，SQL 可能会报错，分批删除或直接删全天数据(如果有 ex 字段)
-                # 这里为了稳妥，我们直接删除当天这些 ts_code 的数据
-
-                # 构造删除语句 (处理 tuple 只有一个元素时的逗号问题)
-                codes_str = str(codes) if len(codes) > 1 else f"('{codes[0]}')"
-                del_sql = text(f"DELETE FROM futures_price WHERE trade_date='{trade_date}' AND ts_code IN {codes_str}")
-                conn.execute(del_sql)
-
-                # 写入
-                df_save.to_sql('futures_price', conn, if_exists='append', index=False, chunksize=2000)
-                conn.commit()
+            # 写入数据库
+            df_save.to_sql('futures_price', engine, if_exists='append', index=False, chunksize=2000)
 
             count = len(df_save)
-            total_count += count
-            print(f"   -> {ex}: 更新 {count} 条")
+            total_records += count
+            print(f"   -> {ex}: 入库 {count} 条")
 
-            # --- 关键：内存释放 ---
-            del df
-            del df_save
-            gc.collect()  # 强制回收内存
+            # 主动释放内存 (虽然 Python 有 GC，但显式删除在大循环里是个好习惯)
+            del df, df_dom, df_final, df_save
 
         except Exception as e:
-            print(f"   [!] {ex} 异常: {e}")
+            print(f"   [!] {ex} 更新异常: {e}")
+            # 服务器脚本遇到单个异常不应退出，继续跑下一个交易所
+            continue
 
-        # 避免 API 频率限制
-        time.sleep(1)
-
-    duration = time.time() - start_time
-    print(f" [√] 完成，共更新 {total_count} 条，耗时 {duration:.2f}s\n")
+    duration = time.time() - start_t
+    print(f" [√] 更新完成。日期: {trade_date}, 总条数: {total_records}, 耗时: {duration:.2f}s\n")
 
 
 if __name__ == "__main__":
-    # 每天只跑今天的数据
-    today = datetime.now().strftime('%Y%m%d')
-    save_daily_all_contracts(today)
+    # 获取今天日期
+    now = datetime.now()
+    today_str = now.strftime('%Y%m%d')
+
+    # 1. 简单的时间检查：如果是周末，直接不跑 (节省服务器资源)
+    # Tushare 免费用户有时周末调取会扣积分，没必要
+    if now.weekday() >= 5:  # 5=周六, 6=周日
+        print(f" [-] 今天是周末 ({today_str})，跳过更新。")
+        sys.exit(0)
+
+    # 2. 交易日历检查 (更严谨)
+    # 建议在每天下午 16:00 或 18:00 后运行
+    if not get_trade_cal(today_str):
+        print(f" [-] 今天 ({today_str}) 是非交易日，跳过更新。")
+        sys.exit(0)
+
+    # 3. 执行更新
+    try:
+        update_daily_data(today_str)
+    except Exception as e:
+        print(f" [!!!] 脚本执行发生致命错误: {e}")
+        sys.exit(1)
