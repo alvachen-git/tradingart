@@ -8,7 +8,12 @@ import data_engine as de
 from sqlalchemy import text
 import datetime as dt
 # 1. 基础配置
-st.set_page_config(page_title="商品期权全景分析", page_icon="📉", layout="wide")
+st.set_page_config(
+    page_title="爱波塔-商品期权技术分析",
+    page_icon="favicon.ico",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 st.markdown("<style>.stSelectbox {margin-bottom: 20px;}</style>", unsafe_allow_html=True)
 
 # 2. 侧边栏逻辑
@@ -143,7 +148,38 @@ if target_contract:
     df_kline, df_iv = get_chart_data(target_contract)
 
     if df_kline is not None and not df_kline.empty:
-        st.subheader(f"{target_contract} 价格与波动率同图")
+        st.subheader(f"{target_contract} 价格与波动率图")
+
+        # --- 【新增功能】IV Rank 仪表盘 (仅主力连续显示) ---
+        if is_continuous and df_iv is not None and not df_iv.empty:
+            # 取最新数据
+            curr_iv = df_iv.iloc[-1]['iv']
+
+            # 取过去一年数据计算 Rank
+            df_year = df_iv.tail(252)
+            max_iv = df_year['iv'].max()
+            min_iv = df_year['iv'].min()
+
+            if max_iv > min_iv:
+                iv_rank = (curr_iv - min_iv) / (max_iv - min_iv) * 100
+            else:
+                iv_rank = 0
+
+            if iv_rank < 15:
+                status = "🟢 极低 (买方有利)"
+            elif iv_rank < 40:
+                status = "🔵 偏低"
+            elif iv_rank < 70:
+                status = "🟠 偏高"
+            else:
+                status = "🔴 极高 (卖方有利)"
+
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("当前 IV", f"{curr_iv:.2f}%")
+            c2.metric("IV Rank (年)", f"{iv_rank:.1f}%", help="当前IV在过去一年中的百分位水平")
+            c3.metric("历史最高 / 最低", f"{max_iv:.1f}% / {min_iv:.1f}%")
+            c4.info(f"📊 状态: **{status}**")
+            st.divider()
 
         # --- K线数据处理 ---
         chart_k = df_kline.rename(columns={'trade_date': 'time'})
