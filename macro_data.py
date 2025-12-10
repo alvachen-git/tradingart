@@ -76,46 +76,44 @@ def get_china_us_spread():
 
 def get_gold_silver_ratio():
     """
-        【真实版】从数据库读取黄金和白银价格，计算金银比
-        """
+    【核心修改】从数据库读取黄金(au)和白银(ag)主力连续价格，计算金银比
+    """
     try:
-        # 1. 编写 SQL 查询
-        # 🟢 修正：直接查找 'au0' 和 'ag0'
-        # 🟢 修正：使用 correct column names (trade_date, close_price)
+        # 1. 修改 SQL：直接查找 'au' 和 'ag' (对应新的主力连续代码)
         sql = """
               SELECT trade_date as date, ts_code as symbol, close_price as close
               FROM futures_price
-              WHERE ts_code IN ('au0' \
-                  , 'ag0')
-                AND trade_date >= '20240101' -- 建议日期稍微往前一点，保证有数据
-              ORDER BY trade_date ASC \
+              WHERE ts_code IN ('au', 'ag') 
+                AND trade_date >= '20230101'
+              ORDER BY trade_date ASC
               """
 
-        # 2. 读取数据
         df = pd.read_sql(sql, engine)
 
         if df.empty:
-            print("❌ 依然查不到数据，请检查 futures_price 表是否有 au0/ag0 的数据。")
+            print("❌ 未查到 au/ag 数据，请检查 futures_price 表。")
             return pd.DataFrame()
 
-        # 3. 数据透视 (Pivot)
-        # 把长表变成宽表
+        # 2. 数据透视 (Long -> Wide)
         df_pivot = df.pivot(index='date', columns='symbol', values='close').dropna()
 
-        # 4. 计算金银比
-        # 你的数据库代码是 au0 和 ag0，直接用这两个名字取列
-        if 'au0' in df_pivot.columns and 'ag0' in df_pivot.columns:
-            # 黄金(元/克) / (白银(元/千克) / 1000)
-            df_pivot['ratio'] = df_pivot['au0'] / (df_pivot['ag0'] / 1000)
+        # 3. 计算金银比 (注意列名现在是 au 和 ag)
+        # 兼容大小写 (数据库可能是 au 或 AU)
+        # 先统一转小写列名方便处理
+        df_pivot.columns = df_pivot.columns.str.lower()
 
-            # 整理返回
+        if 'au' in df_pivot.columns and 'ag' in df_pivot.columns:
+            # 黄金(元/克) / (白银(元/千克) / 1000) -> 统一单位后相比
+            # 白银报价通常是 元/千克，黄金是 元/克
+            # 金银比 = (黄金价格) / (白银价格 / 1000)
+            df_pivot['ratio'] = df_pivot['au'] / (df_pivot['ag'] / 1000)
             return df_pivot.reset_index()
         else:
-            print("❌ 数据透视后缺少 au0 或 ag0 列")
+            print(f"❌ 数据缺失，当前列: {df_pivot.columns}")
             return pd.DataFrame()
 
     except Exception as e:
-        print(f"❌ 计算失败: {e}")
+        print(f"❌ 金银比计算失败: {e}")
         return pd.DataFrame()
 
 

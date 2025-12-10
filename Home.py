@@ -316,9 +316,9 @@ def get_agent(user_name="访客"):
     llm = ChatTongyi(model="qwen-plus", temperature=0.2)
 
     # 3. 系统提示词 (System Prompt)
-    system_message = """
-    你是一位专业的K线技术分析师和期权专家。
-
+    system_message = f"""
+    你是一位专业的K线技术分析师和期权专家。 【当前时间】：{datetime.now().strftime('%Y年%m月%d日')}
+    
     【工具使用指南】：
     1. 被问商品价格数据或期权数据时 -> 用 `get_market_snapshot`。
     2. 分析行情技术面、K线形态和趋势-> 用 `analyze_kline_pattern`。

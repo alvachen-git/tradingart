@@ -138,6 +138,7 @@ def analyze_kline_pattern(query: str, ppprev_open=None):
         body_pct = body_size / total_range
         upper_pct = upper_shadow / body_size
         lower_pct = lower_shadow / body_size
+        uplo_pct = upper_shadow / lower_shadow
 
         # 今日涨跌幅
         chg_pct = (close - prev_close) / prev_close
@@ -160,6 +161,9 @@ def analyze_kline_pattern(query: str, ppprev_open=None):
         prev_5_days_low = df['low_price'].iloc[-6:-1].min()
         prev_6_days_high = df['high_price'].iloc[-7:-1].max()
         prev_6_days_low = df['low_price'].iloc[-7:-1].min()
+
+        # 昨日K线实体大小
+        prebody_pct = abs(prev_close - prev_open) / (prev_high - prev_low)
 
         # B. K线形态判断列表
         patterns = []
@@ -205,6 +209,16 @@ def analyze_kline_pattern(query: str, ppprev_open=None):
             elif fprev_chg_pct < -0.015 and pppprev_close > fprev_low and tprev_close > fprev_low and pprev_close > fprev_low and prev_close > fprev_low and close < prev_5_days_low:
                 patterns.append("【下降三法】(中继再跌，空头持续发力！)")
 
+        # 6. 晨星
+        if (curr['MA5'] < curr['MA10']) and pprev_chg_pct < -0.01 and close > pprev_close and close > prev_high and body_pct >0.7:
+            if prebody_pct < 0.3 and prev_close < pprev_close :
+             patterns.append("【晨星】(反转迹象-从空转多)")
+
+         # 6.夜星
+        if (curr['MA5'] > curr['MA10']) and pprev_chg_pct > 0.01 and close < pprev_close and close < prev_low and body_pct > 0.7:
+            if prebody_pct < 0.3 and prev_close > pprev_close:
+             patterns.append("【夜星】(反转迹象-从多转空)")
+
         # --- 基础形态 ---
 
         # 3. 大阳/大阴
@@ -223,8 +237,9 @@ def analyze_kline_pattern(query: str, ppprev_open=None):
             patterns.append("【倒状锤子】(卖压沉重)")
 
         # 6. 十字星
-        if body_pct < 0.1:
-            patterns.append("【十字星】(变盘前兆)")
+        if body_pct < 0.1 and 0.5 < uplo_pct < 1.5:
+            patterns.append("【十字星】(多空对峙)")
+
 
         # C. 趋势位置判断
         trends = []
