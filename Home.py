@@ -137,7 +137,10 @@ with open('style.css', encoding='utf-8') as f:
 # ==========================================
 
 # 尝试从 Cookie 恢复登录
-if not st.session_state.get('is_logged_in', False):
+# 【关键修复 1】增加 'just_logged_out' 判断，如果刚点了登出，绝不执行自动登录
+should_auto_login = not st.session_state.get('is_logged_in', False) and not st.session_state.get('just_logged_out', False)
+
+if should_auto_login and cookies:
     c_user = cookies.get("username")
     c_token = cookies.get("token")
 
@@ -149,6 +152,11 @@ if not st.session_state.get('is_logged_in', False):
             st.toast(f"欢迎回来，{c_user} (自动登录)")
             time.sleep(0.3)  # 給一點 UI 反應時間
             st.rerun()
+
+# 【关键修复 2】如果已经是登出后的重跑，现在可以重置标记了
+# 这样下次用户刷新页面(F5)时，如果 Cookie 还在(虽然应该删了)，还能尝试登录，或者单纯重置状态
+if st.session_state.get('just_logged_out', False):
+    st.session_state['just_logged_out'] = False
 
 # 只有第一次运行时才初始化，如果已经登录了，不要重置它
 if 'is_logged_in' not in st.session_state:
@@ -292,9 +300,14 @@ with st.sidebar:
         if st.button("登出", type="primary"):
             st.session_state['is_logged_in'] = False
             st.session_state['user_id'] = None
+
+            # 【關鍵修改 3】設置一個“剛登出”的標記，防止 Rerun 後立馬被自動登錄捕獲
+            st.session_state['just_logged_out'] = True
+
             # 【關鍵修改】刪除 Cookie
             cookie_manager.delete("username", key="del_user_cookie")
             cookie_manager.delete("token", key="del_token_cookie")
+
             time.sleep(0.3)
             st.rerun()
 
