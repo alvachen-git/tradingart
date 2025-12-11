@@ -35,7 +35,7 @@ c1, c2 = st.columns([1, 2])
 with c1:
     st.markdown("### 💹 **ETF 期权**")
 with c2:
-    target = st.selectbox("选择标的", ["510050 (50ETF)", "510300 (300ETF)", "510500 (500ETF)", "588000 (科创50ETF)",
+    target = st.selectbox("选择标的", ["510300 (300ETF)", "510050 (50ETF)","510500 (500ETF)", "588000 (科创50ETF)",
                                        "159915 (创业板ETF)"], label_visibility="collapsed")
 st.markdown('</div>', unsafe_allow_html=True)
 

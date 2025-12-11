@@ -23,7 +23,6 @@ st.markdown("""
     /* 全局纯黑背景 */
     .stApp {
         background-color: #0b1121 !important;
-        font-family: 'JetBrains Mono', 'Courier New', monospace;
     }
 
     /* --- Header & 侧边栏按钮交互修复 --- */
