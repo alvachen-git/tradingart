@@ -139,9 +139,9 @@ if __name__ == "__main__":
     # --- 配置区域 ---
 
     # 场景 1: 日常更新 (每天运行一次)
-    # run_update_task(mode='daily')
+    run_update_task(mode='daily')
 
     # 场景 2: 首次修复/补全数据 (建议先运行这个！)
     # 补全最近 30 天，确保 M, IO 等数据都齐了
-    print(">>> 开始执行全市场期权数据补全...")
-    run_update_task(mode='history', days_back=300)
+    #print(">>> 开始执行全市场期权数据补全...")
+    #run_update_task(mode='history', days_back=300)

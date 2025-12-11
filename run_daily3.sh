@@ -18,7 +18,7 @@ echo ">>> [2/3] 开始股票价格数据..." >> update.log
 /usr/bin/python3 update_astock_daily.py >> update.log 2>&1
 
 # 3. 更新【波动率数据】
-echo ">>> [3/3] 开始股票价格数据..." >> update.log
+echo ">>> [3/3] 开始股票期权IV计算..." >> update.log
 /usr/bin/python3 calc_iv_oneday.py >> update.log 2>&1
 
 
