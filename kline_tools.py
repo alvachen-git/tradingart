@@ -31,12 +31,15 @@ engine = get_db_engine()
 # --- 2. 核心工具定义 ---
 
 @tool
-def analyze_kline_pattern(query: str, ppprev_open=None):
+def analyze_kline_pattern(query: str, trade_date: str = None):
     """
     【K线形态计算器】
-    根据用户输入的商品，分析其最近的 K 线形态，判断多空方向。
+    根据用户输入的商品，分析其最近（或指定日期）的 K 线形态，判断多空方向。
     包含：单根K线形状（大阳/大阴/影线）、吞噬形态、趋势强弱、是否有转折K线。
-    当用户询问“技术面怎么看”、“走势如何”、“K线形态”时，**必须**调用此工具。
+
+    参数:
+    - query: 品种名称，如 "白银", "50ETF"
+    - trade_date: (可选) 指定分析哪一天的K线，格式 YYYYMMDD (如 '20251210')。如果不填则默认分析最新一天。
     """
     if engine is None: return "数据库连接失败"
     if not query: return "请输入有效的品种名称或代码。"  # 【新增】空值拦截
@@ -54,6 +57,14 @@ def analyze_kline_pattern(query: str, ppprev_open=None):
     clean_symbol = ''.join([i for i in symbol if not i.isdigit()])
     target_code_1 = f"{clean_symbol}0"
     target_code_2 = clean_symbol
+    # 【修改点 2】构建日期过滤条件
+    # 逻辑：如果指定了 12月10日，我们要查 <= 12月10日 的最近60条记录
+    # 这样第1条就是12月10日，后面是9日、8日... 用于计算均线
+    date_condition = ""
+    if trade_date:
+        # 清洗日期格式 2025-12-10 -> 20251210
+        clean_date = trade_date.replace("-", "").replace("/", "")
+        date_condition = f"AND trade_date <= '{clean_date}'"
 
     try:
         # 2. 获取数据
@@ -62,6 +73,7 @@ def analyze_kline_pattern(query: str, ppprev_open=None):
                 SELECT trade_date, open_price, high_price, low_price, close_price 
                 FROM stock_price
                 WHERE ts_code='{symbol}' 
+                {date_condition} 
                 ORDER BY trade_date DESC LIMIT 60
             """
             df = pd.read_sql(sql, engine)
@@ -70,13 +82,15 @@ def analyze_kline_pattern(query: str, ppprev_open=None):
             sql = f"""
                 SELECT trade_date, open_price, high_price, low_price, close_price 
                 FROM futures_price
-                WHERE ts_code='{target_code_1}' OR ts_code='{target_code_2}'
+                WHERE (ts_code='{target_code_1}' OR ts_code='{target_code_2}')
+                {date_condition}
                 ORDER BY trade_date DESC LIMIT 60
             """
             df = pd.read_sql(sql, engine)
 
         if df.empty:
-            return f"未找到品种 {symbol} 的历史价格数据，无法进行技术分析。"
+            target_date_msg = f" ({trade_date})" if trade_date else ""
+            return f"未找到品种 {symbol}{target_date_msg} 的历史价格数据，无法进行技术分析。"
 
         # 3. 数据预处理
         df = df.sort_values('trade_date').reset_index(drop=True)
@@ -87,6 +101,7 @@ def analyze_kline_pattern(query: str, ppprev_open=None):
         df['MA5'] = df['close_price'].rolling(window=5).mean()
         df['MA10'] = df['close_price'].rolling(window=10).mean()
         df['MA20'] = df['close_price'].rolling(window=20).mean()
+        df['MA30'] = df['close_price'].rolling(window=30).mean()
         df['MA60'] = df['close_price'].rolling(window=60).mean()
 
         if len(df) < 2: return "数据不足，无法分析趋势。"
@@ -219,6 +234,77 @@ def analyze_kline_pattern(query: str, ppprev_open=None):
             if prebody_pct < 0.3 and prev_close > pprev_close:
              patterns.append("【夜星】(反转迹象-从多转空)")
 
+# 1. 计算 ATR (波动率尺子) 用于动态衡量箱体
+        # TR = Max(High-Low, Abs(High-PrevClose), Abs(Low-PrevClose))
+        df['h-l'] = df['high_price'] - df['low_price']
+        df['h-pc'] = abs(df['high_price'] - df['close_price'].shift(1))
+        df['l-pc'] = abs(df['low_price'] - df['close_price'].shift(1))
+        df['tr'] = df[['h-l', 'h-pc', 'l-pc']].max(axis=1)
+        # 通常用 14 天 ATR
+        df['atr'] = df['tr'].rolling(window=14).mean()
+
+        # ... (中间省略原来的代码) ...
+
+        # --- 【ATR 动态自适应横盘策略】 ---
+
+        # 定义扫描周期
+        scan_periods = [5, 10, 20, 30, 60]
+        breakout_found = False
+
+        # 获取昨日的 ATR (作为基准，不用今天的防止未来函数)
+        ref_atr = df['atr'].iloc[-2]
+
+        if not pd.isna(ref_atr) and ref_atr > 0:
+
+            for period in scan_periods:
+                if len(df) <= period + 1: continue
+
+                # 1. 截取箱体 (不含今天)
+                recent_box = df.iloc[-(period+1):-1]
+                box_high = recent_box['high_price'].max()
+                box_low = recent_box['low_price'].min()
+                box_height = box_high - box_low
+
+                # 2. 【核心】计算 ATR 倍数 (ATR Ratio)
+                # 含义：箱体高度 相当于 几天的平均波动？
+                # 倍数越小，说明压缩越极致
+                atr_ratio = box_height / ref_atr
+
+                # 3. 动态阈值设置 (这里是精华)
+                # 5天横盘：箱体高度不应超过 2.5 倍 ATR (非常极致)
+                # 10天横盘：箱体高度不应超过 4.0 倍 ATR
+                # 20天横盘：箱体高度不应超过 6.0 倍 ATR
+                # 60天横盘：箱体高度不应超过 10.0 倍 ATR
+                if period <= 5:
+                    max_atr_multiple = 2.5
+                    p_name = "极致压缩"
+                elif period <= 10:
+                    max_atr_multiple = 4.0
+                    p_name = "短线旗形"
+                elif period <= 20:
+                    max_atr_multiple = 6.0
+                    p_name = "标准箱体"
+                else:
+                    max_atr_multiple = 10.0
+                    p_name = "长线平台"
+
+                # 4. 判断逻辑
+                if atr_ratio <= max_atr_multiple:
+
+                    # A. 向上突破 (需配合中阳线/大阳线)
+                    if close > box_high and body_pct > 0.7:
+                        msg = f"【{p_name}突破】(周期{period}天，压缩比{atr_ratio:.1f}ATR)"
+                        patterns.append(msg)
+                        breakout_found = True
+                        break # 找到最有爆发力的就不找了
+
+                    # B. 向下破位
+                    if close < box_low and body_pct > 0.7:
+                        msg = f"【{p_name}破位】(周期{period}天，压缩比{atr_ratio:.1f}ATR)"
+                        patterns.append(msg)
+                        breakout_found = True
+                        break
+
         # --- 基础形态 ---
 
         # 3. 大阳/大阴
@@ -227,6 +313,14 @@ def analyze_kline_pattern(query: str, ppprev_open=None):
                 patterns.append("【大阳线】(多头气势强)")
             else:
                 patterns.append("【大阴线】(空头气势强)")
+
+        # 3. 波动转折突破
+        if curr['MA30'] > curr['MA20']:
+            if abs(chg_pct) > 0.01 and close > prev_5_days_high and body_pct > 0.6:
+                patterns.append("【多头突破】(波段转折)")
+        if curr['MA30'] < curr['MA20']:
+            if abs(chg_pct) > 0.01 and close < prev_5_days_low and body_pct > 0.6:
+                patterns.append("【空头突破】(波段转折)")
 
         # 4. 长下影
         if lower_pct > 2 and body_pct < 0.3 and body_pct > 0.05 and curr['MA5'] < curr['MA20']and close < prev_close:

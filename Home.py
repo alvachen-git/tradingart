@@ -58,7 +58,7 @@ st.markdown("""
     div[data-testid="stTextInput"] input::placeholder {
         color: #94a3b8 !important;
     }
-    
+
     /* --- 修复：聊天气泡样式 --- */
     /* 聊天消息容器 */
     div[data-testid="stChatMessage"] {
@@ -68,7 +68,7 @@ st.markdown("""
         padding: 15px;
         margin-bottom: 10px;
     }
-    
+
     /* 强制消息内的文字变白 */
     div[data-testid="stChatMessage"] p,
     div[data-testid="stChatMessage"] div,
@@ -97,6 +97,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+
 # 1. 初始化 Cookie 管理器 (必须在页面内容之前)
 # 注意：這個函數本身就有緩存機制，不需要額外加 @st.cache_resource
 def get_manager():
@@ -109,7 +110,6 @@ cookie_manager = get_manager()
 # 注意：stx 需要一點時間從瀏覽器讀取，首次加載可能為 None
 cookies = cookie_manager.get_all()
 
-
 # 【关键修改】使用 LangGraph 的预构建 Agent
 try:
     from langgraph.prebuilt import create_react_agent
@@ -117,11 +117,8 @@ except ImportError:
     st.error("❌ 请先安装 LangGraph: `pip install langgraph`")
     st.stop()
 
-
 current_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(current_dir)
-
-
 
 # 加载 CSS
 with open('style.css', encoding='utf-8') as f:
@@ -138,7 +135,8 @@ with open('style.css', encoding='utf-8') as f:
 
 # 尝试从 Cookie 恢复登录
 # 【关键修复 1】增加 'just_logged_out' 判断，如果刚点了登出，绝不执行自动登录
-should_auto_login = not st.session_state.get('is_logged_in', False) and not st.session_state.get('just_logged_out', False)
+should_auto_login = not st.session_state.get('is_logged_in', False) and not st.session_state.get('just_logged_out',
+                                                                                                 False)
 
 if should_auto_login and cookies:
     c_user = cookies.get("username")
@@ -327,25 +325,37 @@ def get_agent(user_name="访客"):
         return None
 
     llm = ChatTongyi(model="qwen-plus", temperature=0.2)
+    # 1. 动态计算当前日期，让 AI 有时间概念
+    today = datetime.now()
+    today_str = today.strftime('%Y%m%d')
+    # 2. 计算上周/上月的参考日期，给 AI 做参考
+    last_week_start = (today - timedelta(days=today.weekday() + 7)).strftime('%Y%m%d')
+    last_week_end = (today - timedelta(days=today.weekday() + 1)).strftime('%Y%m%d')
 
+    # 3. 升级版 System Prompt
     # 3. 系统提示词 (System Prompt)
     system_message = f"""
-    你是一位专业的K线技术分析师和期权专家。 【当前时间】：{datetime.now().strftime('%Y年%m月%d日')}
+    你是一位专业的K线技术分析师和期权专家。 
     
+    【当前时间基准】：
+    - 今天是：{today.strftime('%Y年%m月%d日')} (数据库查询请使用: {today_str})
+    - 上周区间参考：{last_week_start} 至 {last_week_end}
+
     【工具使用指南】：
-    1. 被问**当前/最新**商品价格数据或期权数据时 -> 用 `get_market_snapshot`。
-    2. 被问 **历史某一天** 或 **指定日期** 的价格（例如“12月8日的价格”、“上周五收盘价”）-> 必须用 `get_price_statistics`。
-       - **重要技巧**：调用此工具时，请准确计算 start_date 和 end_date。
-    2. 分析行情技术面、K线形态和趋势-> 用 `analyze_kline_pattern`。
+    1. 被问**当前/最新**商品价格数据或股票价格或期权数据时 -> 用 `get_market_snapshot`。
+    2. 被问 **历史某一天** 或 **指定日期** 的价格（例如“12月8日的价格”、“上个月涨幅”）-> 必须用 `get_price_statistics`。
+       **重要**：调用此工具时，`start_date` 和 `end_date` 参数必须是 **YYYYMMDD** 格式的字符串（例如 '20231001'）。
+       - 如果用户说 "上周"，请自动计算并传入具体的日期区间（参考上面的时间基准）。
+    3. 被问股票或期货的技术面、K线形态和趋势时-> 优先用 `analyze_kline_pattern`来分析
     4. 查阅期权知识、期权策略、进出场方法-> 用 `search_investment_knowledge`
 
-    
+
 
     【你的行为准则】
     1. **情绪感知**：在回答前，先在心里分析用户的情绪（贪婪/恐惧/愤怒/理性）。
     2. **风险评估**：根据用户的问题判断其风险偏好（激进/保守）。
     3. 如果用户问题不具体，可以反问客户，多用反问来引导用户做交易决策。
-    4. 当用户询问某个品种（如碳酸锂、中证1000）的“走势”、“技术分析”、“K线形态”时，你要调用工具来回答。
+    4. 当用户询问某个品种（如碳酸锂、中证1000）的“走势”、“技术分析”、“K线形态”时，你要调用工具`analyze_kline_pattern`来回答。
     5. 当用户问期权或实战技术问题，优先以知识库工具为信息参考。
     6. 要结合K线分析和期权知识，给出明确的操作建议，风险偏好高的可以给积极的策略，风险偏好低的就给保守策略。
 

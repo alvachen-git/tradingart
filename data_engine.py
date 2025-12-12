@@ -1,4 +1,5 @@
 import pandas as pd
+import numpy as np
 import re
 import os
 from sqlalchemy import create_engine, text
@@ -589,4 +590,221 @@ def update_user_memory_async(user_id, user_input):
 
         except Exception as e:
             print(f" [X] 記憶更新失敗: {e}")
+
+
+# --- 静态字典：品种代码 -> 中文名称 ---
+PRODUCT_MAP = {
+    # 金融
+    'IF': '沪深300', 'IH': '上证50', 'IM': '中证1000', 'IC': '中证500','PD': '钯金','PT': '铂金',
+    'TS': '2年国债', 'TF': '5年国债', 'T': '10年国债', 'TL': '30年国债','EC': '欧线',
+    # 黑色
+    'RB': '螺纹钢', 'HC': '热卷', 'J': '焦炭', 'JM': '焦煤', 'I': '铁矿石','WR': '线材',
+    'SS': '不锈钢', 'SM': '锰硅', 'SF': '硅铁','NR': '20号胶','OP': '双胶纸','SP': '纸浆',
+    # 有色/贵金属
+    'AU': '黄金', 'AG': '白银', 'CU': '铜', 'AL': '铝', 'ZN': '锌','AD': '铝合金',
+    'PB': '铅', 'NI': '镍', 'SN': '锡', 'AO': '氧化铝', 'LC': '碳酸锂', 'SI': '工业硅','PS': '多晶硅',
+    # 农产品
+    'M': '豆粕', 'Y': '豆油', 'P': '棕榈油', 'OI': '菜油', 'RM': '菜粕','A': '豆一','B': '豆二',
+    'C': '玉米', 'CS': '淀粉', 'CF': '棉花', 'SR': '白糖', 'AP': '苹果','LG': '原木','PF': '短纤',
+    'JD': '鸡蛋', 'LH': '生猪', 'PK': '花生', 'CJ': '红枣','CY': '棉纱','PM': '普麦','WH': '强麦',
+    # 能化
+    'SC': '原油', 'FU': '燃料油', 'PG': '液化气', 'TA': 'PTA', 'MA': '甲醇','BU': '沥青','LU': 'LU燃油','SH': '烧碱',
+    'PP': '聚丙烯', 'L': '塑料', 'V': 'PVC', 'EB': '苯乙烯', 'EG': '乙二醇','BZ': '纯苯','PL': '丙烯','PR': '瓶片',
+    'UR': '尿素', 'SA': '纯碱', 'FG': '玻璃', 'PX': '对二甲苯', 'BR': 'BR橡胶'
+}
+
+
+def fmt_date(d):
+    return str(d).replace('-', '').replace('/', '').split(' ')[0]
+
+
+def get_join_key(ts_code):
+    """提取 '品种+月份' 并映射期权代码"""
+    if not isinstance(ts_code, str): return ""
+
+    # 基础清理
+    base = ts_code.strip().upper().split('.')[0]
+    if '-' in base: base = base.split('-')[0]
+
+    # 正则提取：字母+数字
+    match = re.search(r'([A-Z]+)(\d{3,4})$', base)
+
+    if match:
+        product = match.group(1)
+        month = match.group(2)
+
+        # 映射金融期货 (IO->IF)
+        mapping = {'IO': 'IF', 'HO': 'IH', 'MO': 'IM'}
+        final_product = mapping.get(product, product)
+
+        return f"{final_product}{month}"
+
+    return ""
+
+
+def get_comprehensive_market_data():
+    if engine is None: return pd.DataFrame()
+
+    try:
+        # 1. 获取日期
+        dates_df = pd.read_sql("SELECT DISTINCT trade_date FROM futures_price ORDER BY trade_date DESC LIMIT 10",
+                               engine)
+        if len(dates_df) < 6: return pd.DataFrame()
+
+        today = fmt_date(dates_df.iloc[0]['trade_date'])
+        prev_day = fmt_date(dates_df.iloc[1]['trade_date'])
+        day_5_ago = fmt_date(dates_df.iloc[5]['trade_date'])
+
+        date_str = "', '".join([today, prev_day, day_5_ago])
+
+        # 2. 拉取 Price
+        sql_price = f"""
+        SELECT ts_code, close_price, oi, REPLACE(trade_date, '-', '') as trade_date
+        FROM futures_price 
+        WHERE REPLACE(trade_date, '-', '') IN ('{date_str}')
+        """
+        df_price = pd.read_sql(sql_price, engine)
+
+        # 生成 Key 并过滤
+        df_price['join_key'] = df_price['ts_code'].apply(get_join_key)
+        df_price = df_price[df_price['join_key'] != ""]
+
+        # 3. 拉取 IV
+        sql_iv = f"""
+        SELECT ts_code, iv, REPLACE(trade_date, '-', '') as trade_date
+        FROM commodity_iv_history 
+        WHERE REPLACE(trade_date, '-', '') IN ('{date_str}')
+        """
+        df_iv_raw = pd.read_sql(sql_iv, engine)
+
+        # 映射 Key
+        df_iv_raw['join_key'] = df_iv_raw['ts_code'].apply(get_join_key)
+        df_iv_raw = df_iv_raw[df_iv_raw['join_key'] != ""]
+        df_iv = df_iv_raw.groupby(['join_key', 'trade_date'])['iv'].mean().reset_index()
+
+        # 4. 拉取多空
+        sql_s = f"""
+        SELECT symbol as ts_code, dumb_net, smart_net, REPLACE(trade_date, '-', '') as trade_date
+        FROM market_conflict_daily 
+        WHERE REPLACE(trade_date, '-', '') IN ('{date_str}')
+        """
+        df_s = pd.read_sql(sql_s, engine)
+        df_s['join_key'] = df_s['ts_code'].apply(get_join_key)
+
+        # 5. 合并逻辑
+        def merge_data(d):
+            p = df_price[df_price['trade_date'] == d].copy()
+            i = df_iv[df_iv['trade_date'] == d].copy()
+            s = df_s[df_s['trade_date'] == d].copy()
+
+            merged = p.merge(i, on='join_key', how='left')
+
+            if not s.empty and s['join_key'].iloc[0] != "":
+                merged = merged.merge(s[['join_key', 'dumb_net', 'smart_net']], on='join_key', how='left')
+            else:
+                merged = merged.merge(s[['ts_code', 'dumb_net', 'smart_net']], on='ts_code', how='left')
+
+            return merged
+
+        df_now = merge_data(today)
+        df_prev = merge_data(prev_day)
+        df_5d = merge_data(day_5_ago)
+
+        if df_now.empty: return pd.DataFrame()
+
+        # 6. 筛选主力
+        df_now['product'] = df_now['join_key'].apply(lambda x: re.match(r"([a-zA-Z]+)", x).group(1))
+        df_now = df_now.sort_values(['product', 'oi'], ascending=[True, False])
+        df_now = df_now.groupby('product').head(2)
+
+        # 7. 计算 IV Rank
+        date_1y = (pd.to_datetime(today) - pd.Timedelta(days=365)).strftime('%Y%m%d')
+        sql_hist = f"""
+        SELECT ts_code, iv 
+        FROM commodity_iv_history 
+        WHERE REPLACE(trade_date, '-', '') >= '{date_1y}'
+        """
+        df_hist = pd.read_sql(sql_hist, engine)
+        df_hist['join_key'] = df_hist['ts_code'].apply(get_join_key)
+        df_hist = df_hist[df_hist['join_key'] != ""]
+
+        target_keys = df_now['join_key'].unique()
+        df_hist = df_hist[df_hist['join_key'].isin(target_keys)]
+
+        iv_stats = df_hist.groupby('join_key')['iv'].agg(['min', 'max']).reset_index()
+
+        df_now = df_now.merge(iv_stats, on='join_key', how='left')
+        df_now['iv_rank'] = (df_now['iv'] - df_now['min']) / (df_now['max'] - df_now['min']) * 100
+        # 【修改点】IV Rank 替换 inf 并填充 0
+        df_now['iv_rank'] = df_now['iv_rank'].replace([np.inf, -np.inf], 0).fillna(0)
+
+        # 8. 计算变动
+        cols = ['join_key', 'ts_code', 'close_price', 'iv', 'iv_rank', 'dumb_net', 'smart_net', 'product']
+        base = df_now[cols].copy()
+
+        final = base.merge(df_prev[['join_key', 'close_price', 'iv', 'dumb_net', 'smart_net']],
+                           on='join_key', suffixes=('', '_prev'), how='left')
+        final = final.merge(df_5d[['join_key', 'close_price', 'iv', 'dumb_net', 'smart_net']],
+                            on='join_key', suffixes=('', '_5d'), how='left')
+
+        final['当日涨跌%'] = (
+                    (final['close_price'] - final['close_price_prev']) / final['close_price_prev'] * 100).fillna(0)
+        final['5日涨跌%'] = ((final['close_price'] - final['close_price_5d']) / final['close_price_5d'] * 100).fillna(0)
+        final['当日IV变动'] = (final['iv'] - final['iv_prev']).fillna(0)
+        final['5日IV变动'] = (final['iv'] - final['iv_5d']).fillna(0)
+
+        for c in ['dumb_net', 'dumb_net_prev', 'dumb_net_5d', 'smart_net', 'smart_net_prev', 'smart_net_5d']:
+            if c not in final.columns: final[c] = 0
+            final[c] = final[c].fillna(0)
+
+        final['反指变动(日)'] = final['dumb_net'] - final['dumb_net_prev']
+        final['反指变动(5日)'] = final['dumb_net'] - final['dumb_net_5d']
+        final['正指变动(日)'] = final['smart_net'] - final['smart_net_prev']
+        final['正指变动(5日)'] = final['smart_net'] - final['smart_net_5d']
+
+        # --- 9. 【修改点】格式化显示名称 (英文+中文) ---
+        def format_name(row):
+            code = row['join_key']
+            prod = row['product']
+            cn_name = PRODUCT_MAP.get(prod, "")
+            return f"{code} ({cn_name})" if cn_name else code
+
+        final['合约'] = final.apply(format_name, axis=1)
+
+        # 10. 处理 "快到期" 和 IV Rank 取整
+        curr_yymm = int(pd.to_datetime(today).strftime('%y%m'))
+
+        def process_rank(row):
+            # 快到期逻辑
+            if row['iv'] == 0 or pd.isna(row['iv']):
+                m = re.search(r'\d{3,4}$', row['join_key'])
+                if m:
+                    m_str = m.group(0)
+                    if len(m_str) == 3: m_str = "2" + m_str
+                    if int(m_str) <= curr_yymm + 1:
+                        return "快到期"
+
+            # 【修改点】IV Rank 取整
+            val = row['iv_rank']
+            if pd.isna(val): return 0
+            return int(round(val, 0))  # 强制转整数
+
+        final['iv_rank_display'] = final.apply(process_rank, axis=1)
+
+        # 整理输出 (保留1位小数)
+        out_cols = ['合约', 'iv_rank_display', '当日IV变动', '5日IV变动', '当日涨跌%', '5日涨跌%',
+                    '反指变动(日)', '反指变动(5日)', '正指变动(日)', '正指变动(5日)']
+
+        res = final[out_cols].copy()
+        res.columns = ['合约', 'IV Rank', 'IV变动(日)', 'IV变动(5日)', '涨跌%(日)', '涨跌%(5日)', '散户变动(日)',
+                       '散户变动(5日)', '机构变动(日)', '机构变动(5日)']
+
+        return res.round(1)
+
+    except Exception as e:
+        print(f"Engine Error: {e}")
+        import traceback
+        traceback.print_exc()
+        return pd.DataFrame()
+
 
