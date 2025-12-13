@@ -2,7 +2,7 @@ import streamlit as st
 import plotly.graph_objects as go
 import pandas as pd
 from lightweight_charts.widgets import StreamlitChart
-from realtime_tools import fetch_sina_kline_data
+
 import sys
 import os
 import re
