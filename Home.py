@@ -99,16 +99,14 @@ st.markdown("""
 
 
 # 1. 初始化 Cookie 管理器 (必须在页面内容之前)
-# 注意：這個函數本身就有緩存機制，不需要額外加 @st.cache_resource
+# 1. 初始化 Cookie 管理器（移除 @st.cache_resource）
 def get_manager():
     return stx.CookieManager(key="master_cookie_manager")
 
-
 cookie_manager = get_manager()
 
-# 獲取所有 Cookies (用於讀取)
-# 注意：stx 需要一點時間從瀏覽器讀取，首次加載可能為 None
-cookies = cookie_manager.get_all()
+# 2. 获取 Cookies（首次可能为 None）
+cookies = cookie_manager.get_all() or {}
 
 # 【关键修改】使用 LangGraph 的预构建 Agent
 try:
@@ -134,33 +132,38 @@ with open('style.css', encoding='utf-8') as f:
 # ==========================================
 
 # 尝试从 Cookie 恢复登录
-# 【关键修复 1】增加 'just_logged_out' 判断，如果刚点了登出，绝不执行自动登录
-should_auto_login = not st.session_state.get('is_logged_in', False) and not st.session_state.get('just_logged_out',
-                                                                                                 False)
+# 3. 自动登录逻辑
+should_auto_login = (
+    not st.session_state.get('is_logged_in', False) and
+    not st.session_state.get('just_logged_out', False)
+)
 
 if should_auto_login and cookies:
-    c_user = cookies.get("username")
-    c_token = cookies.get("token")
+    c_user = cookies.get("username", "").strip()
+    c_token = cookies.get("token", "").strip()
 
-    if c_user and c_token and c_user.strip() != "":
-        # 去数据库验证 Token
+    if c_user and c_token:
         if auth.check_token(c_user, c_token):
             st.session_state['is_logged_in'] = True
             st.session_state['user_id'] = c_user
-            st.toast(f"欢迎回来，{c_user} (自动登录)")
-            time.sleep(0.3)  # 給一點 UI 反應時間
+            st.toast(f"欢迎回来，{c_user}", icon="👋")
+            time.sleep(0.3)
             st.rerun()
+        else:
+            # Token过期，清除Cookie
+            cookie_manager.delete("username", key="auto_del_user")
+            cookie_manager.delete("token", key="auto_del_token")
 
 # 【关键修复 2】如果已经是登出后的重跑，现在可以重置标记了
 # 这样下次用户刷新页面(F5)时，如果 Cookie 还在(虽然应该删了)，还能尝试登录，或者单纯重置状态
+# 4. 重置登出标记
 if st.session_state.get('just_logged_out', False):
     st.session_state['just_logged_out'] = False
 
-# 只有第一次运行时才初始化，如果已经登录了，不要重置它
+# 5. 初始化登录状态
 if 'is_logged_in' not in st.session_state:
     st.session_state['is_logged_in'] = False
     st.session_state['user_id'] = None
-    st.session_state['username'] = None
 
 # --- 1. 初始化验证码 (如果还没生成过) ---
 if 'captcha_code' not in st.session_state:
@@ -191,18 +194,21 @@ with st.sidebar:
                 if st.form_submit_button("登录", type="primary", use_container_width=True):
                     success, msg, token = auth.login_user(u, p)
                     if success:
+                        # 【改进】过期时间改为30天
+                        expires = datetime.now() + timedelta(days=30)
+
+                        # 【改进】使用时间戳key避免冲突
+                        timestamp = int(time.time() * 1000)
+                        cookie_manager.set("username", u, expires_at=expires,
+                                           key=f"login_user_{timestamp}")
+                        cookie_manager.set("token", token, expires_at=expires,
+                                           key=f"login_token_{timestamp}")
+
                         st.session_state['is_logged_in'] = True
                         st.session_state['user_id'] = u
 
-                        # 【關鍵修改】寫入 Cookie (設置 7 天過期)
-                        # expires_at 是 datetime 對象
-                        expires = datetime.now() + timedelta(days=7)
-
-                        cookie_manager.set("username", u, expires_at=expires, key="set_user_cookie")
-                        cookie_manager.set("token", token, expires_at=expires, key="set_token_cookie")
-
-                        st.success("登录成功")
-                        time.sleep(0.5)
+                        st.success("登录成功！")
+                        time.sleep(0.8)  # 给Cookie更多时间写入
                         st.rerun()
                     else:
                         st.error(msg)
@@ -255,20 +261,20 @@ with st.sidebar:
                         st.session_state['user_id'] = new_user
 
                         # 設置 Cookie (保持登錄狀態)
-                        expires = datetime.now() + timedelta(days=7)
-                        cookie_manager.set("username", new_user, expires_at=expires, key="reg_set_user")
-                        cookie_manager.set("token", token, expires_at=expires, key="reg_set_token")
+                        expires = datetime.now() + timedelta(days=30)  # 改为30天
+                        timestamp = int(time.time() * 1000)
+                        cookie_manager.set("username", new_user, expires_at=expires,
+                                           key=f"reg_user_{timestamp}")
+                        cookie_manager.set("token", token, expires_at=expires,
+                                           key=f"reg_token_{timestamp}")
 
-                        time.sleep(0.3)
+                        time.sleep(0.2)
                         st.rerun()
 
-                        # 3. 清理注册时用的验证码 (防止返回后还在)
-                        if 'captcha_code' in st.session_state:
-                            del st.session_state['captcha_code']
 
                         # 4. 强制刷新页面
                         # 刷新后，Streamlit 会重新运行，发现 logged_in=True，就会直接显示主页，而不是登录页
-                        st.rerun()
+
                     except Exception as e:
                         st.error(f"自动登录失败，请尝试手动登录: {e}")
                 else:
@@ -295,17 +301,31 @@ with st.sidebar:
         except:
             pass
 
+        # 登出按钮逻辑修复
         if st.button("登出", type="primary"):
+            user = st.session_state['user_id']
+
+            # 【修复】使用 de.engine 而不是 engine
+            try:
+                with de.engine.connect() as conn:
+                    conn.execute(
+                        text("UPDATE users SET session_token=NULL WHERE username=:u"),
+                        {"u": user}
+                    )
+                    conn.commit()
+            except:
+                pass
+
+            # 【改进】使用时间戳key
+            timestamp = int(time.time() * 1000)
+            cookie_manager.delete("username", key=f"logout_user_{timestamp}")
+            cookie_manager.delete("token", key=f"logout_token_{timestamp}")
+
             st.session_state['is_logged_in'] = False
             st.session_state['user_id'] = None
-
-            # 【關鍵修改 3】設置一個“剛登出”的標記，防止 Rerun 後立馬被自動登錄捕獲
             st.session_state['just_logged_out'] = True
 
-            # 【關鍵修改】刪除 Cookie
-            cookie_manager.delete("username", key="del_user_cookie")
-            cookie_manager.delete("token", key="del_token_cookie")
-
+            st.success("已登出")
             time.sleep(0.3)
             st.rerun()
 
@@ -348,6 +368,7 @@ def get_agent(user_name="访客"):
        - 如果用户说 "上周"，请自动计算并传入具体的日期区间（参考上面的时间基准）。
     3. 被问股票或期货的技术面、K线形态和趋势时-> 优先用 `analyze_kline_pattern`来分析
     4. 查阅期权知识、期权策略、进出场方法-> 用 `search_investment_knowledge`
+    5.
 
 
 
