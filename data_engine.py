@@ -651,11 +651,17 @@ def get_product_code(raw_code):
 def check_expiry_validity(row, current_date_str):
     """
     逻辑：
-    1. 商品期权：通常在期货月份的前一个月上旬到期 (如 M2505 期权在 4月7日左右到期)。
-    2. 金融期权(IO/MO/HO)：在期货月份当月的第三个周五到期。
-    3. 如果 (估算到期日 - 当前日期) < 2天，则认为无效。
+    1. 中金所期权 (IF/IH/IM/IO/HO/MO)：不做限制，全部保留 (return True)。
+    2. 商品期权：通常在期货月份的前一个月上旬到期。
+       如果 (估算到期日 - 当前日期) <= 2天，则过滤掉。
     """
     try:
+        # A. 【特例】中金所期权直接放行
+        # 注意：前面的代码可能已经把 IO 映射为了 IF，所以这里把两类代号都加上以防万一
+        if row['product'] in ['IF', 'IH', 'IM', 'IO', 'HO', 'MO']:
+            return True
+
+        # B. 商品期权：检查是否临近到期
         # 1. 解析年份和月份 (RB2505 -> 2025, 5)
         m = re.search(r'(\d{3,4})$', row['join_key'])
         if not m: return False
@@ -669,21 +675,17 @@ def check_expiry_validity(row, current_date_str):
         fut_date = pd.Timestamp(year=year, month=month, day=15)
         current_date = pd.to_datetime(current_date_str)
 
-        # 2. 估算期权到期日
-        product = row['product']
-        if product in ['IO', 'MO', 'HO', 'IF', 'IH', 'IM']:
-            # 金融期权：当月到期 (保守按当月10号计算临近)
-            expiry_approx = fut_date.replace(day=10)
-        else:
-            # 商品期权：前一个月到期 (保守按前一个月5号计算临近)
-            # 例如 RB2505，期权在 4月初到期
-            expiry_approx = (fut_date - pd.DateOffset(months=1)).replace(day=5)
+        # 2. 估算商品期权到期日
+        # 商品期权通常在期货月份的前一个月上旬到期
+        # 例如 RB2505，期权在 4月初到期。这里保守按前一个月 5 号计算。
+        expiry_approx = (fut_date - pd.DateOffset(months=1)).replace(day=12)
 
         # 3. 计算剩余天数
         days_left = (expiry_approx - current_date).days
 
         # 必须大于 2 天才算有效
         return days_left > 2
+
     except:
         return True  # 解析失败默认不过滤，防止误杀
 
