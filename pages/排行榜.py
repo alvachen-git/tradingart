@@ -98,15 +98,28 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # === 【新增】页面标题和操作栏 ===
-col1, col2, col3 = st.columns([3, 1, 1])
+col1, col2, col3 = st.columns([1, 3, 1])
 
 with col1:
-    st.caption("📊 全市场监控资金流向与IV异动")
+    st.subheader("📊 全市场监控")
 
 with col2:
-    # 显示上次更新时间
-    if 'last_update' in st.session_state:
-        st.caption(f"🕐{st.session_state['last_update']}")
+    # === 【新增】底部数据说明 ===
+    with st.expander("📖 数据说明", expanded=False):
+        st.markdown("""
+        **指标解释：**
+        - **IV Rank**： 目前隐含波动率在最近一年中的百分位排名，越高表示期权越贵
+        - **散户变动**: （反向指标）某些散户多的期货商净持仓变化
+        - **机构变动**: （正向指标）某些机构强的期货商净持仓变化
+
+        **使用建议：**
+        - IV Rank > 80 适合卖方策略（波动率偏贵）
+        - IV Rank < 20 适合买方策略（波动率便宜）
+        - 机构持仓正数增加 + 散户持仓负数增加 = 潜在做多信号
+        - 机构持仓负数增加 + 散户持仓正数增加 = 潜在做空信号
+
+        **更新频率：** 数据缓存30分钟，点击"刷新"可手动更新
+        """)
 
 with col3:
     # 刷新按钮
@@ -149,7 +162,7 @@ with placeholder.container():
         time.sleep(0.1)
 
         progress_bar.progress(100, text=f"✅ 加载完成 ({load_time:.2f}秒)")
-        time.sleep(0.5)
+        time.sleep(0.1)
 
         # 清除加载提示
         progress_bar.empty()
@@ -277,23 +290,6 @@ if not df_monitor.empty:
         }
     )
 
-    # === 【新增】底部数据说明 ===
-    st.markdown("---")
-    with st.expander("📖 数据说明", expanded=False):
-        st.markdown("""
-        **指标解释：**
-        - **IV Rank**: 当前IV在过去一年中的百分位排名（0-100），越高表示波动率越贵
-        - **散户变动**: （反向指标）某些散户多的期货商净持仓变化
-        - **机构变动**: （正向指标）某些机构强的期货商净持仓变化
-
-        **使用建议：**
-        - IV Rank > 80 适合卖方策略（波动率偏贵）
-        - IV Rank < 20 适合买方策略（波动率便宜）
-        - 机构持仓正数增加 + 散户持仓负数增加 = 潜在做多信号
-        - 机构持仓负数增加 + 散户持仓正数增加 = 潜在做空信号
-
-        **更新频率：** 数据缓存30分钟，点击"刷新"可手动更新
-        """)
 
 else:
     st.warning("⚠️ 暂无数据，请检查数据库连接或稍后重试")

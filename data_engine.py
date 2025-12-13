@@ -646,6 +646,47 @@ def get_product_code(raw_code):
     base = raw_code.strip().upper().split('.')[0]
     return "".join(re.findall("[A-Z]", base))
 
+
+# --- 【新增】判断合约是否快到期 (用于过滤不准确的IV) ---
+def check_expiry_validity(row, current_date_str):
+    """
+    逻辑：
+    1. 商品期权：通常在期货月份的前一个月上旬到期 (如 M2505 期权在 4月7日左右到期)。
+    2. 金融期权(IO/MO/HO)：在期货月份当月的第三个周五到期。
+    3. 如果 (估算到期日 - 当前日期) < 2天，则认为无效。
+    """
+    try:
+        # 1. 解析年份和月份 (RB2505 -> 2025, 5)
+        m = re.search(r'(\d{3,4})$', row['join_key'])
+        if not m: return False
+        ym = m.group(1)
+        if len(ym) == 3: ym = '2' + ym  # 处理 505 -> 2505
+
+        year = int('20' + ym[:2])
+        month = int(ym[2:])
+
+        # 构造期货合约的大致月份时间 (每月15号作为基准)
+        fut_date = pd.Timestamp(year=year, month=month, day=15)
+        current_date = pd.to_datetime(current_date_str)
+
+        # 2. 估算期权到期日
+        product = row['product']
+        if product in ['IO', 'MO', 'HO', 'IF', 'IH', 'IM']:
+            # 金融期权：当月到期 (保守按当月10号计算临近)
+            expiry_approx = fut_date.replace(day=10)
+        else:
+            # 商品期权：前一个月到期 (保守按前一个月5号计算临近)
+            # 例如 RB2505，期权在 4月初到期
+            expiry_approx = (fut_date - pd.DateOffset(months=1)).replace(day=5)
+
+        # 3. 计算剩余天数
+        days_left = (expiry_approx - current_date).days
+
+        # 必须大于 2 天才算有效
+        return days_left > 2
+    except:
+        return True  # 解析失败默认不过滤，防止误杀
+
 @st.cache_data(ttl=1800)
 def get_comprehensive_market_data():
     """
@@ -717,11 +758,23 @@ def get_comprehensive_market_data():
             return v + 20000 if v < 1000 else v
 
         df_cand['m_num'] = df_cand['join_key'].apply(get_m_num)
-        df_cand['oi_rank'] = df_cand.groupby('product')['oi'].rank(ascending=False)
-        df_active = df_cand[df_cand['oi_rank'] <= 6].copy()
-        df_active = df_active.sort_values(by=['product', 'has_iv', 'm_num', 'oi'],
-                                          ascending=[True, False, True, False])
-        df_selected = df_active.groupby('product').head(2).copy()
+        # 1. 过滤快到期的合约
+        # row 必须包含 'join_key' 和 'product'，并且需要传入当前日期 today
+        df_cand['is_valid'] = df_cand.apply(lambda row: check_expiry_validity(row, today), axis=1)
+        df_valid = df_cand[df_cand['is_valid']].copy()
+
+        # 2. 挑选逻辑：每种商品选 [持仓最大] 和 [月份最近] 两个
+
+        # A. 选持仓最大的 (OI Max)
+        top_oi = df_valid.sort_values('oi', ascending=False).groupby('product').head(1)
+
+        # B. 选月份最近的 (m_num Min)
+        # m_num 是之前代码里计算出来的数字月份，越小代表越近月
+        top_near = df_valid.sort_values('m_num', ascending=True).groupby('product').head(1)
+
+        # 3. 合并并去重
+        # 如果主力合约刚好也是近月合约，drop_duplicates 会自动把它们变成一条
+        df_selected = pd.concat([top_oi, top_near]).drop_duplicates(subset=['join_key'])
 
         # === 第5步：计算IV Rank（使用已加载的全年数据）===
         keys = df_selected['join_key'].unique().tolist()
