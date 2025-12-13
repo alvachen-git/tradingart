@@ -1,6 +1,8 @@
 import streamlit as st
+import plotly.graph_objects as go
 import pandas as pd
 from lightweight_charts.widgets import StreamlitChart
+from realtime_tools import fetch_sina_kline_data
 import sys
 import os
 import re
@@ -14,7 +16,11 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded"
 )
+
+with open('style.css', encoding='utf-8') as f:
+    st.markdown(f'<style>{f.read()}</style>', unsafe_allow_html=True)
 st.markdown("<style>.stSelectbox {margin-bottom: 20px;}</style>", unsafe_allow_html=True)
+
 
 # 2. 侧边栏逻辑
 with st.sidebar:
@@ -117,7 +123,7 @@ else:
     is_continuous = False
 
 # 3. 数据获取函数
-@st.cache_data(ttl=600)
+@st.cache_data(ttl=300)
 def get_chart_data(code):
     if not code: return None, None
     try:
@@ -230,3 +236,4 @@ if target_contract:
         st.warning(f"暂无 {target_contract} 的 K 线数据。")
         if is_continuous:
             st.caption("提示：可能是数据库中 futures_price 表缺少主连代码（如 IF 或 IF0）。")
+

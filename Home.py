@@ -10,6 +10,7 @@ from kline_tools import analyze_kline_pattern
 import time
 import extra_streamlit_components as stx
 from market_tools import get_market_snapshot, get_price_statistics
+from data_engine import get_commodity_iv_info
 
 # --- 1. 【关键修复】强制清除系统代理 (解决 SSL 报错) ---
 # 必须放在其他网络库加载之前
@@ -337,7 +338,7 @@ with st.sidebar:
 # ==========================================
 def get_agent(user_name="访客"):
     # 1. 定义工具箱
-    tools = [analyze_kline_pattern, search_investment_knowledge, get_market_snapshot, get_price_statistics]
+    tools = [analyze_kline_pattern, search_investment_knowledge, get_market_snapshot, get_commodity_iv_info, get_price_statistics]
 
     # 2. LLM
     if not os.getenv("DASHSCOPE_API_KEY"):
@@ -355,33 +356,32 @@ def get_agent(user_name="访客"):
     # 3. 升级版 System Prompt
     # 3. 系统提示词 (System Prompt)
     system_message = f"""
-    你是一位专业的K线技术分析师和期权专家。 
+    你是一位专业的K线技术分析师和期权专家，行情判断只按照技术面。 
     
     【当前时间基准】：
     - 今天是：{today.strftime('%Y年%m月%d日')} (数据库查询请使用: {today_str})
     - 上周区间参考：{last_week_start} 至 {last_week_end}
 
     【工具使用指南】：
-    1. 被问**当前/最新**商品价格数据或股票价格或期权数据时 -> 用 `get_market_snapshot`。
-    2. 被问 **历史某一天** 或 **指定日期** 的价格（例如“12月8日的价格”、“上个月涨幅”）-> 必须用 `get_price_statistics`。
-       **重要**：调用此工具时，`start_date` 和 `end_date` 参数必须是 **YYYYMMDD** 格式的字符串（例如 '20231001'）。
-       - 如果用户说 "上周"，请自动计算并传入具体的日期区间（参考上面的时间基准）。
-    3. 被问股票或期货的技术面、K线形态和趋势时-> 优先用 `analyze_kline_pattern`来分析
-    4. 查阅期权知识、期权策略、进出场方法-> 用 `search_investment_knowledge`
-    5.
+    1. 被问当前/最新价格数据时 -> 用 `get_market_snapshot`。
+    2. 被问 **历史某一天** 或 **指定日期** 的价格-> 必须用 `get_price_statistics`。
+       调用此工具时，`start_date` 和 `end_date` 参数必须是 **YYYYMMDD** 格式的字符串（例如 '20231001'）。
+    3. 股票或期货的技术面、K线形态和趋势时-> 用 `analyze_kline_pattern`
+    4. 需要期权知识、期权策略-> 用 `search_investment_knowledge`
+    5. 被问期权波动率数据 -> 用 `get_commodity_iv_info`。
 
 
 
     【你的行为准则】
-    1. **情绪感知**：在回答前，先在心里分析用户的情绪（贪婪/恐惧/愤怒/理性）。
-    2. **风险评估**：根据用户的问题判断其风险偏好（激进/保守）。
+    1. 避免同时调用超过2个工具，除非用户明确要求全面分析。
+    2. 根据用户的风险偏好（激进/保守）给他喜欢的策略，如果是保守的，就不要给激进的建议。
     3. 如果用户问题不具体，可以反问客户，多用反问来引导用户做交易决策。
     4. 当用户询问某个品种（如碳酸锂、中证1000）的“走势”、“技术分析”、“K线形态”时，你要调用工具`analyze_kline_pattern`来回答。
-    5. 当用户问期权或实战技术问题，优先以知识库工具为信息参考。
+    5. 当用户问期权或K线实战应用问题，优先以知识库工具为信息参考。
     6. 要结合K线分析和期权知识，给出明确的操作建议，风险偏好高的可以给积极的策略，风险偏好低的就给保守策略。
 
     【回答格式】
-    先说结论（看多/看空/震荡），最后解释理由，技术分析理由只说明K线，不说其他技术指标，期权策略的建议是根据技术分析和IV。
+   先给结论（看多/看空/震荡），然后解释理由。技术分析只说K线，期权策略的使用要结合技术面和IV。
 
     """
 
@@ -486,8 +486,6 @@ if st.session_state['is_logged_in']:
                                             【当前对话元数据】
                                             - 用户名：{current_user}
                                             - 风险偏好：{risk}
-                                            - 关注品种：{assets}
-
                                             """)
 
                         # 调用 Agent

@@ -180,6 +180,9 @@ def analyze_kline_pattern(query: str, trade_date: str = None):
         # 昨日K线实体大小
         prebody_pct = abs(prev_close - prev_open) / (prev_high - prev_low)
 
+        # 前日K线实体大小
+        pprebody_pct = abs(pprev_close - pprev_open) / (pprev_high - pprev_low)
+
         # B. K线形态判断列表
         patterns = []
 
@@ -225,16 +228,26 @@ def analyze_kline_pattern(query: str, trade_date: str = None):
                 patterns.append("【下降三法】(中继再跌，空头持续发力！)")
 
         # 6. 晨星
-        if (curr['MA5'] < curr['MA10']) and pprev_chg_pct < -0.01 and close > pprev_close and close > prev_high and body_pct >0.7:
+        if (curr['MA5'] < curr['MA10']) and pprebody_pct > 0.8 and close > prev_high and open_p > prev_close:
             if prebody_pct < 0.3 and prev_close < pprev_close :
              patterns.append("【晨星】(反转迹象-从空转多)")
 
          # 6.夜星
-        if (curr['MA5'] > curr['MA10']) and pprev_chg_pct > 0.01 and close < pprev_close and close < prev_low and body_pct > 0.7:
+        if (curr['MA5'] > curr['MA10']) and pprebody_pct > 0.8 and close < prev_low and open_p < prev_close:
             if prebody_pct < 0.3 and prev_close > pprev_close:
              patterns.append("【夜星】(反转迹象-从多转空)")
 
-# 1. 计算 ATR (波动率尺子) 用于动态衡量箱体
+        # 6.步步为营
+        if (curr['MA5'] > curr['MA10']) and pprev_chg_pct > 0.015:
+            if pprev_chg_pct > prev_chg_pct > chg_pct > 0:
+                patterns.append("【步步为营】(多头力量减弱，小心回调)")
+
+        if (curr['MA5'] < curr['MA10']) and pprev_chg_pct > -0.015:
+            if pprev_chg_pct < prev_chg_pct < chg_pct < 0:
+                patterns.append("【步步为营】(空头力量减弱，小心反弹)")
+
+
+        # 1. 计算 ATR (波动率尺子) 用于动态衡量箱体
         # TR = Max(High-Low, Abs(High-PrevClose), Abs(Low-PrevClose))
         df['h-l'] = df['high_price'] - df['low_price']
         df['h-pc'] = abs(df['high_price'] - df['close_price'].shift(1))
@@ -293,14 +306,14 @@ def analyze_kline_pattern(query: str, trade_date: str = None):
 
                     # A. 向上突破 (需配合中阳线/大阳线)
                     if close > box_high and body_pct > 0.7:
-                        msg = f"【{p_name}突破】(周期{period}天，压缩比{atr_ratio:.1f}ATR)"
+                        msg = f"【{p_name}突破】，压缩比{atr_ratio:.1f}ATR)"
                         patterns.append(msg)
                         breakout_found = True
                         break # 找到最有爆发力的就不找了
 
                     # B. 向下破位
                     if close < box_low and body_pct > 0.7:
-                        msg = f"【{p_name}破位】(周期{period}天，压缩比{atr_ratio:.1f}ATR)"
+                        msg = f"【{p_name}破位】，压缩比{atr_ratio:.1f}ATR)"
                         patterns.append(msg)
                         breakout_found = True
                         break

@@ -1,5 +1,4 @@
 import pandas as pd
-import numpy as np
 import os
 from sqlalchemy import create_engine, text
 from dotenv import load_dotenv
@@ -8,6 +7,7 @@ from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 import symbol_map
 import traceback
+import streamlit as st
 
 # 1. 初始化環境
 load_dotenv(override=True)
@@ -174,3 +174,4 @@ def get_market_snapshot(query: str):
 
     except Exception as e:
         return f"查詢錯誤: {e}"
+

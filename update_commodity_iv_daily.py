@@ -26,7 +26,7 @@ FUT_TO_OPT = {v: k for k, v in SPECIAL_MAPPING.items()}
 # 目标品种 (与重算脚本保持一致)
 TARGETS = ['LC', 'SI', 'PS','pd', 'pt','IH', 'IF', 'IM', 'au', 'ag', 'cu', 'al', 'zn', 'ni','sn',
             'rb', 'i','sm','fg', 'sa', 'm', 'a','b','rm', 'y', 'oi', 'p', 'ta', 'ma', 'v', 'eb', 'eg','l','pp','ru',
-            'c', 'cf', 'ap','cj','pk','jd','sr', 'ao', 'sh','ur','fu', 'bu', 'sc']
+            'c', 'cf', 'ap','cj','pk','jd','sr', 'ao', 'sh','ur', 'sp','fu', 'bu', 'sc']
 
 
 def get_opt_prefix(fut_symbol):
