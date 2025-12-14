@@ -330,10 +330,10 @@ def analyze_kline_pattern(query: str, trade_date: str = None):
         # 3. 波动转折突破
         if curr['MA30'] > curr['MA20']:
             if abs(chg_pct) > 0.01 and close > prev_5_days_high and body_pct > 0.6:
-                patterns.append("【多头突破】(波段转折)")
+                patterns.append("【多头反击】(波段转折)")
         if curr['MA30'] < curr['MA20']:
-            if abs(chg_pct) > 0.01 and close < prev_5_days_low and body_pct > 0.6:
-                patterns.append("【空头突破】(波段转折)")
+            if chg_pct < -0.01 and close < prev_5_days_low and body_pct > 0.6:
+                patterns.append("【空头反击】(波段转折)")
 
         # 4. 长下影
         if lower_pct > 2 and body_pct < 0.3 and body_pct > 0.05 and curr['MA5'] < curr['MA20']and close < prev_close:

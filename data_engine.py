@@ -689,7 +689,7 @@ def check_expiry_validity(row, current_date_str):
     except:
         return True  # 解析失败默认不过滤，防止误杀
 
-@st.cache_data(ttl=1800)
+@st.cache_data(ttl=3600)
 def get_comprehensive_market_data():
     """
     优化版全市场监控数据
@@ -732,7 +732,7 @@ def get_comprehensive_market_data():
 
         # === 【优化2】合并IV查询 - 一次性获取历史和最新数据 ===
         date_7d = (pd.to_datetime(today) - pd.Timedelta(days=7)).strftime('%Y%m%d')
-        date_1y = (pd.to_datetime(today) - pd.Timedelta(days=365)).strftime('%Y%m%d')
+        date_1y = (pd.to_datetime(today) - pd.Timedelta(days=252)).strftime('%Y%m%d')
 
         sql_iv_all = f"""
         SELECT ts_code, iv, REPLACE(trade_date, '-', '') as trade_date 
@@ -781,11 +781,29 @@ def get_comprehensive_market_data():
         # === 第5步：计算IV Rank（使用已加载的全年数据）===
         keys = df_selected['join_key'].unique().tolist()
         if keys:
-            df_h = df_iv_all[df_iv_all['join_key'].isin(keys)].copy()
-            stats = df_h.groupby('join_key')['iv'].agg(['min', 'max']).reset_index()
+            date_1y = (pd.to_datetime(today) - pd.Timedelta(days=252)).strftime('%Y%m%d')
+            sql_h = f"SELECT ts_code, iv FROM commodity_iv_history WHERE REPLACE(trade_date, '-', '') >= '{date_1y}'"
+            df_h = pd.read_sql(sql_h, engine)
+            df_h['join_key'] = df_h['ts_code'].apply(get_join_key)
+            df_h = df_h[df_h['join_key'].isin(keys)]
 
-            df_final = df_selected.merge(stats, on='join_key', how='left')
+            # --- 【核心修改】 过滤掉 IV 为 0 的异常值 ---
+            # 只有大于 0.0001 的 IV 才参与统计
+            # 这样 Min 值就是“历史最低的有效IV”，而不是 0
+            df_h_valid = df_h[df_h['iv'] > 0.0001]
+
+            if not df_h_valid.empty:
+                stats = df_h_valid.groupby('join_key')['iv'].agg(['min', 'max']).reset_index()
+                df_final = df_selected.merge(stats, on='join_key', how='left')
+            else:
+                # 如果全是 0，给个空列防止报错
+                df_final = df_selected.copy()
+                df_final['min'] = 0
+                df_final['max'] = 0
+
+            # 计算 Rank
             df_final['iv_range'] = df_final['max'] - df_final['min']
+            # 分母极小时保护
             df_final['iv_rank'] = np.where(
                 df_final['iv_range'] > 0.0001,
                 (df_final['iv'] - df_final['min']) / df_final['iv_range'] * 100,
@@ -1079,3 +1097,212 @@ def get_commodity_iv_info(query: str):
 
     except Exception as e:
         return f"数据查询发生错误: {e}"
+
+
+# --- AI 工具: 查期权到期 (高性能版) ---
+@tool
+def check_option_expiry_status(query: str):
+    """
+    【期权专用】查询期权到期日及策略建议。
+    修复：内置依赖字典，增加 SQL 模糊查询兜底机制，确保 100% 查到数据。
+    """
+    # --- 1. 防止上下文丢失的内置字典 ---
+    LOCAL_PRODUCT_MAP = {
+        'IF': '沪深300', 'IH': '上证50', 'IM': '中证1000', 'IC': '中证500',
+        'TS': '2年国债', 'TF': '5年国债', 'T': '10年国债', 'TL': '30年国债',
+        'RB': '螺纹钢', 'HC': '热卷', 'J': '焦炭', 'JM': '焦煤', 'I': '铁矿石',
+        'M': '豆粕', 'Y': '豆油', 'P': '棕榈油', 'OI': '菜油', 'RM': '菜粕',
+        'C': '玉米', 'CF': '棉花', 'SR': '白糖', 'AP': '苹果', 'JD': '鸡蛋',
+        'LH': '生猪', 'PK': '花生', 'SC': '原油', 'FU': '燃油', 'PG': '液化气',
+        'TA': 'PTA', 'MA': '甲醇', 'PP': '聚丙烯', 'L': '塑料', 'V': 'PVC',
+        'EB': '苯乙烯', 'EG': '乙二醇', 'UR': '尿素', 'SA': '纯碱', 'FG': '玻璃',
+        'PX': '对二甲苯', 'BR': '橡胶', 'LC': '碳酸锂', 'SI': '工业硅', 'AO': '氧化铝',
+        'SS': '不锈钢', 'SM': '锰硅', 'SF': '硅铁', 'WR': '线材', 'CU': '铜',
+        'AL': '铝', 'ZN': '锌', 'PB': '铅', 'NI': '镍', 'SN': '锡', 'AU': '黄金', 'AG': '白银'
+    }
+
+    local_engine = get_db_engine()
+    if local_engine is None: return "❌ 数据库未连接"
+
+    try:
+        # --- 2. 解析查询 ---
+        clean_query = re.sub(r'[^a-zA-Z0-9\u4e00-\u9fa5]', '', query).upper()
+        match_digits = re.search(r'(\d{3,4})', clean_query)
+        user_month = match_digits.group(1) if match_digits else None
+
+        text_part = re.sub(r'\d', '', clean_query)
+        product_code = None
+        product_name = text_part
+
+        # 查字典
+        if text_part in LOCAL_PRODUCT_MAP:
+            product_code = text_part
+            product_name = LOCAL_PRODUCT_MAP[text_part]
+        else:
+            for k, v in LOCAL_PRODUCT_MAP.items():
+                if v in text_part:
+                    product_code = k;
+                    product_name = v;
+                    break
+            if not product_code:
+                m_head = re.match(r'^([A-Z]+)', clean_query)
+                if m_head: product_code = m_head.group(1)
+
+        if not product_code:
+            return f"⚠️ 未识别商品【{query}】。"
+
+        # --- 3. 确定合约 Key ---
+        target_key = None
+        is_main_contract = False
+
+        if user_month:
+            # 用户指定 (如 09 -> 2509)
+            if len(user_month) <= 2:
+                curr_year = datetime.now().year % 100
+                target_key = f"{product_code}{curr_year}{int(user_month):02d}"
+            else:
+                target_key = f"{product_code}{user_month}"
+        else:
+            # 查主力 (过滤纯英文，只取带数字的)
+            is_main_contract = True
+            sql_main = f"""
+                SELECT ts_code 
+                FROM futures_price 
+                WHERE (ts_code LIKE '{product_code}%%' OR ts_code LIKE '{product_code.lower()}%%')
+                  AND ts_code REGEXP '[0-9]' 
+                ORDER BY trade_date DESC, oi DESC 
+                LIMIT 1
+            """
+            df_main = pd.read_sql(sql_main, local_engine)
+            if df_main.empty: return f"暂无【{product_name}】活跃合约。"
+
+            # 提取 Key (M2505.DCE -> M2505)
+            raw_code = df_main.iloc[0]['ts_code'].upper()
+            match = re.match(r'^([A-Z]+)(\d{3,4})', raw_code)
+            if match:
+                target_key = match.group(0)
+            else:
+                target_key = raw_code.split('.')[0]
+
+        # --- 4. 获取到期日 (双保险机制) ---
+
+        # 策略 A: 查缓存 (速度快)
+        static_map = get_static_maturity_map()
+        expiry_date = static_map.get(target_key)
+        msg = "(Data: Cache)"
+
+        # 策略 B: 缓存没命中? 用 SQL 模糊查询兜底! (绝对稳)
+        if pd.isnull(expiry_date):
+            # 这里的逻辑是：只要数据库里有 M2505 开头的期权，我就能查到
+            sql_direct = f"""
+                SELECT maturity_date FROM commodity_option_basic 
+                WHERE ts_code LIKE '{target_key}%%' 
+                   OR ts_code LIKE '{target_key.lower()}%%'
+                ORDER BY maturity_date ASC LIMIT 1
+            """
+            df_direct = pd.read_sql(sql_direct, local_engine)
+
+            if not df_direct.empty:
+                expiry_date = df_direct.iloc[0]['maturity_date']
+                # 再次尝试清洗日期格式，防止数据库里存的是字符串
+                try:
+                    expiry_date = pd.to_datetime(str(expiry_date))
+                except:
+                    pass
+                msg = "(Data: SQL Direct)"
+            else:
+                return f"⚠️ 未找到合约【{target_key}】的期权到期日信息。\n(已尝试 Key: {target_key}%, 请确认该合约是否有上市期权)"
+
+        # --- 5. 结果处理 ---
+        today = datetime.now()
+        expiry_date = pd.to_datetime(expiry_date)
+        days_left = (expiry_date - today).days
+
+        contract_desc = f"{target_key} (主力)" if is_main_contract else target_key
+
+        if days_left > 50:
+            phase = "🌙 远期"; advice = "时间价值衰减慢，主要受隐含波动率影响。"
+        elif 20 < days_left <= 50:
+            phase = "🌓 中期"; advice = "时间和波动率影响都重要，卖方虚值收租黄金期。"
+        elif 5 < days_left <= 20:
+            phase = "🌔 近期"; advice = "时间衰减加快，Gamma造成的方向加速开始体现。"
+        elif 0 < days_left <= 5:
+            phase = "⚡ 末日轮"; advice = "买卖方决战集中在平值附近，⚠️ Gamma的暴击是最大。"
+        else:
+            phase = "💀 已过期"; advice = "合约已到期。"
+
+        return f"""
+✅ **{product_name} ({contract_desc})**
+📅 到期: {expiry_date.strftime('%Y-%m-%d')} {msg}
+⏱️ 剩余: **{days_left}天** ({phase})
+💡 建议: {advice}
+        """
+
+    except Exception as e:
+        return f"查询出错: {str(e)}"
+
+# --- 【新增/保留】高性能静态数据缓存 (12小时只查一次库) ---
+def get_static_maturity_map():
+    """
+    【高速缓存】加载期权到期日。
+    修复：增强日期格式兼容性，防止因格式问题导致数据为空。
+    """
+    # 1. 获取连接
+    local_engine = get_db_engine()
+    if local_engine is None:
+        print("❌ [Cache] 数据库连接失败")
+        return {}
+
+    try:
+        # 2. 全量拉取
+        print("🔄 [System] 正在刷新期权到期日缓存...")
+        sql = "SELECT ts_code, maturity_date FROM commodity_option_basic"
+        df = pd.read_sql(sql, local_engine)
+
+        if df.empty:
+            print("❌ [Cache] commodity_option_basic 表为空！")
+            return {}
+
+        # 3. 【核心修复】强制日期格式转换
+        # 兼容: 20250520(int), "20250520"(str), "2025-05-20"(str)
+        df['maturity_date'] = pd.to_datetime(df['maturity_date'], format='%Y%m%d', errors='coerce').fillna(
+            pd.to_datetime(df['maturity_date'], errors='coerce'))
+
+        # 4. 过滤无效日期
+        df = df.dropna(subset=['maturity_date'])
+        # 只保留未来的 (今天之后的)
+        df = df[df['maturity_date'] >= pd.Timestamp.now().normalize()]
+
+        # 5. 智能提取 Key (正则 + 强制大写)
+        def _extract_key(code):
+            try:
+                # 预处理：M2505-C-3000.DCE -> M2505C3000
+                # 预处理：cu2503C69000.SHF -> CU2503C69000
+                clean = str(code).upper().split('.')[0].replace('-', '')
+
+                # 正则提取：头部字母 + 3到4位数字
+                # 匹配: M2505, CU2503, AU2412
+                import re
+                match = re.match(r'^([A-Z]+)(\d{3,4})', clean)
+                if match:
+                    return match.group(0)  # 返回标准 Key (如 CU2503)
+                return None
+            except:
+                return None
+
+        df['join_key'] = df['ts_code'].apply(_extract_key)
+        df = df.dropna(subset=['join_key'])
+
+        # 6. 生成字典 (取每个合约最早的到期日)
+        expiry_map = df.groupby('join_key')['maturity_date'].min().to_dict()
+
+        # 7. 【调试日志】
+        print(f"✅ [System] 成功缓存 {len(expiry_map)} 条到期日数据")
+        if len(expiry_map) > 0:
+            print(f"   🔎 样例 Key: {list(expiry_map.keys())[:5]}")
+
+        return expiry_map
+
+    except Exception as e:
+        print(f"❌ [Cache Error] 缓存建立失败: {e}")
+        return {}

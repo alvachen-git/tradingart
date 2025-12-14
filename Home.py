@@ -10,7 +10,7 @@ from kline_tools import analyze_kline_pattern
 import time
 import extra_streamlit_components as stx
 from market_tools import get_market_snapshot, get_price_statistics
-from data_engine import get_commodity_iv_info
+from data_engine import get_commodity_iv_info, check_option_expiry_status
 
 # --- 1. 【关键修复】强制清除系统代理 (解决 SSL 报错) ---
 # 必须放在其他网络库加载之前
@@ -338,7 +338,7 @@ with st.sidebar:
 # ==========================================
 def get_agent(user_name="访客"):
     # 1. 定义工具箱
-    tools = [analyze_kline_pattern, search_investment_knowledge, get_market_snapshot, get_commodity_iv_info, get_price_statistics]
+    tools = [analyze_kline_pattern, search_investment_knowledge, get_market_snapshot, get_commodity_iv_info, get_price_statistics,check_option_expiry_status]
 
     # 2. LLM
     if not os.getenv("DASHSCOPE_API_KEY"):
@@ -356,7 +356,7 @@ def get_agent(user_name="访客"):
     # 3. 升级版 System Prompt
     # 3. 系统提示词 (System Prompt)
     system_message = f"""
-    你是一位专业的K线技术分析师和期权专家，行情判断只按照技术面。 
+    你是一位专业的K线技术分析师和期权专家，遵守顺势交易的纪律。 
     
     【当前时间基准】：
     - 今天是：{today.strftime('%Y年%m月%d日')} (数据库查询请使用: {today_str})
@@ -366,9 +366,10 @@ def get_agent(user_name="访客"):
     1. 被问当前/最新价格数据时 -> 用 `get_market_snapshot`。
     2. 被问 **历史某一天** 或 **指定日期** 的价格-> 必须用 `get_price_statistics`。
        调用此工具时，`start_date` 和 `end_date` 参数必须是 **YYYYMMDD** 格式的字符串（例如 '20231001'）。
-    3. 股票或期货的技术面、K线形态和趋势时-> 用 `analyze_kline_pattern`
+    3. 被问股票或期货的技术面、K线形态和趋势时-> 用 `analyze_kline_pattern`
     4. 需要期权知识、期权策略-> 用 `search_investment_knowledge`
-    5. 被问期权波动率数据 -> 用 `get_commodity_iv_info`。
+    5. 被问期权波动率数据时 -> 用 `get_commodity_iv_info`。
+    6. 需要查询期权到期日时 -> 用 `check_option_expiry_status`。
 
 
 
@@ -378,7 +379,10 @@ def get_agent(user_name="访客"):
     3. 如果用户问题不具体，可以反问客户，多用反问来引导用户做交易决策。
     4. 当用户询问某个品种（如碳酸锂、中证1000）的“走势”、“技术分析”、“K线形态”时，你要调用工具`analyze_kline_pattern`来回答。
     5. 当用户问期权或K线实战应用问题，优先以知识库工具为信息参考。
-    6. 要结合K线分析和期权知识，给出明确的操作建议，风险偏好高的可以给积极的策略，风险偏好低的就给保守策略。
+    6. 期权策略的建议，需要考虑波动率和距离到期日，使用工具`check_option_expiry_status`和知识库搭配回答
+    7. 给出明确的操作建议，根据用户风险偏好（激进/保守）给他喜欢的策略，如果是保守的，就不要给激进建议。
+    8. 如果在知识库工具中看到 Markdown 格式的图片链接（例如 ![描述](URL) ），请直接将这个链接包含在你的回答中。
+
 
     【回答格式】
    先给结论（看多/看空/震荡），然后解释理由。技术分析只说K线，期权策略的使用要结合技术面和IV。
@@ -615,64 +619,5 @@ except Exception as e:
 st.markdown("---")
 
 # 2. 【新增】全市场风云榜
-st.caption("### 🏆 全品种盈亏排行榜")
-st.caption("统计范围：近200天, (部分期货商亏损是因为做套保)")
-
-# 获取数据
-with st.spinner("正在扫描全市场数据..."):
-    df_win, df_lose = de.get_cross_market_ranking(days=150, top_n=5)
-
-if not df_win.empty:
-    col_win, col_lose = st.columns(2)
-
-    with col_win:
-
-        st.markdown("**👑 盈利王 (Top 5)**")
-
-        # 绘制条形图
-        fig_win = px.bar(
-            df_win.sort_values('score', ascending=True),  # 升序是为了让最大的在上面
-            x='score', y='broker',
-            orientation='h',
-            text_auto='.0f',
-            color='score',
-            color_continuous_scale='Reds'
-        )
-        fig_win.update_layout(
-            plot_bgcolor='white',
-            margin=dict(l=0, r=0, t=0, b=0),
-            height=200,
-            xaxis=dict(showgrid=False, title=None),
-            yaxis=dict(title=None),
-            coloraxis_showscale=False  # 隐藏色条
-        )
-        st.plotly_chart(fig_win, use_container_width=True)
-
-    with col_lose:
-
-        st.markdown("**💸 亏损王 (Top 5)**")
-
-        # 绘制条形图
-        fig_lose = px.bar(
-            df_lose.sort_values('score', ascending=False),  # 降序是为了让负分最大的在上面
-            x='score', y='broker',
-            orientation='h',
-            text_auto='.0f',
-            color='score',
-            color_continuous_scale='Teal_r'  # 绿色系倒序
-        )
-        fig_lose.update_layout(
-            plot_bgcolor='white',
-            margin=dict(l=0, r=0, t=0, b=0),
-            height=200,
-            xaxis=dict(showgrid=False, title=None),
-            yaxis=dict(title=None),
-            coloraxis_showscale=False
-        )
-        st.plotly_chart(fig_lose, use_container_width=True)
-
-
-else:
-    st.warning("暂无足够数据进行全市场排名。")
 
 st.markdown("---")

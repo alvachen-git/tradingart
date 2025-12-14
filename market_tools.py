@@ -147,7 +147,7 @@ def get_price_statistics(query_list: str, start_date: str, end_date: str):
 def get_market_snapshot(query: str):
     """
     【最新行情查詢】
-    用於查詢當前最新價格、IV數據。
+    用於查詢當前最新價格
     輸入：品種名稱（如 "豆粕"、"茅台"）。
     """
     if engine is None: return "數據庫未連接"

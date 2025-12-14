@@ -255,8 +255,68 @@ with c2:
 
 st.divider()
 
+st.subheader("🏆 全品种盈亏排行榜")
+st.caption("统计范围：近200天, (部分期货商亏损是因为做套保)")
+
+# 获取数据
+with st.spinner("正在扫描全市场数据..."):
+    df_win, df_lose = de.get_cross_market_ranking(days=150, top_n=5)
+
+if not df_win.empty:
+    col_win, col_lose = st.columns(2)
+
+    with col_win:
+
+        st.markdown("**👑 盈利王 (Top 5)**")
+
+        # 绘制条形图
+        fig_win = px.bar(
+            df_win.sort_values('score', ascending=True),  # 升序是为了让最大的在上面
+            x='score', y='broker',
+            orientation='h',
+            text_auto='.0f',
+            color='score',
+            color_continuous_scale='Reds'
+        )
+        fig_win.update_layout(
+            plot_bgcolor='white',
+            margin=dict(l=0, r=0, t=0, b=0),
+            height=200,
+            xaxis=dict(showgrid=False, title=None),
+            yaxis=dict(title=None),
+            coloraxis_showscale=False  # 隐藏色条
+        )
+        st.plotly_chart(fig_win, use_container_width=True)
+
+    with col_lose:
+
+        st.markdown("**💸 亏损王 (Top 5)**")
+
+        # 绘制条形图
+        fig_lose = px.bar(
+            df_lose.sort_values('score', ascending=False),  # 降序是为了让负分最大的在上面
+            x='score', y='broker',
+            orientation='h',
+            text_auto='.0f',
+            color='score',
+            color_continuous_scale='Teal_r'  # 绿色系倒序
+        )
+        fig_lose.update_layout(
+            plot_bgcolor='white',
+            margin=dict(l=0, r=0, t=0, b=0),
+            height=200,
+            xaxis=dict(showgrid=False, title=None),
+            yaxis=dict(title=None),
+            coloraxis_showscale=False
+        )
+        st.plotly_chart(fig_lose, use_container_width=True)
+
+
+else:
+    st.warning("暂无足够数据进行全市场排名。")
+st.divider()
 # 深度透视
-st.header("🔎 机构深度透视")
+st.subheader("🔎 机构深度透视")
 c_sel, c_info = st.columns([1, 3])
 with c_sel:
     broker_list = rank_df.sort_values('总积分', ascending=False)['期货商'].unique()

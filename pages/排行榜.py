@@ -108,11 +108,12 @@ with col2:
     with st.expander("📖 数据说明", expanded=False):
         st.markdown("""
         **指标解释：**
-        - **IV Rank**： 目前隐含波动率在最近一年中的百分位排名，越高表示期权越贵
+        - **IV Rank**： 目前隐含波动率在最近一年中的百分位排名（商品期权页的是用连续月计算，两者有些差异）
         - **散户变动**: （反向指标）某些散户多的期货商净持仓变化
         - **机构变动**: （正向指标）某些机构强的期货商净持仓变化
 
         **使用建议：**
+        - IV Rank 越高代表期权越贵
         - IV Rank > 80 适合卖方策略（波动率偏贵）
         - IV Rank < 20 适合买方策略（波动率便宜）
         - 机构持仓正数增加 + 散户持仓负数增加 = 潜在做多信号
@@ -159,7 +160,7 @@ with placeholder.container():
         load_time = time.time() - start_time
 
         progress_bar.progress(80, text="🔧 正在处理数据...")
-        time.sleep(0.1)
+        time.sleep(0.3)
 
         progress_bar.progress(100, text=f"✅ 加载完成 ({load_time:.2f}秒)")
         time.sleep(0.1)
