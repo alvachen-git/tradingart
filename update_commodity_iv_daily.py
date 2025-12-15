@@ -117,9 +117,9 @@ def calc_iv_core(date, S, HV, fut_code, opt_prefix):
 
                 # 2. 动态阈值筛选
                 if days_left < 10:
-                    threshold = 0.02  # 快到期：±2%
+                    threshold = 0.03  # 快到期：±2%
                 else:
-                    threshold = 0.05  # 远月：±5%
+                    threshold = 0.06  # 远月：±5%
 
                 if not (S * (1 - threshold) < K < S * (1 + threshold)): continue
 
