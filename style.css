@@ -52,7 +52,7 @@
 
     /* === 桌面端侧边栏 === */
     [data-testid="stSidebar"] {
-        background-color: #1E1E1E;
+        background-color: #0b1121;
     }
     [data-testid="stSidebar"] * {
         color: #E0E0E0 !important;
