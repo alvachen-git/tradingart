@@ -534,7 +534,7 @@ else:
             st.markdown(msg["content"])
 
 # D. 底部输入框 (Sticky Footer) [修改点：使用 st.chat_input]
-if prompt := st.chat_input("欢迎问任何期权、K线或实战交易的问题..."):
+if prompt := st.chat_input("我受过交易汇训练，欢迎问我任何实战交易问题..."):
     if not st.session_state['is_logged_in']:
         st.warning("🔒 请先在左侧侧边栏登录")
     else:
