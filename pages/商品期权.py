@@ -2,7 +2,7 @@ import streamlit as st
 import plotly.graph_objects as go
 import pandas as pd
 from lightweight_charts.widgets import StreamlitChart
-
+from realtime_tools import fetch_sina_minute_trend
 import sys
 import os
 import re
@@ -28,12 +28,12 @@ with st.sidebar:
     # 映射表：前端显示中文，后端查询用代码
     COMMODITY_MAP = {
         "IH": "上证50","IF": "沪深300","IM": "中证1000",
-        "au": "黄金","ag": "白银","cu": "铜","al": "铝","zn": "锌","ni": "镍",
-        "lc": "碳酸锂", "si": "工业硅", "ps": "多晶硅",
-        "rb": "螺纹钢", "i": "铁矿石", "fg": "玻璃","sa": "纯碱","ao": "氧化铝","sh": "烧碱",
-        "M": "豆粕", "RM": "菜粕","y": "豆油","oi": "菜油","p": "棕榈油",
-        "sc": "原油","ta": "PTA", "ma": "甲醇", "v": "PVC", "eb": "苯乙烯",
-        "ru": "橡胶", "c": "玉米", "CF": "棉花", "SR": "白糖"
+        "au": "黄金","ag": "白银","cu": "铜","al": "铝","zn": "锌","ni": "镍","sn": "锡",
+        "lc": "碳酸锂", "si": "工业硅", "ps": "多晶硅","pt": "铂金","pd": "钯金",
+        "rb": "螺纹钢", "i": "铁矿石", "hc": "热卷","jm": "焦煤","ad": "铝合金","fg": "玻璃","sa": "纯碱","ao": "氧化铝","sh": "烧碱","sp": "纸浆","lg": "原木",
+        "M": "豆粕", "RM": "菜粕","y": "豆油","oi": "菜油","p": "棕榈油","pk": "花生",
+        "sc": "原油","ta": "PTA", "ma": "甲醇", "v": "PVC", "eb": "苯乙烯","eg": "乙二醇","pp": "聚丙烯","l": "塑料","bu": "沥青","fu": "燃料油",
+        "ru": "橡胶", "c": "玉米", "jd": "鸡蛋", "CF": "棉花", "SR": "白糖", "ap": "苹果", "lh": "生猪"
     }
     variety = st.selectbox("品种", list(COMMODITY_MAP.keys()), format_func=lambda x: f"{x} ({COMMODITY_MAP[x]})")
 
@@ -41,7 +41,7 @@ with st.sidebar:
 
 
     # 获取合约列表函数 (已修复 % 报错问题)
-    @st.cache_data(ttl=60)
+    @st.cache_data(ttl=3600)
     def get_contracts(v):
         if de.engine is None: return []
         try:
@@ -173,9 +173,9 @@ if target_contract:
 
             if iv_rank < 15:
                 status = "🟢 极低 (买方有利)"
-            elif iv_rank < 40:
+            elif iv_rank < 50:
                 status = "🔵 偏低"
-            elif iv_rank < 70:
+            elif iv_rank < 80:
                 status = "🟠 偏高"
             else:
                 status = "🔴 极高 (卖方有利)"
@@ -185,8 +185,9 @@ if target_contract:
             c2.metric("IV Rank (年)", f"{iv_rank:.1f}%", help="当前IV在过去一年中的百分位水平")
             c3.metric("历史最高 / 最低", f"{max_iv:.1f}% / {min_iv:.1f}%")
             c4.info(f"📊 状态: **{status}**")
-            st.divider()
 
+
+            st.divider()  # 分割线，下面接着显示历史 K 线
         # --- K线数据处理 ---
         chart_k = df_kline.rename(columns={'trade_date': 'time'})
         chart_k['time'] = pd.to_datetime(chart_k['time']).dt.strftime('%Y-%m-%d')
@@ -232,8 +233,14 @@ if target_contract:
             if used:
                 st.info(f"💡 当前主力合约参考: **{used}** (IV 计算基于此合约)")
 
+
     else:
         st.warning(f"暂无 {target_contract} 的 K 线数据。")
         if is_continuous:
             st.caption("提示：可能是数据库中 futures_price 表缺少主连代码（如 IF 或 IF0）。")
+
+
+
+
+
 

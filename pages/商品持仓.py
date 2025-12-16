@@ -44,34 +44,43 @@ with st.sidebar:
         "zn": "沪锌",
         "ni": "沪镍",
         "zn": "沪锡",
+        "ru": "橡胶",
+        "i": "铁矿石",
+        "jm": "焦煤",
+        "j": "焦炭",
         "rb": "螺纹钢",
         "hc": "热卷 ",
         "sp": "纸浆 ",
+        "lg": "原木 ",
+        "ao": "氧化铝 ",
+        "sh": "烧碱",
+        "fg": "玻璃",
+        "sa": "纯碱 ",
         "m": "豆粕",
         "a": "豆一",
         "b": "豆二",
         "c": "玉米",
         "lh": "生猪",
         "jd": "鸡蛋",
-        "jm": "焦煤",
-        "j": "焦炭",
-        "i": "铁矿石",
         "p": "棕榈油",
         "y": "豆油",
+        "oi": "菜油 ",
+        "pk": "花生 ",
+        "rm": "菜粕 ",
+        "ma": "甲醇",
+        "ta": "PTA",
+        "pr": "瓶片",
+        "pp": "聚丙烯",
         "v": "PVC",
         "eb": "苯乙烯",
         "eg": "乙二醇",
-        "fg": "玻璃",
-        "sa": "纯碱 ",
-        "rm": "菜粕 ",
-        "oi": "菜油 ",
+        "bu": "沥青",
+        "fu": "燃料油",
         "ur": "尿素 ",
         "sr": "白糖",
         "cf": "棉花",
-        "ap": "苹果",
-        "sh": "烧碱",
-        "ma": "甲醇",
-        "ta": "PTA"
+        "ap": "苹果"
+
     }
     option_list = [f"{code} - {name}" for code, name in COMMODITIES.items()]
     # 这里使用 key 保持状态
@@ -386,6 +395,102 @@ with c_info:
             "score": st.column_config.ProgressColumn("得分", min_value=-5, max_value=5, format="%.2f")
         }, use_container_width=True, hide_index=True, height=200)
 
+st.markdown("---")
+
+# --- 外资动向卡片 ---
+st.caption("### 🌍 外资动向 (摩根/瑞银/乾坤)")
+
+# 读库
+try:
+    # 获取最新日期
+    latest_f_date = pd.read_sql("SELECT MAX(trade_date) FROM foreign_capital_analysis", de.engine).iloc[0, 0]
+
+    if latest_f_date:
+        df_foreign = pd.read_sql(f"SELECT * FROM foreign_capital_analysis WHERE trade_date='{latest_f_date}'",
+                                 de.engine)
+
+        if not df_foreign.empty:
+            # 使用列布局展示卡片
+            cols = st.columns(4)
+            for i, row in df_foreign.iterrows():
+                # 循环使用列
+                with cols[i % 4]:
+                    # --- 【新增】清洗機構名稱 ---
+                    # 去除 (代客)、（代客）等後綴
+                    cleaned_brokers = row['brokers'].replace('（代客）', '').replace('(代客)', '')
+
+                    color = "#d32f2f" if row['direction'] == "做多" else "#2e7d32"
+
+                    st.markdown(f"""
+                                        <div class="metric-card" style="border-top: 3px solid {color};">
+                                            <div class="metric-label">{row['symbol'].upper()}</div>
+                                            <div class="metric-value" style="color:{color}">{row['direction']}</div>
+                                            <div class="metric-delta" style="font-size:0.8rem; color:#888;">
+                                               {cleaned_brokers} </div>
+                                            <div style="font-size:0.8rem; margin-top:5px; color:#3b3b3b;">
+                                               淨量: {int(row['total_net_vol']):,}
+                                            </div>
+                                        </div>
+                                        """, unsafe_allow_html=True)
+        else:
+            st.info("今日外资无明显共振操作。")
+    else:
+        st.info("暂无外资分析数据，请运行 calc_foreign_capital.py。")
+
+except Exception as e:
+    st.error(f"读取外资数据失败: {e}")
+
+st.markdown("---")
+
+# --- 新增：多空巔峰對決 (Smart vs Dumb) ---
+st.caption("### ⚔️ 多空巅峰对决")
+st.caption("筛选逻辑：机构与散户差异最大的持仓对比")
+
+# 1. 獲取數據 (直接讀表)
+try:
+    # 檢查表裡是否有數據
+    latest_c_date = pd.read_sql("SELECT MAX(trade_date) FROM market_conflict_daily", de.engine).iloc[0, 0]
+
+    if latest_c_date:
+        df_conflict = pd.read_sql(f"SELECT * FROM market_conflict_daily WHERE trade_date='{latest_c_date}'", de.engine)
+
+        if not df_conflict.empty:
+            # 創建 4 列佈局
+            cols = st.columns(4)
+            for i, row in df_conflict.iterrows():
+                with cols[i % 4]:  # 防止超過4個報錯
+                    # 顏色邏輯
+                    direction = row['action']
+                    color = "#d32f2f" if direction == "看漲" else "#2e7d32"  # 紅漲綠跌
+
+                    # HTML 結構 (引用上面定義好的 CSS 類名)
+                    card_html = f"""
+        <div class="conflict-card" style="border-top: 4px solid {color};">
+        <div class="conflict-header">
+        <div class="conflict-symbol">{row['symbol'].upper()}</div>
+        <div class="conflict-direction" style="color: {color};">{direction}</div>
+        </div>
+        <div class="conflict-body">
+        <div class="conflict-item-left">
+        <div class="conflict-label">反指(散户)</div>
+        <div class="conflict-value" style="color: #333;">{int(row['dumb_net']):,}</div>
+        </div>
+        <div style="width: 1px; height: 20px; background-color: #ddd;"></div>
+        <div class="conflict-item-right">
+        <div class="conflict-label">正指(主力)</div>
+        <div class="conflict-value" style="color: {color};">{int(row['smart_net']):,}</div>
+        </div>
+        </div>
+        </div>
+        """
+                    st.markdown(card_html, unsafe_allow_html=True)
+        else:
+            st.info("今日市場平靜，無明顯正反博弈信號。")
+    else:
+        st.info("暫無對決數據，請運行後台計算腳本。")
+
+except Exception as e:
+    st.error(f"讀取對決數據失敗: {e}")
 
 
 

@@ -9,7 +9,6 @@ from sqlalchemy.exc import SQLAlchemyError
 from langchain.agents import create_agent
 import tushare as ts
 from datetime import datetime, timedelta
-import akshare as ak
 import streamlit as st
 
 # --- AI 模块 ---
@@ -601,18 +600,25 @@ PRODUCT_MAP = {
     'RB': '螺纹钢', 'HC': '热卷', 'J': '焦炭', 'JM': '焦煤', 'I': '铁矿石','WR': '线材',
     'SS': '不锈钢', 'SM': '锰硅', 'SF': '硅铁','NR': '20号胶','OP': '双胶纸','SP': '纸浆',
     # 有色/贵金属
-    'AU': '黄金', 'AG': '白银', 'CU': '铜', 'AL': '铝', 'ZN': '锌','AD': '铝合金',
-    'PB': '铅', 'NI': '镍', 'SN': '锡', 'AO': '氧化铝', 'LC': '碳酸锂', 'SI': '工业硅','PS': '多晶硅',
+    'AU': '黄金', 'AG': '白银', 'CU': '铜', 'AO': '氧化铝', 'AL': '铝', 'ZN': '锌','AD': '铝合金',
+    'PB': '铅', 'NI': '镍', 'SN': '锡', 'LC': '碳酸锂', 'SI': '工业硅','PS': '多晶硅',
     # 农产品
     'M': '豆粕', 'Y': '豆油', 'P': '棕榈油', 'OI': '菜油', 'RM': '菜粕','A': '豆一','B': '豆二',
     'C': '玉米', 'CS': '淀粉', 'CF': '棉花', 'SR': '白糖', 'AP': '苹果','LG': '原木','PF': '短纤',
     'JD': '鸡蛋', 'LH': '生猪', 'PK': '花生', 'CJ': '红枣','CY': '棉纱','PM': '普麦','WH': '强麦',
     # 能化
-    'SC': '原油', 'FU': '燃料油', 'PG': '液化气', 'TA': 'PTA', 'MA': '甲醇','BU': '沥青','LU': 'LU燃油','SH': '烧碱',
+    'SC': '原油', 'FU': '燃料油', 'PG': '液化气', 'TA': 'PTA', 'MA': '甲醇','BU': '沥青','LU': 'LU燃油','SH': '烧碱','RU': '橡胶',
     'PP': '聚丙烯', 'L': '塑料', 'V': 'PVC', 'EB': '苯乙烯', 'EG': '乙二醇','BZ': '纯苯','PL': '丙烯','PR': '瓶片',
     'UR': '尿素', 'SA': '纯碱', 'FG': '玻璃', 'PX': '对二甲苯', 'BR': 'BR橡胶'
 }
-
+ETF_MAP = {
+        '50ETF': '510050.SH', '上证50ETF': '510050.SH',
+        '300ETF': '510300.SH', '沪深300ETF': '510300.SH',
+        '500ETF': '510500.SH', '中证500ETF': '510500.SH',
+        '创业板ETF': '159915.SZ', '创业板': '159915.SZ', 'CYB': '159915.SZ',
+        '科创50ETF': '588000.SH', '科创板': '588000.SH', '科创50': '588000.SH',
+        '深100ETF': '159901.SZ'
+    }
 # 反向映射表 (中文 -> 代码)
 CN_TO_CODE = {v: k for k, v in PRODUCT_MAP.items()}
 
@@ -948,15 +954,25 @@ def get_comprehensive_market_data():
 #   核心功能：AI 专用 IV 查询工具
 # ==========================================
 
+# ==========================================
+#   核心功能：AI 专用 IV 查询工具（商品 + ETF 期权）
+# ==========================================
+
 @tool
 def get_commodity_iv_info(query: str):
     """
-    【期权专用】查询指定商品的隐含波动率(IV)数据。
+    【期权专用】查询指定商品或ETF的隐含波动率(IV)数据。
+
+    支持查询：
+    - 商品期权：螺纹钢、豆粕、白糖等
+    - ETF期权：50ETF、300ETF、500ETF、创业板ETF等
+
     逻辑：
     1. 默认返回：最新IV数值 + 近期变动趋势（节省资源）。
     2. 深度返回：只有当用户问题包含"IV等级"、"贵"、"便宜"、"分位"等词时，才计算IV Rank。
     """
-    if engine is None: return "❌ 数据库未连接"
+    if engine is None:
+        return "❌ 数据库未连接"
 
     # --- 1. 意图识别：判断用户是否需要 Rank 数据 ---
     keywords_rank = ['rank', '排名', '分位', '贵', '便宜', '位置', '历史', '高', '低', '水平']
@@ -965,7 +981,187 @@ def get_commodity_iv_info(query: str):
     # 决定查询天数：只要趋势查5天就够，要排名才查250天
     limit_days = 252 if need_rank else 5
 
-    # --- 2. 商品代码映射 (保持不变) ---
+    # --- 2. ETF 识别（新增逻辑）---
+    ETF_MAP = {
+        '50ETF': '510050.SH', '上证50ETF': '510050.SH', '上证50': '510050.SH',
+        '300ETF': '510300.SH', '沪深300ETF': '510300.SH', '沪深300': '510300.SH',
+        '500ETF': '510500.SH', '中证500ETF': '510500.SH', '中证500': '510500.SH',
+        '创业板ETF': '159915.SZ', '创业板': '159915.SZ', 'CYB': '159915.SZ',
+        '科创50ETF': '588000.SH', '科创板': '588000.SH', '科创50': '588000.SH',
+        '深100ETF': '159901.SZ', '深100': '159901.SZ'
+    }
+
+    etf_code = None
+    etf_name = None
+
+    # 【调试日志】打印原始查询
+    print(f"[ETF识别] 原始查询: {query}")
+
+    # 尝试匹配 ETF（支持模糊匹配）
+    query_upper = query.upper()
+    for name, code in ETF_MAP.items():
+        # 支持 "50ETF"、"50" 等多种输入
+        if name.upper() in query_upper or name.replace('ETF', '').upper() in query_upper:
+            etf_code = code
+            etf_name = name
+            print(f"[ETF识别] 匹配成功 - 名称: {name}, 代码: {code}")
+            break
+
+    # 也支持直接输入代码（如 510050、510300）
+    if not etf_code:
+        import re
+        match_code = re.search(r'(510\d{3}|159\d{3}|588\d{3})', query)
+        if match_code:
+            raw_code = match_code.group(1)
+            # 根据开头判断交易所
+            etf_code = f"{raw_code}.SZ" if raw_code.startswith('159') else f"{raw_code}.SH"
+            etf_name = f"{raw_code}ETF"
+            print(f"[ETF识别] 代码匹配成功 - {etf_code}")
+
+    # 【调试日志】打印识别结果
+    if etf_code:
+        print(f"[ETF识别] ✅ 最终结果 - 名称: {etf_name}, 代码: {etf_code}")
+    else:
+        print(f"[ETF识别] ❌ 未识别为ETF，将按商品期权处理")
+
+    # --- 3. 分支处理 ---
+    if etf_code:
+        # ========== ETF 期权查询 ==========
+        return _query_etf_iv(etf_code, etf_name, query, need_rank, limit_days)
+    else:
+        # ========== 商品期权查询（保持原逻辑）==========
+        return _query_commodity_iv(query, need_rank, limit_days)
+
+
+# ==========================================
+#   子函数 A: ETF 期权 IV 查询
+# ==========================================
+def _query_etf_iv(etf_code, etf_name, query, need_rank, limit_days):
+    """查询 ETF 期权的 IV 数据（从 etf_iv_history 表）"""
+    try:
+        # 【调试日志】打印查询信息
+        print(f"[ETF IV 查询] 标的: {etf_name}, 代码: {etf_code}, 查询天数: {limit_days}")
+
+        # 1. 【修复】直接查询历史 IV 数据（ETF不需要找主力合约）
+        sql_iv = f"""
+            SELECT REPLACE(trade_date, '-', '') as trade_date, iv 
+            FROM etf_iv_history 
+            WHERE etf_code = '{etf_code}' 
+            ORDER BY trade_date DESC 
+            LIMIT {limit_days}
+        """
+        df_iv = pd.read_sql(sql_iv, engine)
+
+        # 【调试日志】打印查询结果
+        print(f"[ETF IV 查询] 查到 {len(df_iv)} 条记录")
+        if len(df_iv) > 0:
+            print(f"[ETF IV 查询] 最新日期: {df_iv.iloc[0]['trade_date']}, IV: {df_iv.iloc[0]['iv']}")
+
+        # 2. 检查是否有数据
+        if df_iv.empty:
+            # 【增强错误提示】告知用户可能的原因
+            return f"""
+⚠️ 未找到 ETF【{etf_name}】的波动率数据。
+
+可能原因：
+1. 数据库中该 ETF 代码为: {etf_code}，请确认是否正确
+2. etf_iv_history 表中可能还没有该标的的数据
+3. 请检查数据采集脚本是否正常运行
+
+💡 提示：可以尝试查询其他 ETF（如"300ETF波动率"）来验证功能是否正常。
+"""
+
+        # 3. 提取最新日期和 IV
+        latest_date = df_iv.iloc[0]['trade_date']
+        date_str = str(latest_date).replace('-', '')
+        curr_iv = df_iv.iloc[0]['iv']
+
+        # 【调试日志】打印处理逻辑
+        print(f"[ETF IV 查询] 当前IV: {curr_iv}%, 是否需要Rank: {need_rank}")
+
+        # --- 分支 A: 仅回复近期趋势 (省流模式) ---
+        if not need_rank:
+            # 计算日变动
+            iv_change_text = "持平"
+            trend_text = "波动平稳"
+
+            if len(df_iv) > 1:
+                prev_iv = df_iv.iloc[1]['iv']
+                diff = curr_iv - prev_iv
+                if diff > 0.5:
+                    iv_change_text = f"大幅上升 (+{diff:.2f}%)"
+                elif diff > 0:
+                    iv_change_text = f"小幅回升 (+{diff:.2f}%)"
+                elif diff < -0.5:
+                    iv_change_text = f"大幅回落 ({diff:.2f}%)"
+                else:
+                    iv_change_text = f"微跌 ({diff:.2f}%)"
+
+            if len(df_iv) >= 5:
+                iv_5d_ago = df_iv.iloc[4]['iv']
+                diff_5d = curr_iv - iv_5d_ago
+                if diff_5d > 2:
+                    trend_text = "🌊 近期波动率显著放大，市场激情"
+                elif diff_5d < -2:
+                    trend_text = "💤 近期波动率持续走低，行情平淡"
+                else:
+                    trend_text = "➡️ 近一周波动率维持窄幅震荡"
+
+            return f"""
+📊 **{etf_name} ({etf_code}) 波动率速报**
+--------------------------------
+📅 日期: {date_str}
+🔥 **当前 IV: {curr_iv:.2f}%**
+📈 **较昨日: {iv_change_text}**
+🌊 **近期趋势**: {trend_text}
+--------------------------------
+💡 *提示: 如需查询IV历史排位或策略建议，请问"{etf_name}的IV贵吗？"或"{etf_name} IV排名"*
+            """
+
+        # --- 分支 B: 回复 Rank 和策略 (详细模式) ---
+        else:
+            max_iv = df_iv['iv'].max()
+            min_iv = df_iv['iv'].min()
+
+            if max_iv != min_iv:
+                iv_rank = (curr_iv - min_iv) / (max_iv - min_iv) * 100
+            else:
+                iv_rank = 0
+
+            if iv_rank < 20:
+                status = "📉 极低 (权利金便宜)"
+            elif iv_rank < 50:
+                status = "☁️ 偏低"
+            elif iv_rank < 80:
+                status = "📈 偏高"
+            else:
+                status = "🔥 极高 (权利金昂贵)"
+
+            return f"""
+📊 **{etf_name} ({etf_code}) 深度波动率分析**
+--------------------------------
+📅 日期: {date_str}
+🌊 **当前 IV: {curr_iv:.2f}%**
+🏆 **IV Rank: {iv_rank:.1f}% ({status})**
+
+🔍 统计周期: 过去 {len(df_iv)} 个交易日
+📺 历史最高: {max_iv:.2f}%
+📻 历史最低: {min_iv:.2f}%
+--------------------------------
+💡 *策略参考: 当前IV处于{'历史高位，权利金较贵，卖方策略具有统计上优势' if iv_rank > 50 else '历史低位，权利金便宜，买方策略风险收益比更佳'}。*
+            """
+
+    except Exception as e:
+        return f"ETF波动率查询发生错误: {e}"
+
+
+# ==========================================
+#   子函数 B: 商品期权 IV 查询（原有逻辑）
+# ==========================================
+def _query_commodity_iv(query, need_rank, limit_days):
+    """查询商品期权的 IV 数据（从 commodity_iv_history 表）"""
+
+    # 商品代码映射
     target_code = None
     target_name = query
     clean_query = re.sub(r'[^a-zA-Z]', '', query).upper()
@@ -981,15 +1177,17 @@ def get_commodity_iv_info(query: str):
                 target_name = name
                 break
 
+
     if not target_code:
         match = re.match(r'([a-zA-Z]+)', query)
-        if match: target_code = match.group(1).upper()
+        if match:
+            target_code = match.group(1).upper()
 
     if not target_code:
         return f"⚠️ 未找到商品【{query}】。"
 
     try:
-        # --- 3. 寻找主力合约 ---
+        # 寻找主力合约
         sql_main = f"""
             SELECT ts_code, close_price, REPLACE(trade_date, '-', '') as trade_date 
             FROM futures_price 
@@ -1006,8 +1204,7 @@ def get_commodity_iv_info(query: str):
         curr_price = df_main.iloc[0]['close_price']
         date_str = df_main.iloc[0]['trade_date']
 
-        # --- 4. 动态查询 IV 数据 ---
-        # 这里的 LIMIT 是动态的，大大减少了不必要的数据传输
+        # 查询 IV 数据
         sql_iv = f"""
             SELECT trade_date, iv 
             FROM commodity_iv_history 
@@ -1020,12 +1217,10 @@ def get_commodity_iv_info(query: str):
         if df_iv.empty:
             return f"⚠️ 合约【{main_contract}】暂无IV数据。"
 
-        # 基础数据
         curr_iv = df_iv.iloc[0]['iv']
 
-        # --- 分支 A: 仅回复近期趋势 (省流模式) ---
+        # --- 分支 A: 仅回复近期趋势 ---
         if not need_rank:
-            # 计算日变动
             iv_change_text = "持平"
             trend_text = "波动平稳"
 
@@ -1059,10 +1254,10 @@ def get_commodity_iv_info(query: str):
 📈 **较昨日: {iv_change_text}**
 🌊 **近期趋势**: {trend_text}
 --------------------------------
-💡 *提示: 如需查询IV历史排位或策略建议，请问“{target_name}的IV贵吗？”或“{target_name} IV排名”*
+💡 *提示: 如需查询IV历史排位或策略建议，请问"{target_name}的IV贵吗？"或"{target_name} IV排名"*
             """
 
-        # --- 分支 B: 回复 Rank 和策略 (详细模式) ---
+        # --- 分支 B: 回复 Rank 和策略 ---
         else:
             max_iv = df_iv['iv'].max()
             min_iv = df_iv['iv'].min()
@@ -1088,25 +1283,25 @@ def get_commodity_iv_info(query: str):
 🌊 **当前 IV: {curr_iv:.2f}%**
 🏆 **IV Rank: {iv_rank:.1f}% ({status})**
 
-📏 统计周期: 过去 {len(df_iv)} 个交易日
-🔺 历史最高: {max_iv:.2f}%
-🔻 历史最低: {min_iv:.2f}%
+🔍 统计周期: 过去 {len(df_iv)} 个交易日
+📺 历史最高: {max_iv:.2f}%
+📻 历史最低: {min_iv:.2f}%
 --------------------------------
 💡 *策略参考: 当前IV处于{'历史高位，权利金较贵，卖方策略具有统计上优势' if iv_rank > 50 else '历史低位，权利金便宜，买方策略风险收益比更佳'}。*
             """
 
     except Exception as e:
-        return f"数据查询发生错误: {e}"
+        return f"商品波动率查询发生错误: {e}"
 
 
 # --- AI 工具: 查期权到期 (高性能版) ---
 @tool
 def check_option_expiry_status(query: str):
     """
-    【期权专用】查询期权到期日及策略建议。
-    修复：内置依赖字典，增加 SQL 模糊查询兜底机制，确保 100% 查到数据。
+    【全能期权查询】查询 商品期权 或 ETF期权 的到期日。
+    修复：ETF期权查询适配了真实的数据库字段 (underlying, delist_date)。
     """
-    # --- 1. 防止上下文丢失的内置字典 ---
+    # --- 1. 内置字典 ---
     LOCAL_PRODUCT_MAP = {
         'IF': '沪深300', 'IH': '上证50', 'IM': '中证1000', 'IC': '中证500',
         'TS': '2年国债', 'TF': '5年国债', 'T': '10年国债', 'TL': '30年国债',
@@ -1115,110 +1310,140 @@ def check_option_expiry_status(query: str):
         'C': '玉米', 'CF': '棉花', 'SR': '白糖', 'AP': '苹果', 'JD': '鸡蛋',
         'LH': '生猪', 'PK': '花生', 'SC': '原油', 'FU': '燃油', 'PG': '液化气',
         'TA': 'PTA', 'MA': '甲醇', 'PP': '聚丙烯', 'L': '塑料', 'V': 'PVC',
-        'EB': '苯乙烯', 'EG': '乙二醇', 'UR': '尿素', 'SA': '纯碱', 'FG': '玻璃',
-        'PX': '对二甲苯', 'BR': '橡胶', 'LC': '碳酸锂', 'SI': '工业硅', 'AO': '氧化铝',
+        'EB': '苯乙烯', 'EG': '乙二醇', 'UR': '尿素', 'SA': '纯碱', 'FG': '玻璃','RU': '橡胶',
+        'PX': '对二甲苯', 'BR': 'BR橡胶', 'LC': '碳酸锂', 'SI': '工业硅', 'AO': '氧化铝',
         'SS': '不锈钢', 'SM': '锰硅', 'SF': '硅铁', 'WR': '线材', 'CU': '铜',
         'AL': '铝', 'ZN': '锌', 'PB': '铅', 'NI': '镍', 'SN': '锡', 'AU': '黄金', 'AG': '白银'
+    }
+
+    ETF_MAP = {
+        '50ETF': '510050.SH', '上证50ETF': '510050.SH',
+        '300ETF': '510300.SH', '沪深300ETF': '510300.SH',
+        '500ETF': '510500.SH', '中证500ETF': '510500.SH',
+        '创业板ETF': '159915.SZ', '创业板': '159915.SZ', 'CYB': '159915.SZ',
+        '科创50ETF': '588000.SH', '科创板': '588000.SH', '科创50': '588000.SH',
+        '深100ETF': '159901.SZ'
     }
 
     local_engine = get_db_engine()
     if local_engine is None: return "❌ 数据库未连接"
 
     try:
-        # --- 2. 解析查询 ---
         clean_query = re.sub(r'[^a-zA-Z0-9\u4e00-\u9fa5]', '', query).upper()
-        match_digits = re.search(r'(\d{3,4})', clean_query)
-        user_month = match_digits.group(1) if match_digits else None
 
-        text_part = re.sub(r'\d', '', clean_query)
-        product_code = None
-        product_name = text_part
+        # ==========================================
+        #  分支 A: ETF 期权查询 (使用新字段)
+        # ==========================================
+        etf_code = None
+        etf_name = None
 
-        # 查字典
-        if text_part in LOCAL_PRODUCT_MAP:
-            product_code = text_part
-            product_name = LOCAL_PRODUCT_MAP[text_part]
-        else:
-            for k, v in LOCAL_PRODUCT_MAP.items():
-                if v in text_part:
-                    product_code = k;
-                    product_name = v;
-                    break
-            if not product_code:
-                m_head = re.match(r'^([A-Z]+)', clean_query)
-                if m_head: product_code = m_head.group(1)
+        for name, code in ETF_MAP.items():
+            if name in clean_query:
+                etf_code = code;
+                etf_name = name;
+                break
 
-        if not product_code:
-            return f"⚠️ 未识别商品【{query}】。"
+        if not etf_code:
+            match_etf = re.search(r'(510\d{3}|159\d{3}|588\d{3})', clean_query)
+            if match_etf:
+                raw_code = match_etf.group(1)
+                etf_code = f"{raw_code}.SZ" if raw_code.startswith('159') else f"{raw_code}.SH"
+                etf_name = raw_code
 
-        # --- 3. 确定合约 Key ---
-        target_key = None
-        is_main_contract = False
+        if etf_code:
+            today_str = datetime.now().strftime('%Y%m%d')
 
-        if user_month:
-            # 用户指定 (如 09 -> 2509)
-            if len(user_month) <= 2:
-                curr_year = datetime.now().year % 100
-                target_key = f"{product_code}{curr_year}{int(user_month):02d}"
-            else:
-                target_key = f"{product_code}{user_month}"
-        else:
-            # 查主力 (过滤纯英文，只取带数字的)
-            is_main_contract = True
-            sql_main = f"""
-                SELECT ts_code 
-                FROM futures_price 
-                WHERE (ts_code LIKE '{product_code}%%' OR ts_code LIKE '{product_code.lower()}%%')
-                  AND ts_code REGEXP '[0-9]' 
-                ORDER BY trade_date DESC, oi DESC 
+            # 【核心修改】使用 underlying 和 delist_date
+            # 我们直接把 delist_date 重命名为 maturity_date，方便后面统一处理
+            sql_etf = f"""
+                SELECT DISTINCT delist_date as maturity_date 
+                FROM option_basic 
+                WHERE underlying = '{etf_code}' 
+                  AND delist_date >= '{today_str}'
+                ORDER BY delist_date ASC
                 LIMIT 1
             """
-            df_main = pd.read_sql(sql_main, local_engine)
-            if df_main.empty: return f"暂无【{product_name}】活跃合约。"
 
-            # 提取 Key (M2505.DCE -> M2505)
-            raw_code = df_main.iloc[0]['ts_code'].upper()
-            match = re.match(r'^([A-Z]+)(\d{3,4})', raw_code)
-            if match:
-                target_key = match.group(0)
+            try:
+                df_etf = pd.read_sql(sql_etf, local_engine)
+            except Exception as e:
+                return f"❌ ETF查询SQL错误: {e}"
+
+            if df_etf.empty:
+                return f"⚠️ 未找到 ETF【{etf_name} ({etf_code})】的期权到期日。\n(已查询表: option_basic, 字段: underlying='{etf_code}')"
+
+            expiry_date = df_etf.iloc[0]['maturity_date']
+            target_obj = f"{etf_name} ({etf_code}) 当月合约"
+
+        else:
+            # ==========================================
+            #  分支 B: 商品期权 (保持原有的健壮逻辑)
+            # ==========================================
+            text_part = re.sub(r'\d', '', clean_query)
+            product_code = None
+            product_name = text_part
+
+            if text_part in LOCAL_PRODUCT_MAP:
+                product_code = text_part;
+                product_name = LOCAL_PRODUCT_MAP[text_part]
             else:
-                target_key = raw_code.split('.')[0]
+                for k, v in LOCAL_PRODUCT_MAP.items():
+                    if v in text_part: product_code = k; product_name = v; break
+                if not product_code:
+                    m_head = re.match(r'^([A-Z]+)', clean_query)
+                    if m_head: product_code = m_head.group(1)
 
-        # --- 4. 获取到期日 (双保险机制) ---
+            if not product_code:
+                return f"⚠️ 未识别商品【{query}】，若是ETF请提供准确名称。"
 
-        # 策略 A: 查缓存 (速度快)
-        static_map = get_static_maturity_map()
-        expiry_date = static_map.get(target_key)
-        msg = "(Data: Cache)"
+            # 提取 Key
+            match_digits = re.search(r'(\d{3,4})', clean_query)
+            user_month = match_digits.group(1) if match_digits else None
 
-        # 策略 B: 缓存没命中? 用 SQL 模糊查询兜底! (绝对稳)
-        if pd.isnull(expiry_date):
-            # 这里的逻辑是：只要数据库里有 M2505 开头的期权，我就能查到
-            sql_direct = f"""
-                SELECT maturity_date FROM commodity_option_basic 
-                WHERE ts_code LIKE '{target_key}%%' 
-                   OR ts_code LIKE '{target_key.lower()}%%'
-                ORDER BY maturity_date ASC LIMIT 1
-            """
-            df_direct = pd.read_sql(sql_direct, local_engine)
+            target_key = None
+            is_main = False
 
-            if not df_direct.empty:
-                expiry_date = df_direct.iloc[0]['maturity_date']
-                # 再次尝试清洗日期格式，防止数据库里存的是字符串
-                try:
-                    expiry_date = pd.to_datetime(str(expiry_date))
-                except:
-                    pass
-                msg = "(Data: SQL Direct)"
+            if user_month:
+                if len(user_month) <= 2:
+                    curr = datetime.now().year % 100
+                    target_key = f"{product_code}{curr}{int(user_month):02d}"
+                else:
+                    target_key = f"{product_code}{user_month}"
             else:
-                return f"⚠️ 未找到合约【{target_key}】的期权到期日信息。\n(已尝试 Key: {target_key}%, 请确认该合约是否有上市期权)"
+                is_main = True
+                sql_m = f"""
+                    SELECT ts_code FROM futures_price 
+                    WHERE (ts_code LIKE '{product_code}%%' OR ts_code LIKE '{product_code.lower()}%%') 
+                    AND ts_code REGEXP '[0-9]' 
+                    ORDER BY trade_date DESC, oi DESC LIMIT 1
+                """
+                df_m = pd.read_sql(sql_m, local_engine)
+                if df_m.empty: return f"暂无【{product_name}】数据"
+                raw = df_m.iloc[0]['ts_code'].upper()
+                m = re.match(r'^([A-Z]+)(\d{3,4})', raw)
+                target_key = m.group(0) if m else raw.split('.')[0]
 
-        # --- 5. 结果处理 ---
+            # 查到期日
+            static_map = get_static_maturity_map()
+            expiry_date = static_map.get(target_key)
+
+            if pd.isnull(expiry_date):
+                sql_d = f"SELECT maturity_date FROM commodity_option_basic WHERE ts_code LIKE '{target_key}%%' OR ts_code LIKE '{target_key.lower()}%%' ORDER BY maturity_date ASC LIMIT 1"
+                df_d = pd.read_sql(sql_d, local_engine)
+                if not df_d.empty:
+                    expiry_date = df_d.iloc[0]['maturity_date']
+                else:
+                    return f"⚠️ 未找到合约【{target_key}】到期日。"
+
+            target_obj = f"{product_name} ({target_key})"
+
+        # ==========================================
+        #  统一计算
+        # ==========================================
         today = datetime.now()
-        expiry_date = pd.to_datetime(expiry_date)
+        # 兼容处理: 如果数据库里是数字(20250325)或字符串
+        expiry_date = pd.to_datetime(str(expiry_date))
         days_left = (expiry_date - today).days
-
-        contract_desc = f"{target_key} (主力)" if is_main_contract else target_key
 
         if days_left > 50:
             phase = "🌙 远期"; advice = "时间价值衰减慢，主要受隐含波动率影响。"
@@ -1232,16 +1457,17 @@ def check_option_expiry_status(query: str):
             phase = "💀 已过期"; advice = "合约已到期。"
 
         return f"""
-✅ **{product_name} ({contract_desc})**
-📅 到期: {expiry_date.strftime('%Y-%m-%d')} {msg}
-⏱️ 剩余: **{days_left}天** ({phase})
-💡 建议: {advice}
-        """
+    ✅ **{target_obj}**
+    📅 到期: {expiry_date.strftime('%Y-%m-%d')}
+    ⏱️ 剩余: **{days_left}天** ({phase})
+    💡 建议: {advice}
+            """
 
     except Exception as e:
-        return f"查询出错: {str(e)}"
+        return f"查詢出錯: {str(e)}"
 
 # --- 【新增/保留】高性能静态数据缓存 (12小时只查一次库) ---
+@st.cache_data(ttl=36000)
 def get_static_maturity_map():
     """
     【高速缓存】加载期权到期日。

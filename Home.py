@@ -3,7 +3,6 @@ import pandas as pd
 import data_engine as de
 import os
 import sys
-import plotly.express as px
 import auth_utils as auth
 from datetime import datetime, timedelta
 from kline_tools import analyze_kline_pattern
@@ -11,160 +10,193 @@ import time
 import extra_streamlit_components as stx
 from market_tools import get_market_snapshot, get_price_statistics
 from data_engine import get_commodity_iv_info, check_option_expiry_status
-
-# --- 1. 【关键修复】强制清除系统代理 (解决 SSL 报错) ---
-# 必须放在其他网络库加载之前
-for key in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"]:
-    if key in os.environ:
-        del os.environ[key]
-
 from captcha_utils import generate_captcha_image
 from sqlalchemy import text
 from dotenv import load_dotenv
 from knowledge_tools import search_investment_knowledge
-# --- AI 相关导入 (LangGraph 版) ---
+# --- AI 相关导入 ---
 from langchain_community.chat_models import ChatTongyi
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 
-# 1. 初始化环境
-load_dotenv(override=True)
-
-# 页面配置
-st.set_page_config(
-    page_title="爱波塔-懂期权的AI-陪你在市场奋斗",
-    page_icon="favicon.ico",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
-
-# B. 【核心修复】强制注入深色主题 CSS (解决手机端白屏问题)
-st.markdown("""
-<style>
-    /* 1. 强制全局背景为深空蓝黑 */
-    .stApp {
-        background-color: #0b1121 !important;
-        background-image: radial-gradient(circle at 50% 0%, #1e293b 0%, #0b1121 70%);
-        color: white !important; /* 强制全局文字变白 */
-        font-family: 'JetBrains Mono', 'Courier New', monospace;
-    }
-
- /* --- 修复：输入框样式 --- */
-    div[data-testid="stTextInput"] input {
-        background-color: #1e293b !important; /* 深色背景 */
-        color: #ffffff !important;             /* 白色文字 */
-        border: 1px solid #475569 !important;  /* 灰色边框 */
-        border-radius: 8px !important;
-    }
-    /* 输入框的占位符 (Placeholder) 颜色 */
-    div[data-testid="stTextInput"] input::placeholder {
-        color: #94a3b8 !important;
-    }
-
-    /* --- 修复：聊天气泡样式 --- */
-    /* 聊天消息容器 */
-    div[data-testid="stChatMessage"] {
-        background-color: rgba(30, 41, 59, 0.6) !important; /* 半透明深底 */
-        border: 1px solid rgba(255, 255, 255, 0.1);
-        border-radius: 12px;
-        padding: 15px;
-        margin-bottom: 10px;
-    }
-
-    /* 强制消息内的文字变白 */
-    div[data-testid="stChatMessage"] p,
-    div[data-testid="stChatMessage"] div,
-    div[data-testid="stChatMessage"] span {
-        color: #ffffff !important;
-    }
-
-    /* 3. 侧边栏文字强制变白 */
-    [data-testid="stSidebar"] {
-        background-color: #0f172a !important;
-    }
-    [data-testid="stSidebar"] p, [data-testid="stSidebar"] span, [data-testid="stSidebar"] div {
-        color: #cbd5e1 !important;
-    }
-
-    /* 4. 修复 Expander 在首页的样式 */
-    .streamlit-expanderHeader {
-        color: white !important;
-        background-color: rgba(255,255,255,0.05) !important;
-    }
-
-    /* 5. 隐藏顶部装饰条 */
-    header[data-testid="stHeader"] {
-        background-color: transparent !important;
-    }
-</style>
-""", unsafe_allow_html=True)
-
-
-# 1. 初始化 Cookie 管理器 (必须在页面内容之前)
-# 1. 初始化 Cookie 管理器（移除 @st.cache_resource）
-def get_manager():
-    return stx.CookieManager(key="master_cookie_manager")
-
-cookie_manager = get_manager()
-
-# 2. 获取 Cookies（首次可能为 None）
-cookies = cookie_manager.get_all() or {}
-
-# 【关键修改】使用 LangGraph 的预构建 Agent
 try:
     from langgraph.prebuilt import create_react_agent
 except ImportError:
     st.error("❌ 请先安装 LangGraph: `pip install langgraph`")
     st.stop()
 
-current_dir = os.path.dirname(os.path.abspath(__file__))
-sys.path.append(current_dir)
+# 1. 初始化环境
+load_dotenv(override=True)
 
-# 加载 CSS
-with open('style.css', encoding='utf-8') as f:
-    st.markdown(f'<style>{f.read()}</style>', unsafe_allow_html=True)
-
-# ==========================================
-#  【关键修复】 全局状态初始化 (必须放在最前面！)
-# ==========================================
-
+# --- 系统代理清理 ---
+for key in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"]:
+    if key in os.environ:
+        del os.environ[key]
 
 # ==========================================
-#  會話狀態初始化
+#  1. 页面配置 (必须在第一行) [修改点：改为 centered 布局]
 # ==========================================
-
-# 尝试从 Cookie 恢复登录
-# 3. 自动登录逻辑
-should_auto_login = (
-    not st.session_state.get('is_logged_in', False) and
-    not st.session_state.get('just_logged_out', False)
+st.set_page_config(
+    page_title="爱波塔-懂期权的AI-陪你在市场奋斗",
+    page_icon="favicon.ico",
+    layout="centered",
+    initial_sidebar_state="expanded"
 )
 
-if should_auto_login and cookies:
-    c_user = cookies.get("username", "").strip()
-    c_token = cookies.get("token", "").strip()
+# ==========================================
+#  2. 极简主义 CSS 注入 [修改点：新增卡片样式]
+# ==========================================
+st.markdown("""
+<style>
+     /* 1. 强制全局背景为深空蓝黑 */
+    .stApp {
+        background-color: #0b1121 !important;
+        background-image: radial-gradient(circle at 50% 0%, #1e293b 0%, #0b1121 70%);
+        color: white !important; /* 强制全局文字变白 */
+    }
+    /* --- 核心修复：拓宽中间主内容区域 --- */
+    /* 默认 centered 大概只有 730px，这里我们强制拓宽到 1000px 或更宽 */
+    [data-testid="stMainBlockContainer"] {
+        max-width: 65rem !important; /* 约 960px，您可以改成 65rem 或 70rem 甚至更宽 */
+        padding-left: 2rem;
+        padding-right: 2rem;
+    }
+/* --- 修复 1：找回侧边栏按钮 --- */
+    /* 不要隐藏整个 Header，否则按钮也没了。只把背景变透明 */
+    header[data-testid="stHeader"] {
+        background-color: transparent !important;
+    }
+    /* 隐藏顶部的彩虹装饰线条 */
+    [data-testid="stDecoration"] {
+        display: none;
+    }
+    
+    /* --- 修复 2：强制 AI 回答文字变白 --- */
+    /* 针对聊天气泡内的所有文本元素强制设为白色 */
+    [data-testid="stChatMessageContent"] p,
+    [data-testid="stChatMessageContent"] span,
+    [data-testid="stChatMessageContent"] div,
+    [data-testid="stChatMessageContent"] li {
+        color: #ffffff !important;
+        line-height: 1.6;
+    }
+    /* 稍微调亮 Markdown 中的加粗文字 */
+    [data-testid="stChatMessageContent"] strong {
+        color: #fcf7f7 !important; /* 金黄色高亮，更易读 */
+    }
 
-    if c_user and c_token:
+/* --- [核心修改] 快捷指令卡片样式：深色背景 + 亮色文字 --- */
+    .suggestion-card {
+        background-color: #1E2329; /* 改为深色背景 */
+        border: 1px solid #2d333b; /* 微亮的边框 */
+        border-radius: 10px;
+        padding: 15px;
+        text-align: center;
+        cursor: pointer;
+        transition: all 0.2s ease-in-out;
+        height: 100%;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        align-items: center;
+        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1); /* 加点阴影更有质感 */
+    }
+  /* --- [关键修复] 按钮样式重写 (解决白字白底问题) --- */
+    /* 针对所有的 st.button */
+    div.stButton > button {
+        background-color: #1E2329 !important; /* 强制深色背景 */
+        color: #e6e6e6 !important;            /* 强制亮色文字 */
+        border: 1px solid #31333F !important; /* 边框 */
+        border-radius: 8px !important;
+        padding: 1.2rem !important;           /* 增加内边距 */
+        height: auto !important;              /* 高度自适应 */
+        white-space: pre-wrap !important;     /* 关键：允许文字换行 (\n) */
+        width: 100% !important;               /* 填满列宽 */
+        transition: all 0.2s ease-in-out !important;
+        font-family: "Source Sans Pro", sans-serif !important;
+    }
+
+    /* 按钮 Hover (悬停) 状态 */
+    div.stButton > button:hover {
+        border-color: #ff4b4b !important;     /* 红色边框 */
+        background-color: #262c36 !important; /* 稍微变亮的背景 */
+        color: #ffffff !important;            /* 纯白文字 */
+        transform: translateY(-2px);          /* 微微上浮效果 */
+    }
+    
+    /* 按钮 Active/Focus (点击) 状态 */
+    div.stButton > button:active, div.stButton > button:focus {
+        background-color: #262c36 !important;
+        color: #ffffff !important;
+        border-color: #ff4b4b !important;
+        box-shadow: none !important;
+    }
+    .card-icon { font-size: 24px; margin-bottom: 8px; }
+    
+    /* 标题文字：亮白色 */
+    .card-title { 
+        font-weight: bold; 
+        font-size: 15px; 
+        color: #e6e6e6 !important; /* 强制亮白 */
+        margin-bottom: 4px;
+    }
+    /* 描述文字：稍暗的灰色 */
+    .card-desc { 
+        font-size: 13px; 
+        color: #8b949e !important; /* 强制灰白 */
+    }
+
+    /* 调整底部输入框样式 */
+    .stChatInput {
+        padding-bottom: 20px;
+    }
+        /* 3. 侧边栏文字强制变白 */
+    [data-testid="stSidebar"] {
+        background-color: #0f172a !important;
+    }
+    [data-testid="stSidebar"] p, [data-testid="stSidebar"] span, [data-testid="stSidebar"] div {
+        color: #cbd5e1 !important;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+
+# ==========================================
+#  3. Auth & State 初始化 (保持不变)
+# ==========================================
+def get_manager(): return stx.CookieManager(key="master_cookie_manager")
+
+
+cookie_manager = get_manager()
+cookies = cookie_manager.get_all() or {}
+
+# 尝试从 Cookie 恢复登录
+# 【关键修复 1】增加 'just_logged_out' 判断，如果刚点了登出，绝不执行自动登录
+should_auto_login = not st.session_state.get('is_logged_in', False) and not st.session_state.get('just_logged_out',
+                                                                                                 False)
+
+if should_auto_login and cookies:
+    c_user = cookies.get("username")
+    c_token = cookies.get("token")
+
+    if c_user and c_token and c_user.strip() != "":
+        # 去数据库验证 Token
         if auth.check_token(c_user, c_token):
             st.session_state['is_logged_in'] = True
             st.session_state['user_id'] = c_user
-            st.toast(f"欢迎回来，{c_user}", icon="👋")
-            time.sleep(0.3)
+            st.toast(f"欢迎回来，{c_user} (自动登录)")
+            time.sleep(0.3)  # 給一點 UI 反應時間
             st.rerun()
-        else:
-            # Token过期，清除Cookie
-            cookie_manager.delete("username", key="auto_del_user")
-            cookie_manager.delete("token", key="auto_del_token")
 
 # 【关键修复 2】如果已经是登出后的重跑，现在可以重置标记了
 # 这样下次用户刷新页面(F5)时，如果 Cookie 还在(虽然应该删了)，还能尝试登录，或者单纯重置状态
-# 4. 重置登出标记
 if st.session_state.get('just_logged_out', False):
     st.session_state['just_logged_out'] = False
 
-# 5. 初始化登录状态
+# 只有第一次运行时才初始化，如果已经登录了，不要重置它
 if 'is_logged_in' not in st.session_state:
     st.session_state['is_logged_in'] = False
     st.session_state['user_id'] = None
+    st.session_state['username'] = None
 
 # --- 1. 初始化验证码 (如果还没生成过) ---
 if 'captcha_code' not in st.session_state:
@@ -180,9 +212,174 @@ def refresh_captcha():
     st.session_state['captcha_code'] = code
 
 
+# 初始化聊天记录
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+
+
 # ==========================================
-#  側邊欄：統一的登錄/用戶中心
+#  4. AI Agent 定义 (完全保留您的核心逻辑)
 # ==========================================
+def get_agent(current_user="访客"):  # 传入 current_user
+    # ... (这里保留您原来的 prompt 和 tools) ...
+    tools = [analyze_kline_pattern, search_investment_knowledge, get_market_snapshot, get_commodity_iv_info,
+             get_price_statistics, check_option_expiry_status]
+    if not os.getenv("DASHSCOPE_API_KEY"):
+        st.error("❌ 未配置 API KEY");
+        return None
+
+    llm = ChatTongyi(model="qwen-plus", temperature=0.2)
+
+    # 动态日期
+    today = datetime.now()
+    today_str = today.strftime('%Y%m%d')
+    last_week_start = (today - timedelta(days=today.weekday() + 7)).strftime('%Y%m%d')
+    last_week_end = (today - timedelta(days=today.weekday() + 1)).strftime('%Y%m%d')
+
+    system_message = f"""
+    你是一位专业的K线技术分析师和期权专家，遵守顺势交易的纪律。 
+
+    【当前时间基准】：
+    - 今天是：{today.strftime('%Y年%m月%d日')} (数据库查询请使用: {today_str})
+    - 上周区间参考：{last_week_start} 至 {last_week_end}
+
+    【工具使用指南】：
+    1. 被问当前/最新价格数据时 -> 用 `get_market_snapshot`。
+    2. 被问 **历史某一天** 或 **指定日期** 的价格-> 必须用 `get_price_statistics`。
+       调用此工具时，`start_date` 和 `end_date` 参数必须是 **YYYYMMDD** 格式的字符串（例如 '20231001'）。
+    3. 被问股票或期货的技术面、K线形态和趋势时-> 用 `analyze_kline_pattern`
+    4. 需要期权知识、期权策略-> 用 `search_investment_knowledge`
+    5. 被问期权波动率数据时 -> 用 `get_commodity_iv_info`。
+    6. 需要查询期权到期日时 -> 用 `check_option_expiry_status`。
+
+    【你的行为准则】
+    1. 避免同时调用超过2个工具，除非用户明确要求全面分析。
+    2. 根据用户的风险偏好（激进/保守）给他喜欢的策略，如果是保守的，就不要给激进的建议。
+    3. 如果用户问题不具体，可以反问客户，多用反问来引导用户做交易决策。
+    4. 当用户询问某个品种（如碳酸锂、中证1000）的“走势”、“技术分析”、“K线形态”时，你要调用工具`analyze_kline_pattern`来回答。
+    5. 当用户问期权或K线实战应用问题，优先以知识库工具为信息参考。
+    6. 期权策略的建议，需要考虑波动率和距离到期日，使用工具`check_option_expiry_status`和知识库搭配回答
+    7. 给出明确的操作建议，根据用户风险偏好（激进/保守）给他喜欢的策略，如果是保守的，就不要给激进建议。
+    8. 如果在知识库工具中看到 Markdown 格式的图片链接（例如 ![描述](URL) ），请直接将这个链接包含在你的回答中。
+
+    【回答格式】
+   先给结论（看多/看空/震荡），然后解释理由。技术分析只说K线，期权策略的使用要结合技术面和IV。
+    """
+
+    try:
+        return create_react_agent(llm, tools, state_modifier=system_message)
+    except TypeError:
+        try:
+            return create_react_agent(llm, tools, messages_modifier=system_message)
+        except:
+            return create_react_agent(llm, tools)
+
+
+# ==========================================
+#  5. 核心逻辑处理函数 [修改点：封装成函数以便复用]
+# ==========================================
+def process_user_input(prompt_text):
+    """处理用户输入（无论是来自输入框还是快捷卡片）"""
+    # 1. 显示用户消息
+    st.session_state.messages.append({"role": "user", "content": prompt_text})
+    with st.chat_message("user"):
+        st.markdown(prompt_text)
+
+    # 2. 生成 AI 回复
+    current_user = st.session_state.get('user_id', "访客")
+    agent = get_agent(current_user)
+
+    if agent:
+        with st.chat_message("assistant"):
+            with st.spinner("⚡ AI正在思考..."):
+                try:
+                    # 构建 LangChain 消息历史
+                    history = [
+                        HumanMessage(content=m["content"]) if m["role"] == "user" else AIMessage(content=m["content"])
+                        for m in st.session_state.messages]
+
+                    # 注入用户画像 (保留您原有的逻辑)
+                    user_profile = de.get_user_profile(current_user)
+                    risk = user_profile.get('risk_preference', '未知')
+
+                    system_instruction = SystemMessage(content=f"""
+                                        【当前对话元数据】
+                                        - 用户名：{current_user}
+                                        - 风险偏好：{risk}
+                                        """)
+                    # 将 system_instruction 加入 history
+                    history.insert(0, system_instruction)
+
+                    response = agent.invoke(
+                        {"messages": history},
+                        config={"recursion_limit": 50}
+                    )
+                    ai_response = response["messages"][-1].content
+
+                    # 打字机效果显示
+                    placeholder = st.empty()
+                    full_response = ""
+                    #  for chunk in ai_response.split():  # 简单模拟流式 (由于 invoke 是同步的，这里只是为了视觉效果)
+                    #   full_response += chunk + " "
+                    #   placeholder.markdown(full_response + "▌")
+                    #   time.sleep(0.01)
+                    placeholder.markdown(full_response)
+
+                    st.session_state.messages.append({"role": "ai", "content": ai_response})
+
+                    # 更新记忆
+                    if hasattr(de, 'update_user_memory_async'):
+                        de.update_user_memory_async(current_user, prompt_text)
+
+                except Exception as e:
+                    st.error(f"分析中断: {e}")
+
+
+# ==========================================
+#  6. 页面渲染：Welcome Screen (空状态) [修改点：新增]
+# ==========================================
+def show_welcome_screen():
+    st.markdown("<br><br>", unsafe_allow_html=True)
+    st.markdown("<h1 style='text-align: center; color: #fff;'>🤓 嗨，我是爱波塔</h1>", unsafe_allow_html=True)
+    st.markdown("<p style='text-align: center; color: #8b949e;'>陪你在金融市场奋斗</p>",
+                unsafe_allow_html=True)
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    # --- 快捷指令卡片 ---
+    col1, col2, col3 = st.columns(3)
+
+    # 定义点击回调
+    # --- 关键修改：定义回调函数 ---
+    # 这个函数会在页面重新加载前优先执行，确保数据这就位
+    def set_prompt_callback(text):
+        st.session_state.pending_prompt = text
+
+    with col1:
+        st.button("📉 波动率分析-50ETF期权现在贵吗？",
+                     use_container_width=True,
+                     on_click=set_prompt_callback,
+                     args=("50ETF期权现在的IV高吗？",)
+         )
+
+    with col2:
+        st.button("📅 期权学习-什么是飞龙在天？",
+                     use_container_width=True,
+                     on_click=set_prompt_callback,
+                     args=("期权的飞龙在天是什么策略？",)
+         )
+
+    with col3:
+        st.button("🌍 K线分析-帮我看今天的白银",
+                     use_container_width=True,
+                     on_click=set_prompt_callback,
+                     args=("分析今天白银K线",)
+         )
+
+# ==========================================
+#  7. 主程序入口
+# ==========================================
+
+# A. 侧边栏：登录/设置 (折叠起来保持清爽)
 with st.sidebar:
     if not st.session_state['is_logged_in']:
         # --- A. 未登錄狀態 ---
@@ -195,21 +392,18 @@ with st.sidebar:
                 if st.form_submit_button("登录", type="primary", use_container_width=True):
                     success, msg, token = auth.login_user(u, p)
                     if success:
-                        # 【改进】过期时间改为30天
-                        expires = datetime.now() + timedelta(days=30)
-
-                        # 【改进】使用时间戳key避免冲突
-                        timestamp = int(time.time() * 1000)
-                        cookie_manager.set("username", u, expires_at=expires,
-                                           key=f"login_user_{timestamp}")
-                        cookie_manager.set("token", token, expires_at=expires,
-                                           key=f"login_token_{timestamp}")
-
                         st.session_state['is_logged_in'] = True
                         st.session_state['user_id'] = u
 
-                        st.success("登录成功！")
-                        time.sleep(0.8)  # 给Cookie更多时间写入
+                        # 【關鍵修改】寫入 Cookie (設置 7 天過期)
+                        # expires_at 是 datetime 對象
+                        expires = datetime.now() + timedelta(days=7)
+
+                        cookie_manager.set("username", u, expires_at=expires, key="set_user_cookie")
+                        cookie_manager.set("token", token, expires_at=expires, key="set_token_cookie")
+
+                        st.success("登录成功")
+                        time.sleep(0.5)
                         st.rerun()
                     else:
                         st.error(msg)
@@ -262,20 +456,20 @@ with st.sidebar:
                         st.session_state['user_id'] = new_user
 
                         # 設置 Cookie (保持登錄狀態)
-                        expires = datetime.now() + timedelta(days=30)  # 改为30天
-                        timestamp = int(time.time() * 1000)
-                        cookie_manager.set("username", new_user, expires_at=expires,
-                                           key=f"reg_user_{timestamp}")
-                        cookie_manager.set("token", token, expires_at=expires,
-                                           key=f"reg_token_{timestamp}")
+                        expires = datetime.now() + timedelta(days=7)
+                        cookie_manager.set("username", new_user, expires_at=expires, key="reg_set_user")
+                        cookie_manager.set("token", token, expires_at=expires, key="reg_set_token")
 
-                        time.sleep(0.2)
+                        time.sleep(0.3)
                         st.rerun()
 
+                        # 3. 清理注册时用的验证码 (防止返回后还在)
+                        if 'captcha_code' in st.session_state:
+                            del st.session_state['captcha_code']
 
                         # 4. 强制刷新页面
                         # 刷新后，Streamlit 会重新运行，发现 logged_in=True，就会直接显示主页，而不是登录页
-
+                        st.rerun()
                     except Exception as e:
                         st.error(f"自动登录失败，请尝试手动登录: {e}")
                 else:
@@ -302,322 +496,47 @@ with st.sidebar:
         except:
             pass
 
-        # 登出按钮逻辑修复
         if st.button("登出", type="primary"):
-            user = st.session_state['user_id']
-
-            # 【修复】使用 de.engine 而不是 engine
-            try:
-                with de.engine.connect() as conn:
-                    conn.execute(
-                        text("UPDATE users SET session_token=NULL WHERE username=:u"),
-                        {"u": user}
-                    )
-                    conn.commit()
-            except:
-                pass
-
-            # 【改进】使用时间戳key
-            timestamp = int(time.time() * 1000)
-            cookie_manager.delete("username", key=f"logout_user_{timestamp}")
-            cookie_manager.delete("token", key=f"logout_token_{timestamp}")
-
             st.session_state['is_logged_in'] = False
             st.session_state['user_id'] = None
+
+            # 【關鍵修改 3】設置一個“剛登出”的標記，防止 Rerun 後立馬被自動登錄捕獲
             st.session_state['just_logged_out'] = True
 
-            st.success("已登出")
+            # 【關鍵修改】刪除 Cookie
+            cookie_manager.delete("username", key="del_user_cookie")
+            cookie_manager.delete("token", key="del_token_cookie")
+
             time.sleep(0.3)
             st.rerun()
 
-    st.markdown("---")
-
-
-# ==========================================
-#  AI Agent 初始化 (LangGraph 版)
-# ==========================================
-def get_agent(user_name="访客"):
-    # 1. 定义工具箱
-    tools = [analyze_kline_pattern, search_investment_knowledge, get_market_snapshot, get_commodity_iv_info, get_price_statistics,check_option_expiry_status]
-
-    # 2. LLM
-    if not os.getenv("DASHSCOPE_API_KEY"):
-        st.error("未配置 API KEY")
-        return None
-
-    llm = ChatTongyi(model="qwen-plus", temperature=0.2)
-    # 1. 动态计算当前日期，让 AI 有时间概念
-    today = datetime.now()
-    today_str = today.strftime('%Y%m%d')
-    # 2. 计算上周/上月的参考日期，给 AI 做参考
-    last_week_start = (today - timedelta(days=today.weekday() + 7)).strftime('%Y%m%d')
-    last_week_end = (today - timedelta(days=today.weekday() + 1)).strftime('%Y%m%d')
-
-    # 3. 升级版 System Prompt
-    # 3. 系统提示词 (System Prompt)
-    system_message = f"""
-    你是一位专业的K线技术分析师和期权专家，遵守顺势交易的纪律。 
-    
-    【当前时间基准】：
-    - 今天是：{today.strftime('%Y年%m月%d日')} (数据库查询请使用: {today_str})
-    - 上周区间参考：{last_week_start} 至 {last_week_end}
-
-    【工具使用指南】：
-    1. 被问当前/最新价格数据时 -> 用 `get_market_snapshot`。
-    2. 被问 **历史某一天** 或 **指定日期** 的价格-> 必须用 `get_price_statistics`。
-       调用此工具时，`start_date` 和 `end_date` 参数必须是 **YYYYMMDD** 格式的字符串（例如 '20231001'）。
-    3. 被问股票或期货的技术面、K线形态和趋势时-> 用 `analyze_kline_pattern`
-    4. 需要期权知识、期权策略-> 用 `search_investment_knowledge`
-    5. 被问期权波动率数据时 -> 用 `get_commodity_iv_info`。
-    6. 需要查询期权到期日时 -> 用 `check_option_expiry_status`。
-
-
-
-    【你的行为准则】
-    1. 避免同时调用超过2个工具，除非用户明确要求全面分析。
-    2. 根据用户的风险偏好（激进/保守）给他喜欢的策略，如果是保守的，就不要给激进的建议。
-    3. 如果用户问题不具体，可以反问客户，多用反问来引导用户做交易决策。
-    4. 当用户询问某个品种（如碳酸锂、中证1000）的“走势”、“技术分析”、“K线形态”时，你要调用工具`analyze_kline_pattern`来回答。
-    5. 当用户问期权或K线实战应用问题，优先以知识库工具为信息参考。
-    6. 期权策略的建议，需要考虑波动率和距离到期日，使用工具`check_option_expiry_status`和知识库搭配回答
-    7. 给出明确的操作建议，根据用户风险偏好（激进/保守）给他喜欢的策略，如果是保守的，就不要给激进建议。
-    8. 如果在知识库工具中看到 Markdown 格式的图片链接（例如 ![描述](URL) ），请直接将这个链接包含在你的回答中。
-
-
-    【回答格式】
-   先给结论（看多/看空/震荡），然后解释理由。技术分析只说K线，期权策略的使用要结合技术面和IV。
-
-    """
-
-    # 4. 创建 Agent (自动适配参数名)
-    try:
-        # 尝试使用新版参数 state_modifier
-        agent = create_react_agent(llm, tools, state_modifier=system_message)
-    except TypeError:
-        # 如果报错，尝试使用旧版参数 messages_modifier
-        try:
-            agent = create_react_agent(llm, tools, messages_modifier=system_message)
-        except TypeError:
-            # 如果还不行，就不传 modifier，先保证不崩
-            agent = create_react_agent(llm, tools)
-
-    return agent
-
-
-# --- 首页内容 ---
-
-# ==========================================
-#  (新) 顶部 AI 操盘手 (普通输入框模式)
-# ==========================================
-
-if st.session_state['is_logged_in']:
-    # === 已登錄：顯示完整功能 ===
-    current_user = st.session_state['user_id']
-    st.caption(f"正在為 **{current_user}** 提供個性化服務...")
-
-    # 1. 初始化聊天记录
-    if "messages" not in st.session_state:
+    st.divider()
+    if st.button("🗑️ 清空对话历史", use_container_width=True):
         st.session_state.messages = []
+        st.rerun()
 
 
-    # 2. 定义回调函数 (核心魔法)
-    def submit_query():
-        """
-        当用户按回车或点击发送时触发：
-        1. 把输入框的内容转存到 'current_query' 变量
-        2. 把输入框清空
-        """
-        if st.session_state.ai_query_input:  # 如果输入框不为空
-            st.session_state.current_query = st.session_state.ai_query_input
-            st.session_state.ai_query_input = ""  # 清空输入框
+# B. 处理卡片点击产生的 Pending Prompt [修改点：处理快捷指令]
+if "pending_prompt" in st.session_state:
+    prompt = st.session_state.pending_prompt
+    del st.session_state.pending_prompt  # 消费掉，防止循环
+    process_user_input(prompt)
+    st.rerun()  # 重新加载以显示新消息
 
-
-    # 初始化中间变量
-    if "current_query" not in st.session_state:
-        st.session_state.current_query = None
-
-    # 3. 输入区域 (绑定回调)
-    col_input, col_btn = st.columns([4, 1])
-
-    with col_input:
-        # 注意：这里绑定了 on_change=submit_query，按回车会自动触发
-        st.text_input(
-            "请输入您的问题...",
-            key="ai_query_input",
-            label_visibility="collapsed",
-            placeholder="我是陈老师分身，你可以问实战问题（例如：50ETF现在能买期权吗）...",
-            on_change=submit_query
-        )
-
-    with col_btn:
-        # 注意：这里绑定了 on_click=submit_query，点击也会触发
-        st.button("发送", type="primary", use_container_width=True, on_click=submit_query)
-
-    # 4. 处理逻辑 (只检查 current_query)
-    # 只有当回调函数把内容存进 current_query 时，才执行 AI
-    if st.session_state.current_query:
-        prompt = st.session_state.current_query
-
-        # --- 立即清除 current_query，防止刷新页面后重复执行 ---
-        st.session_state.current_query = None
-
-        # --- 下面是正常的 AI 处理逻辑 (和之前一样) ---
-        st.chat_message("user").markdown(prompt)
-        st.session_state.messages.append({"role": "user", "content": prompt})
-
-        # 获取 Agent
-        # 注意：这里要获取当前登录用户
-        current_user = st.session_state.get('user_id', "访客")
-        agent = get_agent(current_user)
-
-        if agent:
-            with st.chat_message("assistant"):
-                with st.spinner("AI 正在思考..."):
-                    try:
-                        # 构建历史
-                        history = [HumanMessage(content=m["content"]) if m["role"] == "user" else AIMessage(
-                            content=m["content"]) for m in st.session_state.messages[:-1]]
-                        history.append(HumanMessage(content=prompt))
-
-                        # 注入用户画像 (可选，之前写的)
-                        user_profile = de.get_user_profile(current_user)
-                        risk = user_profile.get('risk_preference', '未知')
-                        assets = user_profile.get('focus_assets', '暂无')
-
-                        # 2. 构建一条"系统指令"，强行塞给 AI
-                        # 这比 system_prompt 更管用，因为它是当前对话的一部分
-                        system_instruction = SystemMessage(content=f"""
-                                            【当前对话元数据】
-                                            - 用户名：{current_user}
-                                            - 风险偏好：{risk}
-                                            """)
-
-                        # 调用 Agent
-                        response = agent.invoke(
-                            {"messages": history},
-                            config={"recursion_limit": 50}
-                        )
-                        ai_response = response["messages"][-1].content
-
-                        st.markdown(ai_response)
-                        st.session_state.messages.append({"role": "ai", "content": ai_response})
-
-                        # 更新记忆
-                        if hasattr(de, 'update_user_memory_async'):
-                            de.update_user_memory_async(current_user, prompt)
-
-                    except Exception as e:
-                        st.error(f"分析失败: {e}")
-
-    with st.expander("查看历史对话记录"):
-        for msg in st.session_state.messages:
-            role_label = "👤 用户" if msg["role"] == "user" else "🤖 AI"
-            st.markdown(f"**{role_label}:** {msg['content']}")
-            st.markdown("---")
-
+# C. 主界面渲染 [修改点：根据是否有消息切换视图]
+if not st.session_state.messages:
+    # 场景 1：没有消息 -> 显示欢迎页 (Hero Section)
+    show_welcome_screen()
 else:
-    # === 未登錄：顯示鎖定狀態 ===
-    st.warning("🔒 此功能僅對會員開放。請在左側登錄後使用。")
+    # 场景 2：有消息 -> 显示聊天历史
+    for msg in st.session_state.messages:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
 
-st.markdown("---")
-
-# --- 外资动向卡片 ---
-st.caption("### 🌍 外资动向 (摩根/瑞银/乾坤)")
-
-# 读库
-try:
-    # 获取最新日期
-    latest_f_date = pd.read_sql("SELECT MAX(trade_date) FROM foreign_capital_analysis", de.engine).iloc[0, 0]
-
-    if latest_f_date:
-        df_foreign = pd.read_sql(f"SELECT * FROM foreign_capital_analysis WHERE trade_date='{latest_f_date}'",
-                                 de.engine)
-
-        if not df_foreign.empty:
-            # 使用列布局展示卡片
-            cols = st.columns(4)
-            for i, row in df_foreign.iterrows():
-                # 循环使用列
-                with cols[i % 4]:
-                    # --- 【新增】清洗機構名稱 ---
-                    # 去除 (代客)、（代客）等後綴
-                    cleaned_brokers = row['brokers'].replace('（代客）', '').replace('(代客)', '')
-
-                    color = "#d32f2f" if row['direction'] == "做多" else "#2e7d32"
-
-                    st.markdown(f"""
-                                        <div class="metric-card" style="border-top: 3px solid {color};">
-                                            <div class="metric-label">{row['symbol'].upper()}</div>
-                                            <div class="metric-value" style="color:{color}">{row['direction']}</div>
-                                            <div class="metric-delta" style="font-size:0.8rem; color:#888;">
-                                               {cleaned_brokers} </div>
-                                            <div style="font-size:0.8rem; margin-top:5px; color:#3b3b3b;">
-                                               淨量: {int(row['total_net_vol']):,}
-                                            </div>
-                                        </div>
-                                        """, unsafe_allow_html=True)
-        else:
-            st.info("今日外资无明显共振操作。")
+# D. 底部输入框 (Sticky Footer) [修改点：使用 st.chat_input]
+if prompt := st.chat_input("欢迎问任何期权、K线或实战交易的问题..."):
+    if not st.session_state['is_logged_in']:
+        st.warning("🔒 请先在左侧侧边栏登录")
     else:
-        st.info("暂无外资分析数据，请运行 calc_foreign_capital.py。")
-
-except Exception as e:
-    st.error(f"读取外资数据失败: {e}")
-
-st.markdown("---")
-
-# --- 新增：多空巔峰對決 (Smart vs Dumb) ---
-st.caption("### ⚔️ 多空巅峰对决")
-st.caption("筛选逻辑：机构与散户差异最大的持仓对比")
-
-# 1. 獲取數據 (直接讀表)
-try:
-    # 檢查表裡是否有數據
-    latest_c_date = pd.read_sql("SELECT MAX(trade_date) FROM market_conflict_daily", de.engine).iloc[0, 0]
-
-    if latest_c_date:
-        df_conflict = pd.read_sql(f"SELECT * FROM market_conflict_daily WHERE trade_date='{latest_c_date}'", de.engine)
-
-        if not df_conflict.empty:
-            # 創建 4 列佈局
-            cols = st.columns(4)
-            for i, row in df_conflict.iterrows():
-                with cols[i % 4]:  # 防止超過4個報錯
-                    # 顏色邏輯
-                    direction = row['action']
-                    color = "#d32f2f" if direction == "看漲" else "#2e7d32"  # 紅漲綠跌
-
-                    # HTML 結構 (引用上面定義好的 CSS 類名)
-                    card_html = f"""
-        <div class="conflict-card" style="border-top: 4px solid {color};">
-        <div class="conflict-header">
-        <div class="conflict-symbol">{row['symbol'].upper()}</div>
-        <div class="conflict-direction" style="color: {color};">{direction}</div>
-        </div>
-        <div class="conflict-body">
-        <div class="conflict-item-left">
-        <div class="conflict-label">反指(散户)</div>
-        <div class="conflict-value" style="color: #333;">{int(row['dumb_net']):,}</div>
-        </div>
-        <div style="width: 1px; height: 20px; background-color: #ddd;"></div>
-        <div class="conflict-item-right">
-        <div class="conflict-label">正指(主力)</div>
-        <div class="conflict-value" style="color: {color};">{int(row['smart_net']):,}</div>
-        </div>
-        </div>
-        </div>
-        """
-                    st.markdown(card_html, unsafe_allow_html=True)
-        else:
-            st.info("今日市場平靜，無明顯正反博弈信號。")
-    else:
-        st.info("暫無對決數據，請運行後台計算腳本。")
-
-except Exception as e:
-    st.error(f"讀取對決數據失敗: {e}")
-
-st.markdown("---")
-
-# 2. 【新增】全市场风云榜
-
-st.markdown("---")
+        process_user_input(prompt)
+        st.rerun()  # 确保界面更新

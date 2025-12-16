@@ -305,14 +305,14 @@ def analyze_kline_pattern(query: str, trade_date: str = None):
                 if atr_ratio <= max_atr_multiple:
 
                     # A. 向上突破 (需配合中阳线/大阳线)
-                    if close > box_high and body_pct > 0.7:
+                    if close > box_high and body_pct > 0.6:
                         msg = f"【{p_name}突破】，压缩比{atr_ratio:.1f}ATR)"
                         patterns.append(msg)
                         breakout_found = True
                         break # 找到最有爆发力的就不找了
 
                     # B. 向下破位
-                    if close < box_low and body_pct > 0.7:
+                    if close < box_low and body_pct > 0.6:
                         msg = f"【{p_name}破位】，压缩比{atr_ratio:.1f}ATR)"
                         patterns.append(msg)
                         breakout_found = True
