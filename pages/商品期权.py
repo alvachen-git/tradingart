@@ -116,6 +116,44 @@ with st.sidebar:
     else:
         selected_opt = st.selectbox("合约代码", options)
 
+    # 客服卡片 CSS 样式
+    st.markdown("""
+        <style>
+            .contact-card {
+                background-color: #1E2329;
+                border: 1px solid #31333F;
+                border-radius: 8px;
+                padding: 15px;
+                margin-top: 10px;
+                text-align: center;
+            }
+            .contact-title {
+                font-size: 14px;
+                font-weight: bold;
+                color: #e6e6e6;
+                margin-bottom: 8px;
+            }
+            .contact-item {
+                font-size: 13px;
+                color: #8b949e;
+                margin-bottom: 4px;
+            }
+            .wechat-highlight {
+                color: #00e676; /* 微信绿 */
+                font-weight: bold;
+            }
+        </style>
+
+        <div class="contact-card">
+            <div class="contact-title">🤝 客服联系</div>
+            <div class="contact-item">微信：<span class="wechat-highlight">trader-sec</span></div>
+            <div class="contact-item">电话：<span class="wechat-highlight">17521591756</span></div>
+            <div class="contact-item" style="font-size: 12px; margin-top: 8px;">
+                沪ICP备2021018087号-2
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
 if selected_opt and "主力连续" in selected_opt:
     target_contract = variety.upper()
     is_continuous = True
