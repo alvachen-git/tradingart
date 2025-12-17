@@ -564,7 +564,7 @@ with st.sidebar:
             <div class="contact-item">微信：<span class="wechat-highlight">trader-sec</span></div>
             <div class="contact-item">电话：<span class="wechat-highlight">17521591756</span></div>
             <div class="contact-item" style="font-size: 12px; margin-top: 8px;">
-                版本: v0.1.0 (Beta)
+                沪ICP备2021018087号-2
             </div>
         </div>
         """, unsafe_allow_html=True)
