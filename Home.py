@@ -83,6 +83,22 @@ st.markdown("""
     [data-testid="stChatMessageContent"] strong {
         color: #fcf7f7 !important; /* 金黄色高亮，更易读 */
     }
+    
+    /* --- [关键修复 1] 代码块样式修复 --- */
+    /* 强制代码块背景为深色，文字为亮色 */
+    [data-testid="stChatMessageContent"] code {
+        background-color: #2b313e !important;
+        color: #e6e6e6 !important;
+        border: 1px solid #3b4252;
+        border-radius: 4px;
+        padding: 0.2rem 0.4rem;
+    }
+    /* 多行代码块容器 */
+    [data-testid="stChatMessageContent"] pre {
+        background-color: #2b313e !important;
+        border: 1px solid #3b4252;
+        border-radius: 8px;
+    }
 
 /* --- [核心修改] 快捷指令卡片样式：深色背景 + 亮色文字 --- */
     .suggestion-card {
@@ -312,7 +328,7 @@ def process_user_input(prompt_text):
 
                     response = agent.invoke(
                         {"messages": history},
-                        config={"recursion_limit": 50}
+                        config={"recursion_limit": 100}
                     )
                     ai_response = response["messages"][-1].content
 
@@ -369,7 +385,7 @@ def show_welcome_screen():
          )
 
     with col3:
-        st.button("🌍 K线分析-帮我看今天的白银",
+        st.button("🎯 K线分析-帮我看今天的白银",
                      use_container_width=True,
                      on_click=set_prompt_callback,
                      args=("分析今天白银K线",)
@@ -510,11 +526,48 @@ with st.sidebar:
             time.sleep(0.3)
             st.rerun()
 
-    st.divider()
+
     if st.button("🗑️ 清空对话历史", use_container_width=True):
         st.session_state.messages = []
         st.rerun()
 
+    # 客服卡片 CSS 样式
+    st.markdown("""
+        <style>
+            .contact-card {
+                background-color: #1E2329;
+                border: 1px solid #31333F;
+                border-radius: 8px;
+                padding: 15px;
+                margin-top: 10px;
+                text-align: center;
+            }
+            .contact-title {
+                font-size: 14px;
+                font-weight: bold;
+                color: #e6e6e6;
+                margin-bottom: 8px;
+            }
+            .contact-item {
+                font-size: 13px;
+                color: #8b949e;
+                margin-bottom: 4px;
+            }
+            .wechat-highlight {
+                color: #00e676; /* 微信绿 */
+                font-weight: bold;
+            }
+        </style>
+
+        <div class="contact-card">
+            <div class="contact-title">🤝 客服联系</div>
+            <div class="contact-item">微信：<span class="wechat-highlight">trader-sec</span></div>
+            <div class="contact-item">电话：<span class="wechat-highlight">17521591756</span></div>
+            <div class="contact-item" style="font-size: 12px; margin-top: 8px;">
+                版本: v0.1.0 (Beta)
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
 
 # B. 处理卡片点击产生的 Pending Prompt [修改点：处理快捷指令]
 if "pending_prompt" in st.session_state:

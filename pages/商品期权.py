@@ -2,7 +2,8 @@ import streamlit as st
 import plotly.graph_objects as go
 import pandas as pd
 from lightweight_charts.widgets import StreamlitChart
-from realtime_tools import fetch_sina_minute_trend
+from realtime_tools import fetch_minute_trend
+from streamlit_autorefresh import st_autorefresh
 import sys
 import os
 import re
@@ -149,12 +150,103 @@ def get_chart_data(code):
         return None, None
 
 
+# ==============================================================================
+# 🔥【核心修改区】定义局部刷新函数 (放在主逻辑 if target_contract 之前)
+# ==============================================================================
+@st.fragment(run_every=300)  # 👈 关键：每60秒只重新运行这个函数内部，不刷新整个网页
+def render_realtime_chart(symbol):
+    """
+    这是一个独立的 UI 片段，负责绘制实时分时图。
+    它会自动每 60 秒刷新一次，或者点击按钮手动刷新。
+    """
+    # 布局：标题 + 刷新按钮
+    col_title, col_btn = st.columns([8, 2])
+    with col_title:
+        st.subheader(f"当日分时走势")
+    with col_btn:
+        if st.button("🔄 刷新", key=f"btn_refresh_{symbol}", use_container_width=True):
+            st.rerun()
+
+    # 1. 获取数据 (因为 realtime_tools 里加了 cache，这里很快)
+    df_trend = fetch_minute_trend(symbol)
+
+    if not df_trend.empty:
+        # --- 计算动态 Y 轴范围 ---
+        p_min = df_trend['close'].min()
+        p_max = df_trend['close'].max()
+        p_range = p_max - p_min
+        if p_range == 0: p_range = p_max * 0.01
+        y_lower = p_min - (p_range * 0.2)
+        y_upper = p_max + (p_range * 0.2)
+
+        # --- 美化 X 轴标签 ---
+        df_trend['time_display'] = df_trend['date'].apply(
+            lambda x: x.split(' ')[-1][:5] if ' ' in str(x) else str(x))
+
+        # 2. 绘制分时线
+        fig_trend = go.Figure()
+        fig_trend.add_trace(go.Scatter(
+            x=df_trend['date'],
+            y=df_trend['close'],
+            mode='lines',
+            name='最新价',
+            line=dict(color='#2962FF', width=2),
+            hovertemplate='%{y:.2f}<extra></extra>'
+        ))
+
+        # 3. 计算涨跌信息
+        last_price = df_trend.iloc[-1]['close']
+        last_time = df_trend.iloc[-1]['date'].split(' ')[-1]
+        open_price = df_trend.iloc[0]['close']
+        chg = last_price - open_price
+        chg_pct = (chg / open_price) * 100
+        color_code = "#ef232a" if chg >= 0 else "#14b143"
+        sign = "+" if chg >= 0 else ""
+
+        # 4. 图表布局
+        fig_trend.update_layout(
+            title=dict(
+                text=f"<b>{last_price}</b> <span style='color:{color_code};'>({sign}{chg:.1f} / {sign}{chg_pct:.2f}%)</span> <span style='font-size:12px;color:#999'>🕒 {last_time}</span>",
+                font=dict(size=20),
+                x=0, y=1
+            ),
+            height=320,
+            margin=dict(l=10, r=10, t=40, b=10),
+            xaxis=dict(
+                type='category',
+                tickmode='auto',
+                nticks=6,
+                tickangle=0,
+                showgrid=False,
+                linecolor='#333',
+                ticktext=df_trend['time_display'].iloc[::len(df_trend) // 6].tolist(),
+                tickfont=dict(size=10, color="#666")
+            ),
+            yaxis=dict(
+                range=[y_lower, y_upper],
+                showgrid=True,
+                gridcolor='rgba(128,128,128,0.1)',
+                side='right',
+                tickfont=dict(size=10, color="#666"),
+                zeroline=False
+            ),
+            template="plotly_white",
+            paper_bgcolor='rgba(0,0,0,0)',
+            plot_bgcolor='rgba(0,0,0,0)',
+            hovermode="x unified"
+        )
+        st.plotly_chart(fig_trend, use_container_width=True)
+    else:
+        st.info(f"💤 暂无 {symbol} 的实时分时数据")
+
+    st.divider()
+
 # 4. 绘图逻辑
 if target_contract:
     df_kline, df_iv = get_chart_data(target_contract)
 
     if df_kline is not None and not df_kline.empty:
-        st.subheader(f"{target_contract} 价格与波动率图")
+        st.subheader(f"{target_contract} ")
 
         # --- 【新增功能】IV Rank 仪表盘 (仅主力连续显示) ---
         if is_continuous and df_iv is not None and not df_iv.empty:
@@ -171,24 +263,29 @@ if target_contract:
             else:
                 iv_rank = 0
 
-            if iv_rank < 15:
-                status = "🟢 极低 (买方有利)"
-            elif iv_rank < 50:
-                status = "🔵 偏低"
-            elif iv_rank < 80:
+            if iv_rank < 20:
+                status = "🟢 偏低 (买方有利)"
+            elif iv_rank < 60:
+                status = "🔵 正常"
+            elif iv_rank < 85:
                 status = "🟠 偏高"
             else:
                 status = "🔴 极高 (卖方有利)"
 
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("当前 IV", f"{curr_iv:.2f}%")
-            c2.metric("IV Rank (年)", f"{iv_rank:.1f}%", help="当前IV在过去一年中的百分位水平")
+            c2.metric("IV Rank (年)", f"{iv_rank:.1f}", help="当前IV在过去一年中的百分位水平")
             c3.metric("历史最高 / 最低", f"{max_iv:.1f}% / {min_iv:.1f}%")
             c4.info(f"📊 状态: **{status}**")
-
-
             st.divider()  # 分割线，下面接着显示历史 K 线
+
+            # 🔥【核心修改区】在这里调用刚才定义的局部刷新函数
+            # 注意：不再需要 st_autorefresh 插件，@st.fragment 会自动处理
+            render_realtime_chart(target_contract)
+
+
         # --- K线数据处理 ---
+        st.subheader(f"历史日线与波动率")
         chart_k = df_kline.rename(columns={'trade_date': 'time'})
         chart_k['time'] = pd.to_datetime(chart_k['time']).dt.strftime('%Y-%m-%d')
         chart_k = chart_k[['time', 'open', 'high', 'low', 'close']]
