@@ -35,7 +35,8 @@ pro = ts.pro_api()
 
 
 # ==========================================
-#  新增：AkShare 广期所工业硅 (si) 专用补丁
+#  新增：AkShare 广期所(GFEX) 全品种专用补丁
+#  覆盖品种：si(工业硅), lc(碳酸锂), ps(多晶硅), pt(铂金), pd(钯金)
 # ==========================================
 def get_gfex_function():
     """自动查找正确的广期所函数名"""
@@ -47,20 +48,24 @@ def get_gfex_function():
     return None
 
 
-def fetch_si_via_akshare(date_str):
+def fetch_gfex_patch(date_str):
     """
-    专门用于修补 si 数据
-    逻辑：AkShare抓取 -> 清洗宽表 -> 转长表 -> 聚合 -> 复用 save_to_db 入库
+    广期所全品种补录函数
+    逻辑：AkShare抓取 -> 筛选目标品种 -> 清洗宽表 -> 转长表 -> 聚合 -> 复用 save_to_db 入库
     """
-    print(f" [*] [补丁] 正在通过 AkShare 修补广期所 si 数据 {date_str} ...", end="")
+    # 定义我们要补录的广期所品种列表
+    TARGET_VARIETIES = ['si', 'lc', 'ps', 'pt', 'pd']
+    target_str = "|".join(TARGET_VARIETIES)  # 用于正则匹配，如 "si|lc|ps|pt|pd"
+
+    print(f" [*] [补丁] 正在通过 AkShare 修补广期所数据 ({target_str}) {date_str} ...", end="")
     try:
         func = get_gfex_function()
         if not func: return
 
-        # 1. 调用接口
+        # 1. 调用接口 (AkShare 会一次性返回该交易所当天的所有数据)
         raw_data = func(date=date_str)
 
-        # 2. 处理字典/DataFrame 兼容性 (解决 dict has no attribute empty 报错)
+        # 2. 处理字典/DataFrame 兼容性
         df = pd.DataFrame()
         if isinstance(raw_data, dict):
             dfs = []
@@ -90,14 +95,17 @@ def fetch_si_via_akshare(date_str):
         }
         df = df.rename(columns=rename_dict)
 
-        # 4. 筛选 si
+        # 4. 【核心修改】筛选目标品种 (使用正则匹配 si, lc, ps 等)
         if 'ts_code' not in df.columns: return
-        df = df[df['ts_code'].str.contains('si', case=False, na=False)]
+
+        # 这里的正则意思是：只要 ts_code 包含 si 或 lc 或 ps... (忽略大小写)
+        df = df[df['ts_code'].str.contains(target_str, case=False, na=False)]
+
         if df.empty:
-            print(" [-] 无 si 数据")
+            print(f" [-] 无相关品种数据")
             return
 
-        # 5. 宽表转长表 (拆解三榜合一: 成交榜、买榜、卖榜混在同一行的问题)
+        # 5. 宽表转长表 (拆解三榜合一)
         expected_cols = ['vol_party_name', 'vol', 'vol_chg',
                          'long_party_name', 'long_vol', 'long_chg',
                          'short_party_name', 'short_vol', 'short_chg']
@@ -141,7 +149,7 @@ def fetch_si_via_akshare(date_str):
             df_combined[c] = df_combined[c].astype(str).str.replace(',', '', regex=False)
             df_combined[c] = pd.to_numeric(df_combined[c], errors='coerce').fillna(0)
 
-        # 提取纯代码 (si2501 -> si)
+        # 提取纯代码 (si2501 -> si, lc2501 -> lc)
         df_combined['ts_code'] = df_combined['ts_code'].apply(lambda x: re.sub(r'\d+', '', str(x)).lower().strip())
 
         # 7. 聚合与计算
@@ -157,6 +165,8 @@ def fetch_si_via_akshare(date_str):
         save_data = df_final[db_cols].copy()
 
         # 9. 复用原本的 save_to_db (享受内存优化)
+        # 注意：save_to_db 内部会根据传入的品种(ts_code)自动删除旧数据
+        # 所以如果 Tushare 抓了一部分 lc，这里传入新的 lc 会覆盖掉 Tushare 的，保证数据是 AkShare 的完整版
         save_to_db(save_data, date_str)
 
         # 清理内存
@@ -222,13 +232,13 @@ def fetch_and_save_tushare(date_str, exchange):
             print(" [-] Tushare 无数据", end="")
 
         # ==========================================
-        #  修改处：在 Tushare 逻辑执行完后，插入补丁
+        #  修改处：在 Tushare 逻辑执行完后，启动广期所补丁
         # ==========================================
         if exchange == 'GFEX':
-            # 无论 Tushare 有没有抓到数据，都尝试用 AkShare 补录 si
-            # 因为 Tushare 经常只给 lc 而不给 si
+            # 这里的补丁现在会覆盖 Tushare 可能不完整的数据 (si, lc, ps, pt, pd)
+            # 以 AkShare 官网数据为准
             print("")  # 换行
-            fetch_si_via_akshare(date_str)
+            fetch_gfex_patch(date_str)
 
     except Exception as e:
         print(f" [!] 异常: {e}")
@@ -241,7 +251,8 @@ def save_to_db(df, date_str):
         symbols_str = "', '".join(symbols)
 
         with engine.connect() as conn:
-            # 先删除旧数据 (例如：如果 AkShare 抓到了 si，这里会删除旧的 si 记录，不会影响 lc)
+            # 先删除旧数据 (防止重复)
+            # 如果是 AkShare 补录，会删除同名品种，覆盖旧数据
             sql = f"DELETE FROM futures_holding WHERE trade_date='{date_str}' AND ts_code IN ('{symbols_str}')"
             conn.execute(text(sql))
             conn.commit()
@@ -297,9 +308,10 @@ def run_job(start_date, end_date):
 
 if __name__ == "__main__":
     today = datetime.now().strftime('%Y%m%d')
-    start = (datetime.now() - timedelta(days=1)).strftime('%Y%m%d')
+    start = (datetime.now() - timedelta(days=2)).strftime('%Y%m%d')
 
-    # start = '20251126' # 补录起始日
+    # 若要补录旧数据，可手动修改 start
+    # start = '20251126'
 
     print(f"开始任务: {start} -> {today}")
     run_job(start, today)

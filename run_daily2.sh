@@ -19,8 +19,8 @@ echo ">>> [1/3] 开始更新期货席位数据..." >> update.log
 echo ">>> [2/3] 开始更新美股价格数据..." >> update.log
 /usr/bin/python3 update_stock_tiingo.py >> update.log 2>&1
 
-echo ">>> [2/3] 开始更新美股新闻数据..." >> update.log
-/usr/bin/python3 update_news.py >> update.log 2>&1
+echo ">>> [3/3] 开始更新债券收益数据..." >> update.log
+/usr/bin/python3 update_bond_data.py >> update.log 2>&1
 
 # 7. 结束
 echo "✅ 任务结束: $(date)" >> update.log
