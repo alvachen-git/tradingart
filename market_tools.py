@@ -147,7 +147,7 @@ def get_price_statistics(query_list: str, start_date: str, end_date: str):
 def get_market_snapshot(query: str):
     """
     【最新行情查詢】
-    用於查詢當前最新價格
+    用於查询最新价格
     輸入：品種名稱（如 "豆粕"、"茅台"）。
     """
     if engine is None: return "數據庫未連接"
@@ -170,8 +170,8 @@ def get_market_snapshot(query: str):
         row = df.iloc[0]
         price = row.get('close') or row.get('close_price')
         date = row['trade_date']
-        return f"📍 **{query} 最新行情**\n日期: {date}\n價格: {price}\n(如需更多歷史數據請詢問具體時間段)"
+        return f"📍 **{query} 最新行情**\n日期: {date}\n价格: {price}\n(如需更多历史数据请询问具体时间段)"
 
     except Exception as e:
-        return f"查詢錯誤: {e}"
+        return f"查询错误: {e}"
 
