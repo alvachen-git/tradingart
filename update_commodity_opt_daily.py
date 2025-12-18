@@ -144,4 +144,4 @@ if __name__ == "__main__":
     # 场景 2: 首次修复/补全数据 (建议先运行这个！)
     # 补全最近 30 天，确保 M, IO 等数据都齐了
     #print(">>> 开始执行全市场期权数据补全...")
-    #run_update_task(mode='history', days_back=300)
+    #run_update_task(mode='history', days_back=5)
