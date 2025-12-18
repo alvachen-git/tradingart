@@ -498,6 +498,7 @@ if not df_monitor.empty:
         with st.expander("📖 数据说明", expanded=False):
             st.markdown("""
     **指标解释：**
+    - **IV = Implied volatility（隐含波动率）
     - **IV Rank**：目前隐含波动率在最近一年中的百分位排名
     - **散户变动**：（反向指标）某些散户多的期货商净持仓变化
     - **机构变动**：（正向指标）某些机构强的期货商净持仓变化

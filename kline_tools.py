@@ -34,8 +34,8 @@ engine = get_db_engine()
 def analyze_kline_pattern(query: str, trade_date: str = None):
     """
     【K线形态计算器】
-    根据用户输入的商品，分析其最近（或指定日期）的 K 线形态，判断多空方向。
-    包含：单根K线形状（大阳/大阴/影线）、吞噬形态、趋势强弱、是否有转折K线。
+    分析指定商品的K线形态、趋势结构及多空信号。
+    适用于回答技术面、走势、形态等问题。
 
     参数:
     - query: 品种名称，如 "白银", "50ETF"

@@ -91,10 +91,6 @@ with st.sidebar:
     current_code = selected_option.split(' ')[0]
     current_name = COMMODITIES[current_code].split(' (')[0]
 
-    st.write("")
-    if st.button("刷新數據 :material/refresh:", use_container_width=True):
-        st.cache_datast.cache_data.clear()
-        st.rerun()
 
     st.markdown("---")
     # 使用 HTML 渲染自定义客服框

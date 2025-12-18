@@ -45,9 +45,9 @@ def clean_date_str(date_str: str) -> str:
 @tool(args_schema=PriceStatsInput)
 def get_price_statistics(query_list: str, start_date: str, end_date: str):
     """
-    【區間行情統計工具】
-    用於統計某段時間內的：最高價、最低價、區間漲跌幅。
-    適用於回答："上個月最高價多少"、"上週誰漲得好"、"寧德時代今年表現" 等問題。
+    【区间行情統計工具】
+    用於統計某段時間內的：最高价、最低价、區区间漲跌幅。
+    适用于回答："上月最高价多少"、"上周誰漲得好"等问题。
     """
     if engine is None: return "❌ 數據庫連接失敗，請檢查 .env 配置"
 
