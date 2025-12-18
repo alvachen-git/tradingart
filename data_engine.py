@@ -1115,7 +1115,6 @@ def _query_etf_iv(etf_code, etf_name, query, need_rank, limit_days):
 📈 **较昨日: {iv_change_text}**
 🌊 **近期趋势**: {trend_text}
 --------------------------------
-💡 *提示: 如需查询IV历史排位或策略建议，请问"{etf_name}的IV贵吗？"或"{etf_name} IV排名"*
             """
 
         # --- 分支 B: 回复 Rank 和策略 (详细模式) ---
