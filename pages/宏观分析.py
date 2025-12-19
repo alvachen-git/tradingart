@@ -13,6 +13,17 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 root_dir = os.path.dirname(current_dir)
 sys.path.append(root_dir)
 
+# ============================================================
+# 页面配置
+# ============================================================
+
+st.set_page_config(
+    page_title="爱波塔-宏观分析",
+    page_icon="favicon.ico",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
 # 加载 CSS (注意路径)
 css_path = os.path.join(root_dir, 'style.css')
 with open(css_path, encoding='utf-8') as f:

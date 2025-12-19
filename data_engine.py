@@ -3,6 +3,7 @@ import numpy as np
 import re
 import os
 from sqlalchemy import create_engine, text
+from kline_tools import analyze_kline_pattern
 from dotenv import load_dotenv
 from langchain_core.tools import tool
 from sqlalchemy.exc import SQLAlchemyError
@@ -371,7 +372,7 @@ def generate_ai_report_agent(rank_df, expert_data, date_str, commodity_name):
     chat = ChatTongyi(model="qwen-turbo", temperature=0.3)
 
     # 2. 准备工具箱
-    tools = [query_broker_history]
+    tools = [query_broker_history,analyze_kline_pattern]
 
     # 3. 准备提示词
     # 提取排行榜数据
@@ -402,23 +403,18 @@ def generate_ai_report_agent(rank_df, expert_data, date_str, commodity_name):
     system_prompt = f"""
     你是一位资深交易员，遵守顺势交易的纪律。你的任务是撰写《{commodity_name} 行情复盘》，帮助投资者看清市场。
 
-    【专家观点系统说明】
-    你将获得一个“专家观点分数”，范围从 -2 到 2：
-    * 2: 强烈看涨 (做多信号强烈)
-    * 1: 看涨
-    * 0: 中性/震荡
-    * -1: 看跌
-    * -2: 强烈看跌 (做空信号强烈)
 
-    【你的任务】
+
+     【你的任务】
     1. 首先，使用工具 `query_broker_history` 查询榜单上亏损最严重的【{top_loser}】（反向指标）的近期操作。
-    2. 然后，使用工具 `query_broker_history` 查询榜单上东方财富期货和中信建投期货最近的净持仓，因为这两个是反指标，如果他们今天净持仓是多头增加，那代表行情可能继续跌，如果净持仓是多头减少，那代表行情可能继续涨，而在给客户的报告里不要把这两个期货商名字写出来，可以用反指标这词代替。
-    3. 再来，结合【专家观点分数】（这是核心依据，权重占 70%）和你的查询结果（作为验证或反驳），生成分析。
-    4. 如果反向指标的操作方向与专家观点相反（例如专家看涨，反向指标在做空），则信心增强；如果一致，则提示风险。
+    2. 然后，使用工具 `query_broker_history` 查询榜单上东方财富期货和中信建投期货最近的净持仓，因为这两个是反指标，如果他们今天净持仓是多头增加，那代表行情可能继续跌，如果净持仓是多头减少，那代表行情可能继续涨。
+    3. 结合【专家观点分数】或者工具`analyze_kline_pattern`和你的查询结果（作为验证或反驳），生成分析。
+    4. 如果专家没有给出观点，必须调用工具来分析行情取代专家观点 ->用 `analyze_kline_pattern`
+
 
     【输出要求】
-    * 给出明确的多空方向建议。
-    * 引用专家分数作为论据，但不要把专家的分数说出来，也不要把专家占你判断权重的70%说出来。
+    * 结合行情分析和期货商持仓情况，综合给出明确的多空方向建议。
+    * 在给客户的报告里不要把东方财富期货和中信建投期货的名字写出来，可以用反指标这词代替
     * 文字排版整齐，表达方式不要太学术，要平易近人，带点幽默。
     * 字数 500 字以内。
     """
@@ -657,43 +653,60 @@ def get_product_code(raw_code):
 def check_expiry_validity(row, current_date_str):
     """
     逻辑：
-    1. 中金所期权 (IF/IH/IM/IO/HO/MO)：不做限制，全部保留 (return True)。
+    1. 中金所期权 (IF/IH/IM/IO/HO/MO)：
+       【硬规则】只要当前日期到了当月 15 号 (含)，就强制切换到下月合约。
+       (例如今天是 12月15日，IF2512 必须下榜，IF2601 上榜)
+
     2. 商品期权：通常在期货月份的前一个月上旬到期。
-       如果 (估算到期日 - 当前日期) <= 2天，则过滤掉。
+       保留原有逻辑：(估算到期日 - 当前日期) <= 1天 则过滤。
     """
     try:
-        # A. 【特例】中金所期权直接放行
-        # 注意：前面的代码可能已经把 IO 映射为了 IF，所以这里把两类代号都加上以防万一
-        if row['product'] in ['IF', 'IH', 'IM', 'IO', 'HO', 'MO']:
-            return True
-
-        # B. 商品期权：检查是否临近到期
-        # 1. 解析年份和月份 (RB2505 -> 2025, 5)
+        # 1. 解析年份和月份 (RB2505 -> 2025, 5 / IF2512 -> 2025, 12)
         m = re.search(r'(\d{3,4})$', row['join_key'])
-        if not m: return False
+        if not m: return True  # 解析失败默认保留
+
         ym = m.group(1)
         if len(ym) == 3: ym = '2' + ym  # 处理 505 -> 2505
 
-        year = int('20' + ym[:2])
-        month = int(ym[2:])
+        contract_year = int('20' + ym[:2])
+        contract_month = int(ym[2:])
 
-        # 构造期货合约的大致月份时间 (每月15号作为基准)
-        fut_date = pd.Timestamp(year=year, month=month, day=15)
         current_date = pd.to_datetime(current_date_str)
+        curr_year = current_date.year
+        curr_month = current_date.month
+        curr_day = current_date.day
 
-        # 2. 估算商品期权到期日
-        # 商品期权通常在期货月份的前一个月上旬到期
-        # 例如 RB2505，期权在 4月初到期。这里保守按前一个月 5 号计算。
-        expiry_approx = (fut_date - pd.DateOffset(months=1)).replace(day=12)
+        # === 分支 A: 金融期货/期权 (IF/IH/IM/IO/HO/MO) ===
+        if row['product'] in ['IF', 'IH', 'IM', 'IO', 'HO', 'MO']:
+            # 规则：如果是"过去"的合约，肯定不要
+            if curr_year > contract_year: return False
+            if curr_year == contract_year and curr_month > contract_month: return False
 
-        # 3. 计算剩余天数
-        days_left = (expiry_approx - current_date).days
+            # 规则：如果是"当月"合约，且今天 >= 15号，强制过滤
+            if curr_year == contract_year and curr_month == contract_month:
+                if curr_day >= 15:
+                    return False
 
-        # 必须大于 2 天才算有效
-        return days_left > 2
+            # 其他情况（下个月及以后的合约），保留
+            return True
 
-    except:
-        return True  # 解析失败默认不过滤，防止误杀
+        # === 分支 B: 商品期货/期权 ===
+        else:
+            # 商品期权通常在期货月份的前一个月上旬到期
+            # 例如 RB2505 (5月)，期权在 4月初到期
+            fut_date = pd.Timestamp(year=contract_year, month=contract_month, day=15)
+            # 估算期权到期日为：交割月前一个月的 12 号
+            expiry_approx = (fut_date - pd.DateOffset(months=1)).replace(day=12)
+
+            # 计算剩余天数
+            days_left = (expiry_approx - current_date).days
+
+            # 必须大于 1 天才算有效
+            return days_left > 1
+
+    except Exception as e:
+        print(f"Expiry check error: {e}")
+        return True  # 出错时默认不过滤，防止数据全空
 
 @st.cache_data(ttl=3600)
 def get_comprehensive_market_data():
@@ -900,8 +913,8 @@ def get_comprehensive_market_data():
 
         for c in ['iv', 'iv_prev', 'iv_5d']:
             df_final[c] = df_final[c].fillna(0)
-        df_final['当日IV变动'] = df_final['iv'] - df_final['iv_prev']
-        df_final['5日IV变动'] = df_final['iv'] - df_final['iv_5d']
+        df_final['当日IV变动'] = np.where(df_final['iv_prev'] > 0.0001, df_final['iv'] - df_final['iv_prev'], 0)
+        df_final['5日IV变动'] = np.where(df_final['iv_5d'] > 0.0001, df_final['iv'] - df_final['iv_5d'], 0)
 
         for c in ['dumb_chg_1d', 'dumb_chg_5d', 'smart_chg_1d', 'smart_chg_5d']:
             if c not in df_final.columns: df_final[c] = 0
@@ -961,11 +974,7 @@ def get_comprehensive_market_data():
 @tool
 def get_commodity_iv_info(query: str):
     """
-    【期权专用】查询指定商品或ETF的隐含波动率(IV)数据。
-
-    支持查询：
-    - 商品期权：螺纹钢、豆粕、白糖等
-    - ETF期权：50ETF、300ETF、500ETF、创业板ETF等
+    查询指定商品或ETF的隐含波动率(IV)数据。
 
     逻辑：
     1. 默认返回：最新IV数值 + 近期变动趋势（节省资源）。
@@ -1297,8 +1306,7 @@ def _query_commodity_iv(query, need_rank, limit_days):
 @tool
 def check_option_expiry_status(query: str):
     """
-    【全能期权查询】查询 商品期权 或 ETF期权 的到期日。
-    修复：ETF期权查询适配了真实的数据库字段 (underlying, delist_date)。
+    查询 商品期权 或 ETF期权 的到期日。
     """
     # --- 1. 内置字典 ---
     LOCAL_PRODUCT_MAP = {

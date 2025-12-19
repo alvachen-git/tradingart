@@ -18,7 +18,7 @@ st.set_page_config(
     page_title="爱波塔-ETF期权分析",
     page_icon="favicon.ico",
     layout="wide",
-    initial_sidebar_state="collapsed"
+    initial_sidebar_state="expanded"
 )
 
 

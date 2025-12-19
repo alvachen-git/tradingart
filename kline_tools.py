@@ -314,6 +314,59 @@ def analyze_kline_pattern(query: str, trade_date: str = None):
                         breakout_found = True
                         break
 
+                # =================================================================
+                # 【新增】ATR 假突破/假跌破识别 (False Breakout/Breakdown)
+                # 逻辑：昨天突破了箱体，今天又跌回箱体以内
+                # =================================================================
+
+                # 1. 获取前天 ATR (用于判断昨天突破前的盘整状态，因为要还原昨天的场景)
+                ref_atr_prev = df['atr'].iloc[-3] if len(df) > 3 else 0
+
+                # 2. 只有当前天有有效的 ATR 时才计算
+                if not pd.isna(ref_atr_prev) and ref_atr_prev > 0:
+                    for period in scan_periods:
+                        # 至少需要 period + 2 天的数据 (今天+昨天+周期)
+                        if len(df) <= period + 2: continue
+
+                        # 3. 定义 "昨天突破前" 的箱体 (不含昨天和今天)
+                        # 索引: -1是今天, -2是昨天. 切片 [-(period+2) : -2]
+                        box_prev_days = df.iloc[-(period + 2):-2]
+
+                        # 计算那个时候的箱体上下沿
+                        box_high_prev = box_prev_days['high_price'].max()
+                        box_low_prev = box_prev_days['low_price'].min()
+                        box_height_prev = box_high_prev - box_low_prev
+
+                        # 计算压缩比
+                        atr_ratio_prev = box_height_prev / ref_atr_prev
+
+                        # 动态阈值 (复用之前的逻辑)
+                        if period <= 5:
+                            max_atr_multiple = 2.5; p_name_prev = "极致压缩"
+                        elif period <= 10:
+                            max_atr_multiple = 4.0; p_name_prev = "短线旗形"
+                        elif period <= 20:
+                            max_atr_multiple = 6.0; p_name_prev = "标准箱体"
+                        else:
+                            max_atr_multiple = 10.0; p_name_prev = "长线平台"
+
+                        # 4. 判断逻辑：如果昨天那个时候是压缩状态
+                        if atr_ratio_prev <= max_atr_multiple:
+
+                            # A. 假突破 (Bull Trap)
+                            # 条件: 昨天收盘 > 上沿 (真突破), 今天收盘 < 上沿 (跌回)
+                            if prev_close > box_high_prev and close < box_high_prev:
+                                msg = f"【假突破(多头陷阱)】(昨天突破{period}日{p_name_prev}，今天跌回，警惕诱多！)"
+                                patterns.append(msg)
+                                break
+
+                                # B. 假跌破 (Bear Trap)
+                            # 条件: 昨天收盘 < 下沿 (真跌破), 今天收盘 > 下沿 (收回)
+                            if prev_close < box_low_prev and close > box_low_prev:
+                                msg = f"【假跌破(空头陷阱)】(昨天跌破{period}日{p_name_prev}，今天收回，警惕诱空！)"
+                                patterns.append(msg)
+                                break
+
         # --- 基础形态 ---
 
         # 3. 大阳/大阴

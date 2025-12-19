@@ -5,6 +5,17 @@ from st_aggrid import AgGrid, GridOptionsBuilder, JsCode, ColumnsAutoSizeMode
 import time
 
 # ============================================================
+# 页面配置
+# ============================================================
+
+st.set_page_config(
+    page_title="爱波塔-全市场监控波动率",
+    page_icon="favicon.ico",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# ============================================================
 # 🎯 配置区域 - 在这里自定义品种名称和分类
 # ============================================================
 
@@ -174,17 +185,6 @@ def get_product_category(contract_name):
     code = extract_product_code(contract_name)
     return PRODUCT_CATEGORY.get(code, "其他")
 
-
-# ============================================================
-# 页面配置
-# ============================================================
-
-st.set_page_config(
-    page_title="爱波塔-全市场监控波动率",
-    page_icon="favicon.ico",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
 
 # ============================================================
 # 全局CSS样式

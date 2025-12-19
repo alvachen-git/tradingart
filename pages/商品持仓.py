@@ -10,7 +10,7 @@ st.set_page_config(
     page_title="爱波塔-期货持仓透视",
     page_icon="favicon.ico",
     layout="wide",
-    initial_sidebar_state="collapsed"
+    initial_sidebar_state="expanded"
 )
 # --- 路径修复: 确保能导入根目录的 data_engine ---
 current_dir = os.path.dirname(os.path.abspath(__file__))
