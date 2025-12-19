@@ -1,7 +1,6 @@
 import streamlit as st
 import pandas as pd
 import data_engine as de
-import streamlit.components.v1 as components
 import os
 import sys
 import auth_utils as auth
@@ -9,6 +8,8 @@ from datetime import datetime, timedelta
 from kline_tools import analyze_kline_pattern
 import time
 import extra_streamlit_components as stx
+import streamlit.components.v1 as components
+import uuid #用于生成唯一ID
 from market_tools import get_market_snapshot, get_price_statistics
 from data_engine import get_commodity_iv_info, check_option_expiry_status
 from captcha_utils import generate_captcha_image
@@ -178,29 +179,56 @@ st.markdown("""
 
 
 def native_share_button(text_content, key):
-    """
-    创建一个调用手机原生分享菜单的按钮
-    """
-    # 处理一下文本，避免 JS 报错 (把换行符转义)
-    safe_text = text_content.replace("\n", "\\n").replace("'", "\\'").replace('"', '\\"')
+    # 生成一个唯一的 ID，防止页面上多个按钮冲突
+    unique_id = str(uuid.uuid4())[:8]
+    container_id = f"ai-content-{unique_id}"
+    btn_id = f"btn-{unique_id}"
 
+    # 处理文本中的特殊字符
+    # 注意：为了让图片好看，我们把文本包裹在一个设计好的 HTML 结构里
+    # 这里简单模拟一个深色卡片风格
+    styled_html = f"""
+    <div id="{container_id}" style="
+        background-color: #1E2329;
+        color: #e6e6e6;
+        padding: 20px;
+        border-radius: 12px;
+        font-family: 'Source Sans Pro', sans-serif;
+        line-height: 1.6;
+        box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+        max-width: 600px; /* 限制最大宽度，防止图片太宽 */
+    ">
+        <div style="display: flex; align-items: center; margin-bottom: 15px;">
+            <span style="font-size: 24px; margin-right: 10px;">🤖</span>
+            <span style="font-weight: bold; font-size: 18px; color: #4a90e2;">爱波塔 AI 分析纪要</span>
+        </div>
+        <div style="font-size: 15px; white-space: pre-wrap;">{text_content}</div>
+        <div style="margin-top: 20px; border-top: 1px solid #31333F; padding-top: 10px; font-size: 12px; color: #8b949e; text-align: right;">
+            —— 生成于 爱波塔-最懂期权的AI
+        </div>
+    </div>
+    """
+
+    # JS 截图逻辑
     html_code = f"""
     <!DOCTYPE html>
     <html>
     <head>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
     <style>
         .share-btn {{
             background-color: transparent;
             border: 1px solid #4B5563;
             color: #9CA3AF;
-            padding: 5px 12px;
-            border-radius: 15px;
+            padding: 4px 10px;
+            border-radius: 6px;
             font-size: 12px;
             cursor: pointer;
             display: inline-flex;
             align-items: center;
-            font-family: sans-serif;
+            font-family: "Source Sans Pro", sans-serif;
+            margin-top: 10px;
             transition: all 0.2s;
         }}
         .share-btn:hover {{
@@ -209,40 +237,76 @@ def native_share_button(text_content, key):
             border-color: #6B7280;
         }}
         .share-btn i {{ margin-right: 5px; }}
+        /* 初始隐藏要截图的内容，只在截图时显示 */
+        #hidden-container {{
+            position: fixed;
+            top: -9999px;
+            left: -9999px;
+        }}
     </style>
     </head>
     <body>
-        <button class="share-btn" onclick="shareContent()">
-            <i class="fas fa-share-alt"></i> 分享 / 转发
+        <div id="hidden-container">
+            {styled_html}
+        </div>
+
+        <button class="share-btn" id="{btn_id}" onclick="captureAndDownload()">
+            <i class="fas fa-image"></i> 生成图片分享
         </button>
 
         <script>
-        function shareContent() {{
-            const textToShare = '{safe_text}';
+        function captureAndDownload() {{
+            const btn = document.getElementById('{btn_id}');
+            const originalText = btn.innerHTML;
+            const target = document.getElementById('{container_id}');
 
-            // 1. 优先尝试调用手机原生分享菜单 (Web Share API)
-            if (navigator.share) {{
-                navigator.share({{
-                    title: '爱波塔 AI 分析',
-                    text: textToShare,
-                }})
-                .then(() => console.log('分享成功'))
-                .catch((error) => console.log('分享失败', error));
-            }} else {{
-                // 2. 如果是电脑浏览器不支持原生分享，则回退到“复制到剪贴板”
-                navigator.clipboard.writeText(textToShare).then(function() {{
-                    alert('内容已复制！请去微信粘贴。');
-                }}, function(err) {{
-                    console.error('无法复制: ', err);
-                }});
-            }}
+            // 视觉反馈：按钮变成“生成中...”
+            btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 生成中...';
+            btn.disabled = true;
+
+            // 开始截图
+            html2canvas(target, {{
+                backgroundColor: null, // 透明背景
+                scale: 2, // 2倍清晰度 (Retina屏优化)
+                logging: false,
+                useCORS: true // 允许跨域图片
+            }}).then(canvas => {{
+                // 将 canvas 转为图片链接
+                const imgData = canvas.toDataURL('image/png');
+
+                // 创建一个临时的下载链接
+                const link = document.createElement('a');
+                link.href = imgData;
+                // 生成文件名 (例如: ai-analysis-1698765432.png)
+                link.download = `ai-analysis-${{Date.now()}}.png`;
+
+                // 触发下载
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+
+                // 恢复按钮状态
+                btn.innerHTML = '<i class="fas fa-check"></i> 图片已生成';
+                btn.style.color = '#10B981';
+                btn.style.borderColor = '#10B981';
+                setTimeout(() => {{
+                    btn.innerHTML = originalText;
+                    btn.style.color = '';
+                    btn.style.borderColor = '';
+                    btn.disabled = false;
+                }}, 3000);
+            }}).catch(err => {{
+                console.error('截图失败:', err);
+                btn.innerHTML = '❌ 生成失败';
+                btn.disabled = false;
+            }});
         }}
         </script>
     </body>
     </html>
     """
-    # 渲染 HTML，高度设小一点，只占一行
-    components.html(html_code, height=40)
+    # 渲染组件 (高度稍微加大一点，容纳可能出现的滚动条)
+    components.html(html_code, height=60)
 
 # ==========================================
 #  3. Auth & State 初始化 (保持不变)
@@ -410,13 +474,11 @@ def process_user_input(prompt_text):
 
                     st.session_state.messages.append({"role": "ai", "content": ai_response})
 
-
                     # 更新记忆
                     if hasattr(de, 'update_user_memory_async'):
                         de.update_user_memory_async(current_user, prompt_text)
-
                     # [关键] 在这里直接渲染按钮，为了防止刷新前看不见
-                     # 注意：这里不需要存入 session_state，因为上面的"历史消息循环"会负责存储后的渲染
+                    # 注意：这里不需要存入 session_state，因为上面的"历史消息循环"会负责存储后的渲染
                     native_share_button(ai_response, key=f"share_new_{int(time.time())}")
 
                 except Exception as e:
