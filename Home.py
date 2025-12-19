@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import data_engine as de
+import streamlit.components.v1 as components
 import os
 import sys
 import auth_utils as auth
@@ -176,6 +177,73 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
+def native_share_button(text_content, key):
+    """
+    创建一个调用手机原生分享菜单的按钮
+    """
+    # 处理一下文本，避免 JS 报错 (把换行符转义)
+    safe_text = text_content.replace("\n", "\\n").replace("'", "\\'").replace('"', '\\"')
+
+    html_code = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    <style>
+        .share-btn {{
+            background-color: transparent;
+            border: 1px solid #4B5563;
+            color: #9CA3AF;
+            padding: 5px 12px;
+            border-radius: 15px;
+            font-size: 12px;
+            cursor: pointer;
+            display: inline-flex;
+            align-items: center;
+            font-family: sans-serif;
+            transition: all 0.2s;
+        }}
+        .share-btn:hover {{
+            background-color: #374151;
+            color: white;
+            border-color: #6B7280;
+        }}
+        .share-btn i {{ margin-right: 5px; }}
+    </style>
+    </head>
+    <body>
+        <button class="share-btn" onclick="shareContent()">
+            <i class="fas fa-share-alt"></i> 分享 / 转发
+        </button>
+
+        <script>
+        function shareContent() {{
+            const textToShare = '{safe_text}';
+
+            // 1. 优先尝试调用手机原生分享菜单 (Web Share API)
+            if (navigator.share) {{
+                navigator.share({{
+                    title: '爱波塔 AI 分析',
+                    text: textToShare,
+                }})
+                .then(() => console.log('分享成功'))
+                .catch((error) => console.log('分享失败', error));
+            }} else {{
+                // 2. 如果是电脑浏览器不支持原生分享，则回退到“复制到剪贴板”
+                navigator.clipboard.writeText(textToShare).then(function() {{
+                    alert('内容已复制！请去微信粘贴。');
+                }}, function(err) {{
+                    console.error('无法复制: ', err);
+                }});
+            }}
+        }}
+        </script>
+    </body>
+    </html>
+    """
+    # 渲染 HTML，高度设小一点，只占一行
+    components.html(html_code, height=40)
+
 # ==========================================
 #  3. Auth & State 初始化 (保持不变)
 # ==========================================
@@ -342,9 +410,14 @@ def process_user_input(prompt_text):
 
                     st.session_state.messages.append({"role": "ai", "content": ai_response})
 
+
                     # 更新记忆
                     if hasattr(de, 'update_user_memory_async'):
                         de.update_user_memory_async(current_user, prompt_text)
+
+                    # [关键] 在这里直接渲染按钮，为了防止刷新前看不见
+                     # 注意：这里不需要存入 session_state，因为上面的"历史消息循环"会负责存储后的渲染
+                    native_share_button(ai_response, key=f"share_new_{int(time.time())}")
 
                 except Exception as e:
                     st.error(f"分析中断: {e}")
@@ -575,15 +648,24 @@ if "pending_prompt" in st.session_state:
     process_user_input(prompt)
     st.rerun()  # 重新加载以显示新消息
 
-# C. 主界面渲染 [修改点：根据是否有消息切换视图]
+# ==========================================
+#  B. 界面显示逻辑 (核心修改：让历史消息也有分享按钮)
+# ==========================================
 if not st.session_state.messages:
-    # 场景 1：没有消息 -> 显示欢迎页 (Hero Section)
     show_welcome_screen()
 else:
-    # 场景 2：有消息 -> 显示聊天历史
-    for msg in st.session_state.messages:
+    # 预留顶部空间
+    st.markdown('<div style="height: 20px;"></div>', unsafe_allow_html=True)
+
+    # 遍历显示所有历史消息
+    for i, msg in enumerate(st.session_state.messages):
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
+
+            # [关键修改] 如果是 AI 的消息，给它补上分享按钮
+            # 使用 enumerate 的 i 作为 key 的一部分，确保每个按钮 ID 唯一
+            if msg["role"] == "ai":
+                native_share_button(msg["content"], key=f"share_history_{i}")
 
 # D. 底部输入框 (Sticky Footer) [修改点：使用 st.chat_input]
 if prompt := st.chat_input("我受过交易汇训练，欢迎问我任何实战交易问题..."):
