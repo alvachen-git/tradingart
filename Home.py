@@ -2,9 +2,13 @@ import streamlit as st
 import pandas as pd
 import data_engine as de
 import os
+import json
+import random
 import sys
 import auth_utils as auth
+import memory_utils as mem
 from datetime import datetime, timedelta
+from streamlit_lottie import st_lottie
 from kline_tools import analyze_kline_pattern
 import time
 import extra_streamlit_components as stx
@@ -13,6 +17,7 @@ import uuid #用于生成唯一ID
 from market_tools import get_market_snapshot, get_price_statistics
 from data_engine import get_commodity_iv_info, check_option_expiry_status
 from captcha_utils import generate_captcha_image
+from market_correlation import tool_stock_hedging_analysis, tool_futures_correlation_check,tool_stock_correlation_check
 from sqlalchemy import text
 from dotenv import load_dotenv
 from knowledge_tools import search_investment_knowledge
@@ -308,11 +313,10 @@ if should_auto_login and cookies:
     c_user = cookies.get("username")
     c_token = cookies.get("token")
 
-    if c_user and c_token and c_user.strip() != "":
-        # 去数据库验证 Token
-        if auth.check_token(c_user, c_token):
+    if c_user and c_token and str(c_user).strip() != "":
+        if auth.check_token(str(c_user), c_token):
             st.session_state['is_logged_in'] = True
-            st.session_state['user_id'] = c_user
+            st.session_state['user_id'] = str(c_user)
             st.toast(f"欢迎回来，{c_user} (自动登录)")
             time.sleep(0.3)  # 給一點 UI 反應時間
             st.rerun()
@@ -350,10 +354,10 @@ if "messages" not in st.session_state:
 # ==========================================
 #  4. AI Agent 定义 (完全保留您的核心逻辑)
 # ==========================================
-def get_agent(current_user="访客"):  # 传入 current_user
+def get_agent(current_user="访客", user_query=""):  # 传入 current_user
     # ... (这里保留您原来的 prompt 和 tools) ...
     tools = [analyze_kline_pattern, search_investment_knowledge, get_market_snapshot, get_commodity_iv_info,
-             get_price_statistics, check_option_expiry_status]
+             get_price_statistics, check_option_expiry_status,tool_stock_hedging_analysis,tool_futures_correlation_check,tool_stock_correlation_check]
     if not os.getenv("DASHSCOPE_API_KEY"):
         st.error("❌ 未配置 API KEY");
         return None
@@ -366,6 +370,7 @@ def get_agent(current_user="访客"):  # 传入 current_user
     last_week_start = (today - timedelta(days=today.weekday() + 7)).strftime('%Y%m%d')
     last_week_end = (today - timedelta(days=today.weekday() + 1)).strftime('%Y%m%d')
 
+
     system_message = f"""
     你是一位专业的K线技术分析师和期权专家，遵守顺势交易。 
     
@@ -373,24 +378,27 @@ def get_agent(current_user="访客"):  # 传入 current_user
     【当前时间基准】：
     - 今天是：{today.strftime('%Y年%m月%d日')} (数据库查询请使用: {today_str})
     - 上周区间参考：{last_week_start} 至 {last_week_end}
+    
 
     【工具使用指南】：
-    1. 被问当前/最新价格数据时 -> 用 `get_market_snapshot`。
+    1. 当前/最新价格数据 -> 用 `get_market_snapshot`。
     2. 被问 **历史某一天** 或 **指定日期** 的价格-> 可以用 `get_price_statistics`。
        调用此工具时，`start_date` 和 `end_date` 参数必须是 **YYYYMMDD** 格式的字符串（例如 '20231001'）。
-    3. 被问股票或期货的技术面、K线形态和趋势时-> 用 `analyze_kline_pattern`
-    4. 需要期权知识、期权策略-> 用 `search_investment_knowledge`
-    5. 被问期权波动率数据时 -> 用 `get_commodity_iv_info`。
-    6. 需要查询期权到期日时 -> 用 `check_option_expiry_status`。
+    3. 被问股票或期货的技术面、K线形态和趋势-> 用 `analyze_kline_pattern`
+    4. 期权知识、期权策略-> 用 `search_investment_knowledge`
+    5. 期权波动率数据 -> 用 `get_commodity_iv_info`。
+    6. 查询期权到期日 -> 用 `check_option_expiry_status`。
+    7. 股票对冲/大盘相关性 -> 用 `tool_stock_hedging_analysis` (当用户问"股票怎么对冲"、"跟大盘关系"时)。
+    8. 商品期货相关性*-> 用 `tool_futures_correlation_check` (当用户问"黄金和白银相关吗"、"持仓分散度"时)。
+    9. 股票间相关性** -> 用 `tool_stock_correlation_check` (当用户问"茅台和五粮液一样吗")。
 
     【你的行为准则】
     1. 避免同时调用超过2个工具，除非用户明确要求全面分析。
     2. 如果用户问题不具体，可以反问客户，多用反问来引导用户做交易决策。
-    3. 不要给出任何基本面分析的回答，除非客户有专门问
-    4. 当用户问期权或K线实战应用问题，优先以知识库工具为信息参考。
-    5. 期权策略的建议，需要考虑波动率和距离到期日，使用工具`check_option_expiry_status`和知识库搭配回答
-    6. 如果客户问最近某商品的技术面，可以把前面几天的K线都一起分析后给出总结
-    7. 给出明确的操作建议，根据用户风险偏好（激进/保守）给他喜欢的策略，如果是保守的，就不要给激进建议。
+    3. 当用户问期权或交易问题，优先以知识库工具为信息参考。
+    4. 期权策略的建议，需要考虑波动率和距离到期日，使用工具`check_option_expiry_status`和知识库搭配回答
+    5. 如果客户问最近某商品的技术面，可以把前面几天的K线都一起分析后给出总结
+    6. 给出明确操作建议，根据用户风险偏好（激进/保守）给他喜欢的策略，如果是保守的，就不要给激进建议。
 
     【回答格式】
    先给结论，然后解释理由。期权策略的使用要结合K线技术面和IV。
@@ -405,6 +413,21 @@ def get_agent(current_user="访客"):  # 传入 current_user
             return create_react_agent(llm, tools)
 
 
+# 定义随机幽默加载文案
+LOADING_JOKES = [
+    "☕️ AI正在思考，顺便给主力资金打电话核实...",
+    "📈 AI正在思考，顺便用紫微斗数模拟未来 1000 种走势...",
+    "🧘‍♂️ AI正在思考，平复最近赚钱激动的心，保持客观...",
+    "📞 AI正在思考，连线华尔街内幕人士...",
+    "🔮 AI正在思考，偷偷拿出水晶球...",
+    "📉 AI正在思考，顺便检查这根 K 线是不是骗线...",
+    "🐂 AI正在思考，还要忙喂养牛市的公牛...",
+    "🐻 AI正在思考，尽力跳脱刚才亏钱的思绪里...",
+    "🧠 AI正在思考，回想您上次亏损是不是因为没听我劝...",
+    "⚡️ AI正在思考，准备请教陈老师..."
+]
+
+
 # ==========================================
 #  5. 核心逻辑处理函数 [修改点：封装成函数以便复用]
 # ==========================================
@@ -417,34 +440,71 @@ def process_user_input(prompt_text):
 
     # 2. 生成 AI 回复
     current_user = st.session_state.get('user_id', "访客")
-    agent = get_agent(current_user)
+    # [修改] 调用 get_agent 时传入用户的 prompt_text，以便去搜记忆
+    agent = get_agent(current_user, user_query=prompt_text)
 
     if agent:
         with st.chat_message("assistant"):
-            with st.spinner("⚡ AI正在思考..."):
-                try:
-                    # 构建 LangChain 消息历史
-                    history = [
-                        HumanMessage(content=m["content"]) if m["role"] == "user" else AIMessage(content=m["content"])
-                        for m in st.session_state.messages]
+            # ===========================
+            # 🔄 [修改部分开始] 替换原本的 st.spinner
+            # ===========================
 
-                    # 注入用户画像 (保留您原有的逻辑)
+            # 2. 随机选一句骚话
+            random_msg = random.choice(LOADING_JOKES)
+
+            # 4. 使用随机文案作为 Spinner 文字，包裹后续的耗时操作
+            try:
+                with st.spinner(f"🤖 {random_msg}"):
+                    # 3. 显示动画
+                    # =================================================
+                    # 🧠 [核心修改 1]：在这里检索记忆
+                    # =================================================
+                    memory_context = ""
+                    if current_user != "访客":
+                        # 检索最近 3 条最相关的记忆
+                        found = mem.retrieve_relevant_memory(current_user, prompt_text, k=5)
+                        if found:
+                            memory_context = f"""
+                                            \n【🔍 必须参考的历史记忆】
+                                            (以下是该用户过去明确说过的事实，请直接认定为真，无需再次确认)
+                                            {found}
+                                            """
+
+                    # =================================================
+                    # 🧬 [核心修改 2]：构建"超级系统指令"
+                    # =================================================
+                    # 获取用户画像
                     user_profile = de.get_user_profile(current_user)
                     risk = user_profile.get('risk_preference', '未知')
 
-                    system_instruction = SystemMessage(content=f"""
-                                        【当前对话元数据】
-                                        - 用户名：{current_user}
-                                        - 风险偏好：{risk}
-                                        """)
-                    # 将 system_instruction 加入 history
-                    history.insert(0, system_instruction)
+                    # 将 画像 + 记忆 组合成一条强力的 SystemMessage
+                    # 并强制插入到历史记录的第一条，这样 AI 绝对无法忽略
+                    super_system_prompt = f"""
+                                    【当前用户档案】
+                                    - 用户名：{current_user}
+                                    - 风险偏好：{risk}
+
+                                    {memory_context}
+
+                                    【回答指令】
+                                    请结合上述记忆和当前问题进行回答。如果记忆里有相关持仓信息，请主动提及。
+                                    """
+
+                    # 构建 LangChain 消息历史
+                    history = [
+                        HumanMessage(content=m["content"]) if m["role"] == "user" else AIMessage(content=m["content"])
+                        for m in st.session_state.messages
+                    ]
+
+                    # ⚡ 暴力注入：把这个超级指令插在最前面
+                    history.insert(0, SystemMessage(content=super_system_prompt))
 
                     response = agent.invoke(
                         {"messages": history},
                         config={"recursion_limit": 100}
                     )
                     ai_response = response["messages"][-1].content
+
 
                     # 打字机效果显示
                     placeholder = st.empty()
@@ -457,6 +517,14 @@ def process_user_input(prompt_text):
 
                     st.session_state.messages.append({"role": "ai", "content": ai_response})
 
+                    # ==========================================
+                    #  💾 [新增]：将对话存入向量数据库
+                    # ==========================================
+                    # 只有登录用户才存，或者是访客也可以存(看您需求)
+                    if current_user != "访客":
+                        mem.save_interaction(current_user, prompt_text, ai_response)
+                        print(f"已存档记忆: {prompt_text[:10]}...")
+
                     # 更新记忆
                     if hasattr(de, 'update_user_memory_async'):
                         de.update_user_memory_async(current_user, prompt_text)
@@ -464,8 +532,9 @@ def process_user_input(prompt_text):
                     # 注意：这里不需要存入 session_state，因为上面的"历史消息循环"会负责存储后的渲染
                     native_share_button(ai_response, key=f"share_new_{int(time.time())}")
 
-                except Exception as e:
-                    st.error(f"分析中断: {e}")
+
+            except Exception as e:
+                st.error(f"分析中断: {e}")
 
 
 # ==========================================

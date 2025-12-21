@@ -23,8 +23,8 @@ def calculate_and_save_rank(days=200, top_n=10):
     # 1. 定義要掃描的品種 (全市場)
     # 注意：這裡應該包含您數據庫裡有的所有品種
     target_symbols = [
-        'lc0','si0','rb0','hc0','i0','m0','c0','p0','y0','jm0','jd0','ta0','ma0','cf0','sr0','ap0',
-        'fg0','sa0','rm0','sh0','IF0','IM0','T0','au0','ag0','cu0','al0','zn0','ru0'
+        'lc','si','ps','rb','hc','i','m','c','p','y','oi','jm','jd','ta','ma','eb','eg','cf','sr','ap',
+        'fg','sa','sp','rm','sh','ao','IF','IM','IC','T','au','ag','cu','al','zn','ru','sn','sc','bu'
     ]
 
     all_scores = []
