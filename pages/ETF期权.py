@@ -119,7 +119,7 @@ st.markdown("---")
 
 # --- 3. 价格与波动率 (K线 + IV) ---
 # 【核心调用】从新文件获取数据
-df_kline, df_iv = de.get_kline_and_iv_data(etf_code, limit=300)
+df_kline, df_iv = de.get_kline_and_iv_data(etf_code, limit=500)
 
 
 

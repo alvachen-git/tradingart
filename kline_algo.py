@@ -35,6 +35,8 @@ def calculate_kline_signals(df: pd.DataFrame):
     prev = df.iloc[-2]
     pprev = df.iloc[-3]
     tprev = df.iloc[-4]
+    pppprev = df.iloc[-5]
+    fprev = df.iloc[-6]
 
     # 基础变量
     close = curr['close_price']
@@ -43,16 +45,33 @@ def calculate_kline_signals(df: pd.DataFrame):
     low = curr['low_price']
 
     prev_close = prev['close_price']
-    prev_open = prev['open_price']
-    prev_high = prev['high_price']
-    prev_low = prev['low_price']
     pprev_close = pprev['close_price']
+    prev_open = prev['open_price']
+    pprev_open = pprev['open_price']
+    tprev_close = tprev['close_price']
+    pppprev_close = pppprev['close_price']
+    fprev_close = fprev['close_price']
+    tprev_open = tprev['open_price']
+    pppprev_open = pppprev['open_price']
+    fprev_open = fprev['open_price']
+    prev_high = prev['high_price']
+    pprev_high = pprev['high_price']
+    tprev_high = tprev['high_price']
+    pppprev_high = pppprev['high_price']
+    fprev_high = fprev['high_price']
+    prev_low = prev['low_price']
+    pprev_low = pprev['low_price']
+    tprev_low = tprev['low_price']
+    pppprev_low = pppprev['low_price']
+    fprev_low = fprev['low_price']
 
     # 涨跌幅
     chg_pct = (close - prev_close) / prev_close if prev_close != 0 else 0
     prev_chg_pct = (prev_close - prev_open) / prev_open if prev_open != 0 else 0
-    pprev_chg_pct = (pprev['close_price'] - pprev['open_price']) / pprev['open_price'] if pprev[
-                                                                                              'open_price'] != 0 else 0
+    pprev_chg_pct = (pprev_close - pprev_open) / pprev_open
+    tprev_chg_pct = (tprev_close - tprev_open) / tprev_open
+    pppprev_chg_pct = (pppprev_close - pppprev_open) / pppprev_open
+    fprev_chg_pct = (fprev_close - fprev_open) / fprev_open
 
     # 形态比例计算 (复刻原逻辑)
     body_size = abs(close - open_p)
@@ -65,10 +84,17 @@ def calculate_kline_signals(df: pd.DataFrame):
     lower_pct = lower_shadow / body_size if body_size != 0 else 0
     uplo_pct = upper_shadow / lower_shadow if lower_shadow != 0 else 0
 
-    # 历史区间数据 (复刻原逻辑)
+    # 计算一段时间的最高价最低价
     prev_2_days_high = df['high_price'].iloc[-3:-1].max()
+    prev_2_days_low = df['low_price'].iloc[-3:-1].min()
+    prev_3_days_high = df['high_price'].iloc[-4:-1].max()
+    prev_3_days_low = df['low_price'].iloc[-4:-1].min()
+    prev_4_days_high = df['high_price'].iloc[-5:-1].max()
+    prev_4_days_low = df['low_price'].iloc[-5:-1].min()
     prev_5_days_high = df['high_price'].iloc[-6:-1].max()
     prev_5_days_low = df['low_price'].iloc[-6:-1].min()
+    prev_6_days_high = df['high_price'].iloc[-7:-1].max()
+    prev_6_days_low = df['low_price'].iloc[-7:-1].min()
 
     # 实体大小
     prebody_pct = abs(prev_close - prev_open) / (prev_high - prev_low) if (prev_high - prev_low) > 0 else 0
@@ -87,21 +113,50 @@ def calculate_kline_signals(df: pd.DataFrame):
     # ==========================
 
     # 1. 吞噬形态 (Engulfing)
-    if (curr['MA5'] < curr['MA20']) and (prev_chg_pct < -0.015) and (chg_pct > 0) and (open_p < prev_close) and (
-            close > prev_open):
-        patterns.append("多头吞噬")
-        score_change += 30
+    if (curr['MA5'] < curr['MA20']) and (prev_chg_pct < -0.015) and (chg_pct > 0) and (open_p < prev_close) and (close > prev_high):
+        if chg_pct > 0.03:
+            patterns.append("多头吞噬")
+            score_change += 30
+        else:
+            patterns.append("多头吞噬")
+            score_change += 10
 
-    if (curr['MA5'] > curr['MA20']) and (prev_chg_pct > 0.015) and (chg_pct < 0) and (open_p > prev_close) and (
-            close < prev_open):
-        patterns.append("空头吞噬")
-        score_change -= 30
+    if (curr['MA5'] > curr['MA20']) and (prev_chg_pct > 0.015) and (chg_pct < 0) and (open_p > prev_close) and (close < prev_open):
+        if chg_pct < -0.03:
+            patterns.append("空头吞噬")
+            score_change -= 40
+        else:
+            patterns.append("空头吞噬")
+            score_change -= 20
 
-    # 2. 上升/下降三法
-    if (curr['MA5'] > curr[
-        'MA10']) and chg_pct > 0.01 and pprev_chg_pct > 0.015 and prev_close < pprev_close and close > prev_2_days_high:
-        patterns.append("上升三法")
-        score_change += 25
+    # 3. 上升三法
+    if (curr['MA5'] > curr['MA10']) and chg_pct > 0.02:
+        if pprev_chg_pct > 0.02 and prev_close < pprev_close and close > prev_2_days_high:
+            patterns.append("【上升三法】(中继再涨，多头持续上攻！)")
+            score_change += 15
+        elif tprev_chg_pct > 0.02 and pprev_close < tprev_high and prev_close < tprev_high and close > prev_3_days_high:
+            patterns.append("【上升三法】(中继再涨，多头持续上攻)")
+            score_change += 20
+        elif pppprev_chg_pct > 0.02 and tprev_close < pppprev_high and pprev_close < pppprev_high and prev_close < pppprev_high and close > prev_4_days_high:
+            patterns.append("【上升三法】(中继再涨，多头持续上攻)")
+            score_change += 20
+        elif fprev_chg_pct > 0.02 and pppprev_close < fprev_high and tprev_close < fprev_high and pprev_close < fprev_high and prev_close < fprev_high and close > prev_5_days_high:
+            patterns.append("【上升三法】(中继再涨，多头持续上攻)")
+            score_change += 25
+    # 4. 下降三法
+    if (curr['MA5'] < curr['MA10']) and chg_pct < -0.02:
+        if pprev_chg_pct < -0.02 and prev_close > pprev_close and close < prev_2_days_low:
+            patterns.append("【下降三法】(中继再跌，多头持续溃逃)")
+            score_change -= 15
+        elif tprev_chg_pct < -0.02 and pprev_close > tprev_low and prev_close > tprev_low and close < prev_3_days_low:
+            patterns.append("【下降三法】(中继再跌，多头持续溃逃)")
+            score_change -= 20
+        elif pppprev_chg_pct < -0.02 and tprev_close > pppprev_low and pprev_close > pppprev_low and prev_close > pppprev_low and close < prev_4_days_low:
+            patterns.append("【下降三法】(中继再跌，多头持续溃逃)")
+            score_change -= 20
+        elif fprev_chg_pct < -0.02 and pppprev_close > fprev_low and tprev_close > fprev_low and pprev_close > fprev_low and prev_close > fprev_low and close < prev_5_days_low:
+            patterns.append("【下降三法】(中继再跌，多头持续溃逃)")
+            score_change -= 25
 
     # 3. 晨星 / 夜星
     if (curr['MA5'] < curr['MA10']) and pprebody_pct > 0.8 and close > prev_high and open_p > prev_close:
@@ -155,6 +210,11 @@ def calculate_kline_signals(df: pd.DataFrame):
                     patterns.append(f"{period}日平台突破")
                     score_change += 30
                     break
+                # B. 向下破位
+                if close < box_low and body_pct > 0.6:
+                    patterns.append(f"{period}日平台跌破")
+                    score_change -= 30
+                    break
 
                     # --- 假突破/假跌破检测 (复刻原代码逻辑) ---
             # 还原昨天的场景
@@ -199,7 +259,7 @@ def calculate_kline_signals(df: pd.DataFrame):
     if curr['MA30'] > curr['MA20']:
         if abs(chg_pct) > 0.01 and close > prev_5_days_high and body_pct > 0.6:
             patterns.append("波动转折(多头)")
-            score_change += 15
+            score_change += 20
     # 空头反击
     if curr['MA30'] < curr['MA20']:
         if chg_pct < -0.01 and close < prev_5_days_low and body_pct > 0.6:
@@ -208,13 +268,13 @@ def calculate_kline_signals(df: pd.DataFrame):
 
     # 8. 长下影 (复刻原代码)
     # 条件：下影 > 2倍实体，实体 < 0.3，MA5 < MA20，收盘 < 昨日收盘
-    if lower_pct > 2 and body_pct < 0.3 and body_pct > 0.05 and curr['MA5'] < curr['MA20'] and close < prev_close:
+    if lower_pct > 2 and body_pct < 0.3 and body_pct > 0.05 and curr['MA5'] < curr['MA20'] :
         patterns.append("锤子线(长下影)")
-        score_change += 5
+        score_change += 10
 
     # 9. 长上影 (复刻原代码)
     # 条件：上影 > 2倍实体，MA5 > MA20，收盘 > 昨日收盘
-    if upper_pct > 2 and body_pct < 0.3 and body_pct > 0.05 and curr['MA5'] > curr['MA20'] and close > prev_close:
+    if upper_pct > 2 and body_pct < 0.3 and body_pct > 0.05 and curr['MA5'] > curr['MA20'] :
         patterns.append("倒锤子(长上影)")
         score_change -= 5
 
@@ -234,17 +294,19 @@ def calculate_kline_signals(df: pd.DataFrame):
     if close > curr['MA20']:
         if curr['MA20'] > prev['MA20']:
             trends.append("站稳20日线且向上(中多)")
+            score_change += 10
         else:
             trends.append("20日线上方震荡")
     else:
         trends.append("跌破20日线(中空)")
+        score_change -= 10
 
     if curr['MA5'] > curr['MA20'] > curr['MA60']:
         trends.append("均线多头排列")
-        score_change += 10
+        score_change += 20
     elif curr['MA5'] < curr['MA20'] < curr['MA60']:
         trends.append("均线空头排列")
-        score_change -= 10
+        score_change -= 20
 
     if curr['MA20'] > curr['MA5'] > curr['MA10']:
         trends.append("震荡横盘格局")
