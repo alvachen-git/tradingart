@@ -1977,6 +1977,6 @@ if __name__ == "__main__":
     ]
     for code in STOCK_TARGETS:
         fetch_and_save_data(code, start, today, asset_type='S')
-        time.sleep(1)
+        time.sleep(0.5)
 
     print("=== 全部完成 ===")
