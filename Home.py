@@ -10,6 +10,7 @@ import memory_utils as mem
 from datetime import datetime, timedelta
 from streamlit_lottie import st_lottie
 from kline_tools import analyze_kline_pattern
+from screener_tool import search_top_stocks
 import time
 import extra_streamlit_components as stx
 import streamlit.components.v1 as components
@@ -357,7 +358,7 @@ if "messages" not in st.session_state:
 def get_agent(current_user="访客", user_query=""):  # 传入 current_user
     # ... (这里保留您原来的 prompt 和 tools) ...
     tools = [analyze_kline_pattern, search_investment_knowledge, get_market_snapshot, get_commodity_iv_info,
-             get_price_statistics, check_option_expiry_status,tool_stock_hedging_analysis,tool_futures_correlation_check,tool_stock_correlation_check]
+             get_price_statistics, check_option_expiry_status,tool_stock_hedging_analysis,tool_futures_correlation_check,tool_stock_correlation_check,search_top_stocks]
     if not os.getenv("DASHSCOPE_API_KEY"):
         st.error("❌ 未配置 API KEY");
         return None
@@ -389,8 +390,9 @@ def get_agent(current_user="访客", user_query=""):  # 传入 current_user
     5. 期权波动率数据 -> 用 `get_commodity_iv_info`。
     6. 查询期权到期日 -> 用 `check_option_expiry_status`。
     7. 股票对冲/大盘相关性 -> 用 `tool_stock_hedging_analysis` (当用户问"股票怎么对冲"、"跟大盘关系"时)。
-    8. 商品期货相关性*-> 用 `tool_futures_correlation_check` (当用户问"黄金和白银相关吗"、"持仓分散度"时)。
-    9. 股票间相关性** -> 用 `tool_stock_correlation_check` (当用户问"茅台和五粮液一样吗")。
+    8. 商品期货相关性-> 用 `tool_futures_correlation_check` (当用户问"黄金和白银相关吗"、"持仓分散度"时)。
+    9. 股票间相关性 -> 用 `tool_stock_correlation_check` (当用户问"茅台和五粮液一样吗")。
+    10.当客户问“推荐股票”、“选股”-> 用`search_top_stocks`（选分数最高的）
 
     【你的行为准则】
     1. 避免同时调用超过2个工具，除非用户明确要求全面分析。
