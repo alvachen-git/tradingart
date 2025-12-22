@@ -472,23 +472,6 @@ if not df_monitor.empty:
         """
 
 
-    col1, col2, col3, col4 = st.columns(4)
-
-    with col1:
-        st.markdown(create_stat_card("📈", "监控品种", total_count, "个", "#3b82f6", "rgba(59, 130, 246, 0.2)"),
-                    unsafe_allow_html=True)
-    with col2:
-        st.markdown(create_stat_card("🔥", "IV高位 (>80)", high_iv_count, "个", "#ef4444", "rgba(239, 68, 68, 0.2)"),
-                    unsafe_allow_html=True)
-    with col3:
-        st.markdown(create_stat_card("💎", "IV低位 (<20)", low_iv_count, "个", "#22c55e", "rgba(34, 197, 94, 0.2)"),
-                    unsafe_allow_html=True)
-    with col4:
-        inflow_color = "#22c55e" if net_inflow >= 0 else "#ef4444"
-        inflow_glow = "rgba(34, 197, 94, 0.2)" if net_inflow >= 0 else "rgba(239, 68, 68, 0.2)"
-        st.markdown(create_stat_card("🏦", "机构净流入", net_inflow, "手", inflow_color, inflow_glow),
-                    unsafe_allow_html=True)
-
     st.markdown("<div style='height: 24px'></div>", unsafe_allow_html=True)
 
     # === 数据说明 + 搜索框 ===
