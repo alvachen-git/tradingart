@@ -106,31 +106,59 @@ def run_daily_scan():
             # print(f"❌ {ts_code} 出错: {e}")
             continue
 
-    # 3. 批量写入数据库
+    # 3. 批量写入数据库 (升级版：带容错救援机制)
     if data_buffer:
-        print(f"💾 正在将 {len(data_buffer)} 条结果写入数据库...")
-
+        print(f"💾 准备写入 {len(data_buffer)} 条结果...")
         df_result = pd.DataFrame(data_buffer)
 
-        with engine.connect() as conn:
-            # 幂等性设计：先删除今日已跑过的数据，防止重复插入报错
-            del_sql = text(f"DELETE FROM daily_stock_screener WHERE trade_date = '{today}'")
-            conn.execute(del_sql)
-            conn.commit()
-            print("🗑️ 旧数据清理完成")
+        # 1. 清理旧数据
+        try:
+            with engine.connect() as conn:
+                conn.execute(text(f"DELETE FROM daily_stock_screener WHERE trade_date = '{today}'"))
+                conn.commit()
+                print("🗑️ 旧数据清理完成")
+        except Exception as e:
+            print(f"⚠️ 清理旧数据失败 (可能是表不存在，跳过): {e}")
 
-        # 写入新数据
-        # if_exists='append' 表示追加
-        df_result.to_sql('daily_stock_screener', engine, if_exists='append', index=False)
-        print(f"🎉 作业完成！成功入库: {len(data_buffer)} 条 | 失败/跳过: {error_count} 条")
+        # 2. 尝试批量写入 (快)
+        try:
+            # chunksize=100 表示分批次写入
+            df_result.to_sql('daily_stock_screener', engine, if_exists='append', index=False, chunksize=100)
+            print(f"🎉 完美成功！今日 {len(df_result)} 条选股数据已全部入库。")
 
-        # 简单统计
-        top_picks = df_result.sort_values('score', ascending=False).head(5)
-        print("\n🏆 今日最高分前 5 名:")
-        print(top_picks[['ts_code', 'name', 'score', 'pattern']])
+        except Exception as e:
+            print(f"❌ 批量写入遭遇错误: {e}")
+            print("🔄 正在启动【逐条救援模式】，尝试抢救有效数据...")
+
+            success_count = 0
+            fail_count = 0
+
+            # 3. 逐条写入 (慢，但是稳)
+            for i, row in df_result.iterrows():
+                try:
+                    # 将单行转为 DataFrame 写入
+                    pd.DataFrame([row]).to_sql('daily_stock_screener', engine, if_exists='append', index=False)
+                    success_count += 1
+                except Exception as inner_e:
+                    fail_count += 1
+                    # 🌟 打印具体是哪只股票出了问题，方便您排查
+                    print(f"   ⚠️ 写入失败 [{row['ts_code']} {row['name']}]: {inner_e}")
+
+            print(f"🏁 救援完成: 成功入库 {success_count} 条 | 丢弃坏数据 {fail_count} 条")
+
+        # 4. 显示前三名
+        if not df_result.empty:
+            print("\n🏆 今日【形态评分】前 5 名:")
+            # 简单的按分数排序显示
+            try:
+                top = df_result.sort_values('score', ascending=False).head(5)
+                for _, row in top.iterrows():
+                    print(f"   - {row['name']} ({row['ts_code']}): {row['score']}分 | {row['pattern']}")
+            except:
+                pass
 
     else:
-        print("⚠️ 今日无有效数据生成 (可能是非交易日或接口限制)")
+        print("⚠️ 今日无有效数据生成 (可能是周末或接口没数据)")
 
 
 if __name__ == "__main__":
