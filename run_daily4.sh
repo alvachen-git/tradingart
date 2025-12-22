@@ -11,9 +11,11 @@ echo "⏰ 任务开始: $(date)" >> update.log
 
 
 # 2. 更新【商品IV数据】
-echo ">>> [1/1] 开始计算商品IV数据..." >> update.log
+echo ">>> [1/2] 开始计算商品IV数据..." >> update.log
 /usr/bin/python3 update_commodity_iv_daily.py >> update.log 2>&1
 
+echo ">>> [2/2] 开始计算股票指标和分数..." >> update.log
+/usr/bin/python3 update_stock_score.py >> update.log 2>&1
 
 # 3. 结束
 echo "✅ 任务结束: $(date)" >> update.log
