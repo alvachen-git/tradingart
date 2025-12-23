@@ -204,7 +204,7 @@ def analyze_kline_pattern(query: str, trade_date: str = None):
 
         # 3. 上升三法
         if (curr['MA5'] > curr['MA10']) and chg_pct > 0.01:
-            if pprev_chg_pct > 0.015 and prev_close < pprev_close and close > prev_2_days_high:
+            if pprev_chg_pct > 0.015 and prev_close < pprev_close and prev_open < pprev_close and close > prev_2_days_high:
                 patterns.append("【上升三法】(中继再涨，多头持续上攻！)")
             elif tprev_chg_pct > 0.015 and pprev_close < tprev_high and prev_close < tprev_high and close > prev_3_days_high:
                 patterns.append("【上升三法】(中继再涨，多头持续上攻！！)")
@@ -214,7 +214,7 @@ def analyze_kline_pattern(query: str, trade_date: str = None):
                 patterns.append("【上升三法】(中继再涨，多头持续上攻！！)")
         # 4. 下降三法
         if (curr['MA5'] < curr['MA10']) and chg_pct < -0.01:
-            if pprev_chg_pct < -0.015 and prev_close > pprev_close and close < prev_2_days_low:
+            if pprev_chg_pct < -0.015 and prev_close > pprev_close and prev_open > pprev_close and close < prev_2_days_low:
                 patterns.append("【下降三法】(中继再跌，空头持续发力！)")
             elif tprev_chg_pct < -0.015 and pprev_close > tprev_low and prev_close > tprev_low and close < prev_3_days_low:
                 patterns.append("【下降三法】(中继再跌，空头持续发力！)")

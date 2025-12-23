@@ -131,7 +131,7 @@ def calculate_kline_signals(df: pd.DataFrame):
 
     # 3. 上升三法
     if (curr['MA5'] > curr['MA10']) and chg_pct > 0.02:
-        if pprev_chg_pct > 0.02 and prev_close < pprev_close and close > prev_2_days_high:
+        if pprev_chg_pct > 0.02 and prev_close < pprev_close and prev_open < pprev_close and close > prev_2_days_high:
             patterns.append("【上升三法】(中继再涨，多头持续上攻！)")
             score_change += 15
         elif tprev_chg_pct > 0.02 and pprev_close < tprev_high and prev_close < tprev_high and close > prev_3_days_high:
@@ -145,7 +145,7 @@ def calculate_kline_signals(df: pd.DataFrame):
             score_change += 25
     # 4. 下降三法
     if (curr['MA5'] < curr['MA10']) and chg_pct < -0.02:
-        if pprev_chg_pct < -0.02 and prev_close > pprev_close and close < prev_2_days_low:
+        if pprev_chg_pct < -0.02 and prev_close > pprev_close and prev_open > pprev_close and close < prev_2_days_low:
             patterns.append("【下降三法】(中继再跌，多头持续溃逃)")
             score_change -= 15
         elif tprev_chg_pct < -0.02 and pprev_close > tprev_low and prev_close > tprev_low and close < prev_3_days_low:
@@ -266,6 +266,16 @@ def calculate_kline_signals(df: pd.DataFrame):
         if chg_pct < -0.01 and close < prev_5_days_low and body_pct > 0.6:
             patterns.append("波动转折(空头)")
             score_change -= 15
+
+    # 区间突破
+    if close > prev_5_days_high and  upper_pct < 0.5 :
+        if 0.05 > chg_pct > 0.01 :
+            patterns.append("小区间突破")
+            score_change += 20
+        elif  chg_pct > 0.05:
+            patterns.append("小区间强势突破")
+            score_change += 10
+
 
     # 8. 长下影 (复刻原代码)
     # 条件：下影 > 2倍实体，实体 < 0.3，MA5 < MA20，收盘 < 昨日收盘
