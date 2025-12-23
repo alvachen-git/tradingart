@@ -57,7 +57,7 @@ def get_etf_option_analysis(etf_code="510050", days=100):
         if dates_df.empty: return None
         min_date = dates_df['trade_date'].min()
 
-        # 2. 执行 SQL 查询
+        # 2. 执行 SQL 查询 (期权数据)
         sql = f"""
             SELECT 
                 d.trade_date as date,
@@ -78,23 +78,61 @@ def get_etf_option_analysis(etf_code="510050", days=100):
 
         df_raw['type'] = df_raw['call_put'].map({'C': '认购', 'P': '认沽'})
 
+        # 2.5 获取标的价格 (新增步骤：用于判断行权价偏离度)
+        kline_sql = f"""
+            SELECT trade_date as date, close_price as underlying_price
+            FROM stock_price 
+            WHERE ts_code='{etf_code}' 
+              AND trade_date >= '{min_date}'
+        """
+        df_stock = pd.read_sql(kline_sql, engine)
+
+        # 将标的价格合并到期权数据中
+        if not df_stock.empty:
+            df_raw = pd.merge(df_raw, df_stock, on='date', how='left')
+        else:
+            df_raw['underlying_price'] = np.nan
+
         # 3. 每日候选池构建
         daily_candidates_map = {}
         grouped = df_raw.groupby(['date', 'type'])
 
         for (date, otype), group in grouped:
             if group.empty: continue
-            top3 = group.nlargest(3, 'oi')
-            candidates = []
-            for _, row in top3.iterrows():
-                candidates.append({
+
+            # 按持仓量降序排列
+            group = group.sort_values('oi', ascending=False)
+
+            # --- 新增逻辑：10% 偏离度过滤 ---
+            # 获取当日标的价格
+            u_price = group['underlying_price'].iloc[0] if 'underlying_price' in group.columns else np.nan
+
+            candidates_list = []
+
+            # 如果有标的价格，优先寻找偏离度 <= 10% 的合约
+            if pd.notna(u_price) and u_price > 0:
+                filtered_group = group[abs(group['strike'] - u_price) / u_price <= 0.1]
+
+                # 如果过滤后有合约，取前3名
+                if not filtered_group.empty:
+                    top3_df = filtered_group.head(3)
+                else:
+                    # 如果所有合约都偏离很大（极端情况），回退到原始 Top3
+                    top3_df = group.head(3)
+            else:
+                # 如果没有标的价格数据，回退到原始 Top3
+                top3_df = group.head(3)
+
+            for _, row in top3_df.iterrows():
+                candidates_list.append({
                     'strike': row['strike'], 'oi': row['oi'],
                     'price': row['price'], 'code': row['code']
                 })
-            if date not in daily_candidates_map: daily_candidates_map[date] = {}
-            daily_candidates_map[date][otype] = candidates
 
-        # 4. 智能平滑算法
+            if date not in daily_candidates_map: daily_candidates_map[date] = {}
+            daily_candidates_map[date][otype] = candidates_list
+
+        # 4. 智能平滑算法 (保持不变，但输入数据已优化)
         final_results = []
         sorted_dates = sorted(daily_candidates_map.keys())
 
@@ -107,6 +145,8 @@ def get_etf_option_analysis(etf_code="510050", days=100):
                 if otype_raw not in day_data: continue
 
                 candidates = day_data[otype_raw]
+                if not candidates: continue
+
                 selected = candidates[0]
 
                 if last_strike is not None:
