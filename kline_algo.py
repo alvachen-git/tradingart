@@ -158,16 +158,17 @@ def calculate_kline_signals(df: pd.DataFrame):
             patterns.append("【下降三法】(中继再跌，多头持续溃逃)")
             score_change -= 25
 
-    # 3. 晨星 / 夜星
-    if (curr['MA5'] < curr['MA10']) and pprebody_pct > 0.8 and close > prev_high and open_p > prev_close:
+    # 6. 晨星
+    if (curr['MA5'] < curr['MA10']) and pprev_chg_pct < -0.02 and pprebody_pct  > 0.8 and close > prev_high and open_p > prev_close:
         if prebody_pct < 0.3 and prev_close < pprev_close:
-            patterns.append("晨星")
+            patterns.append("【晨星】(反转迹象-从空转多)")
             score_change += 15
 
-    if (curr['MA5'] > curr['MA10']) and pprebody_pct > 0.8 and close < prev_low and open_p < prev_close:
+    # 6.夜星
+    if (curr['MA5'] > curr['MA10']) and pprev_chg_pct > 0.02 and pprebody_pct  > 0.8 and close < prev_low and open_p < prev_close:
         if prebody_pct < 0.3 and prev_close > pprev_close:
-            patterns.append("夜星")
-            score_change -= 20
+            patterns.append("【夜星】(反转迹象-从多转空)")
+            score_change -= 15
 
     # 6.步步为营
     if (curr['MA5'] > curr['MA10']) and pprev_chg_pct > 0.015:

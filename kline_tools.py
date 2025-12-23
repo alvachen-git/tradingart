@@ -224,12 +224,12 @@ def analyze_kline_pattern(query: str, trade_date: str = None):
                 patterns.append("【下降三法】(中继再跌，空头持续发力！)")
 
         # 6. 晨星
-        if (curr['MA5'] < curr['MA10']) and pprebody_pct > 0.8 and close > prev_high and open_p > prev_close:
+        if (curr['MA5'] < curr['MA10']) and pprebody_pct  > -0.01 and pprebody_pct  > 0.8 and close > prev_high and open_p > prev_close:
             if prebody_pct < 0.3 and prev_close < pprev_close :
              patterns.append("【晨星】(反转迹象-从空转多)")
 
          # 6.夜星
-        if (curr['MA5'] > curr['MA10']) and pprebody_pct > 0.8 and close < prev_low and open_p < prev_close:
+        if (curr['MA5'] > curr['MA10']) and pprev_chg_pct  > 0.01 and pprebody_pct  > 0.8 and close < prev_low and open_p < prev_close:
             if prebody_pct < 0.3 and prev_close > pprev_close:
              patterns.append("【夜星】(反转迹象-从多转空)")
 

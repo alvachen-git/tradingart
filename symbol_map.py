@@ -1711,7 +1711,7 @@ def resolve_symbol(query: str):
     # 规则：中文/英文前缀 + 3-4位数字
 
     # 提取数字部分
-    digit_match = re.search(r"(\d{3,4})$", query)
+    digit_match = re.search(r"(\d{3,4})", query)
     if digit_match:
         number_part = digit_match.group(1)
         # 提取前缀 (去掉数字剩下的部分)
