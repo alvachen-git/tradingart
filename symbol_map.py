@@ -2091,7 +2091,7 @@ COMMON_ALIASES = {
     "棉花": "cf", "白糖": "sr", "花生": "pk", "苹果": "ap", "红枣": "cj",
 
     # 新能源
-    "碳酸锂": "lc", "工业硅": "si", "多晶硅": "ps", "钯金": "pd", "铂金": "pt",
+    "碳酸锂": "lc", "工业硅": "si", "多晶硅": "PS","PS": "PS", "钯金": "pd", "铂金": "pt",
     "纸浆": "sp", "双胶纸": "op", "原木": "lg",
 
     # 股指/国债
@@ -2188,8 +2188,8 @@ def resolve_symbol(query: str):
 
 # 测试
 if __name__ == "__main__":
-    print(f"豆粕 -> {resolve_symbol('豆粕')}")  # ('m', 'future') -> 主连
-    print(f"豆粕2505 -> {resolve_symbol('豆粕2505')}")  # ('M2505', 'future') -> 分合约
-    print(f"rb2510 -> {resolve_symbol('rb2510')}")  # ('RB2510', 'future')
-    print(f"螺纹 -> {resolve_symbol('螺纹')}")  # ('rb', 'future')
+    print(f"多晶硅 -> {resolve_symbol('多晶硅')}")  # ('m', 'future') -> 主连
+    print(f"PS2602 -> {resolve_symbol('PS2602')}")  # ('M2505', 'future') -> 分合约
+    print(f"多晶硅2602 -> {resolve_symbol('多晶硅2602')}")  # ('RB2510', 'future')
+    print(f"ps -> {resolve_symbol('ps')}")  # ('rb', 'future')
     print(f"50ETF -> {resolve_symbol('50ETF')}")  # ('510050.SH', 'stock')
