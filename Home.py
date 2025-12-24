@@ -44,7 +44,7 @@ for key in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"]:
 #  1. 页面配置 (必须在第一行) [修改点：改为 centered 布局]
 # ==========================================
 st.set_page_config(
-    page_title="爱波塔-懂期权的AI-陪你在市场奋斗",
+    page_title="爱波塔-懂期权的AI | K线分析+期权策略",
     page_icon="favicon.ico",
     layout="centered",
     initial_sidebar_state="expanded"
@@ -398,7 +398,7 @@ def get_agent(current_user="访客", user_query=""):  # 传入 current_user
     1. 避免同时调用超过2个工具，除非用户明确要求全面分析。
     2. 如果用户问题不具体，可以反问客户，多用反问来引导用户做交易决策。
     3. 当用户问期权或交易问题，优先以知识库工具为信息参考。
-    4. 股票没有期权，客户问股票时，不要给期权策略。
+    4. 股票没有期权，客户问股票时，不要给期权策略，除非是用ETF期权来对冲股票。
     4. 期权策略的建议，需要考虑波动率和距离到期日，使用工具`check_option_expiry_status`和知识库搭配回答
     5. 如果客户问最近某商品的技术面，可以把前面几天的K线都一起分析后给出总结
     6. 给出明确操作建议，根据用户风险偏好（激进/保守）给他喜欢的策略，如果是保守的，就不要给激进建议。
@@ -465,7 +465,7 @@ def process_user_input(prompt_text):
                     memory_context = ""
                     if current_user != "访客":
                         # 检索最近 3 条最相关的记忆
-                        found = mem.retrieve_relevant_memory(current_user, prompt_text, k=5)
+                        found = mem.retrieve_relevant_memory(current_user, prompt_text, k=3)
                         if found:
                             memory_context = f"""
                                             \n【🔍 必须参考的历史记忆】
@@ -757,6 +757,12 @@ with st.sidebar:
             </div>
         </div>
         """, unsafe_allow_html=True)
+    st.markdown("---")
+    st.caption("""
+        AI期权策略建议 | 股票K线形态选股 | 
+        期权波动率分析 | 持仓对冲建议 |
+        期权知识学习
+        """)
 
 # B. 处理卡片点击产生的 Pending Prompt [修改点：处理快捷指令]
 if "pending_prompt" in st.session_state:
