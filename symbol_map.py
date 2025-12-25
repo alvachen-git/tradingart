@@ -2068,6 +2068,19 @@ COMMON_ALIASES = {
     "宏华数科": "688789.SH",
     "艾为电子": "688798.SH",
 
+    #指数
+    '上证指数': '000001.SH',
+    '上证综指': '000001.SH',
+    '大盘': '000001.SH',
+    'A股': '000001.SH',
+    '深证成指': '399001.SZ',
+    '创业板指': '399006.SZ',
+    '科创板': '000688.SH',
+    '微盘股': '8841458.WI', # 万得微盘股指数(示例)
+    '恒生指数': 'HSI',
+    '中证2000': '932000.CSI',
+    '小盘股': '932000.CSI',
+
     # 黑色系
     "螺纹": "rb", "螺纹钢": "rb", "热卷": "hc", "铁矿": "i", "铁矿石": "i",
     "焦煤": "jm", "焦炭": "j", "硅铁": "sf", "锰硅": "sm", "不锈钢": "ss",
@@ -2124,61 +2137,106 @@ def get_all_market_map():
         return {}
 
 
+# ==========================================
+#  新增：指数识别增强配置
+# ==========================================
+
+# 1. 定义已知指数的“标准代码白名单”
+# 只要解析出来的代码在这个集合里，就强制标记为 'index'
+INDEX_CODES_SET = {
+    '000001.SH', '399001.SZ', '399006.SZ', '000688.SH',  # 大盘、深成、创业、科创
+    '000300.SH', '000905.SH', '000852.SH', '000016.SH',  # 300, 500, 1000, 50
+    '399005.SZ', '932000.CSI', 'HSI', '8841458.WI'  # 中小, 2000, 恒生, 微盘
+}
+
+# 2. 动态补充“指数专用”别名到映射表
+# 防止用户输入 "沪深300指数" 时被误判为期货 IF
+EXTRA_INDEX_MAP = {
+    "沪深300指数": "000300.SH", "300指数": "000300.SH",
+    "上证50指数": "000016.SH", "50指数": "000016.SH",
+    "中证500指数": "000905.SH", "500指数": "000905.SH",
+    "中证1000指数": "000852.SH", "1000指数": "000852.SH",
+    "中证2000指数": "932000.CSI", "2000指数": "932000.CSI",
+    "创业板指数": "399006.SZ",
+}
+# 将这些补充别名合并进主字典 (不影响原有的期货映射)
+COMMON_ALIASES.update(EXTRA_INDEX_MAP)
+
+
 def resolve_symbol(query: str):
     """
-    核心解析函数：智能识别 主力连续 vs 具体合约
+    核心解析函数：智能识别 主力连续 vs 具体合约 vs 指数 vs 股票
+    返回: (target_code, asset_type)
+    asset_type 可能为: 'future', 'stock', 'index'
     """
     if not query or not isinstance(query, str) or query.strip() == "":
         return None, None
 
     query = query.strip().upper()
 
-    # --- 1. 尝试匹配具体期货合约 (如 "豆粕2505", "rb2510", "M2509") ---
-    # 规则：中文/英文前缀 + 3-4位数字
+    # --- 0. 优先检查是否直接输入了指数代码 ---
+    if query in INDEX_CODES_SET:
+        return query, 'index'
 
-    # 提取数字部分
+    # --- 1. 尝试匹配具体期货合约 (如 "豆粕2505", "rb2510") ---
+    # 规则：中文/英文前缀 + 3-4位数字
     digit_match = re.search(r"(\d{3,4})", query)
     if digit_match:
+        # 只有当后面确实跟着数字时才处理
         number_part = digit_match.group(1)
-        # 提取前缀 (去掉数字剩下的部分)
         prefix_part = query[:digit_match.start()].strip()
 
-        # 尝试解析前缀
-        # 情况 A: 前缀是中文 (如 "豆粕") -> 查字典转代码 (M)
+        # A. 前缀是中文 (如 "豆粕")
         if prefix_part in COMMON_ALIASES:
             base_code = COMMON_ALIASES[prefix_part]
-            # 拼接成 M2505，直接返回
-            # 注意：如果 base_code 是 stock 类型 (带点)，这里不适用，跳过
+            # 排除股票/指数 (带有 .SH/.SZ 的)
             if '.' not in base_code:
                 return f"{base_code.upper()}{number_part}", 'future'
 
-        # 情况 B: 前缀本身就是代码 (如 "RB", "M")
-        # 检查是否在字典的值里
+        # B. 前缀是代码 (如 "RB")
         if prefix_part.lower() in COMMON_ALIASES.values():
             return f"{prefix_part.upper()}{number_part}", 'future'
 
-    # --- 2. 查常用字典 (主力连续 / ETF / 股票简称) ---
+    # --- 2. 查常用字典 (主力连续 / ETF / 指数 / 股票简称) ---
     if query in COMMON_ALIASES:
         code = COMMON_ALIASES[query]
-        # 期货代码通常没有点，股票/ETF有点
-        asset_type = 'stock' if '.' in code else 'future'
-        # 如果是期货，这里返回的是基础代码 (如 'rb', 'M')，代表主力连续
-        return code, asset_type
 
-    # 检查是否直接输入了代码 (如 'M', 'RB')
+        # 🔥【关键修改】判断类型
+        if code in INDEX_CODES_SET:
+            return code, 'index'  # 命中指数白名单
+        elif '.' in code:
+            return code, 'stock'  # 股票/ETF
+        else:
+            return code, 'future'  # 期货
+
+    # 检查是否直接输入了期货品种代码 (如 'M', 'RB')
     if query.lower() in COMMON_ALIASES.values():
         return query.upper(), 'future'
 
     # --- 3. 查全市场字典 (股票/ETF) ---
     market_map = get_all_market_map()
     if query in market_map:
+        # 全市场字典里大概率没有指数，主要是股票和ETF
         return market_map[query], 'stock'
+
+    # 模糊匹配 (名称包含)
     for name, code in market_map.items():
         if query in name:
             return code, 'stock'
 
     # 4. 匹配纯数字代码 (股票/ETF)
+    # 如果用户输了 600519，默认是股票；如果输了 000300，可能是指数也可能是股票(很少见)
+    # 这里做一个简单的兜底
     if query[0].isdigit():
+        # 优先尝试在指数列表里找 (比如用户输 000001)
+        possible_index = f"{query}.SH"
+        if possible_index in INDEX_CODES_SET:
+            return possible_index, 'index'
+        possible_index_sz = f"{query}.SZ"
+        if possible_index_sz in INDEX_CODES_SET:
+            return possible_index_sz, 'index'
+
+        # 再去股票列表找
         for code in market_map.values():
             if query == code.split('.')[0]:
                 return code, 'stock'
@@ -2186,10 +2244,11 @@ def resolve_symbol(query: str):
     return None, None
 
 
-# 测试
+# 测试代码
 if __name__ == "__main__":
-    print(f"多晶硅 -> {resolve_symbol('多晶硅')}")  # ('m', 'future') -> 主连
-    print(f"PS2602 -> {resolve_symbol('PS2602')}")  # ('M2505', 'future') -> 分合约
-    print(f"多晶硅2602 -> {resolve_symbol('多晶硅2602')}")  # ('RB2510', 'future')
-    print(f"ps -> {resolve_symbol('ps')}")  # ('rb', 'future')
-    print(f"50ETF -> {resolve_symbol('50ETF')}")  # ('510050.SH', 'stock')
+    print(f"上证指数 -> {resolve_symbol('上证指数')}")  # ('000001.SH', 'index')
+    print(f"300指数 -> {resolve_symbol('300指数')}")  # ('000300.SH', 'index')
+    print(f"沪深300 -> {resolve_symbol('沪深300')}")  # ('IF', 'future') - 保持原有期货习惯
+    print(f"000001.SH -> {resolve_symbol('000001.SH')}")  # ('000001.SH', 'index')
+    print(f"m -> {resolve_symbol('m')}")  # ('600519.SH', 'stock')
+    print(f"多晶硅 -> {resolve_symbol('多晶硅')}")  # ('rb', 'future')

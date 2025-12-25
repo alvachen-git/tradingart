@@ -122,7 +122,7 @@ def standardize_columns(df):
 def get_financial_news(query: str = ""):
     """
     【财经新闻搜索工具】
-    获取实时的财经快讯，优先使用财联社电报。
+    获取实时的财经新闻，适用于回答消息面、新闻等问题。
 
     参数:
     - query: 搜索关键词，例如 "白银", "黄金", "原油", "贵州茅台"。

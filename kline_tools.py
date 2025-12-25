@@ -88,6 +88,17 @@ def analyze_kline_pattern(query: str, trade_date: str = None):
             """
             df = pd.read_sql(sql, engine)
 
+ # 🔥【新增】指数查询逻辑
+        elif asset_type == 'index':
+            sql = f"""
+                SELECT trade_date, open_price, high_price, low_price, close_price 
+                FROM index_price
+                WHERE ts_code='{symbol}' 
+                {date_condition} 
+                ORDER BY trade_date DESC LIMIT 60
+            """
+            df = pd.read_sql(sql, engine)
+
         if df.empty:
             target_date_msg = f" ({trade_date})" if trade_date else ""
             return f"未找到品种 {symbol}{target_date_msg} 的历史价格数据，无法进行技术分析。"
