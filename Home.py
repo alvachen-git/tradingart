@@ -371,6 +371,19 @@ def get_agent(current_user="访客", user_query=""):  # 传入 current_user
     last_week_start = (today - timedelta(days=today.weekday() + 7)).strftime('%Y%m%d')
     last_week_end = (today - timedelta(days=today.weekday() + 1)).strftime('%Y%m%d')
 
+    # --- 【新增】上个月计算逻辑 ---
+    # 1. 本月第一天
+    first_day_this_month = today.replace(day=1)
+    # 2. 上个月最后一天 = 本月第一天 - 1天
+    last_day_last_month = first_day_this_month - timedelta(days=1)
+    # 3. 上个月第一天 = 上个月最后一天 把日期换成1号
+    first_day_last_month = last_day_last_month.replace(day=1)
+
+    # 格式化为字符串
+    last_month_start = first_day_last_month.strftime('%Y%m%d')
+    last_month_end = last_day_last_month.strftime('%Y%m%d')
+    last_month_name = first_day_last_month.strftime('%Y年%m月')
+
 
     system_message = f"""
     你是一位专业的K线技术分析师和期权专家，遵守顺势交易。 
@@ -379,6 +392,7 @@ def get_agent(current_user="访客", user_query=""):  # 传入 current_user
     【当前时间基准】：
     - 今天是：{today.strftime('%Y年%m月%d日')} (数据库查询请使用: {today_str})
     - 上周区间参考：{last_week_start} 至 {last_week_end}
+    - 上月区间参考：{last_month_name} ({last_month_start} 至 {last_month_end})
     
 
     【工具使用指南】：
