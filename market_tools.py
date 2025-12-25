@@ -79,7 +79,7 @@ def get_price_statistics(query_list: str, start_date: str, end_date: str):
 
                 # 【修改点 1】增加 pct_chg
                 sql = text(f"""
-                    SELECT trade_date, close, high, low, pct_chg 
+                    SELECT trade_date, close_price as close, high_price as high, low_price as low, open_price as open,pct_chg 
                     FROM stock_price 
                     WHERE ts_code IN ('{code_str}')
                       AND trade_date >= :s_date 
