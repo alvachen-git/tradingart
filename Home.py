@@ -11,6 +11,7 @@ from datetime import datetime, timedelta
 from streamlit_lottie import st_lottie
 from kline_tools import analyze_kline_pattern
 from screener_tool import search_top_stocks
+from news_tools import get_financial_news
 import time
 import extra_streamlit_components as stx
 import streamlit.components.v1 as components
@@ -357,7 +358,7 @@ if "messages" not in st.session_state:
 # ==========================================
 def get_agent(current_user="访客", user_query=""):  # 传入 current_user
     # ... (这里保留您原来的 prompt 和 tools) ...
-    tools = [analyze_kline_pattern, search_investment_knowledge, get_market_snapshot, get_commodity_iv_info,
+    tools = [analyze_kline_pattern, search_investment_knowledge, get_market_snapshot, get_commodity_iv_info,get_financial_news,
              get_price_statistics, check_option_expiry_status,tool_stock_hedging_analysis,tool_futures_correlation_check,tool_stock_correlation_check,search_top_stocks]
     if not os.getenv("DASHSCOPE_API_KEY"):
         st.error("❌ 未配置 API KEY");
@@ -407,6 +408,7 @@ def get_agent(current_user="访客", user_query=""):  # 传入 current_user
     8. 商品期货相关性-> 用 `tool_futures_correlation_check` (当用户问"黄金和白银相关吗"、"持仓分散度"时)。
     9. 股票间相关性 -> 用 `tool_stock_correlation_check` (当用户问"茅台和五粮液一样吗")。
     10.当客户问“推荐股票”、“选股”-> 用`search_top_stocks`（选分数最高的）
+    11.查新闻、消息面-> 用 `get_financial_news` 
 
     【你的行为准则】
     1. 避免同时调用超过2个工具，除非用户明确要求全面分析。
@@ -416,6 +418,16 @@ def get_agent(current_user="访客", user_query=""):  # 传入 current_user
     4. 期权策略的建议，需要考虑波动率和距离到期日，使用工具`check_option_expiry_status`和知识库搭配回答
     5. 如果客户问最近某商品的技术面，可以把前面几天的K线都一起分析后给出总结
     6. 给出明确操作建议，根据用户风险偏好（激进/保守）给他喜欢的策略，如果是保守的，就不要给激进建议。
+    
+    【高级背离研判逻辑 (触发警报)】
+    ⚠️ **场景 A：利多不涨（危险信号！）**
+    - **触发条件**：如果新闻显示重大利好，但技术面显示利空信号(收长上影线、跌破区间）。
+    - **分析结论**：这是利好出尽的典型特征！市场已经透支了预期。
+    
+    💎 **场景 B：利空不跌（黄金坑！）**
+    - **触发条件**：如果新闻是坏消息，但 K 线竟然不跌反涨，或者在低位收出大阳线/下影线。
+    - **分析结论**：这是“利空出尽”的表现，买盘极强，可能大反转。
+
 
     【回答格式】
    先给结论，然后解释理由。期权策略的使用要结合K线技术面和IV。
@@ -432,10 +444,14 @@ def get_agent(current_user="访客", user_query=""):  # 传入 current_user
 
 # 定义随机幽默加载文案
 LOADING_JOKES = [
-    "☕️ AI正在思考，顺便给主力资金打电话核实...",
+    "☕️ AI正在思考，这问题太简单，我该如何回答...",
+    "⚡️ AI正在思考，回想Jack老师的教导..."
     "📈 AI正在思考，顺便用紫微斗数模拟未来 1000 种走势...",
+    "📈 AI正在思考，默默拿出K线战法偷看...",
     "🧘‍♂️ AI正在思考，平复最近赚钱激动的心，保持客观...",
     "📞 AI正在思考，连线华尔街内幕人士...",
+    "📞 AI正在思考，给主力资金打电话核实...",
+    "📞 AI正在思考，准备求助游资大佬...",
     "🔮 AI正在思考，偷偷拿出水晶球...",
     "📉 AI正在思考，顺便检查这根 K 线是不是骗线...",
     "🐂 AI正在思考，还要忙喂养牛市的公牛...",
