@@ -88,6 +88,23 @@ def get_price_statistics(query_list: str, start_date: str, end_date: str):
                 """)
                 df = pd.read_sql(sql, engine, params={"s_date": s_date, "e_date": e_date})
 
+            # --- 分支 2: 指数 (新增) ---
+            elif asset_type == 'index':
+                # 指数表结构现在包含了 high_price, low_price
+                sql = text("""
+                    SELECT trade_date, 
+                           close_price as close, 
+                           high_price as high, 
+                           low_price as low, 
+                           pct_chg 
+                    FROM index_price 
+                    WHERE ts_code = :code
+                      AND trade_date >= :s_date 
+                      AND trade_date <= :e_date
+                    ORDER BY trade_date ASC
+                """)
+                df = pd.read_sql(sql, engine, params={"code": target_code, "s_date": s_date, "e_date": e_date})
+
             else:
                 # 【修改点 2】增加 pct_chg
                 sql = text("""
@@ -161,6 +178,12 @@ def get_market_snapshot(query: str):
             sql = text(
                 f"SELECT * FROM stock_price WHERE ts_code LIKE '{target_code}%' ORDER BY trade_date DESC LIMIT 1")
             df = pd.read_sql(sql, engine)
+
+        elif asset_type == 'index':
+            # 新增指数查询
+            sql = text(f"SELECT * FROM index_price WHERE ts_code = :code ORDER BY trade_date DESC LIMIT 1")
+            df = pd.read_sql(sql, engine, params={"code": target_code})
+
         else:
             sql = text("SELECT * FROM futures_price WHERE ts_code=:code ORDER BY trade_date DESC LIMIT 1")
             df = pd.read_sql(sql, engine, params={"code": target_code})
