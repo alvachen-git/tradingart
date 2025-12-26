@@ -25,7 +25,7 @@ FUT_TO_OPT = {v: k for k, v in SPECIAL_MAPPING.items()}
 # 目标品种
 TARGETS = ['LC', 'SI', 'PS', 'pd', 'pt', 'IH', 'IF', 'IM', 'au', 'ag', 'cu', 'al', 'zn', 'ni', 'sn',
            'rb', 'i', 'sm', 'sf', 'fg', 'sa', 'm', 'a', 'b', 'rm', 'y', 'oi', 'p', 'ta', 'pr', 'ma', 'v', 'eb', 'eg', 'l', 'pp',
-           'ru','br','lg','lh',
+           'ru','br','lg','lh','px',
            'c', 'cf', 'ap', 'cj', 'pk', 'jd', 'sr', 'ao', 'sh', 'ur', 'sp', 'fu', 'bu', 'sc']
 
 
@@ -67,7 +67,7 @@ def calc_iv_core(date, S, HV, fut_code, opt_prefix):
         if not m: return None
         num_part = m.group(1)
 
-        zce_products = ('CF', 'SR', 'TA', 'MA', 'RM', 'OI', 'SH', 'FG', 'SA', 'PF', 'PK', 'SM', 'SF', 'UR', 'AP', 'CJ')
+        zce_products = ('CF', 'SR', 'TA','PX','PR','MA', 'RM', 'OI', 'SH', 'FG', 'SA', 'PF', 'PK', 'SM', 'SF', 'UR', 'AP', 'CJ')
         if len(num_part) == 4 and fut_code.upper().startswith(zce_products):
             opt_num = num_part[1:]
         else:

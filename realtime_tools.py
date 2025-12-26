@@ -19,7 +19,7 @@ def _get_active_proxies(symbol: str):
     # 真实世界当前活跃的月份后缀 (根据当前实际时间调整)
     # 假设现在是 2025年初，活跃合约通常是 2502-2512
     active_suffixes = [
-        "2601", "2602", "2605"
+        "2601", "2602", "2605", "2609"
     ]
 
     proxies = [f"{alpha}{suffix}" for suffix in active_suffixes]

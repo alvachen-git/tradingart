@@ -169,6 +169,46 @@ st.markdown("""
         font-size: 13px; 
         color: #8b949e !important; /* 强制灰白 */
     }
+    
+    /* 1. 锁定按钮容器：给它加一个明显的背景色块 */
+    button[data-testid="stSidebarCollapsedControl"] {
+        background-color: #3b82f6 !important; /* 亮蓝色底 (如果不喜欢蓝色，可改为 #FFD700 金色) */
+        border: 2px solid rgba(255, 255, 255, 0.6) !important; /* 半透明白边框 */
+        border-radius: 12px !important;       /* 圆角矩形 */
+        width: 40px !important;               /* 强制宽度 */
+        height: 40px !important;              /* 强制高度 */
+        box-shadow: 0 4px 12px rgba(0,0,0,0.5) !important; /* 明显的阴影，增加立体感 */
+        
+        /* 强制定位：防止被 Header 遮挡 */
+        position: fixed !important;
+        left: 15px !important;
+        top: 15px !important;
+        z-index: 999999 !important; /* 层级最高，浮在一切之上 */
+        
+        /* 确保内容居中 */
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        opacity: 1 !important; /* 防止被系统默认的透明度影响 */
+        transition: transform 0.2s ease !important;
+    }
+
+    /* 2. 鼠标悬停效果：点击欲望 */
+    button[data-testid="stSidebarCollapsedControl"]:hover {
+        background-color: #2563eb !important; /* 悬停深蓝 */
+        transform: scale(1.1) !important;     /* 微微放大 */
+        border-color: #ffffff !important;     /* 边框变亮白 */
+    }
+
+    /* 3. 核心修复：强制内部的箭头图标(SVG)变白 */
+    button[data-testid="stSidebarCollapsedControl"] svg,
+    button[data-testid="stSidebarCollapsedControl"] i {
+        fill: #ffffff !important;    /* 填充纯白 */
+        color: #ffffff !important;   /* 颜色纯白 */
+        stroke: #ffffff !important;  /* 描边纯白 */
+        width: 20px !important;      /* 强制图标大小 */
+        height: 20px !important;
+    }
 
     /* 调整底部输入框样式 */
     .stChatInput {
@@ -575,9 +615,26 @@ def process_user_input(prompt_text):
 # ==========================================
 def show_welcome_screen():
     st.markdown("<br><br>", unsafe_allow_html=True)
-    st.markdown("<h1 style='text-align: center; color: #fff;'>🤓 嗨，我是爱波塔</h1>", unsafe_allow_html=True)
-    st.markdown("<p style='text-align: center; color: #8b949e;'>陪你在金融市场奋斗</p>",
-                unsafe_allow_html=True)
+    # --- 修复 1：优化标题排版 ---
+    # white-space: nowrap -> 强制不换行
+    # font-size: clamp(...) -> 智能字体大小（最小 1.8rem，最大 3rem，中间自适应）
+    # margin-bottom: 0.5rem -> 调整下边距
+    st.markdown("""
+            <div style="text-align: center;">
+                <h1 style='
+                    color: #fff; 
+                    white-space: nowrap; 
+                    font-size: clamp(2rem, 5vw, 3rem); 
+                    margin-bottom: 0.5rem;
+                '>
+                    🤓 嗨，我是爱波塔
+                </h1>
+                <p style='color: #8b949e; font-size: 1rem;'>
+                    陪你在金融市场奋斗
+                </p>
+            </div>
+        """, unsafe_allow_html=True)
+
     st.markdown("<br>", unsafe_allow_html=True)
 
     # --- 快捷指令卡片 ---
