@@ -2081,6 +2081,11 @@ COMMON_ALIASES = {
     '中证2000': '932000.CSI',
     '小盘股': '932000.CSI',
 
+# 🔥【新增】股指期权专用映射 (必须显式定义，防止正则误判)
+    "MO": "MO", "中证1000股指期权": "MO", "1000期权": "MO",
+    "HO": "HO", "上证50股指期权": "HO", "50期权": "HO",
+    "IO": "IO", "沪深300股指期权": "IO", "300期权": "IO",
+
     # 黑色系
     "螺纹": "rb", "螺纹钢": "rb", "热卷": "hc", "铁矿": "i", "铁矿石": "i",
     "焦煤": "jm", "焦炭": "j", "硅铁": "sf", "锰硅": "sm", "不锈钢": "ss",
@@ -2106,6 +2111,7 @@ COMMON_ALIASES = {
     # 新能源
     "碳酸锂": "lc", "工业硅": "si", "多晶硅": "PS","PS": "PS", "钯金": "pd", "铂金": "pt",
     "纸浆": "sp", "双胶纸": "op", "原木": "lg",
+
 
     # 股指/国债
     "沪深300": "IF", "上证50": "IH", "中证500": "IC", "中证1000": "IM",
@@ -2247,7 +2253,7 @@ def resolve_symbol(query: str):
 # 测试代码
 if __name__ == "__main__":
     print(f"上证指数 -> {resolve_symbol('上证指数')}")  # ('000001.SH', 'index')
-    print(f"300指数 -> {resolve_symbol('300指数')}")  # ('000300.SH', 'index')
+    print(f"mo -> {resolve_symbol('mo')}")  # ('000300.SH', 'index')
     print(f"沪深300 -> {resolve_symbol('沪深300')}")  # ('IF', 'future') - 保持原有期货习惯
     print(f"000001.SH -> {resolve_symbol('000001.SH')}")  # ('000001.SH', 'index')
     print(f"m -> {resolve_symbol('m')}")  # ('600519.SH', 'stock')

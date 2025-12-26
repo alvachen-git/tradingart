@@ -17,7 +17,7 @@ import extra_streamlit_components as stx
 import streamlit.components.v1 as components
 import uuid #用于生成唯一ID
 from market_tools import get_market_snapshot, get_price_statistics
-from data_engine import get_commodity_iv_info, check_option_expiry_status
+from data_engine import get_commodity_iv_info, check_option_expiry_status,search_broker_holdings_on_date
 from captcha_utils import generate_captcha_image
 from market_correlation import tool_stock_hedging_analysis, tool_futures_correlation_check,tool_stock_correlation_check
 from sqlalchemy import text
@@ -398,7 +398,7 @@ if "messages" not in st.session_state:
 # ==========================================
 def get_agent(current_user="访客", user_query=""):  # 传入 current_user
     # ... (这里保留您原来的 prompt 和 tools) ...
-    tools = [analyze_kline_pattern, search_investment_knowledge, get_market_snapshot, get_commodity_iv_info,get_financial_news,
+    tools = [analyze_kline_pattern, search_investment_knowledge, get_market_snapshot, get_commodity_iv_info,get_financial_news,search_broker_holdings_on_date,
              get_price_statistics, check_option_expiry_status,tool_stock_hedging_analysis,tool_futures_correlation_check,tool_stock_correlation_check,search_top_stocks]
     if not os.getenv("DASHSCOPE_API_KEY"):
         st.error("❌ 未配置 API KEY");
@@ -449,6 +449,7 @@ def get_agent(current_user="访客", user_query=""):  # 传入 current_user
     9. 股票间相关性 -> 用 `tool_stock_correlation_check` (当用户问"茅台和五粮液一样吗")。
     10.当客户问“推荐股票”、“选股”-> 用`search_top_stocks`（选分数最高的）
     11.查新闻、消息面-> 用 `get_financial_news` 
+    12. 查询某期货商的持仓 -> 用 `search_broker_holdings_on_date`。
 
     【你的行为准则】
     1. 当用户询问某个标的时，如果没有指定K线分析，那可以同时调用`analyze_kline_pattern`和`get_financial_news`，将消息面与技术面进行对比。

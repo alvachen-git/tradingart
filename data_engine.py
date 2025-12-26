@@ -592,6 +592,7 @@ PRODUCT_MAP = {
     # 金融
     'IF': '沪深300', 'IH': '上证50', 'IM': '中证1000', 'IC': '中证500','PD': '钯金','PT': '铂金',
     'TS': '2年国债', 'TF': '5年国债', 'T': '10年国债', 'TL': '30年国债','EC': '欧线',
+    'MO': '中证1000', 'HO': '上证50', 'IO': '沪深300',
     # 黑色
     'RB': '螺纹钢', 'HC': '热卷', 'J': '焦炭', 'JM': '焦煤', 'I': '铁矿石','WR': '线材',
     'SS': '不锈钢', 'SM': '锰硅', 'SF': '硅铁','NR': '20号胶','OP': '双胶纸','SP': '纸浆',
@@ -1169,7 +1170,7 @@ def _query_etf_iv(etf_code, etf_name, query, need_rank, limit_days):
 def _query_commodity_iv(query, need_rank, limit_days):
     """查询商品期权的 IV 数据（从 commodity_iv_history 表）"""
 
-    # 商品代码映射
+    # 1. 商品代码映射
     target_code = None
     target_name = query
     clean_query = re.sub(r'[^a-zA-Z]', '', query).upper()
@@ -1185,7 +1186,6 @@ def _query_commodity_iv(query, need_rank, limit_days):
                 target_name = name
                 break
 
-
     if not target_code:
         match = re.match(r'([a-zA-Z]+)', query)
         if match:
@@ -1195,35 +1195,61 @@ def _query_commodity_iv(query, need_rank, limit_days):
         return f"⚠️ 未找到商品【{query}】。"
 
     try:
-        # 寻找主力合约
+        # 🔥【关键修复开始】金融期权映射表
+        # 解释：数据库里 futures_price 只有期货(IM)，没有期权(MO)
+        # 所以查主力合约时，必须把 MO 映射为 IM 去查活跃月份
+        FIN_OPT_MAP = {
+            'MO': 'IM',  # 中证1000期权 -> 查 IM 期货
+            'HO': 'IH',  # 上证50期权   -> 查 IH 期货
+            'IO': 'IF'  # 沪深300期权 -> 查 IF 期货
+        }
+
+        # 如果是 MO，search_code 变成 IM；否则保持原样 (如 M, RB)
+        search_code = FIN_OPT_MAP.get(target_code, target_code)
+
+        # 2. 寻找主力合约 (使用 search_code 去查期货表)
         sql_main = f"""
             SELECT ts_code, close_price, REPLACE(trade_date, '-', '') as trade_date 
             FROM futures_price 
-            WHERE ts_code LIKE '{target_code}%%' 
+            WHERE ts_code LIKE '{search_code}%%' 
               AND trade_date = (SELECT MAX(trade_date) FROM futures_price)
             ORDER BY oi DESC LIMIT 1
         """
         df_main = pd.read_sql(sql_main, engine)
 
         if df_main.empty:
-            return f"⚠️ 暂无品种【{target_code}】的数据。"
+            return f"⚠️ 暂无品种【{target_code}】(关联期货 {search_code}) 的数据。"
 
-        main_contract = df_main.iloc[0]['ts_code']
+        # 获取主力合约，例如 "IM2502"
+        main_contract_future = df_main.iloc[0]['ts_code']
         curr_price = df_main.iloc[0]['close_price']
         date_str = df_main.iloc[0]['trade_date']
+
+        # 3. 确定 IV 查询用的合约代码
+        # 假设您的 IV 表里存的是和期货一样的代码 (IM2502)，或者我们先查 IM2502
+        iv_search_code = main_contract_future
 
         # 查询 IV 数据
         sql_iv = f"""
             SELECT trade_date, iv 
             FROM commodity_iv_history 
-            WHERE ts_code = '{main_contract}' 
+            WHERE ts_code = '{iv_search_code}' 
             ORDER BY trade_date DESC 
             LIMIT {limit_days}
         """
         df_iv = pd.read_sql(sql_iv, engine)
 
+        # 兜底：如果查 IM2502 没查到 IV，尝试替换前缀查 MO2502 (防止数据库存的是 MO 开头)
+        if df_iv.empty and target_code in FIN_OPT_MAP:
+            alt_code = main_contract_future.replace(search_code, target_code)  # IM2502 -> MO2502
+            sql_iv_alt = f"SELECT trade_date, iv FROM commodity_iv_history WHERE ts_code = '{alt_code}' ORDER BY trade_date DESC LIMIT {limit_days}"
+            df_iv = pd.read_sql(sql_iv_alt, engine)
+            if not df_iv.empty:
+                iv_search_code = alt_code  # 修正为实际查到的代码
+        # 🔥【关键修复结束】
+
         if df_iv.empty:
-            return f"⚠️ 合约【{main_contract}】暂无IV数据。"
+            return f"⚠️ 合约【{iv_search_code}】暂无IV数据。"
 
         curr_iv = df_iv.iloc[0]['iv']
 
@@ -1255,7 +1281,7 @@ def _query_commodity_iv(query, need_rank, limit_days):
                     trend_text = "➡️ 近一周波动率维持窄幅震荡"
 
             return f"""
-📊 **{target_name} ({main_contract}) 波动率速报**
+📊 **{target_name} ({iv_search_code}) 波动率速报**
 --------------------------------
 📅 日期: {date_str}
 🔥 **当前 IV: {curr_iv:.2f}%**
@@ -1285,7 +1311,7 @@ def _query_commodity_iv(query, need_rank, limit_days):
                 status = "🔥 极高 (权利金昂贵)"
 
             return f"""
-📊 **{target_name} ({main_contract}) 深度波动率分析**
+📊 **{target_name} ({iv_search_code}) 深度波动率分析**
 --------------------------------
 📅 日期: {date_str}
 🌊 **当前 IV: {curr_iv:.2f}%**
@@ -1295,7 +1321,6 @@ def _query_commodity_iv(query, need_rank, limit_days):
 📺 历史最高: {max_iv:.2f}%
 📻 历史最低: {min_iv:.2f}%
 --------------------------------
-💡 *策略参考: 当前IV处于{'历史高位，权利金较贵，卖方策略具有统计上优势' if iv_rank > 50 else '历史低位，权利金便宜，买方策略风险收益比更佳'}。*
             """
 
     except Exception as e:
@@ -1311,6 +1336,7 @@ def check_option_expiry_status(query: str):
     # --- 1. 内置字典 ---
     LOCAL_PRODUCT_MAP = {
         'IF': '沪深300', 'IH': '上证50', 'IM': '中证1000', 'IC': '中证500',
+        'MO': '中证1000股指期权', 'HO': '上证50股指期权', 'IO': '沪深300股指期权',
         'TS': '2年国债', 'TF': '5年国债', 'T': '10年国债', 'TL': '30年国债',
         'RB': '螺纹钢', 'HC': '热卷', 'J': '焦炭', 'JM': '焦煤', 'I': '铁矿石',
         'M': '豆粕', 'Y': '豆油', 'P': '棕榈油', 'OI': '菜油', 'RM': '菜粕',
@@ -1539,3 +1565,91 @@ def get_static_maturity_map():
     except Exception as e:
         print(f"❌ [Cache Error] 缓存建立失败: {e}")
         return {}
+
+
+@tool
+def search_broker_holdings_on_date(broker_name: str, date: str, symbol: str = None):
+    """
+    查询持仓数据，支持两种模式：
+    1. 查询【某家期货商】的持仓（。
+    2. 查询【所有期货商】在某天针对【某品种】的持仓排名。
+
+    参数:
+    - broker_name: 期货商名称 。如果要查全市场排名，请填 '所有' 或 'All'。
+    - date: 查询日期 (YYYYMMDD)。
+    - symbol: (可选) 品种代码，如 'RB', 'CU'。当 broker_name='所有' 时，此项必填。
+    """
+    # 1. 预处理参数
+    date = date.replace('-', '').replace('/', '')
+
+    # 识别是否查全市场
+    is_search_all = broker_name in ['所有', '全部', 'All', 'all', '各个', '哪个']
+
+    print(
+        f"[*] Query Holdings: Broker={broker_name}, Date={date}, Symbol={symbol}, Mode={'ALL' if is_search_all else 'SINGLE'}")
+
+    try:
+        # ==========================================
+        #  模式 A: 查【所有期货商】的排名 (横向对比)
+        # ==========================================
+        if is_search_all:
+            if not symbol:
+                return "❌ 查询所有期货商时，必须指定品种（例如：'查询所有期货商在铜上的持仓'）。"
+
+            # 转换品种代码 (如 螺纹钢 -> RB)
+            from data_engine import CN_TO_CODE
+            code_prefix = CN_TO_CODE.get(symbol, symbol).upper()
+
+            # SQL: 查该品种下，各期货商的持仓，按总持仓量(活跃度)排序
+            # 注意: 这里使用 %% 来转义 %，防止 Python 字符串格式化报错
+            sql = f"""
+                SELECT 
+                    broker as 期货商, 
+                    long_vol as 多单, 
+                    short_vol as 空单, 
+                    net_vol as 净持仓,
+                    (long_vol + short_vol) as 总持仓
+                FROM futures_holding 
+                WHERE REPLACE(trade_date, '-', '') = '{date}'
+                  AND ts_code LIKE '{code_prefix}%%'
+                ORDER BY 总持仓 DESC
+                LIMIT 20
+            """
+
+        # ==========================================
+        #  模式 B: 查【某家期货商】的持仓 (纵向详情)
+        # ==========================================
+        else:
+            sql = f"""
+                SELECT 
+                    ts_code as 合约, 
+                    long_vol as 多单, 
+                    short_vol as 空单, 
+                    net_vol as 净持仓
+                FROM futures_holding 
+                WHERE broker = '{broker_name}' 
+                  AND REPLACE(trade_date, '-', '') = '{date}'
+            """
+            # 如果指定了品种，加筛选
+            if symbol:
+                from data_engine import CN_TO_CODE
+                code_prefix = CN_TO_CODE.get(symbol, symbol).upper()
+                sql += f" AND ts_code LIKE '{code_prefix}%%'"
+
+            # 按净持仓绝对值排序
+            sql += " ORDER BY ABS(net_vol) DESC LIMIT 20"
+
+        # 3. 执行查询
+        df = pd.read_sql(sql, engine)
+
+        if df.empty:
+            if is_search_all:
+                return f"未找到 {date} 关于 {symbol} 的持仓数据。\n可能是当天该品种未进入龙虎榜，或数据未更新。"
+            else:
+                return f"未找到【{broker_name}】在 {date} 的持仓数据。\n请检查该期货商当天是否上榜。"
+
+        # 4. 返回 Markdown 表格
+        return f"📊 **查询结果 ({date})**:\n" + df.to_markdown(index=False)
+
+    except Exception as e:
+        return f"查询持仓失败: {str(e)}"
