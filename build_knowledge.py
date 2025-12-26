@@ -32,7 +32,7 @@ def load_txt_safe(file_path):
 def build_db():
     print("🚀 開始構建知識庫 (終極穩健版)...")
 
-    base_dir = './knowledge_docs'
+    base_dir = '../future-app/knowledge_docs'
     if not os.path.exists(base_dir):
         os.makedirs(base_dir)
         print(f"已創建 {base_dir} 文件夾，請放入文件後重試。")
@@ -79,7 +79,7 @@ def build_db():
 
     try:
         # 1. 創建本地客戶端
-        client = QdrantClient(path="./qdrant_db")
+        client = QdrantClient(path="../future-app/qdrant_db")
 
         # 2. 【關鍵步驟】計算向量維度
         # 我們先試著把一個簡單的詞變成向量，看看它是多少維的
