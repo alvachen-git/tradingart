@@ -4,6 +4,7 @@ import data_engine as de
 import os
 import json
 import random
+import markdown
 import sys
 import auth_utils as auth
 import memory_utils as mem
@@ -230,7 +231,16 @@ def native_share_button(user_content, ai_content, key):
     container_id = f"share-container-{unique_id}"
     btn_id = f"btn-{unique_id}"
 
-    # --- 1. 构建包含问与答的精美卡片 HTML ---
+    # 1. 【核心修改】将 AI 的 Markdown 内容转换为 HTML
+    # extensions=['tables'] 用于支持 | 表格 | 语法
+    # extensions=['nl2br'] 用于支持换行
+    html_content = markdown.markdown(
+        ai_content,
+        extensions=['tables', 'fenced_code', 'nl2br']
+    )
+
+    # 2. 构建包含样式的 HTML
+    # 注意：我在 <style> 里增加了针对 table, th, td, h3, strong 的样式，让排版更漂亮
     styled_html = f"""
     <div id="{container_id}" style="
         background: linear-gradient(145deg, #1e293b 0%, #0f172a 100%);
@@ -239,10 +249,49 @@ def native_share_button(user_content, ai_content, key):
         border-radius: 16px;
         font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
         line-height: 1.6;
-        width: 380px; /* 适合手机屏幕的宽度 */
-        position: fixed; top: -9999px; left: -9999px; /* 隐藏但可截图 */
+        width: 400px; /* 稍微加宽一点以容纳表格 */
+        position: fixed; top: -9999px; left: -9999px;
         box-sizing: border-box;
     ">
+        <style>
+            #{container_id} table {{
+                border-collapse: collapse;
+                width: 100%;
+                margin: 10px 0;
+                font-size: 12px;
+                color: #e6e6e6;
+            }}
+            #{container_id} th, #{container_id} td {{
+                border: 1px solid #475569;
+                padding: 6px 8px;
+                text-align: left;
+            }}
+            #{container_id} th {{
+                background-color: rgba(255, 255, 255, 0.1);
+                color: #fff;
+                font-weight: bold;
+            }}
+            #{container_id} h1, #{container_id} h2, #{container_id} h3, #{container_id} h4 {{
+                color: #ffffff;
+                margin-top: 15px;
+                margin-bottom: 8px;
+                font-weight: 700;
+            }}
+            #{container_id} strong {{
+                color: #FFD700; /* 金黄色高亮重点 */
+            }}
+            #{container_id} ul, #{container_id} ol {{
+                padding-left: 20px;
+                margin: 5px 0;
+            }}
+            #{container_id} li {{
+                margin-bottom: 4px;
+            }}
+            #{container_id} p {{
+                margin-bottom: 8px;
+            }}
+        </style>
+
         <div style="display: flex; align-items: center; margin-bottom: 20px; border-bottom: 1px solid rgba(255,255,255,0.1); padding-bottom: 15px;">
             <div style="font-size: 24px; margin-right: 10px;">📊</div>
             <div>
@@ -264,7 +313,7 @@ def native_share_button(user_content, ai_content, key):
 
         <div style="margin-bottom: 20px;">
             <div style="font-size: 12px; color: #10b981; margin-bottom: 6px; font-weight:bold;">🤖 AI 分析:</div>
-            <div style="font-size: 14px; color: #cbd5e1; white-space: pre-wrap;">{ai_content}</div>
+            <div style="font-size: 13px; color: #cbd5e1;">{html_content}</div>
         </div>
 
         <div style="
@@ -277,7 +326,7 @@ def native_share_button(user_content, ai_content, key):
     </div>
     """
 
-    # --- 2. JS 逻辑 (保持不变，支持微信降级) ---
+    # --- 3. JS 逻辑 (保持不变) ---
     html_code = f"""
     <!DOCTYPE html>
     <html>
