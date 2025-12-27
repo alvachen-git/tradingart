@@ -1648,6 +1648,38 @@ def search_broker_holdings_on_date(broker_name: str, date: str, symbol: str = No
             else:
                 return f"未找到【{broker_name}】在 {date} 的持仓数据。\n请检查该期货商当天是否上榜。"
 
+        # ==========================================
+        # 🔥【核心修复】数据增强：把代码翻译成人话
+        # ==========================================
+        # 如果结果里有 '合约' 这一列 (模式 B)，我们要把它解析出中文名
+        if '合约' in df.columns:
+            # 引入映射表
+            from data_engine import PRODUCT_MAP
+
+            def enrich_name(row):
+                raw_code = row['合约']  # e.g., eb2601.DCE
+                if not isinstance(raw_code, str): return raw_code
+
+                # 提取字母部分: eb2601 -> EB
+                # 使用正则把数字和点去掉
+                base_code = re.split(r'\d', raw_code)[0].upper()
+
+                # 查字典
+                cn_name = PRODUCT_MAP.get(base_code, base_code)
+
+                # 返回格式: "苯乙烯 (EB)"
+                # AI 看到这个格式，就不会自己去瞎编 "PS" 了
+                return f"{cn_name} ({base_code})"
+
+            # 新增一列 '品种' 并放到第一位
+            df['品种'] = df.apply(enrich_name, axis=1)
+
+            # 调整列顺序，把 '品种' 放在最前面，更直观
+            cols = ['品种', '合约', '多单', '空单', '净持仓']
+            # 确保列都存在
+            final_cols = [c for c in cols if c in df.columns]
+            df = df[final_cols]
+
         # 4. 返回 Markdown 表格
         return f"📊 **查询结果 ({date})**:\n" + df.to_markdown(index=False)
 
