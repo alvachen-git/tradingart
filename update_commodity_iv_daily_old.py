@@ -240,7 +240,7 @@ if __name__ == "__main__":
 
     # 循环回溯3天
     print(f"=== 🔄 开始更新最近3天 IV 数据 ===")
-    for i in range(200):
+    for i in range(2):
         calc_date = now - datetime.timedelta(days=i)
         target_date = calc_date.strftime('%Y%m%d')
 
