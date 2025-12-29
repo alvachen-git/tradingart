@@ -49,7 +49,7 @@ def view_all_memories():
         # 打印表格，设置显示宽度防止折行太乱
         pd.set_option('display.max_rows', None)
         pd.set_option('display.max_colwidth', 60)
-        pd.set_option('display.width', 1000)
+        pd.set_option('display.width', 2000)
         print(df)
         print("-" * 60)
 
