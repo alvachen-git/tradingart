@@ -15,7 +15,7 @@ echo ">>> [1/2] 开始更新期货价格数据..." >> update.log
 
 # 1. 更新【期权数据】
 echo ">>> [2/2] 开始更新商品期权价格数据..." >> update.log
-/usr/bin/python3 update_commodity_opt_daily_old.py >> update.log 2>&1
+/usr/bin/python3 update_commodity_opt_daily.py >> update.log 2>&1
 
 
 # 7. 结束
