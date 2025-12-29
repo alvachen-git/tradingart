@@ -72,7 +72,7 @@ def save_interaction(user_id: str, user_input: str, ai_response: str):
         # 这里打印详细错误，方便我们在控制台看到原因
 
 
-def retrieve_relevant_memory(user_id: str, query: str, k=3, score_threshold=0.6) -> str:
+def retrieve_relevant_memory(user_id: str, query: str, k=3, score_threshold=0.5) -> str:
     """
     [读取记忆]
     注意：切换到 Cosine 后，Score 的范围变了：
