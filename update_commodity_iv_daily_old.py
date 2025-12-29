@@ -108,7 +108,7 @@ def calc_iv_core(date, S, HV, fut_code, opt_prefix):
                 if days_left < 10:
                     threshold = 0.02
                 else:
-                    threshold = 0.05
+                    threshold = 0.08
 
                 if not (S * (1 - threshold) < K < S * (1 + threshold)): continue
 
