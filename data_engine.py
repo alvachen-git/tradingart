@@ -1685,3 +1685,88 @@ def search_broker_holdings_on_date(broker_name: str, date: str, symbol: str = No
 
     except Exception as e:
         return f"查询持仓失败: {str(e)}"
+
+
+@tool
+def tool_analyze_position_change(symbol: str, start_date: str, end_date: str, sort_by: str = "long"):
+    """
+    【持仓变动分析器】
+    计算某品种在一段时间内（start_date 到 end_date）某期货商的持仓变化。
+
+    参数:
+    - symbol: 品种名称或代码，如 '铜', 'RB', '510050'。
+    - start_date: 开始日期 (YYYYMMDD)，如 '20251210'。
+    - end_date: 结束日期 (YYYYMMDD)，通常是今天或昨天。
+    - sort_by: 排序方式。'long' (按多单增量排序), 'short' (按空单增量排序), 'net' (按净持仓变动排序)。默认 'long'。
+    """
+    print(f"[*] 分析持仓变化: {symbol} ({start_date} -> {end_date})")
+
+    try:
+        # 1. 转换品种代码 (如 铜 -> CU)
+        from data_engine import CN_TO_CODE
+        code_prefix = CN_TO_CODE.get(symbol, symbol).upper()
+
+        # 2. 清洗日期
+        d1 = start_date.replace('-', '').replace('/', '')
+        d2 = end_date.replace('-', '').replace('/', '')
+
+        # 3. 一次性查出两天的所有相关数据
+        # 注意：这里我们只查该品种(LIKE '{code_prefix}%')
+        sql = f"""
+            SELECT 
+                broker, 
+                long_vol, 
+                short_vol, 
+                REPLACE(trade_date, '-', '') as t_date
+            FROM futures_holding 
+            WHERE REPLACE(trade_date, '-', '') IN ('{d1}', '{d2}')
+              AND ts_code LIKE '{code_prefix}%%'
+        """
+        df = pd.read_sql(sql, engine)
+
+        if df.empty:
+            return f"未找到 {symbol} 在 {start_date} 或 {end_date} 的数据，无法对比。"
+
+        # 4. 数据聚合 (关键步骤！)
+        # 因为一家期货商可能同时持有 CU2503 和 CU2504，必须先把它们加起来，变成该期货商在"铜"上的总头寸
+        df_agg = df.groupby(['broker', 't_date'])[['long_vol', 'short_vol']].sum().reset_index()
+
+        # 5. 拆分成两个表进行对比
+        df_start = df_agg[df_agg['t_date'] == d1].set_index('broker')
+        df_end = df_agg[df_agg['t_date'] == d2].set_index('broker')
+
+        if df_start.empty or df_end.empty:
+            return f"数据缺失：找到的数据不足以进行首尾对比 (可能某一天休市或未上榜)。"
+
+        # 6. 计算差值 (End - Start)
+        # 使用 align 确保期货商对齐 (有的期货商可能只在某一天上榜，fillna(0) 处理)
+        df_end, df_start = df_end.align(df_start, join='outer', fill_value=0)
+
+        df_diff = pd.DataFrame()
+        df_diff['多单变化'] = df_end['long_vol'] - df_start['long_vol']
+        df_diff['空单变化'] = df_end['short_vol'] - df_start['short_vol']
+        df_diff['净增仓'] = (df_end['long_vol'] - df_end['short_vol']) - (df_start['long_vol'] - df_start['short_vol'])
+
+        # 结果美化：只保留变动不为0的
+        df_diff = df_diff[(df_diff['多单变化'] != 0) | (df_diff['空单变化'] != 0)]
+
+        # 7. 排序逻辑
+        if sort_by == 'short':
+            df_diff = df_diff.sort_values('空单变化', ascending=False)
+            filter_desc = "空单增加前20名"
+        elif sort_by == 'net':
+            df_diff = df_diff.sort_values('净增仓', ascending=False)
+            filter_desc = "净多头增加前20名"
+        else:  # default long
+            df_diff = df_diff.sort_values('多单变化', ascending=False)
+            filter_desc = "多单增加前20名"
+
+        # 取前 20
+        res = df_diff.head(20).reset_index()
+        res.columns = ['期货商', '多单变化', '空单变化', '净增仓变动']
+
+        return f"📊 **{symbol} 持仓变动分析 ({start_date} vs {end_date})**\n📉 排序依据: {filter_desc}\n" + res.to_markdown(
+            index=False)
+
+    except Exception as e:
+        return f"分析失败: {str(e)}"
