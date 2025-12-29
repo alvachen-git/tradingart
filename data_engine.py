@@ -1770,3 +1770,22 @@ def tool_analyze_position_change(symbol: str, start_date: str, end_date: str, so
 
     except Exception as e:
         return f"分析失败: {str(e)}"
+
+
+
+# [新增] 获取数据库中实际存在的最新日期
+@st.cache_data(ttl=300) # 缓存 5 分钟
+def get_latest_data_date():
+    """获取数据库中最新的交易日期 (返回 YYYYMMDD 字符串)"""
+    if engine is None: return datetime.now().strftime('%Y%m%d')
+    try:
+        # 查期货表 (因为期货更新最快)
+        sql = "SELECT MAX(trade_date) as last_date FROM futures_price"
+        with engine.connect() as conn:
+            result = conn.execute(text(sql)).fetchone()
+            if result and result[0]:
+                return str(result[0]).replace('-', '').replace('/', '')
+    except Exception as e:
+        print(f"获取最新日期失败: {e}")
+    # 如果查库失败，兜底返回当前日期
+    return datetime.now().strftime('%Y%m%d')

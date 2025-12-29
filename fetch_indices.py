@@ -67,7 +67,7 @@ def fetch_and_save_indices():
     }
 
     # 拉取过去 3 年的数据 (保证 MA60, MA250 等长周期均线能计算)
-    start_date = (datetime.now() - timedelta(days=3000)).strftime('%Y%m%d')
+    start_date = (datetime.now() - timedelta(days=4)).strftime('%Y%m%d')
     end_date = datetime.now().strftime('%Y%m%d')
 
     print(f"🚀 开始拉取指数 OHLC 数据 ({start_date} - {end_date})...")

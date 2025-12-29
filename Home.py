@@ -23,6 +23,7 @@ from captcha_utils import generate_captcha_image
 from market_correlation import tool_stock_hedging_analysis, tool_futures_correlation_check,tool_stock_correlation_check
 from sqlalchemy import text
 from dotenv import load_dotenv
+from beta_tool import calculate_hedging_beta
 from knowledge_tools import search_investment_knowledge
 # --- AI 相关导入 ---
 from langchain_community.chat_models import ChatTongyi
@@ -448,28 +449,39 @@ if "messages" not in st.session_state:
 def get_agent(current_user="访客", user_query=""):  # 传入 current_user
     # ... (这里保留您原来的 prompt 和 tools) ...
     tools = [analyze_kline_pattern, search_investment_knowledge, get_market_snapshot, get_commodity_iv_info,get_financial_news,search_broker_holdings_on_date,tool_analyze_position_change,
-             get_price_statistics, check_option_expiry_status,tool_stock_hedging_analysis,tool_futures_correlation_check,tool_stock_correlation_check,search_top_stocks]
+             get_price_statistics, check_option_expiry_status,tool_stock_hedging_analysis,tool_futures_correlation_check,tool_stock_correlation_check,search_top_stocks,calculate_hedging_beta]
     if not os.getenv("DASHSCOPE_API_KEY"):
         st.error("❌ 未配置 API KEY");
         return None
 
     llm = ChatTongyi(model="qwen-plus", temperature=0.2)
 
-    # 动态日期
-    today = datetime.now()
-    today_str = today.strftime('%Y%m%d')
-    last_week_start = (today - timedelta(days=today.weekday() + 7)).strftime('%Y%m%d')
-    last_week_end = (today - timedelta(days=today.weekday() + 1)).strftime('%Y%m%d')
+    # --- 🔥【核心修复 1】强制使用北京时间 (UTC+8) ---
+    # 服务器通常是 UTC，直接 +8 小时修正
+    utc_now = datetime.utcnow()
+    china_now = utc_now + timedelta(hours=8)
 
-    # --- 【新增】上个月计算逻辑 ---
-    # 1. 本月第一天
-    first_day_this_month = today.replace(day=1)
-    # 2. 上个月最后一天 = 本月第一天 - 1天
+    today_str = china_now.strftime('%Y%m%d')  # 真实日历日期
+    weekday_cn = ["一", "二", "三", "四", "五", "六", "日"][china_now.weekday()]
+
+    # --- 🔥【核心修复 2】获取数据库里的“最新行情日期” ---
+    # 如果今天是周六，db_latest_date 应该是周五
+    db_latest_date = de.get_latest_data_date()
+
+    # --- 日期计算逻辑 (基于北京时间) ---
+    # 本周范围
+    current_week_start = (china_now - timedelta(days=china_now.weekday())).strftime('%Y%m%d')
+    # 上周范围
+    last_week_start_dt = china_now - timedelta(days=china_now.weekday() + 7)
+    last_week_end_dt = china_now - timedelta(days=china_now.weekday() + 1)
+    last_week_start = last_week_start_dt.strftime('%Y%m%d')
+    last_week_end = last_week_end_dt.strftime('%Y%m%d')
+
+    # 上月范围
+    first_day_this_month = china_now.replace(day=1)
     last_day_last_month = first_day_this_month - timedelta(days=1)
-    # 3. 上个月第一天 = 上个月最后一天 把日期换成1号
     first_day_last_month = last_day_last_month.replace(day=1)
 
-    # 格式化为字符串
     last_month_start = first_day_last_month.strftime('%Y%m%d')
     last_month_end = last_day_last_month.strftime('%Y%m%d')
     last_month_name = first_day_last_month.strftime('%Y年%m月')
@@ -480,9 +492,13 @@ def get_agent(current_user="访客", user_query=""):  # 传入 current_user
     
 
     【当前时间基准】：
-    - 今天是：{today.strftime('%Y年%m月%d日')} (数据库查询请使用: {today_str})
-    - 上周区间参考：{last_week_start} 至 {last_week_end}
-    - 上月区间参考：{last_month_name} ({last_month_start} 至 {last_month_end})
+    1. **现实时间**：{china_now.strftime('%Y年%m月%d日 %H:%M')} (周{weekday_cn})。
+    2. **数据最新日期**：【{db_latest_date}】。
+       - 当用户问“今天”、“最新”的行情时，**必须**使用日期 `{db_latest_date}` 进行查询。
+    【常用时间参考】
+    - **上周**：{last_week_start} 至 {last_week_end}
+    - **本周以来**：{current_week_start} 至今
+    - **上个月 ({last_month_name})**：{last_month_start} 至 {last_month_end}
     
 
     【工具使用指南】：
@@ -500,6 +516,8 @@ def get_agent(current_user="访客", user_query=""):  # 传入 current_user
     11.查新闻、消息面-> 用 `get_financial_news` 
     12.查询某期货商当天的持仓 -> 用 `search_broker_holdings_on_date`
     13.查询期货商一段时间的持仓变化 ->用`tool_analyze_position_change`
+    14.股票对冲、Beta值计算 -> 用 `calculate_hedging_beta`。
+  
 
     【你的行为准则】
     1. 当用户询问某个标的时，如果没有指定K线分析，那可以同时调用`analyze_kline_pattern`和`get_financial_news`，将消息面与技术面进行对比。
