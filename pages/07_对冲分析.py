@@ -37,7 +37,7 @@ def get_db_engine():
 
 
 st.set_page_config(
-    page_title="爱波塔-懂期权的AI | 对冲分析",
+    page_title="爱波塔-对冲分析",
     page_icon="favicon.ico",
     layout="wide",
     initial_sidebar_state="expanded"

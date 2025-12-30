@@ -16,9 +16,10 @@ import symbol_map as sm
 #  页面配置
 # ==========================================
 st.set_page_config(
-    page_title="资产相关性分析",
-    page_icon="📊",
-    layout="wide"
+    page_title="爱波塔-相关度分析",
+    page_icon="favicon.ico",
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
 
 # ==========================================

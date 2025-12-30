@@ -12,7 +12,12 @@ import time
 # 1. 环境初始化
 load_dotenv(override=True)
 
-st.set_page_config(page_title="个人中心 | 交易员档案", page_icon="👤", layout="wide")
+st.set_page_config(
+    page_title="爱波塔-私密",
+    page_icon="favicon.ico",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
 # 2. 样式注入 (已同步 Home.py 的去白和侧边栏样式)
 st.markdown("""
