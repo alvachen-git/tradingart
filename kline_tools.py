@@ -263,8 +263,6 @@ def analyze_kline_pattern(query: str, trade_date: str = None):
         # 通常用 14 天 ATR
         df['atr'] = df['tr'].rolling(window=14).mean()
 
-        # ... (中间省略原来的代码) ...
-
         # --- 【ATR 动态自适应横盘策略】 ---
 
         # 定义扫描周期

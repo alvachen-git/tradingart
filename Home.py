@@ -509,7 +509,7 @@ def get_agent(current_user="访客", user_query=""):  # 传入 current_user
     4. 期权知识、期权策略、K线交易-> 用 `search_investment_knowledge`
     5. 期权波动率数据 -> 用 `get_commodity_iv_info`。
     6. 查询期权到期日 -> 用 `check_option_expiry_status`。
-    7. 股票对冲/大盘相关性 -> 用 `tool_stock_hedging_analysis` (当用户问"股票怎么对冲"、"跟大盘关系"时)。
+    7. 股票与大盘相关性，资产风险分析 -> 用 `tool_stock_hedging_analysis` 。
     8. 商品期货相关性-> 用 `tool_futures_correlation_check` (当用户问"黄金和白银相关吗"、"持仓分散度"时)。
     9. 股票间相关性 -> 用 `tool_stock_correlation_check` (当用户问"茅台和五粮液一样吗")。
     10.当客户问“推荐股票”、“选股”-> 用`search_top_stocks`（选分数最高的）
@@ -520,7 +520,7 @@ def get_agent(current_user="访客", user_query=""):  # 传入 current_user
   
 
     【你的行为准则】
-    1. 当用户询问某个标的时，如果没有指定K线分析，那可以同时调用`analyze_kline_pattern`和`get_financial_news`，将消息面与技术面进行对比。
+    1. 当用户询问某个标的时，如果没有指定K线分析，可以同时调用`analyze_kline_pattern`和`get_financial_news`，将消息面与技术面进行对比。
     2. 当用户问期权或交易问题，优先以知识库工具为信息参考。
     3. 股票没有期权，客户问股票时，不要给期权策略，除非是用ETF期权来对冲股票。
     4. 期权策略的建议，需要考虑波动率和距离到期日，使用工具`check_option_expiry_status`和知识库搭配回答
@@ -850,7 +850,6 @@ with st.sidebar:
         # 顯示資產 (模擬)
         try:
             info = pd.read_sql(f"SELECT level, capital FROM users WHERE username='{user}'", de.engine).iloc[0]
-            st.metric("爱波币", f"¥{int(info['capital']):,}", f"Lv.{info['level']}")
         except:
             pass
 
