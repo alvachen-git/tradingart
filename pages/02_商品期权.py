@@ -25,38 +25,63 @@ with open('style.css', encoding='utf-8') as f:
 st.markdown("""
 <style>
     @media (max-width: 768px) {
-        /* 1. 强制指标卡片 (st.metric) 为白底黑字 */
+        /* ===========================
+           1. 标题与文字颜色修复 (新增)
+           =========================== */
+        /* 强制所有标题 (h1-h4) 变成深黑色 */
+        h1, h2, h3, h4, h5, h6 {
+            color: #1f2937 !important; /* 深炭灰色，对比度极高 */
+        }
+
+        /* 修复普通文本 (p) 的颜色，防止正文也看不清 */
+        [data-testid="stMarkdownContainer"] p {
+            color: #374151 !important;
+        }
+
+        /* ===========================
+           2. 指标卡片 (st.metric) 修复
+           =========================== */
         [data-testid="stMetric"] {
             background-color: #ffffff !important; /* 强制白底 */
-            border: 1px solid #e0e0e0 !important; /* 加个边框 */
+            border: 1px solid #e5e7eb !important; /* 浅灰边框 */
             border-radius: 8px !important;
-            padding: 10px 15px !important;
-            box-shadow: 0 1px 3px rgba(0,0,0,0.1) !important; /* 加点阴影 */
+            padding: 12px 16px !important;
+            box-shadow: 0 1px 2px rgba(0,0,0,0.05) !important;
             margin-bottom: 8px !important;
         }
 
-        /* 2. 修复指标标签 (如 "当前 IV") */
+        /* 标签 (如 "当前 IV") */
         [data-testid="stMetricLabel"] {
-            color: #666666 !important; /* 深灰色 */
+            color: #6b7280 !important; /* 灰色 */
             font-size: 14px !important;
         }
 
-        /* 3. 修复指标数值 (如 "15.90%") */
+        /* 数值 (如 "15.90%") */
         [data-testid="stMetricValue"] {
-            color: #333333 !important; /* 纯黑色，高对比度 */
+            color: #111827 !important; /* 纯黑 */
         }
 
-        /* 4. 修复状态提示框 (st.info) 的文字颜色 */
+        /* ===========================
+           3. 其他组件适配
+           =========================== */
+        /* 状态提示框 (st.info/warning) */
         [data-testid="stAlert"] {
-            color: #333333 !important;
+            background-color: #f3f4f6 !important;
+            color: #1f2937 !important;
+            border: 1px solid #e5e7eb !important;
         }
         [data-testid="stAlert"] p {
-            color: #333333 !important;
+            color: #1f2937 !important;
         }
 
-        /* 5. 修复下拉框选中的文字颜色 */
+        /* 下拉框文字 */
         div[data-baseweb="select"] span {
-            color: #333333 !important;
+            color: #1f2937 !important;
+        }
+
+        /* 手机端顶部容器文字 */
+        .mobile-top-container {
+            color: #1f2937 !important;
         }
     }
 </style>
