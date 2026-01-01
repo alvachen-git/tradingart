@@ -22,91 +22,87 @@ engine = create_engine(db_url)
 
 
 def fetch_sector_moneyflow(trade_date):
-    print(f"🚀 正在抓取 {trade_date} 的板块资金流 (东方财富源)...")
+    print(f"🚀 正在抓取 {trade_date} 的资金流 (行业+概念)...")
 
     try:
-        # 接口: 东方财富板块资金流
-        # 字段: trade_date, ts_code, name, pct_change, net_amount(净流入), net_amount_rate(净流入率), close
+        # 接口: moneyflow_ind_dc (东财源)
         df = pro.moneyflow_ind_dc(trade_date=trade_date)
 
         if df.empty:
-            print(f"   ⚠️ {trade_date} 无数据 (可能是非交易日)")
+            print(f"   ⚠️ {trade_date} 无数据")
             return
 
-        # --- 数据清洗 ---
+        # --- 1. 数据分类 (关键修改) ---
+        # 我们不再过滤 content_type，而是把它保留下来
+        # content_type 只有两个值：'行业' 或 '概念'
+        if 'content_type' not in df.columns:
+            df['content_type'] = '未知'  # 防止接口变动
 
-        # 1. 筛选：只保留“概念”板块 (该接口混合了行业和概念)
-        # 东方财富的概念板块通常更活跃，适合做热点追踪
-        if 'content_type' in df.columns:
-            df = df[df['content_type'] == '概念'].copy()
+        # 补全字段
+        expected_cols = ['net_amount', 'buy_md_amount', 'buy_sm_amount', 'net_amount_rate']
+        for col in expected_cols:
+            if col not in df.columns: df[col] = 0.0
 
-        # 2. 计算【主力净流入】 (单位转换：元 -> 万元)
-        # net_amount 就是主力净流入
+        # --- 2. 核心计算 (单位：万元) ---
         df['main_net_inflow'] = df['net_amount'] / 10000.0
+        df['medium_net_inflow'] = df['buy_md_amount'] / 10000.0
+        df['small_net_inflow'] = df['buy_sm_amount'] / 10000.0
 
-        # 3. 核心计算：反推【总成交额】
-        # 公式：总成交额 = 净流入额 / (净流入率 / 100)
-        # 这一步完美解决了之前“缺 amount” 的问题
+        # 反推成交额
         def calc_turnover(row):
             try:
                 rate = row['net_amount_rate']
                 net = row['net_amount']
-                if rate == 0:
-                    return 0
-                # 结果转为万元
-                return (net / (rate / 100.0)) / 10000.0
+                if rate != 0: return (net / (rate / 100.0)) / 10000.0
+                return 0
             except:
                 return 0
 
         df['total_turnover'] = df.apply(calc_turnover, axis=1)
 
-        # 4. 字段重命名 (适配数据库)
-        df.rename(columns={
-            'name': 'industry',
-            'net_amount_rate': 'net_rate'
-        }, inplace=True)
+        if 'net_amount_rate' in df.columns:
+            df['net_rate'] = df['net_amount_rate']
+        else:
+            df['net_rate'] = 0
 
-        # 5. 准备入库
-        # 确保有涨跌幅字段
-        if 'pct_change' not in df.columns:
-            df['pct_change'] = 0
+        if 'name' in df.columns: df.rename(columns={'name': 'industry'}, inplace=True)
+        if 'pct_change' not in df.columns: df['pct_change'] = 0
+
+        # --- 3. 构造入库数据 ---
+        # 新增 sector_type 字段，对应接口里的 content_type
+        df.rename(columns={'content_type': 'sector_type'}, inplace=True)
 
         data_to_save = df[[
-            'trade_date', 'industry', 'main_net_inflow',
+            'trade_date', 'industry', 'sector_type',  # <--- 新增 sector_type
+            'main_net_inflow', 'medium_net_inflow', 'small_net_inflow',
             'total_turnover', 'pct_change', 'net_rate'
         ]].copy()
 
-        # 填充可能出现的空值
         data_to_save.fillna(0, inplace=True)
-
-        # 简单去重 (防止东财数据偶发的重复)
-        data_to_save = data_to_save.drop_duplicates(subset=['trade_date', 'industry'])
+        # 去重：同一天、同一个名字、同一个类型
+        data_to_save = data_to_save.drop_duplicates(subset=['trade_date', 'industry', 'sector_type'])
 
         # --- 入库 ---
         with engine.begin() as conn:
-            # 幂等性删除：防止重复插入
             conn.execute(text(f"DELETE FROM sector_moneyflow WHERE trade_date='{trade_date}'"))
             data_to_save.to_sql('sector_moneyflow', conn, if_exists='append', index=False)
 
-        print(f"   ✅ 成功入库 {len(data_to_save)} 条数据 (已自动计算成交额)")
+        print(
+            f"   ✅ 入库完成: 行业 {len(data_to_save[data_to_save['sector_type'] == '行业'])} 条 | 概念 {len(data_to_save[data_to_save['sector_type'] == '概念'])} 条")
 
     except Exception as e:
         print(f"   ❌ 抓取失败: {e}")
-        # 权限提示
-        if "permission" in str(e).lower():
-            print("   💡 提示：请确认 Tushare 积分 >= 5000 (moneyflow_ind_dc 要求)")
 
 
 if __name__ == "__main__":
-    # 补抓最近 5 个交易日
+    # 建议重跑最近1个月的数据，以便有完整的行业数据
     end_date = datetime.now()
-    start_date = end_date - timedelta(days=1)
+    start_date = end_date - timedelta(days=60)
 
     current = start_date
     while current <= end_date:
         d_str = current.strftime('%Y%m%d')
-        # 简单跳过周末
         if current.weekday() < 5:
             fetch_sector_moneyflow(d_str)
-            time.sleep(1)  # 增加延时
+            time.sleep(1)
         current += timedelta(days=1)
