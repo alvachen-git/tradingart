@@ -39,7 +39,7 @@ def format_news(df, limit=10):
             item_str = f"⏰[{time_str}] {content}"
         else:
             # 内容太长截断，保持整洁
-            clean_content = content[:200].replace('\n', ' ')
+            clean_content = content[:80].replace('\n', ' ')
             item_str = f"⏰[{time_str}] **{title}**\n   {clean_content}..."
 
         news_text.append(item_str)

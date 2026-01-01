@@ -8,6 +8,7 @@ import markdown
 import sys
 import auth_utils as auth
 import memory_utils as mem
+import threading
 from datetime import datetime, timedelta
 from streamlit_lottie import st_lottie
 from kline_tools import analyze_kline_pattern
@@ -25,6 +26,8 @@ from sqlalchemy import text
 from dotenv import load_dotenv
 from beta_tool import calculate_hedging_beta
 from knowledge_tools import search_investment_knowledge
+from langchain_core.callbacks import BaseCallbackHandler
+from langchain_core.outputs import LLMResult
 # --- AI 相关导入 ---
 from langchain_community.chat_models import ChatTongyi
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
@@ -225,6 +228,56 @@ st.markdown("""
     }
 </style>
 """, unsafe_allow_html=True)
+
+
+class TokenMonitorCallback(BaseCallbackHandler):
+    """自定义回调：专门用于监听 Token 消耗并写入数据库 (异步非阻塞版)"""
+
+    def __init__(self, username, query_text):
+        self.username = username
+        self.query_text = query_text
+
+    def on_llm_end(self, response: LLMResult, **kwargs):
+        """当 LLM 生成结束时触发"""
+        try:
+            # 1. 遍历所有生成结果
+            for generation in response.generations:
+                for gen in generation:
+                    usage = {}
+                    # 尝试提取 token_usage
+                    if response.llm_output and 'token_usage' in response.llm_output:
+                        usage = response.llm_output['token_usage']
+                    elif gen.generation_info and 'token_usage' in gen.generation_info:
+                        usage = gen.generation_info['token_usage']
+
+                    if usage:
+                        input_tokens = usage.get('input_tokens', 0)
+                        output_tokens = usage.get('output_tokens', 0)
+
+                        if input_tokens > 0 or output_tokens > 0:
+                            # =================================================
+                            # 🔥【核心优化】开启一个新线程去写数据库
+                            # 这样主程序会立刻往下走，不会等待数据库写入完成
+                            # =================================================
+                            task = threading.Thread(
+                                target=de.log_token_usage,
+                                args=(
+                                    self.username,
+                                    "qwen-plus",
+                                    input_tokens,
+                                    output_tokens,
+                                    self.query_text
+                                )
+                            )
+                            # 设置为守护线程 (可选，意味着主程序退出它也退出，防止挂起)
+                            task.daemon = True
+                            task.start()
+
+                            # print(f"🚀 已启动后台记账线程...")
+
+        except Exception as e:
+            # 这里的报错只会打印在后台，绝对不会崩掉前端页面
+            print(f"Callback Error: {e}")
 
 
 def native_share_button(user_content, ai_content, key):
@@ -461,7 +514,6 @@ def get_agent(current_user="访客", user_query=""):  # 传入 current_user
     utc_now = datetime.utcnow()
     china_now = utc_now + timedelta(hours=8)
 
-    today_str = china_now.strftime('%Y%m%d')  # 真实日历日期
     weekday_cn = ["一", "二", "三", "四", "五", "六", "日"][china_now.weekday()]
 
     # --- 🔥【核心修复 2】获取数据库里的“最新行情日期” ---
@@ -495,20 +547,18 @@ def get_agent(current_user="访客", user_query=""):  # 传入 current_user
     1. **现实时间**：{china_now.strftime('%Y年%m月%d日 %H:%M')} (周{weekday_cn})。
     2. **数据最新日期**：【{db_latest_date}】。
        - 当用户问“今天”、“最新”的行情时，**必须**使用日期 `{db_latest_date}` 进行查询。
-    【常用时间参考】
-    - **上周**：{last_week_start} 至 {last_week_end}
-    - **本周以来**：{current_week_start} 至今
-    - **上个月 ({last_month_name})**：{last_month_start} 至 {last_month_end}
+    【日期参考】
+        上周: {last_week_start}-{last_week_end}
+        上月: {last_month_start}-{last_month_end}
     
 
     【工具使用指南】：
     1. 当前/最新价格数据 -> 用 `get_market_snapshot`。
     2. 被问 **历史某一天** 或 **指定日期** 的价格-> 可以用 `get_price_statistics`。
-       调用此工具时，`start_date` 和 `end_date` 参数必须是 **YYYYMMDD** 格式的字符串（例如 '20231001'）。
-    3. 被问股票或期货的技术面、K线形态和趋势-> 用 `analyze_kline_pattern`
+    3. 股票或期货的技术面、K线形态和趋势-> 用 `analyze_kline_pattern`
     4. 期权知识、期权策略、K线交易-> 用 `search_investment_knowledge`
     5. 期权波动率数据 -> 用 `get_commodity_iv_info`。
-    6. 查询期权到期日 -> 用 `check_option_expiry_status`。
+    6. 查期权到期日 -> 用 `check_option_expiry_status`。
     7. 股票与大盘相关性，资产风险分析 -> 用 `tool_stock_hedging_analysis` 。
     8. 商品期货相关性-> 用 `tool_futures_correlation_check` (当用户问"黄金和白银相关吗"、"持仓分散度"时)。
     9. 股票间相关性 -> 用 `tool_stock_correlation_check` (当用户问"茅台和五粮液一样吗")。
@@ -516,7 +566,7 @@ def get_agent(current_user="访客", user_query=""):  # 传入 current_user
     11.查新闻、消息面-> 用 `get_financial_news` 
     12.查询某期货商当天的持仓 -> 用 `search_broker_holdings_on_date`
     13.查询期货商一段时间的持仓变化 ->用`tool_analyze_position_change`
-    14.股票对冲、Beta值计算 -> 用 `calculate_hedging_beta`。
+    14.只要客户问保证金问题-> 必须用 `search_investment_knowledge`。
   
 
     【你的行为准则】
@@ -595,39 +645,44 @@ def process_user_input(prompt_text):
                     # =================================================
                     # 🧠 [核心修改 1]：在这里检索记忆
                     # =================================================
+                    # 【优化】定义触发词：只有涉及用户自身情况时，才加载画像和记忆
+                    # 这样能节省大量 System Prompt 的 Token
+                    personal_keywords = ["之前", "持仓", "账户", "买", "卖", "建议", "仓位", "风险"]
+                    need_personal_context = any(k in prompt_text for k in personal_keywords)
+
                     memory_context = ""
-                    if current_user != "访客":
+                    # 确保这一行和上面的代码对齐
+                    if current_user != "访客" and need_personal_context:
                         # 检索最近 3 条最相关的记忆
                         found = mem.retrieve_relevant_memory(current_user, prompt_text, k=2)
                         if found:
                             memory_context = f"""
-                                            \n【🔍 必须参考的历史记忆】
-                                            (以下是该用户过去明确说过的事实，请直接认定为真，无需再次确认)
-                                            {found}
-                                            """
+                                                \n【🔍 必须参考的历史记忆】
+                                                 {found}
+                                                 """
 
-                    # =================================================
-                    # 🧬 [核心修改 2]：构建"超级系统指令"
-                    # =================================================
-                    # 获取用户画像
-                    user_profile = de.get_user_profile(current_user)
-                    risk = user_profile.get('risk_preference', '未知')
+                        # 获取用户画像
+                        user_profile = de.get_user_profile(current_user)
+                        risk = user_profile.get('risk_preference', '未知')
 
-                    # 将 画像 + 记忆 组合成一条强力的 SystemMessage
-                    # 并强制插入到历史记录的第一条，这样 AI 绝对无法忽略
-                    super_system_prompt = f"""
-                                    【当前用户档案】
-                                    - 用户名：{current_user}
-                                    - 风险偏好：{risk}
+                        # 将 画像 + 记忆 组合成一条强力的 SystemMessage
+                        super_system_prompt = f"""
+                                                    【当前用户档案】
+                                                     - 用户名：{current_user}
+                                                     - 风险偏好：{risk}
 
-                                    {memory_context}
+                                                        {memory_context}
 
-                                    【回答指令】
-                                    请结合上述记忆和当前问题进行回答。如果记忆里有相关持仓信息，请主动提及。
-                                    """
+                                                     回答指令】
+                                                     请结合上述记忆和当前问题进行回答。如果记忆里有相关持仓信息，请主动提及。
+                                                     """
+                    else:
+                        # ⚠️ 注意：这里的 else 必须和上面的 if 垂直对齐
+                        # 如果只是查行情，给个最简单的空串，或者通用指令
+                        super_system_prompt = ""
 
                     # 构建 LangChain 消息历史
-                    max_history_rounds = 6
+                    max_history_rounds = 2
                     recent_messages = st.session_state.messages[-max_history_rounds:]
 
                     history = [
@@ -638,9 +693,18 @@ def process_user_input(prompt_text):
                     # ⚡ 暴力注入：把这个超级指令插在最前面
                     history.insert(0, SystemMessage(content=super_system_prompt))
 
+                    # 1. 实例化回调对象
+                    monitor_callback = TokenMonitorCallback(
+                        username=current_user,
+                        query_text=prompt_text
+                    )
+
                     response = agent.invoke(
                         {"messages": history},
-                        config={"recursion_limit": 100}
+                        config={"recursion_limit": 100,
+                                "callbacks": [monitor_callback]
+                                }
+
                     )
                     ai_response = response["messages"][-1].content
 

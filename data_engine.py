@@ -1613,7 +1613,7 @@ def search_broker_holdings_on_date(broker_name: str, date: str, symbol: str = No
                 WHERE REPLACE(trade_date, '-', '') = '{date}'
                   AND ts_code LIKE '{code_prefix}%%'
                 ORDER BY 总持仓 DESC
-                LIMIT 20
+                LIMIT 6
             """
 
         # ==========================================
@@ -1761,8 +1761,8 @@ def tool_analyze_position_change(symbol: str, start_date: str, end_date: str, so
             df_diff = df_diff.sort_values('多单变化', ascending=False)
             filter_desc = "多单增加前20名"
 
-        # 取前 20
-        res = df_diff.head(20).reset_index()
+        # 取前 6
+        res = df_diff.head(6).reset_index()
         res.columns = ['期货商', '多单变化', '空单变化', '净增仓变动']
 
         return f"📊 **{symbol} 持仓变动分析 ({start_date} vs {end_date})**\n📉 排序依据: {filter_desc}\n" + res.to_markdown(
@@ -1789,3 +1789,42 @@ def get_latest_data_date():
         print(f"获取最新日期失败: {e}")
     # 如果查库失败，兜底返回当前日期
     return datetime.now().strftime('%Y%m%d')
+
+
+def log_token_usage(username, model_name, input_tokens, output_tokens, query_text=""):
+    """记录 Token 消耗到数据库"""
+    if not engine: return
+
+    try:
+        # 1. 准备数据
+        today_str = datetime.now().strftime('%Y%m%d')
+        total = input_tokens + output_tokens
+
+        # 简单截取前50个字作为摘要，防止数据库太占空间
+        snippet = query_text[:50].replace("'", "").replace('"', "") if query_text else ""
+
+        # 2. 插入 SQL
+        sql = text(f"""
+            INSERT INTO token_usage_log 
+            (trade_date, username, model_name, input_tokens, output_tokens, total_tokens, query_snippet)
+            VALUES 
+            (:d, :u, :m, :i, :o, :t, :s)
+        """)
+
+        # 3. 执行
+        with engine.connect() as conn:
+            conn.execute(sql, {
+                "d": today_str,
+                "u": username,
+                "m": model_name,
+                "i": input_tokens,
+                "o": output_tokens,
+                "t": total,
+                "s": snippet
+            })
+            conn.commit()
+
+        # print(f"📝 Token 已记录: {total}") # 调试用
+
+    except Exception as e:
+        print(f"❌ Token 记录失败: {e}")
