@@ -1435,38 +1435,56 @@ def check_option_expiry_status(query: str):
 
             target_key = None
             is_main = False
+            expiry_date = None
 
             if user_month:
+                # 用户指定了月份
                 if len(user_month) <= 2:
                     curr = datetime.now().year % 100
                     target_key = f"{product_code}{curr}{int(user_month):02d}"
                 else:
                     target_key = f"{product_code}{user_month}"
-            else:
-                is_main = True
-                sql_m = f"""
-                    SELECT ts_code FROM futures_price 
-                    WHERE (ts_code LIKE '{product_code}%%' OR ts_code LIKE '{product_code.lower()}%%') 
-                    AND ts_code REGEXP '[0-9]' 
-                    ORDER BY trade_date DESC, oi DESC LIMIT 1
+
+                # 查询指定月份的到期日
+                sql_d = f"""
+                    SELECT maturity_date 
+                    FROM commodity_option_basic 
+                    WHERE UPPER(ts_code) LIKE '{target_key}%%' 
+                    ORDER BY maturity_date ASC 
+                    LIMIT 1
                 """
-                df_m = pd.read_sql(sql_m, local_engine)
-                if df_m.empty: return f"暂无【{product_name}】数据"
-                raw = df_m.iloc[0]['ts_code'].upper()
+                df_d = pd.read_sql(sql_d, local_engine)
+
+                if df_d.empty:
+                    return f"⚠️ 未找到合约【{target_key}】的到期日，请确认月份是否正确。"
+
+                expiry_date = df_d.iloc[0]['maturity_date']
+
+            else:
+                # ==========================================
+                # 【核心修复2】没指定月份 -> 直接查期权表最近到期
+                # 不再依赖期货主力合约！
+                # ==========================================
+                today_str = datetime.now().strftime('%Y%m%d')
+
+                sql_opt = f"""
+                    SELECT ts_code, maturity_date 
+                    FROM commodity_option_basic 
+                    WHERE UPPER(ts_code) LIKE '{product_code}%%'
+                      AND maturity_date >= '{today_str}'
+                    ORDER BY maturity_date ASC 
+                    LIMIT 1
+                """
+                df_opt = pd.read_sql(sql_opt, local_engine)
+
+                if df_opt.empty:
+                    return f"⚠️ 暂无【{product_name}】未到期的期权合约。"
+
+                # 从查询结果中提取 Key 和到期日
+                raw = df_opt.iloc[0]['ts_code'].upper()
                 m = re.match(r'^([A-Z]+)(\d{3,4})', raw)
                 target_key = m.group(0) if m else raw.split('.')[0]
-
-            # 查到期日
-            static_map = get_static_maturity_map()
-            expiry_date = static_map.get(target_key)
-
-            if pd.isnull(expiry_date):
-                sql_d = f"SELECT maturity_date FROM commodity_option_basic WHERE ts_code LIKE '{target_key}%%' OR ts_code LIKE '{target_key.lower()}%%' ORDER BY maturity_date ASC LIMIT 1"
-                df_d = pd.read_sql(sql_d, local_engine)
-                if not df_d.empty:
-                    expiry_date = df_d.iloc[0]['maturity_date']
-                else:
-                    return f"⚠️ 未找到合约【{target_key}】到期日。"
+                expiry_date = df_opt.iloc[0]['maturity_date']
 
             target_obj = f"{product_name} ({target_key})"
 
@@ -1479,25 +1497,30 @@ def check_option_expiry_status(query: str):
         days_left = (expiry_date - today).days
 
         if days_left > 50:
-            phase = "🌙 远期"; advice = "时间价值衰减慢，主要受隐含波动率影响。"
+            phase = "🌙 远期"
+            advice = "时间价值衰减慢，主要受隐含波动率影响。"
         elif 20 < days_left <= 50:
-            phase = "🌓 中期"; advice = "时间和波动率影响都重要，卖方虚值收租黄金期。"
+            phase = "🌓 中期"
+            advice = "时间和波动率影响都重要，卖方虚值收租黄金期。"
         elif 5 < days_left <= 20:
-            phase = "🌔 近期"; advice = "时间衰减加快，Gamma造成的方向加速开始体现。"
+            phase = "🌔 近期"
+            advice = "时间衰减加快，Gamma造成的方向加速开始体现。"
         elif 0 < days_left <= 5:
-            phase = "⚡ 末日轮"; advice = "买卖方决战集中在平值附近，⚠️ Gamma的暴击是最大。"
+            phase = "⚡ 末日轮"
+            advice = "买卖方决战集中在平值附近，⚠️ Gamma的暴击是最大。"
         else:
-            phase = "💀 已过期"; advice = "合约已到期。"
+            phase = "💀 已过期"
+            advice = "合约已到期。"
 
         return f"""
-    ✅ **{target_obj}**
-    📅 到期: {expiry_date.strftime('%Y-%m-%d')}
-    ⏱️ 剩余: **{days_left}天** ({phase})
-    💡 建议: {advice}
-            """
+✅ **{target_obj}**
+📅 到期: {expiry_date.strftime('%Y-%m-%d')}
+⏱️ 剩余: **{days_left}天** ({phase})
+💡 建议: {advice}
+        """
 
     except Exception as e:
-        return f"查詢出錯: {str(e)}"
+        return f"查询出错: {str(e)}"
 
 # --- 【新增/保留】高性能静态数据缓存 (12小时只查一次库) ---
 @st.cache_data(ttl=36000)
@@ -1529,22 +1552,20 @@ def get_static_maturity_map():
 
         # 4. 过滤无效日期
         df = df.dropna(subset=['maturity_date'])
-        # 只保留未来的 (今天之后的)
-        df = df[df['maturity_date'] >= pd.Timestamp.now().normalize()]
+        # 【修复】放宽过滤条件，保留近30天内到期的合约
+        cutoff_date = pd.Timestamp.now().normalize() - pd.Timedelta(days=30)
+        df = df[df['maturity_date'] >= cutoff_date]
 
         # 5. 智能提取 Key (正则 + 强制大写)
         def _extract_key(code):
             try:
-                # 预处理：M2505-C-3000.DCE -> M2505C3000
-                # 预处理：cu2503C69000.SHF -> CU2503C69000
+                import re
+                # 【关键修复】先统一转大写
                 clean = str(code).upper().split('.')[0].replace('-', '')
 
-                # 正则提取：头部字母 + 3到4位数字
-                # 匹配: M2505, CU2503, AU2412
-                import re
                 match = re.match(r'^([A-Z]+)(\d{3,4})', clean)
                 if match:
-                    return match.group(0)  # 返回标准 Key (如 CU2503)
+                    return match.group(0)
                 return None
             except:
                 return None
