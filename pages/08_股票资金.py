@@ -40,7 +40,7 @@ with col_title:
 with col_type:
     # --- 🔥 新增：板块类型切换 ---
     # 默认选"行业"，因为它更清爽，符合您的需求
-    sector_type = st.radio("板块视角", ["行业 (清爽)", "概念 (细分)"], horizontal=True, index=0)
+    sector_type = st.radio("板块视角", ["行业", "概念"], horizontal=True, index=0)
     # 提取真实值 '行业' 或 '概念'
     real_sector_type = sector_type.split(" ")[0]
 
