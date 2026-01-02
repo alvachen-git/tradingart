@@ -1460,27 +1460,59 @@ def check_option_expiry_status(query: str):
                 expiry_date = df_d.iloc[0]['maturity_date']
 
             else:
-                # ==========================================
-                # 【核心修复2】没指定月份 -> 直接查期权表最近到期
-                # 不再依赖期货主力合约！
+# ==========================================
+                # 【核心修复3】MySQL 正则精准查询
+                # 解决 M(豆粕) 被 MA(甲醇) 淹没的问题
                 # ==========================================
                 today_str = datetime.now().strftime('%Y%m%d')
 
+                # 使用 MySQL 的 REGEXP 操作符
+                # ^{product_code}[0-9] 意思是以 "代码+数字" 开头
+                # 例如：^M[0-9] 能匹配 M2601，但不能匹配 MA2601
                 sql_opt = f"""
                     SELECT ts_code, maturity_date 
                     FROM commodity_option_basic 
-                    WHERE UPPER(ts_code) LIKE '{product_code}%%'
+                    WHERE ts_code REGEXP '^{product_code}[0-9]'
                       AND maturity_date >= '{today_str}'
                     ORDER BY maturity_date ASC 
                     LIMIT 1
                 """
+
+                # 如果数据库不支持 REGEXP (比如是 SQLite)，则使用备选方案：大幅增加 LIMIT
+                # sql_opt = f"""
+                #     SELECT ts_code, maturity_date
+                #     FROM commodity_option_basic
+                #     WHERE ts_code LIKE '{product_code}%%'
+                #       AND maturity_date >= '{today_str}'
+                #     ORDER BY maturity_date ASC
+                #     LIMIT 3000
+                # """
+
                 df_opt = pd.read_sql(sql_opt, local_engine)
+
+                if df_opt.empty:
+                    # 备选尝试：有些数据源代码可能是小写，或者格式不同，尝试宽泛查询再过滤
+                    # 只有在精准查询失败时才跑这个兜底逻辑
+                    sql_fallback = f"""
+                        SELECT ts_code, maturity_date 
+                        FROM commodity_option_basic 
+                        WHERE ts_code LIKE '{product_code}%%'
+                          AND maturity_date >= '{today_str}'
+                        ORDER BY maturity_date ASC 
+                        LIMIT 1000
+                    """
+                    df_fallback = pd.read_sql(sql_fallback, local_engine)
+
+                    # Python 端二次过滤
+                    pattern = re.compile(f"^{product_code}\\d", re.IGNORECASE)
+                    df_opt = df_fallback[df_fallback['ts_code'].apply(lambda x: bool(pattern.match(x)))].head(1)
 
                 if df_opt.empty:
                     return f"⚠️ 暂无【{product_name}】未到期的期权合约。"
 
-                # 从查询结果中提取 Key 和到期日
+                # 3. 提取结果
                 raw = df_opt.iloc[0]['ts_code'].upper()
+                # 再次用正则提取纯代码，确保展示美观 (M2601.DCE -> M2601)
                 m = re.match(r'^([A-Z]+)(\d{3,4})', raw)
                 target_key = m.group(0) if m else raw.split('.')[0]
                 expiry_date = df_opt.iloc[0]['maturity_date']

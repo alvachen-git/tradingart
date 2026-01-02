@@ -558,15 +558,11 @@ def get_agent(current_user="访客", user_query=""):  # 传入 current_user
     3. 股票或期货的技术面、K线形态和趋势-> 用 `analyze_kline_pattern`
     4. 期权知识、期权策略、K线交易-> 用 `search_investment_knowledge`
     5. 期权波动率数据 -> 用 `get_commodity_iv_info`。
-    6. 查期权到期日 -> 用 `check_option_expiry_status`。
-    7. 股票与大盘相关性，资产风险分析 -> 用 `tool_stock_hedging_analysis` 。
-    8. 商品期货相关性-> 用 `tool_futures_correlation_check` (当用户问"黄金和白银相关吗"、"持仓分散度"时)。
-    9. 股票间相关性 -> 用 `tool_stock_correlation_check` (当用户问"茅台和五粮液一样吗")。
-    10.当客户问“推荐股票”、“选股”-> 用`search_top_stocks`（选分数最高的）
-    11.查新闻、消息面-> 用 `get_financial_news` 
-    12.查询某期货商当天的持仓 -> 用 `search_broker_holdings_on_date`
-    13.查询期货商一段时间的持仓变化 ->用`tool_analyze_position_change`
-    14.只要客户问保证金问题-> 必须用 `search_investment_knowledge`。
+    6.当客户问“推荐股票”、“选股”-> 用`search_top_stocks`（选分数最高的）
+    7.查新闻、消息面-> 用 `get_financial_news` 
+    8.查询某期货商当天的持仓 -> 用 `search_broker_holdings_on_date`
+    9.查询期货商一段时间的持仓变化 ->用`tool_analyze_position_change`
+    10.只要客户问保证金问题-> 必须用 `search_investment_knowledge`。
   
 
     【你的行为准则】

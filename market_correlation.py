@@ -142,7 +142,7 @@ def analyze_stock_market_correlation(stock_code: str, lookback_days=120):
 
 def analyze_futures_correlation(futures_codes: list, lookback_days=120):
     """
-    计算一组期货品种的互相关矩阵
+    计算商品期货之间的相关性
     """
     end_date = datetime.now()
     start_date = (end_date - timedelta(days=lookback_days * 1.5)).strftime('%Y%m%d')
