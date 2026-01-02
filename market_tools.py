@@ -147,9 +147,9 @@ def get_price_statistics(query_list: str, start_date: str, end_date: str):
             results.append(f"""
 📊 **{q} 行情统计 ({s_date} - {e_date})**
 - **期间涨跌**: {period_chg:+.2f}% {'🔥' if period_chg > 0 else '💧'}
-- **收盘价格**: {end_price}
-- **最高价格**: {max_price} (出现在 {max_date_str})
-- **最低价格**: {min_price}
+- **收盘价**: {end_price}
+- **最高价**: {max_price} (出现在 {max_date_str})
+- **最低价**: {min_price}
             """)
 
         except Exception as e:
@@ -163,9 +163,9 @@ def get_price_statistics(query_list: str, start_date: str, end_date: str):
 @tool
 def get_market_snapshot(query: str):
     """
-    【最新行情查詢】
-    用於查询最新价格
-    輸入：品種名稱（如 "豆粕"、"茅台"）。
+    【最新行情查询】
+    用於查询股票或商品期货最新价格
+    输入：品种名称（如 "豆粕"、"茅台"）。
     """
     if engine is None: return "數據庫未連接"
     symbol_code, asset_type = symbol_map.resolve_symbol(query)
@@ -198,3 +198,158 @@ def get_market_snapshot(query: str):
     except Exception as e:
         return f"查询错误: {e}"
 
+
+# market_tools.py 末尾添加
+
+# ==========================================
+#   🔥 新增功能：精准期权价格查询工具
+# ==========================================
+@tool
+def tool_query_specific_option(query: str):
+    """
+    【期权价格查询专用】
+    当用户询问具体的期权合约价格时使用。
+    例如："50ETF 1月 3.1 认购价格"、"300ETF 12月 4.0 认沽"、"创业板 2月 2.0 看涨"。
+    """
+    # 确保 engine 可用 (market_tools 头部已经创建了 engine)
+    if engine is None: return "❌ 数据库未连接"
+
+    import re
+    from datetime import datetime
+
+    # 1. 定义标的映射 (覆盖主要 ETF)
+    ETF_CODE_MAP = {
+        '50ETF': '510050.SH', '上证50': '510050.SH',
+        '300ETF': '510300.SH', '沪深300': '510300.SH',
+        '500ETF': '510500.SH', '中证500': '510500.SH',
+        '创业板': '159915.SZ', '创业板ETF': '159915.SZ',
+        '科创50': '588000.SH', '科创板': '588000.SH','科创50ETF': '588000.SH'
+    }
+
+    # --- A. 解析标的 ---
+    target_code = None
+    target_name = ""
+    query_upper = query.upper()
+    for name, code in ETF_CODE_MAP.items():
+        if name in query_upper:
+            target_code = code
+            target_name = name
+            break
+
+    if not target_code:
+        return "⚠️ 抱歉，我只支持查询 50ETF、300ETF、500ETF、创业板ETF、科创50ETF 的期权价格。"
+
+    # --- B. 解析方向 (认购/认沽) ---
+    cp_type = None
+    if any(x in query for x in ['认购', '看涨', 'Call', 'C']):
+        cp_type = 'C'
+        cp_name = "认购"
+    elif any(x in query for x in ['认沽', '看跌', 'Put', 'P']):
+        cp_type = 'P'
+        cp_name = "认沽"
+
+    if not cp_type:
+        return f"⚠️ 请指明是【认购】还是【认沽】？(例如：{target_name} 3.0 认购)"
+
+    # --- C. 解析行权价 ---
+    numbers = re.findall(r"\d+\.?\d*", query)
+    strike_price = None
+
+    for num in numbers:
+        val = float(num)
+        # 排除年份月份特征
+        if "." in num and val < 20:
+            strike_price = val
+            break
+        if "." not in num and val < 10 and "月" not in query.split(num)[1][:1]:
+            strike_price = val
+            break
+
+    if strike_price is None:
+        return f"⚠️ 未在问题中识别到行权价。(例如：{target_name} 3.2 认购)"
+
+    # --- D. 解析月份 ---
+    match_month = re.search(r'(\d+)月', query)
+    search_month_str = ""
+
+    if match_month:
+        m = int(match_month.group(1))
+        search_month_str = f"{m:02d}"  # 变成 "01", "12"
+    else:
+        search_month_str = datetime.now().strftime("%m")
+
+    try:
+        # --- E. 数据库查询：找合约代码 (Option Basic) ---
+        sql_find_contract = f"""
+            SELECT ts_code, exercise_price, delist_date 
+            FROM option_basic 
+            WHERE underlying = '{target_code}' 
+              AND call_put = '{cp_type}'
+              AND delist_date >= '{datetime.now().strftime('%Y%m%d')}'
+            ORDER BY delist_date ASC
+        """
+        df_basic = pd.read_sql(sql_find_contract, engine)
+
+        if df_basic.empty:
+            return f"❌ 数据库中未找到 {target_name} 的基础合约信息。"
+
+        # 1. 筛选月份
+        df_basic['month_str'] = df_basic['delist_date'].astype(str).str[4:6]
+        target_contracts = df_basic[df_basic['month_str'] == search_month_str]
+
+        if target_contracts.empty:
+            target_contracts = df_basic  # 兜底
+
+        if target_contracts.empty:
+            return f"⚠️ 未找到 {search_month_str} 月份到期的合约。"
+
+        # 2. 筛选行权价
+        target_contracts = target_contracts.copy()
+        target_contracts['diff'] = abs(target_contracts['exercise_price'] - strike_price)
+        best_match = target_contracts.sort_values('diff').iloc[0]
+
+        if best_match['diff'] > 0.2:
+            return f"⚠️ 未找到行权价为 {strike_price} 的合约。最接近的是 {best_match['exercise_price']}。"
+
+        final_ts_code = best_match['ts_code']
+        real_maturity = best_match['delist_date']
+
+        # --- F. 数据库查询：找最新价格 (Option Daily) ---
+        sql_price = f"""
+            SELECT trade_date, close,vol, oi 
+            FROM option_daily 
+            WHERE ts_code = '{final_ts_code}' 
+            ORDER BY trade_date DESC LIMIT 2
+        """
+        df_price = pd.read_sql(sql_price, engine)
+
+        if df_price.empty:
+            return f"✅ 找到合约代码 **{final_ts_code}**，但暂无最新交易数据。"
+
+        curr_row = df_price.iloc[0]
+
+        # 🔥【修改点 2】计算涨跌逻辑：今收 - 昨收
+        change_val = 0.0
+        change_text = "0.0000"
+
+        if len(df_price) >= 2:
+            prev_close = df_price.iloc[1]['close']  # 昨天的收盘价
+            change_val = curr_row['close'] - prev_close
+            change_text = f"{change_val:+.4f}"  # 带符号显示，如 +0.0012
+        else:
+            # 如果只有 1 条数据 (比如刚上市第一天)，暂时无法计算涨跌
+            change_text = "新上市"
+
+        return f"""
+-------------------------
+📝 **合约**: {target_name} {cp_name} @ {best_match['exercise_price']:.3f}
+📅 **月份**: {search_month_str}月
+-------------------------
+💰 **最新价**: **{curr_row['close']:.4f}**
+📅 **数据日期**: {curr_row['trade_date']}
+📊 **涨跌**: **{change_text}** (较昨收)
+📈 **持仓量**: {curr_row['oi']}
+        """
+
+    except Exception as e:
+        return f"查询过程发生错误: {e}"

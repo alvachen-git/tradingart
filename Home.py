@@ -18,7 +18,7 @@ import time
 import extra_streamlit_components as stx
 import streamlit.components.v1 as components
 import uuid #用于生成唯一ID
-from market_tools import get_market_snapshot, get_price_statistics
+from market_tools import get_market_snapshot, get_price_statistics,tool_query_specific_option
 from data_engine import get_commodity_iv_info, check_option_expiry_status,search_broker_holdings_on_date,tool_analyze_position_change
 from captcha_utils import generate_captcha_image
 from market_correlation import tool_stock_hedging_analysis, tool_futures_correlation_check,tool_stock_correlation_check
@@ -501,7 +501,7 @@ if "messages" not in st.session_state:
 # ==========================================
 def get_agent(current_user="访客", user_query=""):  # 传入 current_user
     # ... (这里保留您原来的 prompt 和 tools) ...
-    tools = [analyze_kline_pattern, search_investment_knowledge, get_market_snapshot, get_commodity_iv_info,get_financial_news,search_broker_holdings_on_date,tool_analyze_position_change,
+    tools = [analyze_kline_pattern, search_investment_knowledge, get_market_snapshot, get_commodity_iv_info,get_financial_news,search_broker_holdings_on_date,tool_analyze_position_change,tool_query_specific_option,
              get_price_statistics, check_option_expiry_status,tool_stock_hedging_analysis,tool_futures_correlation_check,tool_stock_correlation_check,search_top_stocks,calculate_hedging_beta]
     if not os.getenv("DASHSCOPE_API_KEY"):
         st.error("❌ 未配置 API KEY");
@@ -647,7 +647,7 @@ def process_user_input(prompt_text):
                     # =================================================
                     # 【优化】定义触发词：只有涉及用户自身情况时，才加载画像和记忆
                     # 这样能节省大量 System Prompt 的 Token
-                    personal_keywords = ["之前", "持仓", "账户", "买", "卖", "建议", "仓位", "风险"]
+                    personal_keywords = ["之前", "持仓", "账户", "买", "卖", "建议", "仓位", "风险", "风格" , "推荐"]
                     need_personal_context = any(k in prompt_text for k in personal_keywords)
 
                     memory_context = ""
@@ -673,7 +673,7 @@ def process_user_input(prompt_text):
 
                                                         {memory_context}
 
-                                                     回答指令】
+                                                     【回答指令】
                                                      请结合上述记忆和当前问题进行回答。如果记忆里有相关持仓信息，请主动提及。
                                                      """
                     else:

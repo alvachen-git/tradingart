@@ -440,8 +440,8 @@ def analyze_kline_pattern(query: str, trade_date: str = None):
         📊 **{symbol} K线技术面诊断** ({date})
 
         1. **形态信号**：{' 🔥 '.join(patterns) if patterns else '普通震荡K线。'}
-        2. **趋势结构**：{'，'.join(trends)}。
-        3. **关键数据**：
+        2. **趋势**：{'，'.join(trends)}。
+        3. **价格**：
            - 收盘：{close} (涨跌 {chg_pct * 100:.2f}%)
         """
 

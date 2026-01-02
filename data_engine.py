@@ -1157,7 +1157,7 @@ def _query_etf_iv(etf_code, etf_name, query, need_rank, limit_days):
 📺 历史最高: {max_iv:.2f}%
 📻 历史最低: {min_iv:.2f}%
 --------------------------------
-💡 *策略参考: 当前IV处于{'历史高位，权利金较贵，卖方策略具有统计上优势' if iv_rank > 50 else '历史低位，权利金便宜，买方策略风险收益比更佳'}。*
+💡 *策略参考: 当前IV处于{'历史高位，权利金较贵，卖方具有统计上优势' if iv_rank > 50 else '历史低位，权利金便宜，买方风险收益比更佳'}。*
             """
 
     except Exception as e:
@@ -1288,7 +1288,6 @@ def _query_commodity_iv(query, need_rank, limit_days):
 📈 **较昨日: {iv_change_text}**
 🌊 **近期趋势**: {trend_text}
 --------------------------------
-💡 *提示: 如需查询IV历史排位或策略建议，请问"{target_name}的IV贵吗？"或"{target_name} IV排名"*
             """
 
         # --- 分支 B: 回复 Rank 和策略 ---
