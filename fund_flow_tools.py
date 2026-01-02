@@ -2,6 +2,7 @@ import pandas as pd
 import os
 from sqlalchemy import create_engine, text
 from dotenv import load_dotenv
+from langchain_core.tools import tool
 
 load_dotenv(override=True)
 DB_USER = os.getenv("DB_USER")
@@ -135,3 +136,69 @@ def get_all_sectors(sector_type='行业'):
         return pd.read_sql(sql, engine)['industry'].tolist()
     except:
         return []
+
+
+# ==========================================
+#  🔥 AI 专用工具: 量化/散户合力资金分析 (加上了 @tool)
+# ==========================================
+@tool
+def tool_get_retail_money_flow(days: int = 1):
+    """
+    查询股票的行业资金流向。
+    用于回答“股票资金最近在哪些行业流动”、“量化资金去哪了”、“散户在买什么”等问题。
+
+    Args:
+        days (int): 统计天数。1代表当日，3代表最近3天，5代表最近5天。
+    """
+    if engine is None: return "数据库连接失败"
+
+    try:
+        # 1. 确定日期范围
+        dates_df = pd.read_sql(
+            f"SELECT DISTINCT trade_date FROM sector_moneyflow ORDER BY trade_date DESC LIMIT {days + 5}", engine)
+        if dates_df.empty: return "暂无资金数据，请先运行数据更新脚本。"
+
+        # 截取最近 days 天的日期
+        target_dates = dates_df.head(days)['trade_date'].tolist()
+        date_str = "'" + "','".join(target_dates) + "'"
+        date_range_info = f"{target_dates[-1]} ~ {target_dates[0]}"
+
+        # 2. 核心查询：只算 Medium + Small
+        sql = f"""
+            SELECT 
+                industry,
+                SUM(medium_net_inflow + small_net_inflow) as hidden_flow,
+                SUM(main_net_inflow) as main_flow,  -- 查出来仅作对比参考
+                AVG(pct_change) as avg_pct
+            FROM sector_moneyflow 
+            WHERE trade_date IN ({date_str}) AND sector_type='行业' -- 默认只看行业
+            GROUP BY industry
+            ORDER BY hidden_flow DESC
+        """
+
+        df = pd.read_sql(sql, engine)
+
+        if df.empty: return "该时间段内无数据。"
+
+        # 3. 生成 AI 可读的分析报告
+        report = f"📊 **【资金流向分析】**\n"
+        report += f"📅 统计区间：{date_range_info} (近{days}个交易日)\n"
+
+        # 取前 10 名 (流入)
+        top_10 = df.head(3)
+        report += "🚀 **净流入 Top 3 :**\n"
+        for _, row in top_10.iterrows():
+            report += f"- **{row['industry']}**: +{row['hidden_flow']:.0f}万 (均涨: {row['avg_pct']:.2f}%)"
+
+        report += "\n"
+
+        # 取后 3 名 (流出)
+        bottom_5 = df.tail(3).sort_values('hidden_flow', ascending=True)
+        report += "🧊 **净流出 Top 3 :**\n"
+        for _, row in bottom_5.iterrows():
+            report += f"- **{row['industry']}**: {row['hidden_flow']:.0f}万\n"
+
+        return report
+
+    except Exception as e:
+        return f"查询出错: {e}"
