@@ -48,8 +48,8 @@ def get_hk_stock_list():
 def run_hk_score_update():
     # === A. 设定时间窗口 ===
     # 目标日期：默认为今天
-    #target_date = datetime.now().strftime('%Y%m%d')
-    target_date="20260102"
+    target_date = datetime.now().strftime('%Y%m%d')
+    #target_date="20260102"
 
     # 起始日期：往前推 180 天 (足够计算 MA60, MA120 等长周期均线)
     # 优化点：不要拉取几年的数据，浪费带宽和内存
