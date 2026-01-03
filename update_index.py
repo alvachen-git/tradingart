@@ -1,5 +1,6 @@
 import tushare as ts
 import pandas as pd
+import akshare as ak
 from sqlalchemy import create_engine, text
 import os
 from dotenv import load_dotenv
@@ -100,21 +101,109 @@ def fetch_and_save_indices(start_date, end_date):
             print(f"   [x] {name} 异常: {e}")
 
 
-# ==========================================
-#  🔴 修改重点：自动获取“今天”
-# ==========================================
+def fetch_and_save_hk_indices(start_date, end_date):
+    """
+    抓取港股核心指数 (使用 AkShare)
+    并自动计算涨跌幅
+    """
+    # 强制转为字符串，防止报错
+    start_date = str(start_date)
+    end_date = str(end_date)
+
+    # 映射表: AkShare代码 -> 中文名
+    # HSI: 恒生指数, HSTECH: 恒生科技指数
+    hk_indices = {
+        'HSI': '恒生指数',
+        'HSTECH': '恒生科技指数'
+    }
+
+    print(f"🚀 [港股] 开始拉取指数数据: {start_date} 至 {end_date} ...")
+
+    for symbol, name in hk_indices.items():
+        try:
+            # 1. 清理旧数据
+            with engine.connect() as conn:
+                del_sql = text(
+                    f"DELETE FROM index_price WHERE ts_code='{symbol}' AND trade_date >= '{start_date}' AND trade_date <= '{end_date}'")
+                conn.execute(del_sql)
+                conn.commit()
+
+            # 2. 调用 AkShare 接口 (获取全量历史)
+            df = ak.stock_hk_index_daily_sina(symbol=symbol)
+
+            if df.empty:
+                print(f"   [-] {name} 接口未返回数据")
+                continue
+
+            # 3. 数据清洗与计算
+            if 'date' not in df.columns:
+                print(f"   [!] {name} 缺少 date 列")
+                continue
+
+            # 日期格式化
+            df['trade_date'] = pd.to_datetime(df['date']).dt.strftime('%Y%m%d')
+
+            # 🔥【关键新增】计算涨跌幅 (pct_chg)
+            # 逻辑：(今收 - 昨收) / 昨收 * 100
+            # 必须在过滤日期之前计算，否则第一天的数据会因为没有前一天而变成 NaN
+            df['close'] = pd.to_numeric(df['close'], errors='coerce')
+            df['pct_chg'] = df['close'].pct_change() * 100
+            df['pct_chg'] = df['pct_chg'].fillna(0).round(4)  # 保留4位小数
+
+            # 4. 过滤日期区间
+            mask = (df['trade_date'] >= start_date) & (df['trade_date'] <= end_date)
+            df_filtered = df.loc[mask].copy()
+
+            if df_filtered.empty:
+                print(f"   [-] {name} 区间内无数据")
+                continue
+
+            # 字段重命名
+            rename_map = {
+                'open': 'open_price',
+                'high': 'high_price',
+                'low': 'low_price',
+                'close': 'close_price',
+                'volume': 'vol'
+            }
+            df_filtered = df_filtered.rename(columns=rename_map)
+
+            # 补充字段
+            df_filtered['ts_code'] = symbol
+            df_filtered['amount'] = 0
+
+            # 5. 入库
+            cols_to_save = ['trade_date', 'ts_code', 'open_price', 'high_price',
+                            'low_price', 'close_price', 'pct_chg', 'vol', 'amount']
+
+            for c in cols_to_save:
+                if c not in df_filtered.columns:
+                    df_filtered[c] = 0
+
+            df_filtered[cols_to_save].to_sql('index_price', engine, if_exists='append', index=False)
+            print(f"   [√] {name} 更新成功 ({len(df_filtered)} 条)")
+
+            time.sleep(1)
+
+        except Exception as e:
+            print(f"   [x] {name} 异常: {e}")
+
+
 if __name__ == "__main__":
     init_index_table()
 
-    # 1. 自动获取今天的日期 (格式 YYYYMMDD)
+    # 自动获取今天
     today = datetime.now().strftime('%Y%m%d')
 
-    # 2. 如果你想跑昨天的，可以用这行 (把上面那行注释掉):
-    # today = (datetime.now() - timedelta(days=1)).strftime('%Y%m%d')
+    # 如果想补全历史数据，可以把下面这行解开注释并修改日期：
+    # fetch_and_save_hk_indices("20240101", today)
 
-    print(f"⚡️ 正在执行单日更新模式: {today}")
+    print(f"⚡️ 正在执行每日更新模式: {today}")
 
-    # 3. 开始与结束都设为今天，就只跑今天
+    # 更新 A 股
     fetch_and_save_indices(today, today)
 
-    print("\n=== ✅ 今日数据任务结束 ===")
+    # 更新 港股
+    fetch_and_save_hk_indices(today, today)
+
+    print("\n=== ✅ 所有指数数据更新结束 ===")
