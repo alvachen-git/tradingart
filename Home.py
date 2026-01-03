@@ -929,9 +929,14 @@ with st.sidebar:
             st.rerun()
 
 
-    if st.button("🗑️ 清空对话历史", use_container_width=True):
-        st.session_state.messages = []
-        st.rerun()
+# 使用 popover 创建一个二级菜单，防止误触
+    with st.popover("🗑️ 清空对话历史", use_container_width=True):
+        st.markdown("⚠️ **确定要删除所有聊天记录吗？**\n\n此操作无法撤销。")
+
+        # 真正的删除动作在这里触发
+        if st.button("🚨 确认删除", type="primary", use_container_width=True):
+            st.session_state.messages = []
+            st.rerun()
 
     # 客服卡片 CSS 样式
     st.markdown("""
