@@ -19,7 +19,7 @@ import time
 import extra_streamlit_components as stx
 import streamlit.components.v1 as components
 import uuid #用于生成唯一ID
-from market_tools import get_market_snapshot, get_price_statistics,tool_query_specific_option
+from market_tools import get_market_snapshot, get_price_statistics,tool_query_specific_option,get_historical_price
 from data_engine import get_commodity_iv_info, check_option_expiry_status,search_broker_holdings_on_date,tool_analyze_position_change
 from captcha_utils import generate_captcha_image
 from market_correlation import tool_stock_hedging_analysis, tool_futures_correlation_check,tool_stock_correlation_check
@@ -502,7 +502,7 @@ if "messages" not in st.session_state:
 # ==========================================
 def get_agent(current_user="访客", user_query=""):  # 传入 current_user
     # ... (这里保留您原来的 prompt 和 tools) ...
-    tools = [analyze_kline_pattern, search_investment_knowledge, get_market_snapshot, get_commodity_iv_info,get_financial_news,search_broker_holdings_on_date,tool_analyze_position_change,tool_query_specific_option,
+    tools = [analyze_kline_pattern, search_investment_knowledge, get_market_snapshot, get_commodity_iv_info,get_financial_news,search_broker_holdings_on_date,tool_analyze_position_change,tool_query_specific_option,get_historical_price,
              get_price_statistics, check_option_expiry_status,tool_stock_hedging_analysis,tool_futures_correlation_check,tool_stock_correlation_check,search_top_stocks,calculate_hedging_beta,tool_get_retail_money_flow]
     if not os.getenv("DASHSCOPE_API_KEY"):
         st.error("❌ 未配置 API KEY");
@@ -781,17 +781,17 @@ def show_welcome_screen():
          )
 
     with col2:
-        st.button("📅 期权学习-什么是飞龙在天？",
+        st.button("📅 期权学习-什么是牛市价差？",
                      use_container_width=True,
                      on_click=set_prompt_callback,
-                     args=("期权的飞龙在天是什么策略？",)
+                     args=("期权的牛市价差是什么策略？",)
          )
 
     with col3:
-        st.button("🎯 K线分析-帮我看今天的白银",
+        st.button("🎯 K线分析-强势股票",
                      use_container_width=True,
                      on_click=set_prompt_callback,
-                     args=("分析今天白银K线",)
+                     args=("最近有哪些K线强势的股票推荐",)
          )
 
 # ==========================================

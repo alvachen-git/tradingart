@@ -70,23 +70,44 @@ def get_price_statistics(query_list: str, start_date: str, end_date: str):
 
             # C. 構建查詢 (增加 pct_chg 字段)
             if asset_type == 'stock':
-                codes_to_try = [target_code]
-                if "." in target_code:
-                    codes_to_try.append(target_code.split('.')[0])
-                else:
-                    codes_to_try.extend([f"{target_code}.SZ", f"{target_code}.SH"])
-                code_str = "','".join(codes_to_try)
+                is_hk = target_code.endswith('.HK')
 
-                # 【修改点 1】增加 pct_chg
-                sql = text(f"""
-                    SELECT trade_date, close_price as close, high_price as high, low_price as low, open_price as open,pct_chg 
-                    FROM stock_price 
-                    WHERE ts_code IN ('{code_str}')
-                      AND trade_date >= :s_date 
-                      AND trade_date <= :e_date
-                    ORDER BY trade_date ASC
-                """)
-                df = pd.read_sql(sql, engine, params={"s_date": s_date, "e_date": e_date})
+                if is_hk:
+                    # 🔥【港股】使用精确匹配，避免01810.HK和81810.HK混淆
+                    sql = text("""
+                               SELECT trade_date,
+                                      close_price as close, high_price as high, 
+                               low_price as low, open_price as open, pct_chg
+                               FROM stock_price
+                               WHERE ts_code = :code
+                                 AND trade_date >= :s_date
+                                 AND trade_date <= :e_date
+                               ORDER BY trade_date ASC
+                               """)
+                    df = pd.read_sql(sql, engine, params={
+                        "code": target_code,
+                        "s_date": s_date,
+                        "e_date": e_date
+                    })
+                else:
+                    # 【A股】保持原逻辑
+                    codes_to_try = [target_code]
+                    if "." in target_code:
+                        codes_to_try.append(target_code.split('.')[0])
+                    else:
+                        codes_to_try.extend([f"{target_code}.SZ", f"{target_code}.SH"])
+                    code_str = "','".join(set(codes_to_try))
+
+                    sql = text(f"""
+                        SELECT trade_date, close_price as close, high_price as high, 
+                               low_price as low, open_price as open, pct_chg 
+                        FROM stock_price 
+                        WHERE ts_code IN ('{code_str}')
+                          AND trade_date >= :s_date 
+                          AND trade_date <= :e_date
+                        ORDER BY trade_date ASC
+                    """)
+                    df = pd.read_sql(sql, engine, params={"s_date": s_date, "e_date": e_date})
 
             # --- 分支 2: 指数 (新增) ---
             elif asset_type == 'index':
@@ -175,9 +196,13 @@ def get_market_snapshot(query: str):
         target_code = symbol_code.upper()
         if asset_type == 'stock':
             # 模糊匹配查詢最新一條
-            sql = text(
-                f"SELECT * FROM stock_price WHERE ts_code LIKE '{target_code}%' ORDER BY trade_date DESC LIMIT 1")
-            df = pd.read_sql(sql, engine)
+            sql = text("""
+                       SELECT ts_code, name, trade_date, close_price, pct_chg
+                       FROM stock_price
+                       WHERE ts_code = :code
+                       ORDER BY trade_date DESC LIMIT 1
+                       """)
+            df = pd.read_sql(sql, engine, params={"code": target_code})
 
         elif asset_type == 'index':
             # 新增指数查询
@@ -353,3 +378,135 @@ def tool_query_specific_option(query: str):
 
     except Exception as e:
         return f"查询过程发生错误: {e}"
+
+
+# ==========================================
+#   🔥 新增：查询历史某一天的价格
+# ==========================================
+@tool
+def get_historical_price(query: str, trade_date: str):
+    """
+    【历史价格查询】
+    查询股票(A股/港股)、期货、指数在某一天的价格。
+    适用于回答："阿里在12月2日价格多少"、"茅台上周五收盘价"、"黄金在2025年11月1日的价格"。
+
+    参数:
+    - query: 品种名称，如 "阿里"、"茅台"、"黄金"、"小米"
+    - trade_date: 查询日期，格式 YYYYMMDD，如 "20251202"
+    """
+    if engine is None:
+        return "❌ 数据库未连接"
+
+    # 清洗日期
+    clean_date = trade_date.replace("-", "").replace("/", "").replace(".", "").strip()
+
+    # 解析品种
+    symbol_code, asset_type = symbol_map.resolve_symbol(query)
+    if not symbol_code:
+        return f"⚠️ 未找到品种: {query}"
+
+    try:
+        target_code = symbol_code.upper()
+        df = pd.DataFrame()
+
+        if asset_type == 'stock':
+            is_hk = target_code.endswith('.HK')
+
+            if is_hk:
+                # 港股精确匹配
+                sql = text("""
+                           SELECT ts_code,
+                                  name,
+                                  trade_date,
+                                  open_price,
+                                  high_price,
+                                  low_price,
+                                  close_price,
+                                  pct_chg
+                           FROM stock_price
+                           WHERE ts_code = :code
+                             AND trade_date = :date
+                           """)
+                df = pd.read_sql(sql, engine, params={"code": target_code, "date": clean_date})
+            else:
+                # A股
+                codes_to_try = [target_code]
+                if "." in target_code:
+                    codes_to_try.append(target_code.split('.')[0])
+                else:
+                    codes_to_try.extend([f"{target_code}.SZ", f"{target_code}.SH"])
+                code_str = "','".join(set(codes_to_try))
+
+                sql = text(f"""
+                    SELECT ts_code, name, trade_date, open_price, high_price, 
+                           low_price, close_price, pct_chg
+                    FROM stock_price 
+                    WHERE ts_code IN ('{code_str}') AND trade_date = :date
+                """)
+                df = pd.read_sql(sql, engine, params={"date": clean_date})
+
+        elif asset_type == 'index':
+            sql = text("""
+                       SELECT ts_code,
+                              trade_date,
+                              open_price,
+                              high_price,
+                              low_price,
+                              close_price,
+                              pct_chg
+                       FROM index_price
+                       WHERE ts_code = :code
+                         AND trade_date = :date
+                       """)
+            df = pd.read_sql(sql, engine, params={"code": target_code, "date": clean_date})
+
+        else:  # future
+            sql = text("""
+                       SELECT ts_code,
+                              trade_date,
+                              open_price,
+                              high_price,
+                              low_price,
+                              close_price,
+                              pct_chg
+                       FROM futures_price
+                       WHERE ts_code = :code
+                         AND trade_date = :date
+                       """)
+            df = pd.read_sql(sql, engine, params={"code": target_code, "date": clean_date})
+
+        if df.empty:
+            return f"⚠️ {query} ({target_code}) 在 {clean_date} 无交易数据（可能是休市日）"
+
+        row = df.iloc[0]
+        ts_code = row.get('ts_code', target_code)
+        name = row.get('name', query)
+        open_p = row.get('open_price')
+        high_p = row.get('high_price')
+        low_p = row.get('low_price')
+        close_p = row.get('close_price')
+        pct_chg = row.get('pct_chg', 0)
+
+        # 港股显示货币单位
+        currency = "港元" if '.HK' in str(ts_code) else "元"
+
+        # 涨跌幅
+        if pct_chg and pct_chg != 0:
+            chg_str = f"{float(pct_chg):+.2f}%"
+            chg_emoji = "🔴" if float(pct_chg) < 0 else "🟢"
+        else:
+            chg_str = "0.00%"
+            chg_emoji = "⚪"
+
+        return f"""📅 **{name} ({ts_code}) {clean_date} 行情**
+
+💰 **收盘价**: {close_p} {currency}
+📈 **开盘价**: {open_p} {currency}
+🔺 **最高价**: {high_p} {currency}
+🔻 **最低价**: {low_p} {currency}
+{chg_emoji} **涨跌幅**: {chg_str}
+"""
+
+    except Exception as e:
+        print(f"查询错误: {traceback.format_exc()}")
+        return f"❌ 查询出错: {e}"

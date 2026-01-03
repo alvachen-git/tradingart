@@ -4,6 +4,7 @@ import os
 from dotenv import load_dotenv
 from functools import lru_cache
 import re
+from sqlalchemy import create_engine, text
 
 # 1. 初始化
 load_dotenv(override=True)
@@ -15,8 +16,38 @@ for key in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"]:
 
 ts_token = os.getenv("TUSHARE_TOKEN")
 
+def get_db_engine():
+    DB_USER = os.getenv("DB_USER")
+    DB_PASSWORD = os.getenv("DB_PASSWORD")
+    DB_HOST = os.getenv("DB_HOST")
+    DB_PORT = os.getenv("DB_PORT")
+    DB_NAME = os.getenv("DB_NAME")
+    if not all([DB_USER, DB_PASSWORD, DB_HOST, DB_NAME]): return None
+    db_url = f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
+    return create_engine(db_url)
+
 # 基础映射表：中文名称 -> 主力连续代码 (不带数字)
 COMMON_ALIASES = {
+# === 🟢 热门港股 (预埋) ===
+    "腾讯": "00700.HK", "腾讯控股": "00700.HK", "企鹅": "00700.HK",
+    "美团": "03690.HK", "美团-W": "03690.HK",
+    "阿里": "09988.HK", "阿里巴巴": "09988.HK", "巴巴": "09988.HK",
+    "小米": "01810.HK", "小米集团": "01810.HK",
+    "快手": "01024.HK", "快手-W": "01024.HK",
+    "中芯HK": "00981.HK",  # 区分A股中芯
+    "京东": "09618.HK", "京东集团": "09618.HK",
+    "百度": "09888.HK", "百度集团": "09888.HK",
+    "网易": "09999.HK",
+    "B站": "09626.HK", "哔哩哔哩": "09626.HK",
+    "商汤": "00020.HK",
+    "理想": "02015.HK", "理想汽车": "02015.HK",
+    "蔚来": "09866.HK",
+    "小鹏": "09868.HK", "小鹏汽车": "09868.HK",
+    "汇丰": "00005.HK", "汇丰控股": "00005.HK",
+    "港交所": "00388.HK", "香港交易所": "00388.HK",
+    "中海油HK": "00883.HK", "中国海洋石油": "00883.HK",
+    "中移动HK": "00941.HK", "中国移动HK": "00941.HK",
+
 # === 🟢 沪深300 ===
     "平安银行": "000001.SZ",
     "万科A": "000002.SZ", "万科": "000002.SZ",
@@ -2129,18 +2160,44 @@ COMMON_ALIASES = {
 
 @lru_cache(maxsize=1)
 def get_all_market_map():
-    """获取全市场品种列表 (股票 + ETF)"""
-    if not ts_token: return {}
-    try:
-        ts.set_token(ts_token)
-        pro = ts.pro_api()
-        df_stock = pro.stock_basic(exchange='', list_status='L', fields='ts_code,name')
-        df_fund = pro.fund_basic(market='E', status='L', fields='ts_code,name')
-        df_all = pd.concat([df_stock, df_fund])
-        return dict(zip(df_all['name'], df_all['ts_code']))
-    except Exception as e:
-        print(f" [!] 加载品种列表失败: {e}")
-        return {}
+    """
+        全市场映射：获取 股票(A股+港股) + 基金 的名称映射
+        """
+    market_map = {}
+    engine = get_db_engine()
+
+    if engine:
+        try:
+            # 1. 查 A股 (stock_basic)
+            # 如果您有 stock_basic 表，先查它
+            try:
+                df_a = pd.read_sql("SELECT ts_code, name FROM stock_basic", engine)
+                for _, row in df_a.iterrows():
+                    market_map[row['name']] = row['ts_code']
+                    market_map[row['ts_code'].split('.')[0]] = row['ts_code']  # 兼容纯数字
+            except:
+                pass
+
+            # 2. 🔥【关键新增】查 港股 (从 stock_price 表提取)
+            # 因为我们把港股数据存到了 stock_price，直接去重查询即可
+            print("🔍 正在加载港股映射...")
+            sql_hk = text("SELECT DISTINCT ts_code, name FROM stock_price WHERE ts_code LIKE :suffix")
+            df_hk = pd.read_sql(sql_hk, engine, params={"suffix": "%.HK"})
+
+            for _, row in df_hk.iterrows():
+                if row['name']:
+                    # 映射中文名 -> 代码 (如 '腾讯控股' -> '00700.HK')
+                    market_map[row['name']] = row['ts_code']
+                    # 映射纯数字 -> 代码 (如 '00700' -> '00700.HK')
+                    code_num = row['ts_code'].split('.')[0]
+                    market_map[code_num] = row['ts_code']
+
+            print(f"✅ 市场映射加载完成，共 {len(market_map)} 个品种")
+
+        except Exception as e:
+            print(f"❌ 加载市场映射失败: {e}")
+
+    return market_map
 
 
 # ==========================================
@@ -2242,6 +2299,15 @@ def resolve_symbol(query: str):
         if possible_index_sz in INDEX_CODES_SET:
             return possible_index_sz, 'index'
 
+        # 🔥【关键新增】港股通常是 5位 (如 00700)
+        if len(query) == 5:
+            # 尝试补全 .HK
+            hk_code = f"{query}.HK"
+            # 只要在数据库里见过这个代码，就返回
+            if query in market_map: return market_map[query], 'stock'
+            # 或者直接返回
+            return hk_code, 'stock'
+
         # 再去股票列表找
         for code in market_map.values():
             if query == code.split('.')[0]:
@@ -2255,6 +2321,6 @@ if __name__ == "__main__":
     print(f"上证指数 -> {resolve_symbol('上证指数')}")  # ('000001.SH', 'index')
     print(f"mo -> {resolve_symbol('mo')}")  # ('000300.SH', 'index')
     print(f"沪深300 -> {resolve_symbol('沪深300')}")  # ('IF', 'future') - 保持原有期货习惯
-    print(f"000001.SH -> {resolve_symbol('000001.SH')}")  # ('000001.SH', 'index')
-    print(f"m -> {resolve_symbol('m')}")  # ('600519.SH', 'stock')
-    print(f"多晶硅 -> {resolve_symbol('多晶硅')}")  # ('rb', 'future')
+    print(f"宁德时代 -> {resolve_symbol('宁德时代')}")  # ('000001.SH', 'index')
+    print(f"小米 -> {resolve_symbol('小米')}")  # ('600519.SH', 'stock')
+    print(f"00700 -> {resolve_symbol('00700')}")  # ('rb', 'future')

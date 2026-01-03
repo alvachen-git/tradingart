@@ -453,4 +453,4 @@ def analyze_kline_pattern(query: str, trade_date: str = None):
 
 if __name__ == "__main__":
     # 工具必须用 .invoke 并在字典里传参
-    print(analyze_kline_pattern.invoke({"symbol": "im"}))
+    print(analyze_kline_pattern.invoke({"symbol": "茅台"}))

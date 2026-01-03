@@ -23,7 +23,7 @@ db_url = f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}
 engine = create_engine(db_url)
 
 
-def fetch_and_fix_single_stock(symbol, start_date="20200101", end_date="20260101"):
+def fetch_and_fix_single_stock(symbol, start_date="20200101", end_date="20260102"):
     """
     专门修复某一只港股的历史数据
     symbol: 5位数字代码，例如 '00700'
@@ -135,5 +135,5 @@ if __name__ == "__main__":
     # 🛠️在此处修改您要修复的股票
     # 腾讯: 00700, 小米: 01810, 美团: 03690
 
-    TARGET_SYMBOL = "00700"  # 小米
+    TARGET_SYMBOL ="02015"
     fetch_and_fix_single_stock(TARGET_SYMBOL)
