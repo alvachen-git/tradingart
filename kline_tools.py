@@ -1,5 +1,6 @@
 import pandas as pd
 import os
+import re
 import streamlit as st
 from sqlalchemy import create_engine, text
 from dotenv import load_dotenv
@@ -53,10 +54,6 @@ def analyze_kline_pattern(query: str, trade_date: str = None):
     symbol, asset_type = result
 
 
-    # 1. 容错处理
-    clean_symbol = ''.join([i for i in symbol if not i.isdigit()])
-    target_code_1 = f"{clean_symbol}0"
-    target_code_2 = clean_symbol
     # 【修改点 2】构建日期过滤条件
     # 逻辑：如果指定了 12月10日，我们要查 <= 12月10日 的最近60条记录
     # 这样第1条就是12月10日，后面是9日、8日... 用于计算均线
@@ -79,13 +76,28 @@ def analyze_kline_pattern(query: str, trade_date: str = None):
             df = pd.read_sql(sql, engine)
 
         elif asset_type == 'future':
-            sql = f"""
-                SELECT trade_date, open_price, high_price, low_price, close_price 
-                FROM futures_price
-                WHERE (ts_code='{target_code_1}' OR ts_code='{target_code_2}')
-                {date_condition}
-                ORDER BY trade_date DESC LIMIT 60
-            """
+            # 🔥【核心修复】判断是否指定了具体合约月份
+            has_month = bool(re.search(r'\d{2,4}', symbol))  # 检查是否有3-4位数字
+
+            if has_month:
+                # 用户指定了具体合约（如 AG2602）
+                sql = f"""
+                    SELECT trade_date, open_price, high_price, low_price, close_price 
+                    FROM futures_price
+                    WHERE ts_code='{symbol}'
+                    {date_condition}
+                    ORDER BY trade_date DESC LIMIT 60
+                """
+            else:
+                # 用户只输入品种（如 白银），查询主力合约
+                clean_symbol = ''.join([i for i in symbol if not i.isdigit()])
+                sql = f"""
+                    SELECT trade_date, open_price, high_price, low_price, close_price 
+                    FROM futures_price
+                    WHERE (ts_code='{clean_symbol}0' OR ts_code='{clean_symbol}')
+                    {date_condition}
+                    ORDER BY trade_date DESC LIMIT 60
+                """
             df = pd.read_sql(sql, engine)
 
  # 🔥【新增】指数查询逻辑
@@ -201,13 +213,13 @@ def analyze_kline_pattern(query: str, trade_date: str = None):
 
         # 1. 多头吞噬 (Bullish Engulfing)
         # 条件：空头趋势(5<20) + 昨日大跌(>2%) + 今日大涨 + 包住昨日
-        if (curr['MA5'] < curr['MA20']) and (prev_chg_pct < -0.015) and (chg_pct > 0) and (open_p < prev_close) and (close > prev_open):
+        if (curr['MA5'] < curr['MA20']) and (prev_chg_pct < -0.005) and (chg_pct > 0) and (open_p < prev_close) and (close > prev_open):
             patterns.append("【多头吞噬】(空头趋势末端，一阳吞一阴，强力反转信号！)")
 
         # 2. 空头吞噬 (Bearish Engulfing)
         # 条件：多头趋势(5>20) + 昨日大涨(>2%) + 今日大跌 + 包住昨日
         if (curr['MA5'] > curr['MA20']) and \
-                (prev_chg_pct > 0.015) and \
+                (prev_chg_pct > 0) and \
                 (chg_pct < 0) and \
                 (open_p > prev_close) and \
                 (close < prev_open):

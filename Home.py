@@ -15,6 +15,7 @@ from kline_tools import analyze_kline_pattern
 from screener_tool import search_top_stocks
 from news_tools import get_financial_news
 from fund_flow_tools import tool_get_retail_money_flow
+from vision_tools import analyze_financial_image
 import time
 import extra_streamlit_components as stx
 import streamlit.components.v1 as components
@@ -617,14 +618,37 @@ LOADING_JOKES = [
 def process_user_input(prompt_text):
     """处理用户输入（无论是来自输入框还是快捷卡片）"""
     # 1. 显示用户消息
+    # --- 🔥 [新增逻辑] 处理图片 ---
+    # 检查是否有上传的文件
+    image_context = ""
+    if st.session_state.get("portfolio_uploader"):
+        with st.status("📸 正在识别持仓截图...", expanded=True) as status:
+            st.write("AI 正在观察图片...")
+            # 调用视觉模型提取文字
+            vision_result = analyze_financial_image(st.session_state.portfolio_uploader)
+            status.update(label="✅ 图片识别完成", state="complete", expanded=False)
+
+            # 将识别结果拼接到上下文中，但不直接展示给用户看，而是作为 AI 的“潜意识”
+            image_context = f"\n\n【用户上传图，视觉模型提取的信息如下，请务必基于这信息，回答用户下面的问题】：\n{vision_result}\n----------------\n"
+
+            # (可选) 可以在界面上显示识别到了什么，增强信任感
+            with st.chat_message("ai"):
+                st.caption(f"已识别图片内容：\n{vision_result[:100]}...")
+
+     # 2. 显示用户提问
     st.session_state.messages.append({"role": "user", "content": prompt_text})
     with st.chat_message("user"):
         st.markdown(prompt_text)
+        # 如果有图片，顺便显示一下缩略图
+        if st.session_state.get("portfolio_uploader"):
+            st.image(st.session_state.portfolio_uploader, width=200)
 
     # 2. 生成 AI 回复
     current_user = st.session_state.get('user_id', "访客")
+    # 真正的 Prompt = 图片提取出的持仓数据 + 用户的问题
+    final_prompt = image_context + prompt_text
     # [修改] 调用 get_agent 时传入用户的 prompt_text，以便去搜记忆
-    agent = get_agent(current_user, user_query=prompt_text)
+    agent = get_agent(current_user, user_query=final_prompt)
 
     if agent:
         with st.chat_message("assistant"):
@@ -645,13 +669,13 @@ def process_user_input(prompt_text):
                     # 【优化】定义触发词：只有涉及用户自身情况时，才加载画像和记忆
                     # 这样能节省大量 System Prompt 的 Token
                     personal_keywords = ["之前", "持仓", "账户", "买", "卖", "建议", "仓位", "风险", "风格" , "推荐"]
-                    need_personal_context = any(k in prompt_text for k in personal_keywords)
+                    need_personal_context = any(k in final_prompt for k in personal_keywords)
 
                     memory_context = ""
                     # 确保这一行和上面的代码对齐
                     if current_user != "访客" and need_personal_context:
                         # 检索最近 3 条最相关的记忆
-                        found = mem.retrieve_relevant_memory(current_user, prompt_text, k=2)
+                        found = mem.retrieve_relevant_memory(current_user, final_prompt, k=2)
                         if found:
                             memory_context = f"""
                                                 \n【🔍 必须参考的历史记忆】
@@ -682,10 +706,19 @@ def process_user_input(prompt_text):
                     max_history_rounds = 2
                     recent_messages = st.session_state.messages[-max_history_rounds:]
 
-                    history = [
-                        HumanMessage(content=m["content"]) if m["role"] == "user" else AIMessage(content=m["content"])
-                        for m in recent_messages
-                    ]
+                    history = []
+                    for m in recent_messages:
+                        if m["role"] == "user":
+                            history.append(HumanMessage(content=m["content"]))
+                        else:
+                            history.append(AIMessage(content=m["content"]))
+
+                    # 🔥【核心修复】如果有图片识别信息，替换最后一条用户消息
+                    if image_context and history:
+                        for i in range(len(history) - 1, -1, -1):
+                            if isinstance(history[i], HumanMessage):
+                                history[i] = HumanMessage(content=final_prompt)
+                                break
 
                     # ⚡ 暴力注入：把这个超级指令插在最前面
                     history.insert(0, SystemMessage(content=super_system_prompt))
@@ -693,7 +726,7 @@ def process_user_input(prompt_text):
                     # 1. 实例化回调对象
                     monitor_callback = TokenMonitorCallback(
                         username=current_user,
-                        query_text=prompt_text
+                        query_text=final_prompt
                     )
 
                     response = agent.invoke(
@@ -722,12 +755,12 @@ def process_user_input(prompt_text):
                     # ==========================================
                     # 只有登录用户才存，或者是访客也可以存(看您需求)
                     if current_user != "访客":
-                        mem.save_interaction(current_user, prompt_text, ai_response)
-                        print(f"已存档记忆: {prompt_text[:10]}...")
+                        mem.save_interaction(current_user, final_prompt, ai_response)
+                        print(f"已存档记忆: {final_prompt[:10]}...")
 
                     # 更新记忆
                     if hasattr(de, 'update_user_memory_async'):
-                        de.update_user_memory_async(current_user, prompt_text)
+                        de.update_user_memory_async(current_user, final_prompt)
                     # [关键] 在这里直接渲染按钮，为了防止刷新前看不见
                     # 注意：这里不需要存入 session_state，因为上面的"历史消息循环"会负责存储后的渲染
                     native_share_button(ai_response, key=f"share_new_{int(time.time())}")
@@ -1009,6 +1042,33 @@ else:
 
                 # 传入两个参数：问题 + 回答
                 native_share_button(user_question, msg["content"], key=f"share_history_{i}")
+
+# ==========================================
+#  E. 图片上传区 (新增)
+# ==========================================
+with st.container():
+    # 使用 Expander 把上传控件收起来，避免占用太高空间
+    with st.expander("📸 可以上传持仓、K线等图", expanded=False):
+        uploaded_img = st.file_uploader("支持 JPG/PNG，截图越清晰越好", type=["jpg", "jpeg", "png"],
+                                        key="portfolio_uploader")
+
+        if uploaded_img:
+            st.image(uploaded_img, caption="已加载截图", width=200)
+            # 🔥 [修改點] 使用自定義 HTML 替代 st.info，解決看不清的問題
+            st.markdown("""
+                        <div style="
+                            background-color: rgba(59, 130, 246, 0.2); /* 半透明亮藍底 */
+                            border: 1px solid #3b82f6;               /* 亮藍色邊框 */
+                            color: #ffffff !important;               /* 強制純白文字 */
+                            padding: 12px;
+                            border-radius: 8px;
+                            margin-top: 10px;
+                            line-height: 1.5;
+                        ">
+                            <strong style="color: #FFD700;">✅ 图片已就绪</strong><br>
+                            请在下方输入框输入问题 <span style="color: #cbd5e1; font-size: 13px;">(例如：'帮分析持仓风险')</span>
+                        </div>
+                        """, unsafe_allow_html=True)
 
 # D. 底部输入框 (Sticky Footer) [修改点：使用 st.chat_input]
 if prompt := st.chat_input("我受过交易汇训练，欢迎问我任何实战交易问题..."):
