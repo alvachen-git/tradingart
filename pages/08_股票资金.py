@@ -112,6 +112,11 @@ if not df_bubble.empty:
                 "bubble_size": "成交额"},
         title=None
     )
+    fig.update_traces(
+        textposition='top center',
+        textfont=dict(color='white', size=12, family="Arial Black"),  # 强制白色，稍微调大字号
+        marker=dict(opacity=0.9, line=dict(width=1, color='#0b1121'))  # 给气泡加个深色描边，让文字在气泡上也能看清
+    )
     fig.update_layout(template="plotly_dark", height=600, paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
     fig.add_hline(y=0, line_dash="dash", line_color="gray")
     fig.add_vline(x=0, line_dash="dash", line_color="gray")
