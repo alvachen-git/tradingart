@@ -16,6 +16,7 @@ from screener_tool import search_top_stocks
 from news_tools import get_financial_news
 from fund_flow_tools import tool_get_retail_money_flow
 from vision_tools import analyze_financial_image
+from volume_oi_tools import get_volume_oi, get_futures_oi_ranking, get_option_oi_ranking,get_option_volume_abnormal, get_option_oi_abnormal
 import time
 import extra_streamlit_components as stx
 import streamlit.components.v1 as components
@@ -503,7 +504,7 @@ if "messages" not in st.session_state:
 # ==========================================
 def get_agent(current_user="访客", user_query=""):  # 传入 current_user
     # ... (这里保留您原来的 prompt 和 tools) ...
-    tools = [analyze_kline_pattern, search_investment_knowledge, get_market_snapshot, get_commodity_iv_info,get_financial_news,search_broker_holdings_on_date,tool_analyze_position_change,tool_query_specific_option,get_historical_price,
+    tools = [analyze_kline_pattern, search_investment_knowledge, get_market_snapshot, get_commodity_iv_info,get_financial_news,search_broker_holdings_on_date,tool_analyze_position_change,tool_query_specific_option,get_historical_price,get_volume_oi,get_futures_oi_ranking,get_option_oi_ranking,get_option_volume_abnormal,get_option_oi_abnormal,
              get_price_statistics, check_option_expiry_status,tool_stock_hedging_analysis,tool_futures_correlation_check,tool_stock_correlation_check,search_top_stocks,calculate_hedging_beta,tool_get_retail_money_flow]
     if not os.getenv("DASHSCOPE_API_KEY"):
         st.error("❌ 未配置 API KEY");
@@ -568,7 +569,7 @@ def get_agent(current_user="访客", user_query=""):  # 传入 current_user
   
 
     【你的行为准则】
-    1. 当用户询问某个标的时，如果没有指定K线分析，可以同时调用`analyze_kline_pattern`和`get_financial_news`，将消息面与技术面进行对比。
+    1. 当收到视觉模型提取的信息，还得利用`analyze_kline_pattern`和`search_investment_knowledge`做搭配思考
     2. 当用户问期权或交易问题，优先以知识库工具为信息参考。
     3. 股票没有期权，客户问股票时，不要给期权策略，除非是用ETF期权来对冲股票。
     4. 期权策略的建议，需要考虑波动率和距离到期日，使用工具`check_option_expiry_status`和知识库搭配回答
