@@ -204,9 +204,16 @@ def _plot_kline(ts_code, name, period, asset_type):
 
         # K线 + 成交量
         fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=[0.7, 0.3])
-        fig.add_trace(
-            go.Candlestick(x=df['trade_date'], open=df['open_price'], high=df['high_price'], low=df['low_price'],
-                           close=df['close_price'], name='K线'), row=1, col=1)
+        fig.add_trace(go.Candlestick(
+            x=df['trade_date'],
+            open=df['open_price'],
+            high=df['high_price'],
+            low=df['low_price'],
+            close=df['close_price'],
+            name='K线',
+            increasing_line_color='#ef4444',  # 🔴 涨：红色
+            decreasing_line_color='#22c55e'  # 🟢 跌：绿色
+        ), row=1, col=1)
         colors = ['#ef4444' if c >= o else '#22c55e' for o, c in zip(df['open_price'], df['close_price'])]
         fig.add_trace(go.Bar(x=df['trade_date'], y=df['vol'], name='成交量', marker_color=colors), row=2, col=1)
 
