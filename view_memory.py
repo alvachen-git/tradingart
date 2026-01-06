@@ -23,7 +23,7 @@ def view_all_memories():
 
         # 2. 直接通过 get() 方法获取所有数据
         # ChromaDB 的 get() 默认返回前 100 条，我们可以设大一点
-        data = vector_store.get(limit=2000)
+        data = vector_store.get(limit=5000)
 
         ids = data['ids']
         documents = data['documents']
