@@ -2111,7 +2111,7 @@ COMMON_ALIASES = {
     '恒生指数': 'HSI','恒指': 'HSI',
     '恒生科技指数': 'HSTECH','恒生科技': 'HSTECH',
     '中证2000': '932000.CSI','中证1000': '000852.SH','中证1000指数': '000852.SH','1000指数': '000852.SH',
-    '小盘股': '932000.CSI','沪深300指数': '000300.SH','上证50指数': '000016.SH',
+    '小盘股': '932000.CSI','沪深300指数': '000300.SH','上证50指数': '000016.SH','沪深300': '000300.SH','上证50': '000016.SH',
 
 # 🔥【新增】股指期权专用映射 (必须显式定义，防止正则误判)
     "MO": "MO", "中证1000股指期权": "MO", "1000期权": "MO",
@@ -2227,7 +2227,7 @@ EXTRA_INDEX_MAP = {
 COMMON_ALIASES.update(EXTRA_INDEX_MAP)
 
 
-def resolve_symbol(query: str):
+def resolve_symbol(query):
     """
     核心解析函数：智能识别 主力连续 vs 具体合约 vs 指数 vs 股票
     返回: (target_code, asset_type)
@@ -2236,7 +2236,7 @@ def resolve_symbol(query: str):
     if not query or not isinstance(query, str) or query.strip() == "":
         return None, None
 
-    query = query.strip().upper()
+    query = str(query).strip().upper() # 转大写，去空格
 
     # --- 0. 优先检查是否直接输入了指数代码 ---
     if query in INDEX_CODES_SET:
@@ -2291,14 +2291,20 @@ def resolve_symbol(query: str):
     # 4. 匹配纯数字代码 (股票/ETF)
     # 如果用户输了 600519，默认是股票；如果输了 000300，可能是指数也可能是股票(很少见)
     # 这里做一个简单的兜底
-    if query[0].isdigit():
-        # 优先尝试在指数列表里找 (比如用户输 000001)
-        possible_index = f"{query}.SH"
-        if possible_index in INDEX_CODES_SET:
-            return possible_index, 'index'
-        possible_index_sz = f"{query}.SZ"
-        if possible_index_sz in INDEX_CODES_SET:
-            return possible_index_sz, 'index'
+    # --- 2. 纯数字代码自动补全 (如 600519) ---
+    if query.isdigit() and len(query) == 6:
+        # 沪市 (6开头)
+        if query.startswith('6'):
+            return f"{query}.SH", "stock"
+        # 深市 (0或3开头)
+        elif query.startswith(('0', '3')):
+            return f"{query}.SZ", "stock"
+        # 北交所 (4或8开头)
+        elif query.startswith(('4', '8')):
+            return f"{query}.BJ", "stock"
+        # 兜底默认
+        else:
+            return f"{query}.SH", "stock"
 
         # 🔥【关键新增】港股通常是 5位 (如 00700)
         if len(query) == 5:
@@ -2323,5 +2329,5 @@ if __name__ == "__main__":
     print(f"mo -> {resolve_symbol('mo')}")  # ('000300.SH', 'index')
     print(f"沪深300 -> {resolve_symbol('沪深300')}")  # ('IF', 'future') - 保持原有期货习惯
     print(f"宁德时代 -> {resolve_symbol('宁德时代')}")  # ('000001.SH', 'index')
-    print(f"小米 -> {resolve_symbol('小米')}")  # ('600519.SH', 'stock')
+    print(f"600519 -> {resolve_symbol('600519')}")  # ('600519.SH', 'stock')
     print(f"00700 -> {resolve_symbol('00700')}")  # ('rb', 'future')
