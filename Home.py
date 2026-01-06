@@ -27,6 +27,7 @@ import uuid #用于生成唯一ID
 from market_tools import get_market_snapshot, get_price_statistics,tool_query_specific_option,get_historical_price
 from data_engine import get_commodity_iv_info, check_option_expiry_status,search_broker_holdings_on_date,tool_analyze_position_change
 from captcha_utils import generate_captcha_image
+from search_tools import search_web
 from market_correlation import tool_stock_hedging_analysis, tool_futures_correlation_check,tool_stock_correlation_check
 from sqlalchemy import text
 from dotenv import load_dotenv
@@ -559,7 +560,7 @@ if "messages" not in st.session_state:
 def get_agent(current_user="访客", user_query=""):  # 传入 current_user
     # ... (这里保留您原来的 prompt 和 tools) ...
     tools = [analyze_kline_pattern, search_investment_knowledge, get_market_snapshot, get_commodity_iv_info,get_financial_news,search_broker_holdings_on_date,tool_analyze_position_change,tool_query_specific_option,get_historical_price,get_volume_oi,get_futures_oi_ranking,get_option_oi_ranking,get_option_volume_abnormal,get_option_oi_abnormal,
-             get_price_statistics, check_option_expiry_status,tool_stock_hedging_analysis,tool_futures_correlation_check,tool_stock_correlation_check,search_top_stocks,calculate_hedging_beta,tool_get_retail_money_flow,draw_chart_tool]
+             get_price_statistics, check_option_expiry_status,tool_stock_hedging_analysis,tool_futures_correlation_check,tool_stock_correlation_check,search_top_stocks,calculate_hedging_beta,tool_get_retail_money_flow,draw_chart_tool,search_web]
     if not os.getenv("DASHSCOPE_API_KEY"):
         st.error("❌ 未配置 API KEY");
         return None
@@ -614,10 +615,10 @@ def get_agent(current_user="访客", user_query=""):  # 传入 current_user
     2. 被问 **历史某一天** 或 **指定日期** 的价格-> 可以用 `get_price_statistics`。
     3. 股票或期货的技术面、K线形态和趋势-> 用 `analyze_kline_pattern`
     4. 期权知识、期权策略、K线交易-> 用 `search_investment_knowledge`
-    5.当客户问“推荐股票”、“选股”-> 用`search_top_stocks`（选分数最高的）
-    6.如果客户要求画图 ->用 `draw_chart_tool` 
-    7.查询某期货商当天的持仓 -> 用 `search_broker_holdings_on_date`
-    8.只要客户问保证金问题-> 必须参考 `search_investment_knowledge`。
+    5. 当客户问“推荐股票”、“选股”-> 用`search_top_stocks`（选分数最高的）
+    6. 如果客户要求画图 ->用 `draw_chart_tool` 
+    7. 只要客户问保证金问题-> 必须参考 `search_investment_knowledge`。
+    8. 查新闻时，先用`get_financial_news`，如果没找到信息，再用`search_web`。
     
 
   
@@ -656,10 +657,14 @@ LOADING_JOKES = [
     "📞 AI正在思考，给主力资金打电话核实...",
     "📞 AI正在思考，准备求助游资大佬...",
     "🔮 AI正在思考，偷偷拿出水晶球...",
+    "🔮 AI正在思考，应该说实话吗...",
     "📉 AI正在思考，顺便检查这根 K 线是不是骗线...",
-    "🐂 AI正在思考，还要忙喂养牛市的公牛...",
+    "🐂 AI正在思考，牛市里应该怎么做...",
     "🐻 AI正在思考，尽力跳脱刚才亏钱的思绪里...",
     "🧠 AI正在思考，回想您上次亏损是不是因为没听我劝...",
+    "🧠 AI正在思考，感觉这个用户好像很贪心...",
+    "🧠 AI正在思考，不知道这用户在害怕什么...",
+    "🧠 AI正在思考，是不是应该劝你all in...",
     "⚡️ AI正在思考，准备请教陈老师..."
 ]
 

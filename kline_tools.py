@@ -43,6 +43,9 @@ def analyze_kline_pattern(query: str, trade_date: str = None):
     - trade_date: (可选) 指定分析哪一天的K线，格式 YYYYMMDD (如 '20251210')。如果不填则默认分析最新一天。
     """
     if engine is None: return "数据库连接失败"
+    # 🔥 [新增] 强力清洗：去除空格、单引号、双引号，防止 AI 传参格式错误
+    if query:
+        query = str(query).strip().replace("'", "").replace('"', "")
     if not query: return "请输入有效的品种名称或代码。"  # 【新增】空值拦截
 
     # 1. 智能解析名称
