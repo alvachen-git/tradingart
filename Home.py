@@ -1,6 +1,8 @@
 import streamlit as st
 import pandas as pd
 import data_engine as de
+import re
+import plotly.io as pio
 import os
 import json
 import random
@@ -15,6 +17,7 @@ from kline_tools import analyze_kline_pattern
 from screener_tool import search_top_stocks
 from news_tools import get_financial_news
 from fund_flow_tools import tool_get_retail_money_flow
+from plot_tools import draw_chart_tool
 from vision_tools import analyze_financial_image
 from volume_oi_tools import get_volume_oi, get_futures_oi_ranking, get_option_oi_ranking,get_option_volume_abnormal, get_option_oi_abnormal
 import time
@@ -58,6 +61,8 @@ st.set_page_config(
     layout="centered",
     initial_sidebar_state="expanded"
 )
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+CHART_DIR = os.path.join(BASE_DIR, "static", "charts")
 
 # ==========================================
 #  2. 极简主义 CSS 注入 [修改点：新增卡片样式]
@@ -231,6 +236,55 @@ st.markdown("""
     }
 </style>
 """, unsafe_allow_html=True)
+
+
+# ==========================================
+#  🔥 [新增函数] 根据文件名直接渲染图表
+#  放在 Home.py 的工具函数区域
+# ==========================================
+def render_chart_by_filename(filename):
+    """
+    直接读取 static/charts 下的 json 文件并渲染
+    """
+    if not filename:
+        return
+
+    # 拼凑绝对路径
+    filepath = os.path.join(CHART_DIR, filename)
+
+    if os.path.exists(filepath):
+        try:
+            with open(filepath, 'r', encoding='utf-8') as f:
+                fig_json = f.read()
+
+            # 还原图表对象
+            fig = pio.from_json(fig_json)
+
+            # 使用 Streamlit 原生渲染，key 设为文件名防止冲突
+            st.plotly_chart(fig, use_container_width=True, key=f"history_{filename}")
+        except Exception as e:
+            st.error(f"图表加载异常: {e}")
+    # 如果文件不存在，静默失败（不显示报错），保持界面整洁
+
+
+def clean_chart_tag(response_text):
+    """清理 AI 乱加的图片链接和标记"""
+    text = response_text
+
+    # 1. 删掉所有 Markdown 图片语法: ![任意文字](任意链接)
+    text = re.sub(r'!\[.*?\]\(.*?\)', '', text)
+
+    # 2. 删掉 chart_xxx.json 相关链接
+    text = re.sub(r'\[.*?\]\(.*?chart_[a-f0-9]+_[a-f0-9]+\.json.*?\)', '', text)
+
+    # 3. 删掉旧标记
+    text = re.sub(r'\[CHART_FILE:.*?\]', '', text)
+    text = re.sub(r'\[CHART_JSON:.*?\]', '', text)
+
+    # 4. 清理多余空行
+    text = re.sub(r'\n{3,}', '\n\n', text)
+
+    return text.strip()
 
 
 class TokenMonitorCallback(BaseCallbackHandler):
@@ -505,7 +559,7 @@ if "messages" not in st.session_state:
 def get_agent(current_user="访客", user_query=""):  # 传入 current_user
     # ... (这里保留您原来的 prompt 和 tools) ...
     tools = [analyze_kline_pattern, search_investment_knowledge, get_market_snapshot, get_commodity_iv_info,get_financial_news,search_broker_holdings_on_date,tool_analyze_position_change,tool_query_specific_option,get_historical_price,get_volume_oi,get_futures_oi_ranking,get_option_oi_ranking,get_option_volume_abnormal,get_option_oi_abnormal,
-             get_price_statistics, check_option_expiry_status,tool_stock_hedging_analysis,tool_futures_correlation_check,tool_stock_correlation_check,search_top_stocks,calculate_hedging_beta,tool_get_retail_money_flow]
+             get_price_statistics, check_option_expiry_status,tool_stock_hedging_analysis,tool_futures_correlation_check,tool_stock_correlation_check,search_top_stocks,calculate_hedging_beta,tool_get_retail_money_flow,draw_chart_tool]
     if not os.getenv("DASHSCOPE_API_KEY"):
         st.error("❌ 未配置 API KEY");
         return None
@@ -560,12 +614,12 @@ def get_agent(current_user="访客", user_query=""):  # 传入 current_user
     2. 被问 **历史某一天** 或 **指定日期** 的价格-> 可以用 `get_price_statistics`。
     3. 股票或期货的技术面、K线形态和趋势-> 用 `analyze_kline_pattern`
     4. 期权知识、期权策略、K线交易-> 用 `search_investment_knowledge`
-    5. 期权波动率数据 -> 用 `get_commodity_iv_info`。
-    6.当客户问“推荐股票”、“选股”-> 用`search_top_stocks`（选分数最高的）
-    7.查新闻、消息面-> 用 `get_financial_news` 
-    8.查询某期货商当天的持仓 -> 用 `search_broker_holdings_on_date`
-    9.查询期货商一段时间的持仓变化 ->用`tool_analyze_position_change`
-    10.只要客户问保证金问题-> 必须用 `search_investment_knowledge`。
+    5.当客户问“推荐股票”、“选股”-> 用`search_top_stocks`（选分数最高的）
+    6.如果客户要求画图 ->用 `draw_chart_tool` 
+    7.查询某期货商当天的持仓 -> 用 `search_broker_holdings_on_date`
+    8.只要客户问保证金问题-> 必须参考 `search_investment_knowledge`。
+    
+
   
 
     【你的行为准则】
@@ -574,12 +628,9 @@ def get_agent(current_user="访客", user_query=""):  # 传入 current_user
     3. 股票没有期权，客户问股票时，不要给期权策略，除非是用ETF期权来对冲股票。
     4. 期权策略的建议，需要考虑波动率和距离到期日，使用工具`check_option_expiry_status`和知识库搭配回答
     5. 如果客户问最近某商品的技术面，可以把前面几天的K线都一起分析后给出总结
-    6. 给出明确操作建议，根据用户风险偏好（激进/保守）给他喜欢的策略，如果是保守的，就不要给激进建议。
-    
-    【高级背离研判逻辑 (触发警报)】
-     1.如果新闻显示重大利好，但技术面显示利空信号(收长上影线、跌破区间），要提醒利多不涨。
-     2.如果新闻是坏消息，但 K 线竟然不跌反涨，或者在低位收出大阳线/下影线,，要提醒利空不跌。
-
+    6.【重要】如果调用某个工具超过 3 次都失败，请立即停止尝试，并直接向用户报告错误。
+    7. 给出明确操作建议，根据用户风险偏好（激进/保守）给他喜欢的策略，如果是保守的，就不要给激进建议。
+        
 
     【回答格式】
    先给结论，然后解释理由。期权策略的使用要结合K线技术面和IV。
@@ -738,18 +789,40 @@ def process_user_input(prompt_text):
 
                     )
                     ai_response = response["messages"][-1].content
+                    # ========================================================
+                    # 🔥 [修改区域]：检票员逻辑 (Inspector Strategy)
+                    # ========================================================
 
+                    attached_chart = None
 
-                    # 打字机效果显示
+                    # 1. 倒序遍历消息记录，寻找工具的返回值 (ToolMessage)
+                    # LangGraph 返回的 messages 列表里包含了：Human -> AI -> Tool -> AI(Final)
+                    for msg in reversed(response["messages"]):
+                        # 检查是否是工具消息 (type='tool') 且包含我们的暗号
+                        if msg.type == 'tool' and "IMAGE_CREATED:" in msg.content:
+                            # 提取文件名
+                            attached_chart = msg.content.split("IMAGE_CREATED:")[1].strip()
+                            print(f"🎫 检票成功，发现图表: {attached_chart}")
+                            break  # 找到一张最新的就够了
+
+                    # 2. 存入历史记录 (带 chart 字段)
+                    message_data = {
+                        "role": "ai",
+                        "content": ai_response,
+                        "chart": attached_chart
+                    }
+                    st.session_state.messages.append(message_data)
+
+                    # 3. 界面即时显示
                     placeholder = st.empty()
-                    full_response = ""
-                    #  for chunk in ai_response.split():  # 简单模拟流式 (由于 invoke 是同步的，这里只是为了视觉效果)
-                    #   full_response += chunk + " "
-                    #   placeholder.markdown(full_response + "▌")
-                    #   time.sleep(0.01)
-                    placeholder.markdown(full_response)
+                    # 彻底清理可能残留的标记 (双保险)
+                    display_text = clean_chart_tag(ai_response).replace("IMAGE_CREATED:", "")
+                    placeholder.markdown(display_text)
 
-                    st.session_state.messages.append({"role": "ai", "content": ai_response})
+                    # 4. 渲染图表
+                    if attached_chart:
+                        render_chart_by_filename(attached_chart)
+
 
                     # ==========================================
                     #  💾 [新增]：将对话存入向量数据库
@@ -765,7 +838,6 @@ def process_user_input(prompt_text):
                     # [关键] 在这里直接渲染按钮，为了防止刷新前看不见
                     # 注意：这里不需要存入 session_state，因为上面的"历史消息循环"会负责存储后的渲染
                     native_share_button(ai_response, key=f"share_new_{int(time.time())}")
-
 
             except Exception as e:
                 st.error(f"分析中断: {e}")
@@ -1033,6 +1105,10 @@ else:
     for i, msg in enumerate(st.session_state.messages):
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
+
+            # 如果这条消息里有 "chart" 字段，且不为空，就把它画出来
+            if msg.get("chart"):
+                render_chart_by_filename(msg["chart"])
 
             # [关键修改]
             if msg["role"] == "ai":
