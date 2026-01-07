@@ -1007,15 +1007,28 @@ def get_commodity_iv_info(query: str):
     # 【调试日志】打印原始查询
     print(f"[ETF识别] 原始查询: {query}")
 
-    # 尝试匹配 ETF（支持模糊匹配）
+    # 【修复版】ETF 识别逻辑：优先匹配最长关键词
     query_upper = query.upper()
+    matches = []
+
     for name, code in ETF_MAP.items():
-        # 支持 "50ETF"、"50" 等多种输入
-        if name.upper() in query_upper or name.replace('ETF', '').upper() in query_upper:
-            etf_code = code
-            etf_name = name
-            print(f"[ETF识别] 匹配成功 - 名称: {name}, 代码: {code}")
-            break
+        # 1. 尝试完全匹配 (例如 "科创50ETF")
+        if name.upper() in query_upper:
+            matches.append({'name': name, 'code': code, 'len': len(name)})
+            continue  # 如果全名匹配了，就不用试简写了
+
+        # 2. 尝试去后缀匹配 (例如 "50ETF" -> "50")
+        short_name = name.upper().replace('ETF', '')
+        if len(short_name) > 0 and short_name in query_upper:
+            matches.append({'name': name, 'code': code, 'len': len(short_name)})
+
+    if matches:
+        # 核心修复：按匹配词的长度降序排列，取最长的一个
+        # 这样 "科创50" (长度4) 就会排在 "50" (长度2) 前面
+        best_match = sorted(matches, key=lambda x: x['len'], reverse=True)[0]
+        etf_code = best_match['code']
+        etf_name = best_match['name']
+        print(f"[ETF识别] ✅ 最终匹配: {etf_name} ({etf_code}) (匹配长度: {best_match['len']})")
 
     # 也支持直接输入代码（如 510050、510300）
     if not etf_code:

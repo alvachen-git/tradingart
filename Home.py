@@ -260,9 +260,20 @@ def render_chart_by_filename(filename):
 
             # 还原图表对象
             fig = pio.from_json(fig_json)
+            config = {
+                'modeBarButtonsToAdd': [
+                    'drawline',
+                    'drawopenpath',
+                    'drawcircle',
+                    'drawrect',
+                    'eraseshape'
+                ],
+                'displaylogo': False,  # 隐藏 Plotly logo
+                'scrollZoom': True  # 允许滚轮缩放
+            }
 
             # 使用 Streamlit 原生渲染，key 设为文件名防止冲突
-            st.plotly_chart(fig, use_container_width=True, key=f"history_{filename}")
+            st.plotly_chart(fig, use_container_width=True, key=f"history_{filename}", config=config)
         except Exception as e:
             st.error(f"图表加载异常: {e}")
     # 如果文件不存在，静默失败（不显示报错），保持界面整洁
