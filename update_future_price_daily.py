@@ -7,6 +7,7 @@ from dotenv import load_dotenv
 import time
 from datetime import datetime
 import sys
+from requests.exceptions import ReadTimeout, ConnectionError
 
 # --- 1. 初始化配置 ---
 load_dotenv(override=True)
@@ -21,7 +22,7 @@ engine = create_engine(db_url, pool_recycle=3600)
 
 # Tushare 初始化
 ts.set_token(os.getenv("TUSHARE_TOKEN"))
-pro = ts.pro_api()
+pro = ts.pro_api(timeout=120)
 
 # 交易所后缀映射表
 EXCHANGE_CONFIG = {
@@ -32,12 +33,27 @@ EXCHANGE_CONFIG = {
     'INE': '.INE',
     'GFEX': '.GFE'
 }
+def fetch_tushare_safe(api_func, max_retries=5, sleep_time=3, **kwargs):
+    """
+    带自动重试机制的 Tushare 接口调用封装
+    """
+    for i in range(max_retries):
+        try:
+            return api_func(**kwargs)
+        except (ReadTimeout, ConnectionError) as e:
+            print(f"   [⚠️] 网络波动 (超时/连接失败)，正在第 {i + 1}/{max_retries} 次重试...")
+            time.sleep(sleep_time)
+        except Exception as e:
+            print(f"   [⚠️] 接口调用异常: {e}，正在第 {i + 1}/{max_retries} 次重试...")
+            time.sleep(sleep_time)
 
+    print(f"   [❌] 重试 {max_retries} 次后依然失败，跳过本次抓取。")
+    return pd.DataFrame()
 
 def get_trade_cal(date_str):
     """判断今天是否是交易日"""
     try:
-        df = pro.trade_cal(exchange='SHFE', start_date=date_str, end_date=date_str)
+        df = fetch_tushare_safe(pro.trade_cal, exchange='SHFE', start_date=date_str, end_date=date_str)
         if not df.empty:
             return df.iloc[0]['is_open'] == 1
     except:
@@ -66,7 +82,7 @@ def update_daily_data(trade_date):
     for ex, suffix in EXCHANGE_CONFIG.items():
         try:
             # A. 抓取
-            df = pro.fut_daily(trade_date=trade_date, exchange=ex)
+            df = fetch_tushare_safe(pro.fut_daily, max_retries=5, trade_date=trade_date, exchange=ex)
             if df.empty: continue
 
             # 过滤后缀 (虽然可能拦不住所有脏数据，但还是加上)
