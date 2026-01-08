@@ -293,6 +293,21 @@ def calculate_kline_signals(df: pd.DataFrame):
     if body_pct < 0.1 and 0.5 < uplo_pct < 1.5:
         patterns.append("十字星")
 
+        # ==========================
+        # [新增] 11. 创新高策略 (Breakout Strategy)
+        # ==========================
+
+     # 策略 A: 创90日新高 (中期突破，海龟战法核心)
+    # 逻辑：今天的收盘价 > 过去 59 个交易日(不含今天)的最高价
+    if len(df) >= 90:
+        # iloc[-61:-1] 取的是从倒数第61天到昨天的数据
+        prev_60_days_high = df['high_price'].iloc[-91:-1].max()
+
+        # 必须是收盘价站上去才算有效突破，光是盘中摸一下不算
+        if close > prev_60_days_high:
+            patterns.append("创新高")
+            score_change += 10  # 这是一个非常强的多头信号，加分权重高一些
+
     # ==========================
     #  B. 趋势判定 (复刻逻辑)
     # ==========================

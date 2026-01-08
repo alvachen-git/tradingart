@@ -59,6 +59,65 @@ def _calculate_start_date(period: str):
         return (today - timedelta(days=180)).strftime('%Y%m%d')
 
 
+def _resolve_symbol_smart(query):
+    """
+    智能解析：优先拦截股指期货别名，以及常见的指数别名。
+    """
+    # 1. 清洗输入
+    q = query.upper().strip()
+
+    # 2. 定义拦截名单 (Map)
+    # 键: 用户可能的输入, 值: (代码, 类型)
+    alias_map = {
+        # === 股指期货 (原有) ===
+        "IF": ("IF", "future"),
+        "IC": ("IC", "future"),
+        "IH": ("IH", "future"),
+        "IM": ("IM", "future"),
+        "A50": ("A50", "future"),
+        "沪深300股指期货": ("IF", "future"),
+        "沪深300期货": ("IF", "future"),
+        "中证500股指期货": ("IC", "future"),
+        "中证500期货": ("IC", "future"),
+        "上证50股指期货": ("IH", "future"),
+        "上证50期货": ("IH", "future"),
+        "中证1000股指期货": ("IM", "future"),
+        "中证1000期货": ("IM", "future"),
+
+        # === 🔥【新增】指数别名 (手动补全) ===
+        "沪深300指数": ("000300.SH", "index"),
+        "沪深300": ("000300.SH", "index"),
+        "300指数": ("000300.SH", "index"),
+
+        "中证500指数": ("000905.SH", "index"),
+        "中证500": ("000905.SH", "index"),
+        "500指数": ("000905.SH", "index"),
+
+        "上证50指数": ("000016.SH", "index"),
+        "上证50": ("000016.SH", "index"),
+
+        "中证1000指数": ("000852.SH", "index"),
+        "中证1000": ("000852.SH", "index"),
+        "1000指数": ("000852.SH", "index"),
+    }
+
+    # 3. 精准匹配
+    if q in alias_map:
+        return alias_map[q]
+
+    # 4. 模糊匹配 (只针对长中文名)
+    # 这里的逻辑是为了防止 "中证500" 匹配到 "中证500期货"
+    # 所以我们要小心：如果用户输入 "沪深300"，map里有精准匹配，会在第3步直接返回指数。
+    # 如果用户输入 "沪深300期货"，map里也有精准匹配，第3步返回期货。
+    # 只有当用户输入 weird 的名字（比如"主力沪深300期货"）才会走到这里。
+
+    for key, val in alias_map.items():
+        if len(key) > 3 and key in q:
+            return val
+
+    # 5. 放行
+    return symbol_map.resolve_symbol(query)
+
 def save_chart_as_json(fig, name):
     """保存图表并返回文件名（检票员模式）"""
     safe_name = hashlib.md5(name.encode()).hexdigest()[:8]
@@ -317,8 +376,8 @@ def _plot_spread_chart(query, period, mode='diff'):
         code_b = codes[1].strip()
 
         # 2. 获取数据
-        res_a = symbol_map.resolve_symbol(code_a)
-        res_b = symbol_map.resolve_symbol(code_b)
+        res_a = _resolve_symbol_smart(code_a)
+        res_b = _resolve_symbol_smart(code_b)
 
         if not res_a or not res_b: return f"❌ 无法识别代码: {code_a} 或 {code_b}"
 
@@ -380,7 +439,7 @@ def _plot_stock_comparison(stock_names_str, period):
         for name in names:
             name = name.strip()
             if not name: continue
-            res = symbol_map.resolve_symbol(name)
+            res = _resolve_symbol_smart(name)
             if not res or not res[0]: continue
             df = _fetch_data(res[0], start_date, res[1])  # 复用 _fetch_data
             if len(df) > 0:
@@ -462,7 +521,7 @@ def draw_chart_tool(query: str, chart_type: str = "kline", time_period: str = "6
                 holding_type = 'short'
 
     # 4. 解析代码
-    res = symbol_map.resolve_symbol(target_name)
+    res = _resolve_symbol_smart(target_name)
     if not res or not res[0]: return f"❌ 无法识别品种: {target_name}"
 
     ts_code = res[0]
