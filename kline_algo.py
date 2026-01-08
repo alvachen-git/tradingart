@@ -279,15 +279,15 @@ def calculate_kline_signals(df: pd.DataFrame):
 
     # 8. 长下影 (复刻原代码)
     # 条件：下影 > 2倍实体，实体 < 0.3，MA5 < MA20，收盘 < 昨日收盘
-    if lower_pct > 2 and body_pct < 0.3 and body_pct > 0.05 and curr['MA5'] < curr['MA20'] :
+    if lower_pct > 2 and upper_pct < 1.0 and body_pct < 0.3 and body_pct > 0.01 and curr['MA5'] < curr['MA20'] :
         patterns.append("锤子线(长下影)")
         score_change += 10
 
     # 9. 长上影 (复刻原代码)
     # 条件：上影 > 2倍实体，MA5 > MA20，收盘 > 昨日收盘
-    if upper_pct > 2 and body_pct < 0.3 and body_pct > 0.05 and curr['MA5'] > curr['MA20'] :
+    if upper_pct > 2 and lower_pct < 1.0 and body_pct < 0.3 and body_pct > 0.01 and curr['MA5'] > curr['MA20'] :
         patterns.append("倒锤子(长上影)")
-        score_change -= 5
+        score_change -= 10
 
     # 10. 十字星
     if body_pct < 0.1 and 0.5 < uplo_pct < 1.5:

@@ -409,11 +409,14 @@ def analyze_kline_pattern(query: str, trade_date: str = None):
                 patterns.append("【空头反击】(波段转折)")
 
         # 4. 长下影
-        if lower_pct > 2 and body_pct < 0.3 and body_pct > 0.05 and curr['MA5'] < curr['MA20']and close < prev_close:
-            patterns.append("【锤子】(多头抵抗)")
+        if lower_pct > 2.0 and upper_pct < 1.0 and body_pct < 0.3 and body_pct > 0.01:
+            if curr['MA5'] < curr['MA20']:
+                patterns.append("【锤子】(多头抵抗)")
+            elif curr['MA5'] > curr['MA20']:
+                patterns.append("【吊人线】(高位抛压预警)")
 
         # 5. 长上影
-        if upper_pct > 2 and body_pct < 0.3 and body_pct > 0.05 and curr['MA5'] > curr['MA20'] and close > prev_close:
+        if upper_pct > 2.0 and lower_pct < 1.0 and body_pct < 0.3 and body_pct > 0.01 and curr['MA5'] > curr['MA20']:
             patterns.append("【倒状锤子】(卖压沉重)")
 
         # 6. 十字星
