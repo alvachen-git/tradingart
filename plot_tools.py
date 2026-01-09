@@ -174,6 +174,23 @@ def _generate_data_summary(df, type_name="数据"):
             summary += f"- 均值: {avg_val:.2f}\n"
             summary += f"- 波动范围: {min_val:.2f} ~ {max_val:.2f}\n"
 
+        if 'pe_ttm' in df.columns:
+            last_pe = df['pe_ttm'].iloc[-1]
+            max_pe = df['pe_ttm'].max()
+            min_pe = df['pe_ttm'].min()
+            median_pe = df['pe_ttm'].median()
+
+            # 计算当前分位状态
+            status = "适中"
+            if last_pe < min_pe + (max_pe - min_pe) * 0.2:
+                status = "历史低位 (便宜)"
+            elif last_pe > min_pe + (max_pe - min_pe) * 0.8:
+                status = "历史高位 (贵)"
+
+            summary += f"- 最新PE: {last_pe:.2f} ({status})\n"
+            summary += f"- 历史中位数: {median_pe:.2f}\n"
+            summary += f"- 极值区间: {min_pe:.2f} ~ {max_pe:.2f}\n"
+
         return summary
     except Exception as e:
         return f"摘要生成失败: {e}"
@@ -364,6 +381,81 @@ def _plot_oi_line(ts_code, name, period, asset_type, broker=None, holding_type='
         return f"❌ 持仓图失败: {e}"
 
 
+# ==========================================
+#  [新增] 获取估值数据
+# ==========================================
+def _fetch_valuation(ts_code, start_date):
+    """从 stock_valuation 表查询 PE/PB 数据"""
+    try:
+        sql = text("""
+                   SELECT trade_date, pe_ttm, pb
+                   FROM stock_valuation
+                   WHERE ts_code = :code
+                     AND trade_date >= :s_date
+                   ORDER BY trade_date ASC
+                   """)
+        df = pd.read_sql(sql, engine, params={"code": ts_code, "s_date": start_date})
+        return df
+    except Exception as e:
+        print(f"Valuation fetch error: {e}")
+        return pd.DataFrame()
+
+
+# ==========================================
+#  [新增] 绘制 PE 走势图
+# ==========================================
+def _plot_pe_line(ts_code, name, period):
+    """画市盈率(PE-TTM)走势图"""
+    try:
+        start_date = _calculate_start_date(period)
+        df = _fetch_valuation(ts_code, start_date)
+
+        if df.empty:
+            return f"❌ 未找到 {name} 的估值数据。请确认：\n1. `stock_valuation` 表是否有数据？\n2. 是否运行了 `update_valuation.py`？"
+
+        # 过滤掉亏损数据(PE < 0) 或 极端值，避免图形被压缩（可选）
+        # 这里只保留 PE > 0 的数据来画图，或者保留原样看亏损
+        # df = df[df['pe_ttm'] > 0]
+
+        current_pe = df['pe_ttm'].iloc[-1]
+        median_pe = df['pe_ttm'].median()
+
+        # 绘图
+        fig = go.Figure()
+
+        # 1. PE 曲线
+        fig.add_trace(go.Scatter(
+            x=df['trade_date'], y=df['pe_ttm'],
+            mode='lines', name='PE-TTM',
+            line=dict(color='#f59e0b', width=2),  # 橙色
+            fill='tozeroy',  # 填充底部背景，更有分量感
+            fillcolor='rgba(245, 158, 11, 0.1)'
+        ))
+
+        # 2. 中位数参考线 (虚线)
+        fig.add_hline(
+            y=median_pe,
+            line_dash="dash", line_color="gray", annotation_text=f"中位数: {median_pe:.2f}",
+            annotation_position="top right"
+        )
+
+        fig.update_layout(
+            title=f"{name} 市盈率(PE-TTM) 历史走势",
+            template="plotly_dark",
+            height=450,
+            yaxis_title="市盈率 (倍)"
+        )
+
+        filename = save_chart_as_json(fig, f"pe_{name}")
+
+        # 生成摘要
+        summary = _generate_data_summary(df, f"{name} 估值数据")
+        return f"{summary}\n\nIMAGE_CREATED:{filename}"
+
+    except Exception as e:
+        return f"❌ PE图绘制失败: {e}"
+
+
 def _plot_spread_chart(query, period, mode='diff'):
     """🔥 新增：画价差/比价图"""
     try:
@@ -482,6 +574,7 @@ def draw_chart_tool(query: str, chart_type: str = "kline", time_period: str = "6
     - chart_type: 图表类型
        * 'kline': K线图 (包含成交量)
        * 'line_oi': 持仓量(Open Interest)折线图 (仅期货)
+       * 'line_pe': 市盈率PE走势图 (仅股票/指数)
        * 'spread_diff': 价差图 (A - B)
        * 'spread_ratio': 比价图 (A / B)
        * 'bar_compare': 多股涨跌幅对比
@@ -535,5 +628,8 @@ def draw_chart_tool(query: str, chart_type: str = "kline", time_period: str = "6
         # 🔥 传入解析好的参数
         return _plot_oi_line(ts_code, target_name, time_period, asset_type, broker=broker_name,
                              holding_type=holding_type)
+    elif chart_type == 'line_pe':
+        if asset_type == 'future': return "❌ 期货没有市盈率数据"
+        return _plot_pe_line(ts_code, target_name, time_period)
 
     return f"❌ 不支持: {chart_type}"
