@@ -10,24 +10,27 @@ echo "⏰ 任务开始: $(date)" >> update.log
 
 
 # 1. 更新【期权数据】
-echo ">>> [1/6] 开始更新ETF期权数据..." >> update.log
+echo ">>> [1/7] 开始更新ETF期权数据..." >> update.log
 /usr/bin/python3 update_options_daily.py >> update.log 2>&1
 
-echo ">>> [2/6] 开始更新指数数据..." >> update.log
+echo ">>> [2/7] 开始更新指数数据..." >> update.log
 /usr/bin/python3 update_index.py >> update.log 2>&1
 
 # 2. 更新【A股数据】
-echo ">>> [3/6] 开始更新股票价格数据..." >> update.log
+echo ">>> [3/7] 开始更新股票价格数据..." >> update.log
 /usr/bin/python3 update_astock_daily.py >> update.log 2>&1
 
-echo ">>> [4/6] 开始更新股票财务数据..." >> update.log
+echo ">>> [4/7] 开始更新股票财务数据..." >> update.log
 /usr/bin/python3 update_stock_valuation.py >> update.log 2>&1
 
-echo ">>> [5/6] 开始更新板块资金流数据..." >> update.log
+echo ">>> [5/7] 开始更新指数估值数据..." >> update.log
+/usr/bin/python3 update_index_valuation.py >> update.log 2>&1
+
+echo ">>> [6/7] 开始更新板块资金流数据..." >> update.log
 /usr/bin/python3 update_sector_flow.py >> update.log 2>&1
 
 # 3. 更新【波动率数据】
-echo ">>> [6/6] 开始股票期权IV计算..." >> update.log
+echo ">>> [7/7] 开始股票期权IV计算..." >> update.log
 /usr/bin/python3 calc_iv_oneday.py >> update.log 2>&1
 
 

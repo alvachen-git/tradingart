@@ -384,17 +384,38 @@ def _plot_oi_line(ts_code, name, period, asset_type, broker=None, holding_type='
 # ==========================================
 #  [新增] 获取估值数据
 # ==========================================
-def _fetch_valuation(ts_code, start_date):
-    """从 stock_valuation 表查询 PE/PB 数据"""
+def _fetch_valuation(ts_code, start_date, asset_type='stock'):
+    """从数据库查询 PE/PB 数据"""
     try:
-        sql = text("""
-                   SELECT trade_date, pe_ttm, pb
-                   FROM stock_valuation
-                   WHERE ts_code = :code
-                     AND trade_date >= :s_date
-                   ORDER BY trade_date ASC
-                   """)
+        # 1. 确定查哪张表
+        table_name = 'stock_valuation'
+        if asset_type == 'index':
+            table_name = 'index_valuation'
+
+        # 2. 确定 PE 字段名
+        # 股票表里叫 pe_ttm，指数表接口返回 pe 和 pe_ttm
+        # 我们统一取 pe_ttm，如果指数没有 ttm 就取 pe
+        pe_col = "pe_ttm"
+
+        sql = text(f"""
+                SELECT trade_date, {pe_col} as pe_ttm, pb 
+                FROM {table_name}
+                WHERE ts_code = :code AND trade_date >= :s_date 
+                ORDER BY trade_date ASC
+            """)
+
         df = pd.read_sql(sql, engine, params={"code": ts_code, "s_date": start_date})
+
+        # 容错：如果指数表里 pe_ttm 全是 0 或空，尝试用 pe 字段补救 (部分指数可能没有 TTM)
+        if asset_type == 'index' and (df.empty or df['pe_ttm'].sum() == 0):
+            sql_backup = text(f"""
+                    SELECT trade_date, pe as pe_ttm, pb 
+                    FROM index_valuation
+                    WHERE ts_code = :code AND trade_date >= :s_date 
+                    ORDER BY trade_date ASC
+                """)
+            df = pd.read_sql(sql_backup, engine, params={"code": ts_code, "s_date": start_date})
+
         return df
     except Exception as e:
         print(f"Valuation fetch error: {e}")
@@ -404,14 +425,17 @@ def _fetch_valuation(ts_code, start_date):
 # ==========================================
 #  [新增] 绘制 PE 走势图
 # ==========================================
-def _plot_pe_line(ts_code, name, period):
+def _plot_pe_line(ts_code, name, period, asset_type='stock'):
     """画市盈率(PE-TTM)走势图"""
     try:
         start_date = _calculate_start_date(period)
-        df = _fetch_valuation(ts_code, start_date)
+
+        # 🔥 传入 asset_type
+        df = _fetch_valuation(ts_code, start_date, asset_type)
 
         if df.empty:
-            return f"❌ 未找到 {name} 的估值数据。请确认：\n1. `stock_valuation` 表是否有数据？\n2. 是否运行了 `update_valuation.py`？"
+            table = 'index_valuation' if asset_type == 'index' else 'stock_valuation'
+            return f"❌ 未找到 {name} ({ts_code}) 的估值数据。\n请检查 `{table}` 表是否有数据。"
 
         # 过滤掉亏损数据(PE < 0) 或 极端值，避免图形被压缩（可选）
         # 这里只保留 PE > 0 的数据来画图，或者保留原样看亏损
@@ -630,6 +654,6 @@ def draw_chart_tool(query: str, chart_type: str = "kline", time_period: str = "6
                              holding_type=holding_type)
     elif chart_type == 'line_pe':
         if asset_type == 'future': return "❌ 期货没有市盈率数据"
-        return _plot_pe_line(ts_code, target_name, time_period)
+        return _plot_pe_line(ts_code, target_name, time_period, asset_type)
 
     return f"❌ 不支持: {chart_type}"
