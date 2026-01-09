@@ -1,5 +1,6 @@
 import pandas as pd
 import numpy as np
+from scipy import stats
 import re
 import os
 from sqlalchemy import create_engine, text
@@ -1893,3 +1894,178 @@ def log_token_usage(username, model_name, input_tokens, output_tokens, query_tex
 
     except Exception as e:
         print(f"❌ Token 记录失败: {e}")
+
+
+@tool
+def get_stock_valuation(symbol: str):
+    """
+    【基本面+估值分位分析工具】
+    查询股票的当前估值(PE/PB)以及其在历史(过去3-10年)中的分位水平。
+    用于精准判断股票是"便宜"还是"贵"。
+
+    Args:
+        symbol: 股票名称或代码，如 '茅台', '600519'
+    """
+    if engine is None: return "数据库连接失败"
+
+    # 1. 识别代码
+    import symbol_map
+    res = symbol_map.resolve_symbol(symbol)
+    if not res or res[1] != 'stock':
+        return f"未找到股票 {symbol}，请确认名称。"
+
+    ts_code = res[0]
+
+    try:
+        # 2. 查询历史估值数据 (一次性拉取该股票的所有历史 PE)
+        # 限制 1250 条大约是 5 年的数据 (250交易日 * 5)
+        sql = f"""
+            SELECT trade_date, pe_ttm, pb, dv_ratio, total_mv, turnover_rate
+            FROM stock_valuation 
+            WHERE ts_code = '{ts_code}' 
+            ORDER BY trade_date DESC 
+            LIMIT 2000
+        """
+        df = pd.read_sql(sql, engine)
+
+        if df.empty:
+            return f"暂无 {symbol} 的估值数据，请先运行 backfill_valuation.py 补充历史数据。"
+
+        # 取最新一天的数据
+        curr = df.iloc[0]
+        curr_pe = curr['pe_ttm']
+        curr_pb = curr['pb']
+
+        # --- 3. 核心算法：计算 PE/PB 历史分位 ---
+
+        # 过滤掉无效数据 (PE < 0 的亏损时期通常不参与分位统计，或者单独处理)
+        # 这里我们只统计 PE > 0 的时期，看它在"盈利时期"里的估值水平
+        valid_pe_history = df[df['pe_ttm'] > 0]['pe_ttm']
+        valid_pb_history = df[df['pb'] > 0]['pb']
+
+        pe_rank = 0
+        pe_desc = "数据不足"
+
+        if len(valid_pe_history) > 100:  # 至少要有100天数据才有统计意义
+            # 计算百分位 (0~100)
+            # percentileofscore 计算当前值在序列中的排名百分比
+            pe_rank = stats.percentileofscore(valid_pe_history, curr_pe)
+
+            # 生成评语
+            if pe_rank < 10:
+                pe_desc = "历史极值低位 (地板价 🔥)"
+            elif pe_rank < 30:
+                pe_desc = "偏低 (低估区域 ✅)"
+            elif pe_rank < 70:
+                pe_desc = "合理区间 (中枢震荡)"
+            elif pe_rank < 90:
+                pe_desc = "偏高 (高估区域 ⚠️)"
+            else:
+                pe_desc = "历史极值高位 (泡沫风险 ❌)"
+        elif curr_pe < 0:
+            pe_desc = "公司亏损中 (无效PE)"
+
+        # --- 4. 生成报告 ---
+        mv = curr['total_mv'] / 10000.0
+
+        report = f"📊 **{symbol} ({ts_code}) 估值深度分析** ({curr['trade_date']})\n"
+        report += f"- **总市值**: {mv:.2f} 亿\n"
+        report += "--------------------------------\n"
+
+        # PE 部分
+        report += f"💎 **市盈率 (PE-TTM)**: {curr_pe:.2f}\n"
+        if curr_pe > 0 and len(valid_pe_history) > 100:
+            report += f"   - **历史分位**: {pe_rank:.1f}% ({pe_desc})\n"
+            report += f"   - **近{len(df) // 250}年最高**: {valid_pe_history.max():.2f} | **最低**: {valid_pe_history.min():.2f}\n"
+        else:
+            report += f"   - 状态: {pe_desc}\n"
+
+        # PB 部分 (简略)
+        report += f"🏠 **市净率 (PB)**: {curr_pb:.2f}\n"
+        if len(valid_pb_history) > 100:
+            pb_rank = stats.percentileofscore(valid_pb_history, curr_pb)
+            report += f"   - **历史分位**: {pb_rank:.1f}%\n"
+
+        # 其他
+        report += "--------------------------------\n"
+        report += f"💰 **股息率**: {curr['dv_ratio']:.2f}%\n"
+        report += f"🤝 **换手率**: {curr['turnover_rate']:.2f}%\n"
+
+        return report
+
+    except Exception as e:
+        return f"估值分析出错: {e}"
+
+
+@tool
+def tool_compare_stocks(stock_list: str):
+    """
+    【多股对比工具】
+    用于对比多只股票的市值、市盈率(PE)、市净率(PB)等指标。
+    当用户问“对比A和B”、“谁的市值更高”、“给这些股票排个序”时使用。
+
+    Args:
+        stock_list: 股票名称字符串，用逗号或空格分隔。例如: "茅台,五粮液,泸州老窖" 或 "宁德时代 比亚迪"
+    """
+    if engine is None: return "数据库连接失败"
+
+    # 1. 解析输入的股票名单
+    # 简单的清洗逻辑：把逗号、顿号、空格都换成统一分隔符
+    raw_names = stock_list.replace("，", ",").replace("、", ",").replace(" ", ",").split(",")
+    valid_codes = []
+    valid_names = []
+
+    import symbol_map  # 复用您的映射库
+
+    for name in raw_names:
+        name = name.strip()
+        if not name: continue
+
+        # 解析代码
+        res = symbol_map.resolve_symbol(name)
+        if res and res[1] == 'stock':
+            valid_codes.append(res[0])  # ts_code
+            valid_names.append(name)  # 原名
+
+    if not valid_codes:
+        return "未能识别任何有效股票，请检查名称。"
+
+    try:
+        # 2. 批量查询数据库 (使用 IN 语法)
+        code_str = "'" + "','".join(valid_codes) + "'"
+
+        # 我们查最新的那一天的数据
+        # 这里用了一个子查询来确保每只股票都取到它最新的一条
+        sql = f"""
+            SELECT v.ts_code, v.trade_date, v.total_mv, v.pe_ttm, v.pb, v.dv_ratio
+            FROM stock_valuation v
+            WHERE v.ts_code IN ({code_str})
+            AND v.trade_date = (
+                SELECT MAX(trade_date) FROM stock_valuation WHERE ts_code = v.ts_code
+            )
+        """
+        df = pd.read_sql(sql, engine)
+
+        if df.empty:
+            return "未找到这些股票的估值数据，请确认是否已运行 update_valuation.py 入库。"
+
+        # 3. 数据美化与计算
+        # 把代码转回中文名 (为了给 AI 看得更清楚，也可以做个映射，这里简单处理)
+        # 这里建议再读一次 stock_basic 表或者复用 symbol_map 的反向映射，为了演示简单，直接用 ts_code
+
+        df['市值(亿)'] = (df['total_mv'] / 10000).round(2)
+        df['PE(动)'] = df['pe_ttm'].round(2)
+        df['PB'] = df['pb'].round(2)
+        df['股息率%'] = df['dv_ratio'].round(2)
+
+        # 4. 按市值降序排列 (默认逻辑：对比时通常看谁老大)
+        df = df.sort_values('市值(亿)', ascending=False)
+
+        # 5. 生成 Markdown 表格
+        # 选取 AI 需要的核心列
+        final_df = df[['ts_code', '市值(亿)', 'PE(动)', 'PB', '股息率%']]
+
+        return f"📊 **多股同台竞技** (按市值排名):\n" + final_df.to_markdown(index=False)
+
+    except Exception as e:
+        return f"对比失败: {e}"

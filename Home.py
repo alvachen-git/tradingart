@@ -27,7 +27,7 @@ import extra_streamlit_components as stx
 import streamlit.components.v1 as components
 import uuid #用于生成唯一ID
 from market_tools import get_market_snapshot, get_price_statistics,tool_query_specific_option,get_historical_price
-from data_engine import get_commodity_iv_info, check_option_expiry_status,search_broker_holdings_on_date,tool_analyze_position_change
+from data_engine import get_commodity_iv_info, check_option_expiry_status,search_broker_holdings_on_date,tool_analyze_position_change,tool_compare_stocks,get_stock_valuation
 from captcha_utils import generate_captcha_image
 from search_tools import search_web
 from market_correlation import tool_stock_hedging_analysis, tool_futures_correlation_check,tool_stock_correlation_check
@@ -565,7 +565,7 @@ if "messages" not in st.session_state:
 def get_agent(current_user="访客", user_query=""):  # 传入 current_user
     # ... (这里保留您原来的 prompt 和 tools) ...
     tools = [analyze_kline_pattern, search_investment_knowledge, get_market_snapshot, get_commodity_iv_info,get_financial_news,search_broker_holdings_on_date,tool_analyze_position_change,tool_query_specific_option,get_historical_price,get_volume_oi,get_futures_oi_ranking,get_option_oi_ranking,get_option_volume_abnormal,get_option_oi_abnormal,
-             get_price_statistics, check_option_expiry_status,tool_stock_hedging_analysis,tool_futures_correlation_check,tool_stock_correlation_check,search_top_stocks,calculate_hedging_beta,tool_get_retail_money_flow,draw_chart_tool,search_web]
+             get_price_statistics, check_option_expiry_status,tool_stock_hedging_analysis,tool_futures_correlation_check,tool_stock_correlation_check,search_top_stocks,calculate_hedging_beta,tool_get_retail_money_flow,draw_chart_tool,search_web,get_stock_valuation,tool_compare_stocks]
     if not os.getenv("DASHSCOPE_API_KEY"):
         st.error("❌ 未配置 API KEY");
         return None
@@ -628,12 +628,10 @@ def get_agent(current_user="访客", user_query=""):  # 传入 current_user
 
     【你的行为准则】
     1. 当收到视觉模型提取的信息，还得利用`analyze_kline_pattern`和`search_investment_knowledge`做搭配思考
-    2. 当用户问期权或交易问题，优先以知识库工具为信息参考。
-    3. 股票没有期权，客户问股票时，不要给期权策略，除非是用ETF期权来对冲股票。
-    4. 期权策略的建议，需要考虑波动率和距离到期日，使用工具`check_option_expiry_status`和知识库搭配回答
-    5. 如果客户问最近某商品的技术面，可以把前面几天的K线都一起分析后给出总结
-    6.【重要】如果调用某个工具超过 3 次都失败，请立即停止尝试，并直接向用户报告错误。
-    7. 给出明确操作建议，根据用户风险偏好（激进/保守）给他喜欢的策略，如果是保守的，就不要给激进建议。
+    2. 股票没有期权，客户问股票时，不要给期权策略，除非是用ETF期权来对冲股票。
+    3. 期权策略的建议，需要考虑波动率和距离到期日，使用工具`check_option_expiry_status`和知识库搭配回答
+    4. 如果客户问最近某商品的技术面，可以把前面几天的K线都一起分析后给出总结
+    5. 给出明确操作建议，根据用户风险偏好（激进/保守）给他喜欢的策略，如果是保守的，就不要给激进建议。
         
 
     【回答格式】
