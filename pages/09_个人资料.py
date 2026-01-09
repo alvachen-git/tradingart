@@ -8,6 +8,7 @@ from sqlalchemy import create_engine, text
 from dotenv import load_dotenv
 import plotly.express as px
 import time
+import sys
 
 # 1. 环境初始化
 load_dotenv(override=True)
@@ -108,14 +109,28 @@ st.markdown("""
     .streamlit-expanderContent p {
         margin-bottom: 0px !important;
     }
+    
+    /* 输入框标签文字颜色 */
+    .stTextInput label, .stNumberInput label, .stSelectbox label {
+        color: #e2e8f0 !important;
+    }
+
+    /* 邮箱显示样式 */
+    .email-bound {
+        background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+        color: white;
+        padding: 8px 16px;
+        border-radius: 8px;
+        display: inline-block;
+        font-size: 14px;
+    }
 </style>
 """, unsafe_allow_html=True)
 
 # 3. 引入依赖
-try:
-    import sys
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-    sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+try:
     from memory_utils import get_vector_store
 except ImportError:
     st.error("❌ 找不到 memory_utils.py，请确保文件在项目根目录下。")
@@ -124,9 +139,18 @@ except ImportError:
     def get_vector_store():
         return None
 
+# 导入邮箱和认证工具
+try:
+    from email_utils import send_bind_email_code, verify_bind_email_code, send_reset_password_code
+    from auth_utils import get_masked_email, bind_email, change_password_with_old, reset_password_with_email
+
+    EMAIL_ENABLED = True
+except ImportError:
+    EMAIL_ENABLED = False
+    print("⚠️ 邮箱功能模块未找到")
 
 
-# --- 2. 插入分享函數 (請加在 get_db_engine 函數之前) ---
+# --- 分享函数 ---
 def native_share_button(user_content, ai_content, key):
     unique_id = str(uuid.uuid4())[:8]
     container_id = f"share-container-{unique_id}"
@@ -358,6 +382,81 @@ with col3:
 
 st.markdown("---")
 
+# ============================================
+# 账号安全设置（紧凑折叠版）
+# ============================================
+if EMAIL_ENABLED:
+    masked_email = get_masked_email(username)
+
+    # 显示邮箱状态的简短文字
+    email_status = f"📧 {masked_email}" if masked_email else "📧 未绑定邮箱"
+
+    with st.expander(f"⚙️ 账号设置 | {email_status}", expanded=False):
+        tab_email, tab_pwd = st.tabs(["绑定邮箱", "修改密码"])
+
+        # ============ Tab1: 邮箱绑定 ============
+        with tab_email:
+            if masked_email:
+                st.success(f"✅ 已绑定：{masked_email}")
+                st.caption("如需换绑，请输入新邮箱")
+            else:
+                st.warning("⚠️ 未绑定邮箱，建议绑定以便找回密码")
+
+            col1, col2 = st.columns([3, 1])
+            with col1:
+                bind_email_input = st.text_input("邮箱", placeholder="your@email.com", key="bind_email",
+                                                 label_visibility="collapsed")
+            with col2:
+                if st.button("发送验证码", key="btn_send_bind", use_container_width=True):
+                    if bind_email_input:
+                        success, msg = send_bind_email_code(bind_email_input)
+                        if success:
+                            st.success("已发送")
+                        else:
+                            st.error(msg)
+                    else:
+                        st.warning("请输入邮箱")
+
+            col1, col2 = st.columns([3, 1])
+            with col1:
+                bind_code = st.text_input("验证码", max_chars=6, key="bind_email_code", label_visibility="collapsed",
+                                          placeholder="验证码")
+            with col2:
+                if st.button("绑定", type="primary", key="btn_bind_email", use_container_width=True):
+                    if bind_email_input and bind_code:
+                        success, msg = bind_email(username, bind_email_input, bind_code)
+                        if success:
+                            st.success(msg)
+                            time.sleep(1)
+                            st.rerun()
+                        else:
+                            st.error(msg)
+                    else:
+                        st.warning("请填写完整")
+
+        # ============ Tab2: 修改密码 ============
+        with tab_pwd:
+            old_pwd = st.text_input("当前密码", type="password", key="old_pwd")
+            new_pwd = st.text_input("新密码", type="password", key="new_pwd", placeholder="至少6位")
+            new_pwd2 = st.text_input("确认密码", type="password", key="new_pwd2")
+
+            if st.button("确认修改", type="primary", key="btn_change_pwd", use_container_width=True):
+                if not old_pwd:
+                    st.warning("请输入当前密码")
+                elif not new_pwd or len(new_pwd) < 6:
+                    st.warning("新密码至少6位")
+                elif new_pwd != new_pwd2:
+                    st.error("两次密码不一致")
+                else:
+                    success, msg = change_password_with_old(username, old_pwd, new_pwd)
+                    if success:
+                        st.success(msg)
+                        st.session_state.is_logged_in = False
+                        time.sleep(1.5)
+                        st.rerun()
+                    else:
+                        st.error(msg)
+
 # 3. 底部：记忆碎片展示 (折叠版)
 st.subheader("🧠 大脑记忆")
 st.caption("这里存储了 AI 对您的所有深度记忆，也可以分享。")
@@ -387,7 +486,7 @@ else:
         raw_text = row['content']
         time_str = row['create_time']
 
-        # 解析文本：尝试提取“用户问”作为标题
+        # 解析文本：尝试提取"用户问"作为标题
         q_preview = "无标题记忆"
         q_full = raw_text
         a_full = ""
@@ -427,4 +526,3 @@ else:
                 unsafe_allow_html=True
             )
             native_share_button(q_full, a_full, key=f"share_mem_{index}")
-

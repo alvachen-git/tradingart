@@ -1,63 +1,176 @@
-import pandas as pd
+"""
+用户认证工具类 (邮箱验证版)
+- 新用户注册：强制邮箱验证
+- 邮箱：不能重复
+- 老用户：可在个人资料页绑定邮箱
+"""
+
 import bcrypt
 from sqlalchemy import text
 import streamlit as st
-import time
 import uuid
 from datetime import datetime, timedelta
 
 # 导入数据库引擎
 from data_engine import engine
 
+# 导入邮箱服务
+from email_utils import (
+    send_register_code, verify_register_code,
+    send_reset_password_code, verify_reset_password_code,
+    send_login_code, verify_login_code,
+    send_bind_email_code, verify_bind_email_code
+)
 
-# --- 密码处理 ---
+
+# ============================================
+# 密码处理
+# ============================================
+
 def hash_password(password):
+    """密码加密"""
     return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
 
 
 def verify_password(password, hashed):
+    """验证密码"""
     return bcrypt.checkpw(password.encode(), hashed.encode())
 
 
 def generate_token():
+    """生成会话Token"""
     return str(uuid.uuid4())
 
 
-# --- 【改进】登录逻辑 ---
-def login_user(username, password):
+# ============================================
+# 🔥 新用户注册（强制邮箱验证）
+# ============================================
+
+def register_with_email(email: str, password: str, email_code: str, username: str = None):
     """
-    改进点：
-    1. 添加更详细的错误日志
-    2. 使用事务确保数据一致性
-    3. 返回更多调试信息
+    使用邮箱注册（强制验证）
+
+    Args:
+        email: 邮箱地址（必填，且不能重复）
+        password: 密码
+        email_code: 邮箱验证码
+        username: 用户名（可选，默认从邮箱生成）
+
+    Returns:
+        (success, message)
     """
-    if not username or not password:
-        return False, "请输入用户名和密码", None
+    # 1. 验证邮箱验证码
+    code_valid, code_msg = verify_register_code(email, email_code)
+    if not code_valid:
+        return False, code_msg
+
+    # 2. 验证密码强度
+    if len(password) < 6:
+        return False, "密码长度不能少于6位"
+
+    # 3. 用户名处理
+    if not username:
+        # 从邮箱生成默认用户名
+        username = email.split('@')[0]
+        if len(username) < 3:
+            username = f"用户{username}"
+
+    # 4. 密码加密
+    hashed = hash_password(password)
 
     try:
-        with engine.begin() as conn:  # 使用 begin() 自动管理事务
-            # 查询用户
-            sql = text("SELECT password_hash, is_active FROM users WHERE username = :u")
-            result = conn.execute(sql, {"u": username}).fetchone()
+        with engine.begin() as conn:
+            # 🔥 检查邮箱是否已注册（强制唯一）
+            check_email = conn.execute(
+                text("SELECT 1 FROM users WHERE email = :e"),
+                {"e": email}
+            ).fetchone()
+
+            if check_email:
+                return False, "该邮箱已注册，请直接登录或找回密码"
+
+            # 检查用户名是否已存在
+            check_user = conn.execute(
+                text("SELECT 1 FROM users WHERE username = :u"),
+                {"u": username}
+            ).fetchone()
+
+            if check_user:
+                # 自动生成唯一用户名
+                import random
+                username = f"{username}_{random.randint(1000, 9999)}"
+
+            # 插入用户（邮箱已验证）
+            sql_user = text("""
+                            INSERT INTO users (username, email, password_hash,
+                                               level, experience, capital,
+                                               is_active, email_verified, created_at)
+                            VALUES (:u, :e, :h,
+                                    1, 0, 1000000,
+                                    1, 1, :now)
+                            """)
+            conn.execute(sql_user, {
+                "u": username,
+                "e": email,
+                "h": hashed,
+                "now": datetime.now()
+            })
+
+            # 初始化用户画像
+            sql_profile = text("""
+                               INSERT INTO user_profile (user_id, risk_preference, focus_assets, current_mood)
+                               VALUES (:uid, '未知', '暂无', '平静')
+                               """)
+            conn.execute(sql_profile, {"uid": username})
+
+            return True, f"注册成功！您的用户名是：{username}"
+
+    except Exception as e:
+        print(f"注册失败: {e}")
+        return False, "注册失败，请稍后重试"
+
+
+# ============================================
+# 登录功能
+# ============================================
+
+def login_user(account: str, password: str):
+    """
+    用户名/邮箱 + 密码登录
+
+    Returns:
+        (success, message, token, username)  # 🔥 新增返回 username
+    """
+    if not account or not password:
+        return False, "请输入账号和密码", None, None
+
+    try:
+        with engine.begin() as conn:
+            # 支持用户名或邮箱登录
+            sql = text("""
+                       SELECT username, password_hash, is_active
+                       FROM users
+                       WHERE username = :a
+                          OR email = :a
+                       """)
+            result = conn.execute(sql, {"a": account}).fetchone()
 
             if not result:
-                return False, "用户不存在", None
+                return False, "账号不存在", None, None
 
-            stored_hash, is_active = result
+            username, stored_hash, is_active = result
 
-            # 检查账号是否被禁用
             if not is_active:
-                return False, "账号已被禁用", None
+                return False, "账号已被禁用", None, None
 
-            # 验证密码
             if not verify_password(password, stored_hash):
-                return False, "密码错误", None
+                return False, "密码错误", None, None
 
-            # 生成新Token（30天有效期）
+            # 生成Token
             token = generate_token()
             expire_time = datetime.now() + timedelta(days=30)
 
-            # 更新Token到数据库
+            # 更新Token
             update_sql = text("""
                               UPDATE users
                               SET session_token = :t,
@@ -72,30 +185,218 @@ def login_user(username, password):
                 "u": username
             })
 
-            # 事务自动提交
-            return True, "登录成功", token
+            # 🔥 返回真正的 username
+            return True, "登录成功", token, username
 
     except Exception as e:
-        # 添加详细错误日志
-        error_msg = f"登录系统错误: {str(e)}"
-        print(error_msg)  # 后台日志
-        return False, "登录失败，请稍后重试", None
+        print(f"登录错误: {e}")
+        return False, "登录失败，请稍后重试", None, None
 
 
-# --- 【改进】Token 验证 ---
+def login_with_email_code(email: str, email_code: str):
+    """
+    邮箱验证码登录
+
+    Returns:
+        (success, message, token, username)  # 🔥 返回 username
+    """
+    # 1. 验证邮箱验证码
+    code_valid, code_msg = verify_login_code(email, email_code)
+    if not code_valid:
+        return False, code_msg, None, None
+
+    try:
+        with engine.begin() as conn:
+            sql = text("""
+                       SELECT username, is_active
+                       FROM users
+                       WHERE email = :e
+                       """)
+            result = conn.execute(sql, {"e": email}).fetchone()
+
+            if not result:
+                return False, "该邮箱未注册", None, None
+
+            username, is_active = result
+
+            if not is_active:
+                return False, "账号已被禁用", None, None
+
+            # 生成Token
+            token = generate_token()
+            expire_time = datetime.now() + timedelta(days=30)
+
+            update_sql = text("""
+                              UPDATE users
+                              SET session_token = :t,
+                                  token_expire  = :e,
+                                  last_login    = :now
+                              WHERE username = :u
+                              """)
+            conn.execute(update_sql, {
+                "t": token,
+                "e": expire_time,
+                "now": datetime.now(),
+                "u": username
+            })
+
+            # 🔥 返回真正的 username
+            return True, "登录成功", token, username
+
+    except Exception as e:
+        print(f"登录错误: {e}")
+        return False, "登录失败，请稍后重试", None, None
+
+
+# ============================================
+# 修改密码
+# ============================================
+
+def change_password_with_old(username: str, old_password: str, new_password: str):
+    """通过旧密码修改密码"""
+    if len(new_password) < 6:
+        return False, "新密码长度不能少于6位"
+
+    try:
+        with engine.begin() as conn:
+            sql = text("SELECT password_hash FROM users WHERE username = :u")
+            result = conn.execute(sql, {"u": username}).fetchone()
+
+            if not result:
+                return False, "用户不存在"
+
+            if not verify_password(old_password, result[0]):
+                return False, "旧密码错误"
+
+            new_hash = hash_password(new_password)
+            update_sql = text("""
+                              UPDATE users
+                              SET password_hash = :h,
+                                  session_token = NULL,
+                                  token_expire  = NULL
+                              WHERE username = :u
+                              """)
+            conn.execute(update_sql, {"h": new_hash, "u": username})
+
+            return True, "密码修改成功，请重新登录"
+
+    except Exception as e:
+        print(f"修改密码失败: {e}")
+        return False, "修改密码失败"
+
+
+def reset_password_with_email(email: str, email_code: str, new_password: str):
+    """通过邮箱验证码重置密码"""
+    # 1. 验证邮箱验证码
+    code_valid, code_msg = verify_reset_password_code(email, email_code)
+    if not code_valid:
+        return False, code_msg
+
+    if len(new_password) < 6:
+        return False, "新密码长度不能少于6位"
+
+    try:
+        with engine.begin() as conn:
+            check = conn.execute(
+                text("SELECT username FROM users WHERE email = :e"),
+                {"e": email}
+            ).fetchone()
+
+            if not check:
+                return False, "该邮箱未注册"
+
+            new_hash = hash_password(new_password)
+            update_sql = text("""
+                              UPDATE users
+                              SET password_hash = :h,
+                                  session_token = NULL,
+                                  token_expire  = NULL
+                              WHERE email = :e
+                              """)
+            conn.execute(update_sql, {"h": new_hash, "e": email})
+
+            return True, "密码重置成功，请使用新密码登录"
+
+    except Exception as e:
+        print(f"重置密码失败: {e}")
+        return False, "重置密码失败"
+
+
+# ============================================
+# 🔥 绑定邮箱（老用户使用）
+# ============================================
+
+def bind_email(username: str, email: str, email_code: str):
+    """
+    为已有账号绑定/换绑邮箱
+
+    Args:
+        username: 用户名
+        email: 新邮箱
+        email_code: 邮箱验证码
+    """
+    # 1. 验证邮箱验证码
+    code_valid, code_msg = verify_bind_email_code(email, email_code)
+    if not code_valid:
+        return False, code_msg
+
+    try:
+        with engine.begin() as conn:
+            # 🔥 检查邮箱是否已被其他账号绑定
+            check = conn.execute(
+                text("SELECT username FROM users WHERE email = :e AND username != :u"),
+                {"e": email, "u": username}
+            ).fetchone()
+
+            if check:
+                return False, "该邮箱已被其他账号绑定"
+
+            # 绑定邮箱
+            update_sql = text("""
+                              UPDATE users
+                              SET email          = :e,
+                                  email_verified = 1
+                              WHERE username = :u
+                              """)
+            conn.execute(update_sql, {"e": email, "u": username})
+
+            return True, "邮箱绑定成功"
+
+    except Exception as e:
+        print(f"绑定邮箱失败: {e}")
+        return False, "绑定失败"
+
+
+# ============================================
+# Token 验证
+# ============================================
+
+def logout_user(username: str):
+    """
+    登出用户（使数据库中的token失效）
+    """
+    try:
+        with engine.begin() as conn:
+            sql = text("""
+                       UPDATE users
+                       SET session_token = NULL,
+                           token_expire  = NULL
+                       WHERE username = :u
+                       """)
+            conn.execute(sql, {"u": username})
+            return True
+    except Exception as e:
+        print(f"登出失败: {e}")
+        return False
+
+
 def check_token(username, token):
-    """
-    改进点：
-    1. 添加更详细的验证逻辑
-    2. 自动清理过期Token
-    3. 返回验证详情（可选）
-    """
+    """验证Token有效性"""
     if not username or not token:
         return False
 
     try:
         with engine.connect() as conn:
-            # 查询Token和过期时间
             sql = text("""
                        SELECT token_expire, is_active
                        FROM users
@@ -105,20 +406,16 @@ def check_token(username, token):
             result = conn.execute(sql, {"u": username, "t": token}).fetchone()
 
             if not result:
-                # Token不匹配或用户不存在
                 return False
 
             expire_time, is_active = result
 
-            # 检查账号状态
             if not is_active:
                 return False
 
-            # 检查Token是否过期
             if expire_time and expire_time > datetime.now():
                 return True
             else:
-                # Token已过期，清理数据库中的过期Token
                 with engine.begin() as clean_conn:
                     clean_sql = text("""
                                      UPDATE users
@@ -134,144 +431,21 @@ def check_token(username, token):
         return False
 
 
-# --- 【改进】注册逻辑 ---
-def register_user(username, password):
-    """
-    改进点：
-    1. 添加用户名格式验证
-    2. 使用事务确保数据一致性
-    3. 更详细的错误提示
-    """
-    # 1. 基础验证
-    if not username or not password:
-        return False, "用户名和密码不能为空"
+# ============================================
+# 用户信息查询
+# ============================================
 
-    if len(username) < 3:
-        return False, "用户名长度不能少于3位"
-
-    if len(password) < 6:
-        return False, "密码长度不能少于6位"
-
-    # 2. 用户名格式验证（可选，根据需求调整）
-    if not username.replace("_", "").isalnum():
-        return False, "用户名只能包含字母、数字和下划线"
-
-    # 3. 密码加密
-    hashed = hash_password(password)
-
-    try:
-        with engine.begin() as conn:  # 使用事务
-            # 检查用户名是否已存在
-            check = conn.execute(
-                text("SELECT 1 FROM users WHERE username = :u"),
-                {"u": username}
-            ).fetchone()
-
-            if check:
-                return False, "用户名已存在，请换一个"
-
-            # 插入用户表
-            sql_user = text("""
-                            INSERT INTO users (username,
-                                               password_hash,
-                                               level,
-                                               experience,
-                                               capital,
-                                               is_active,
-                                               created_at)
-                            VALUES (:u, :p, 1, 0, 1000000, 1, :now)
-                            """)
-            conn.execute(sql_user, {
-                "u": username,
-                "p": hashed,
-                "now": datetime.now()
-            })
-
-            # 初始化用户画像
-            sql_profile = text("""
-                               INSERT INTO user_profile (user_id,
-                                                         risk_preference,
-                                                         focus_assets,
-                                                         current_mood)
-                               VALUES (:uid, '未知', '暂无', '平静')
-                               """)
-            conn.execute(sql_profile, {"uid": username})
-
-            # 事务自动提交
-            return True, "注册成功！请登录"
-
-    except Exception as e:
-        error_msg = str(e)
-        print(f"注册失败: {error_msg}")
-
-        # 根据错误类型返回友好提示
-        if "Duplicate entry" in error_msg or "UNIQUE" in error_msg:
-            return False, "用户名已存在"
-        else:
-            return False, f"注册失败: {error_msg}"
-
-
-# --- 【新增】Token刷新功能 ---
-def refresh_token(username, old_token):
-    """
-    刷新用户Token（延长登录时间）
-    当用户活跃时可以自动调用此函数
-    """
-    if not check_token(username, old_token):
-        return False, None
-
-    try:
-        with engine.begin() as conn:
-            new_token = generate_token()
-            new_expire = datetime.now() + timedelta(days=30)
-
-            sql = text("""
-                       UPDATE users
-                       SET session_token = :t,
-                           token_expire  = :e
-                       WHERE username = :u
-                       """)
-            conn.execute(sql, {"t": new_token, "e": new_expire, "u": username})
-
-            return True, new_token
-    except:
-        return False, None
-
-
-# --- 【新增】批量清理过期Token ---
-def cleanup_expired_tokens():
-    """
-    定期清理数据库中的过期Token
-    可以在应用启动时调用
-    """
-    try:
-        with engine.begin() as conn:
-            sql = text("""
-                       UPDATE users
-                       SET session_token = NULL,
-                           token_expire  = NULL
-                       WHERE token_expire < :now
-                       """)
-            result = conn.execute(sql, {"now": datetime.now()})
-            return result.rowcount
-    except Exception as e:
-        print(f"清理过期Token失败: {e}")
-        return 0
-
-
-# --- 【新增】获取用户详细信息 ---
 def get_user_info(username):
-    """
-    获取用户完整信息（用于调试）
-    """
+    """获取用户信息"""
     try:
         with engine.connect() as conn:
             sql = text("""
                        SELECT username,
+                              email,
+                              email_verified,
                               level,
                               capital,
                               is_active,
-                              token_expire,
                               last_login,
                               created_at
                        FROM users
@@ -282,14 +456,87 @@ def get_user_info(username):
             if result:
                 return {
                     "username": result[0],
-                    "level": result[1],
-                    "capital": result[2],
-                    "is_active": result[3],
-                    "token_expire": result[4],
-                    "last_login": result[5],
-                    "created_at": result[6]
+                    "email": result[1],
+                    "email_verified": result[2],
+                    "level": result[3],
+                    "capital": result[4],
+                    "is_active": result[5],
+                    "last_login": result[6],
+                    "created_at": result[7]
                 }
             return None
     except Exception as e:
         print(f"获取用户信息失败: {e}")
         return None
+
+
+def get_masked_email(username):
+    """获取脱敏邮箱（用于前端显示）"""
+    try:
+        with engine.connect() as conn:
+            sql = text("SELECT email FROM users WHERE username = :u")
+            result = conn.execute(sql, {"u": username}).fetchone()
+
+            if result and result[0]:
+                email = result[0]
+                parts = email.split('@')
+                if len(parts) == 2:
+                    name = parts[0]
+                    domain = parts[1]
+                    if len(name) > 2:
+                        masked_name = name[:2] + '***'
+                    else:
+                        masked_name = name[0] + '***'
+                    return f"{masked_name}@{domain}"
+            return None
+    except:
+        return None
+
+
+# ============================================
+# 旧版注册（兼容，但建议弃用）
+# ============================================
+
+def register_user(username, password):
+    """
+    用户名+密码注册（不带邮箱）
+    """
+    if not username or not password:
+        return False, "用户名和密码不能为空"
+
+    if len(username) < 3:
+        return False, "用户名长度不能少于3位"
+
+    if len(password) < 6:
+        return False, "密码长度不能少于6位"
+
+    hashed = hash_password(password)
+
+    try:
+        with engine.begin() as conn:
+            check = conn.execute(
+                text("SELECT 1 FROM users WHERE username = :u"),
+                {"u": username}
+            ).fetchone()
+
+            if check:
+                return False, "用户名已存在"
+
+            sql_user = text("""
+                            INSERT INTO users (username, password_hash, level, experience, capital, is_active,
+                                               created_at)
+                            VALUES (:u, :p, 1, 0, 1000000, 1, :now)
+                            """)
+            conn.execute(sql_user, {"u": username, "p": hashed, "now": datetime.now()})
+
+            sql_profile = text("""
+                               INSERT INTO user_profile (user_id, risk_preference, focus_assets, current_mood)
+                               VALUES (:uid, '未知', '暂无', '平静')
+                               """)
+            conn.execute(sql_profile, {"uid": username})
+
+            return True, "注册成功！请登录"
+
+    except Exception as e:
+        print(f"注册失败: {e}")
+        return False, "注册失败"

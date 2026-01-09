@@ -12,10 +12,12 @@ import auth_utils as auth
 import memory_utils as mem
 import threading
 from datetime import datetime, timedelta
+from auth_ui import show_auth_dialog, sidebar_user_menu
 from streamlit_lottie import st_lottie
 from kline_tools import analyze_kline_pattern
 from screener_tool import search_top_stocks
 from news_tools import get_financial_news
+from langgraph.errors import GraphRecursionError
 from fund_flow_tools import tool_get_retail_money_flow
 from plot_tools import draw_chart_tool
 from vision_tools import analyze_financial_image
@@ -509,6 +511,7 @@ def native_share_button(user_content, ai_content, key):
     """
     components.html(html_code, height=50)
 
+
 # ==========================================
 #  3. Auth & State 初始化 (保持不变)
 # ==========================================
@@ -520,8 +523,10 @@ cookies = cookie_manager.get_all() or {}
 
 # 尝试从 Cookie 恢复登录
 # 【关键修复 1】增加 'just_logged_out' 判断，如果刚点了登出，绝不执行自动登录
-should_auto_login = not st.session_state.get('is_logged_in', False) and not st.session_state.get('just_logged_out',
-                                                                                                 False)
+should_auto_login = (
+    not st.session_state.get('is_logged_in', False)
+    and not st.session_state.get('just_logged_out', False)  # ← 这行很重要！
+)
 
 if should_auto_login and cookies:
     c_user = cookies.get("username")
@@ -546,18 +551,7 @@ if 'is_logged_in' not in st.session_state:
     st.session_state['user_id'] = None
     st.session_state['username'] = None
 
-# --- 1. 初始化验证码 (如果还没生成过) ---
-if 'captcha_code' not in st.session_state:
-    img, code = generate_captcha_image()
-    st.session_state['captcha_img'] = img
-    st.session_state['captcha_code'] = code
 
-
-def refresh_captcha():
-    """刷新验证码的回调函数"""
-    img, code = generate_captcha_image()
-    st.session_state['captcha_img'] = img
-    st.session_state['captcha_code'] = code
 
 
 # 初始化聊天记录
@@ -631,8 +625,6 @@ def get_agent(current_user="访客", user_query=""):  # 传入 current_user
     7. 只要客户问保证金问题-> 必须参考 `search_investment_knowledge`。
     8. 查新闻时，先用`get_financial_news`，如果没找到信息，再用`search_web`。
     
-
-  
 
     【你的行为准则】
     1. 当收到视觉模型提取的信息，还得利用`analyze_kline_pattern`和`search_investment_knowledge`做搭配思考
@@ -720,6 +712,8 @@ def process_user_input(prompt_text):
 
     if agent:
         with st.chat_message("assistant"):
+            status_placeholder = st.empty()
+            response_container = st.empty()
             # ===========================
             # 🔄 [修改部分开始] 替换原本的 st.spinner
             # ===========================
@@ -855,9 +849,29 @@ def process_user_input(prompt_text):
                     # 注意：这里不需要存入 session_state，因为上面的"历史消息循环"会负责存储后的渲染
                     native_share_button(ai_response, key=f"share_new_{int(time.time())}")
 
-            except Exception as e:
-                st.error(f"分析中断: {e}")
+            # 🔥🔥 [核心修改] 捕获"思考步数过多"的错误 🔥🔥
+            except GraphRecursionError:
+                status_placeholder.empty()
+                # 这里写您想要的友好提示
+                friendly_error = """
+                🤔 **这个问题有点复杂，AI 思考过度了...**                             
+                建议你把问题拆解得更细一点。
 
+                """
+                response_container.warning(friendly_error)
+
+                # (可选) 记录错误日志
+                print("❌ [GraphRecursionError] AI 陷入死循环或步数超限")
+
+            # 捕获其他通用错误
+            except Exception as e:
+                status_placeholder.empty()
+                # 如果是其他错误，也转成中文
+                error_msg = str(e)
+                if "recursion limit" in error_msg.lower(): # 双重保险，防止某些版本抛出 ValueError
+                     response_container.warning("🤔 AI 思考步数超限，请尝试把问题描述得更具体一些。")
+                else:
+                    response_container.error(f"🤯 AI 大脑过载了: {error_msg}")
 
 # ==========================================
 #  6. 页面渲染：Welcome Screen (空状态) [修改点：新增]
@@ -923,24 +937,27 @@ def show_welcome_screen():
 # A. 侧边栏：登录/设置 (折叠起来保持清爽)
 with st.sidebar:
     if not st.session_state['is_logged_in']:
-        # --- A. 未登錄狀態 ---
-        tab1, tab2 = st.tabs(["登录", "注册"])
+        # --- A. 未登录状态 ---
+        tab1, tab2, tab3 = st.tabs(["🔐 登录", "📝 注册", "🔑 找回"])
 
+        # ============ Tab1: 登录（仅密码方式）============
         with tab1:
             with st.form("login_form_sidebar"):
-                u = st.text_input("账号", key="login_user")
+                u = st.text_input("用户名/邮箱", key="login_user", placeholder="输入用户名或邮箱")
                 p = st.text_input("密码", type="password", key="login_pass")
-                if st.form_submit_button("登录", type="primary", use_container_width=True):
-                    success, msg, token = auth.login_user(u, p)
+                login_btn = st.form_submit_button("登录", type="primary", use_container_width=True)
+
+            if login_btn:
+                if u and p:
+                    # 🔥 login_user 现在返回4个值：success, msg, token, username
+                    success, msg, token, real_username = auth.login_user(u, p)
                     if success:
                         st.session_state['is_logged_in'] = True
-                        st.session_state['user_id'] = u
+                        st.session_state['user_id'] = real_username  # 🔥 使用真正的用户名
 
-                        # 【關鍵修改】寫入 Cookie (設置 7 天過期)
-                        # expires_at 是 datetime 對象
+                        # 写入 Cookie（也用真正的用户名）
                         expires = datetime.now() + timedelta(days=7)
-
-                        cookie_manager.set("username", u, expires_at=expires, key="set_user_cookie")
+                        cookie_manager.set("username", real_username, expires_at=expires, key="set_user_cookie")
                         cookie_manager.set("token", token, expires_at=expires, key="set_token_cookie")
 
                         st.success("登录成功")
@@ -948,117 +965,175 @@ with st.sidebar:
                         st.rerun()
                     else:
                         st.error(msg)
-
-        with tab2:
-            with st.form("reg_form_sidebar"):
-                st.write("### 注册新账号")
-                new_user = st.text_input("新账号", key="reg_user")
-                new_pass = st.text_input("新密码", type="password", key="reg_pass")
-                # --- 2. 显示验证码 ---
-                col1, col2 = st.columns([1, 1])
-                with col1:
-                    # 显示图片
-                    st.image(st.session_state['captcha_img'], caption="请输入右侧数字", width=120)
-                with col2:
-                    # 验证码输入框
-                    captcha_input = st.text_input("验证码", placeholder="4位数字", label_visibility="collapsed")
-
-                # 刷新按钮 (放在 form 外面或者用特殊处理，最简单是让用户输错自动刷新)
-                # 这里我们直接放提交按钮
-                submit_btn = st.form_submit_button("注册")
-        # --- 3. 处理提交逻辑 ---
-        if submit_btn:
-            # 🛑 第一关：检查输入是否为空
-            if not new_user or not new_pass or not captcha_input:
-                st.warning("⚠️ 请填写完整的账号、密码和验证码！")
-
-                # 🛑 第二关：检查验证码
-                # 注意：这里判断是否不相等
-            elif captcha_input != st.session_state.get('captcha_code'):
-                st.error("❌ 验证码错误！已为您更换一张，请重新输入。")
-                refresh_captcha()
-                # 注意：这里不要加 st.rerun()，否则错误提示会瞬间消失！
-                # 用户看到错误后，手动再次点击注册即可。
-
-
-            # C. 执行注册 (调用之前的 register_user 函数)
-            else:
-                success, msg = auth.register_user(new_user, new_pass)
-                if success:
-                    # --- 🎉 注册成功后的自动登录逻辑 ---
-                    st.success("注册成功！正在为您自动登录...")
-                    # 1. 我们需要拿到刚注册的 user_id (为了后续功能使用)
-                    try:
-                        login_success, login_msg, token = auth.login_user(new_user, new_pass)
-
-                        # 2. 关键步骤：修改 Session 状态
-                        # 这几行代码就是“告诉 Streamlit 我已经登录了”
-                        st.session_state['is_logged_in'] = True
-                        st.session_state['user_id'] = new_user
-
-                        # 設置 Cookie (保持登錄狀態)
-                        expires = datetime.now() + timedelta(days=7)
-                        cookie_manager.set("username", new_user, expires_at=expires, key="reg_set_user")
-                        cookie_manager.set("token", token, expires_at=expires, key="reg_set_token")
-
-                        time.sleep(0.3)
-                        st.rerun()
-
-                        # 3. 清理注册时用的验证码 (防止返回后还在)
-                        if 'captcha_code' in st.session_state:
-                            del st.session_state['captcha_code']
-
-                        # 4. 强制刷新页面
-                        # 刷新后，Streamlit 会重新运行，发现 logged_in=True，就会直接显示主页，而不是登录页
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"自动登录失败，请尝试手动登录: {e}")
                 else:
-                    # === ❌ 注册失败 (比如密码太短、用户已存在) ===
-                    # 这里直接显示 register_user 函数返回的错误消息
-                    st.error(f"❌ {msg}")
-                    # 同样，这里也不要 rerun，让用户看到错误并去修改
-                    refresh_captcha()  # 为了安全，失败时最好也刷新验证码
+                    st.warning("请输入账号和密码")
 
-        # 加一个小按钮允许用户手动刷新看不清的图片
-        if st.button("🔄 看不清？换一张"):
-            refresh_captcha()
-            st.rerun()
+        # ============ Tab2: 注册（用户名必填，邮箱选填）============
+        with tab2:
+            st.caption("📝 创建新账号")
+
+            reg_username = st.text_input("用户名（必填）", key="reg_username", placeholder="请输入用户名")
+            reg_password = st.text_input("设置密码", type="password", key="reg_password", placeholder="至少6位")
+            reg_password2 = st.text_input("确认密码", type="password", key="reg_password2")
+
+            # 邮箱选填区域
+            with st.expander("📧 绑定邮箱（选填）", expanded=False):
+                st.caption("绑定后可用邮箱登录和找回密码，也可注册后在个人资料中绑定")
+                reg_email = st.text_input("邮箱", key="reg_email", placeholder="your@email.com")
+
+                col1, col2 = st.columns([2, 1])
+                with col1:
+                    reg_code = st.text_input("验证码", key="reg_code", max_chars=6)
+                with col2:
+                    st.write("")
+                    if st.button("发送", key="btn_send_reg_code", use_container_width=True):
+                        if reg_email:
+                            from email_utils import send_register_code
+
+                            success, msg = send_register_code(reg_email)
+                            if success:
+                                st.success("已发送")
+                            else:
+                                st.error(msg)
+                        else:
+                            st.warning("请输入邮箱")
+
+            if st.button("注册", type="primary", use_container_width=True, key="btn_register"):
+                if not reg_username:
+                    st.warning("👤 用户名是必填项")
+                elif len(reg_username) < 3:
+                    st.warning("用户名至少3个字符")
+                elif not reg_password:
+                    st.warning("请设置密码")
+                elif len(reg_password) < 6:
+                    st.warning("密码至少6位")
+                elif reg_password != reg_password2:
+                    st.error("两次密码不一致")
+                elif reg_email and not reg_code:
+                    st.warning("填写了邮箱请输入验证码，或清空邮箱")
+                else:
+                    # 根据是否填写邮箱选择注册方式
+                    if reg_email and reg_code:
+                        # 带邮箱注册
+                        success, msg = auth.register_with_email(
+                            email=reg_email,
+                            password=reg_password,
+                            email_code=reg_code,
+                            username=reg_username
+                        )
+                    else:
+                        # 普通注册（不带邮箱）
+                        success, msg = auth.register_user(reg_username, reg_password)
+
+                    if success:
+                        st.success(msg if msg else "注册成功！")
+                        st.balloons()
+                        # 自动登录
+                        try:
+                            login_success, login_msg, token, real_username = auth.login_user(reg_username, reg_password)
+                            if login_success:
+                                st.session_state['is_logged_in'] = True
+                                st.session_state['user_id'] = real_username
+
+                                expires = datetime.now() + timedelta(days=7)
+                                cookie_manager.set("username", real_username, expires_at=expires, key="reg_set_user")
+                                cookie_manager.set("token", token, expires_at=expires, key="reg_set_token")
+
+                                time.sleep(0.5)
+                                st.rerun()
+                        except:
+                            st.info("请切换到登录页登录")
+                    else:
+                        st.error(msg)
+
+        # ============ Tab3: 找回密码 ============
+        with tab3:
+            st.caption("📧 通过邮箱重置密码")
+
+            reset_email = st.text_input("注册邮箱", key="reset_email", placeholder="your@email.com")
+
+            col1, col2 = st.columns([2, 1])
+            with col1:
+                reset_code = st.text_input("验证码", key="reset_code", max_chars=6)
+            with col2:
+                st.write("")
+                if st.button("发送", key="btn_send_reset_code", use_container_width=True):
+                    if reset_email:
+                        from email_utils import send_reset_password_code
+
+                        success, msg = send_reset_password_code(reset_email)
+                        if success:
+                            st.success("已发送")
+                        else:
+                            st.error(msg)
+                    else:
+                        st.warning("请输入邮箱")
+
+            new_pwd = st.text_input("新密码", type="password", key="reset_new_pwd")
+            new_pwd2 = st.text_input("确认密码", type="password", key="reset_new_pwd2")
+
+            if st.button("重置密码", type="primary", use_container_width=True, key="btn_reset_pwd"):
+                if not reset_email:
+                    st.warning("请输入邮箱")
+                elif not reset_code:
+                    st.warning("请输入验证码")
+                elif not new_pwd or len(new_pwd) < 6:
+                    st.warning("密码至少6位")
+                elif new_pwd != new_pwd2:
+                    st.error("两次密码不一致")
+                else:
+                    success, msg = auth.reset_password_with_email(reset_email, reset_code, new_pwd)
+                    if success:
+                        st.success(msg)
+                        st.balloons()
+                    else:
+                        st.error(msg)
 
     else:
-        # --- B. 已登錄狀態 ---
+        # --- B. 已登录状态 ---
         user = st.session_state['user_id']
         st.success(f"👤 欢迎回来，{user}")
 
-        # 顯示資產 (模擬)
-        try:
-            info = pd.read_sql(f"SELECT level, capital FROM users WHERE username='{user}'", de.engine).iloc[0]
-        except:
-            pass
+        # 显示邮箱绑定状态
+        if user != "访客":
+            masked_email = auth.get_masked_email(user)
+            if masked_email:
+                st.caption(f"📧 {masked_email}")
+            else:
+                st.caption("📧 未绑定邮箱 [去个人资料绑定]")
 
-        if st.button("登出", type="primary"):
+
+        # 🔥 登出回调函数
+        def do_logout():
+            # 1. 使数据库中的 token 失效（关键！）
+            if user != "访客":
+                auth.logout_user(user)
+
+            # 2. 清除 session state
             st.session_state['is_logged_in'] = False
             st.session_state['user_id'] = None
-
-            # 【關鍵修改 3】設置一個“剛登出”的標記，防止 Rerun 後立馬被自動登錄捕獲
             st.session_state['just_logged_out'] = True
+            if 'token' in st.session_state:
+                del st.session_state['token']
 
-            # 【關鍵修改】刪除 Cookie
-            cookie_manager.delete("username", key="del_user_cookie")
-            cookie_manager.delete("token", key="del_token_cookie")
 
+        # 登出按钮
+        if st.button("🚪 登出", type="primary", use_container_width=True, on_click=do_logout):
+            # 删除 Cookie
+            try:
+                cookie_manager.delete("username", key="logout_del_user")
+                cookie_manager.delete("token", key="logout_del_token")
+            except:
+                pass
             time.sleep(0.3)
             st.rerun()
 
-
-# 使用 popover 创建一个二级菜单，防止误触
-    with st.popover("🗑️ 清空对话历史", use_container_width=True):
-        st.markdown("⚠️ **确定要删除所有聊天记录吗？**\n\n此操作无法撤销。")
-
-        # 真正的删除动作在这里触发
-        if st.button("🚨 确认删除", type="primary", use_container_width=True):
-            st.session_state.messages = []
-            st.rerun()
+        # 清空对话历史（使用 popover 防误触）
+        with st.popover("🗑️ 清空对话历史", use_container_width=True):
+            st.markdown("⚠️ **确定要删除所有聊天记录吗？**\n\n此操作无法撤销。")
+            if st.button("🚨 确认删除", type="primary", use_container_width=True, key="btn_clear_chat"):
+                st.session_state.messages = []
+                st.rerun()
 
     # 客服卡片 CSS 样式
     st.markdown("""
