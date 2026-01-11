@@ -16,6 +16,7 @@ DB_HOST = os.getenv("DB_HOST")
 DB_PORT = os.getenv("DB_PORT")
 DB_NAME = os.getenv("DB_NAME")
 
+
 @st.cache_resource
 def get_db_engine():
     if not all([DB_USER, DB_PASSWORD, DB_HOST, DB_NAME]):
@@ -25,8 +26,6 @@ def get_db_engine():
 
 
 engine = get_db_engine()
-
-
 
 
 # --- 2. 核心工具定义 ---
@@ -55,7 +54,6 @@ def analyze_kline_pattern(query: str, trade_date: str = None):
         return f"未找到与'{query}'相关的品种，请尝试输入全名。"
 
     symbol, asset_type = result
-
 
     # 【修改点 2】构建日期过滤条件
     # 逻辑：如果指定了 12月10日，我们要查 <= 12月10日 的最近60条记录
@@ -103,7 +101,7 @@ def analyze_kline_pattern(query: str, trade_date: str = None):
                 """
             df = pd.read_sql(sql, engine)
 
- # 🔥【新增】指数查询逻辑
+        # 🔥【新增】指数查询逻辑
         elif asset_type == 'index':
             sql = f"""
                 SELECT trade_date, open_price, high_price, low_price, close_price 
@@ -216,8 +214,9 @@ def analyze_kline_pattern(query: str, trade_date: str = None):
 
         # 1. 多头吞噬 (Bullish Engulfing)
         # 条件：空头趋势(5<20) + 昨日大跌(>2%) + 今日大涨 + 包住昨日
-        if (curr['MA5'] < curr['MA20']) and (prev_chg_pct < -0.005) and (chg_pct > 0) and (open_p < prev_close) and (close > prev_open):
-            patterns.append("【多头吞噬】(空头趋势末端，一阳吞一阴，强力反转信号！)")
+        if (curr['MA5'] < curr['MA20']) and (prev_chg_pct < -0.005) and (chg_pct > 0) and (open_p < prev_close) and (
+                close > prev_open):
+            patterns.append("【多头吞噬】(空头趋势阶段见底，转折信号！)")
 
         # 2. 空头吞噬 (Bearish Engulfing)
         # 条件：多头趋势(5>20) + 昨日大涨(>2%) + 今日大跌 + 包住昨日
@@ -226,7 +225,7 @@ def analyze_kline_pattern(query: str, trade_date: str = None):
                 (chg_pct < 0) and \
                 (open_p > prev_close) and \
                 (close < prev_open):
-            patterns.append("【空头吞噬】(多头趋势末端，一阴吞一阳，强力见顶信号！)")
+            patterns.append("【空头吞噬】(多头趋势阶段见顶，反转信号！)")
 
         # 3. 上升三法
         if (curr['MA5'] > curr['MA10']) and chg_pct > 0.01:
@@ -250,14 +249,16 @@ def analyze_kline_pattern(query: str, trade_date: str = None):
                 patterns.append("【下降三法】(中继再跌，空头持续发力！)")
 
         # 6. 晨星
-        if (curr['MA5'] < curr['MA10']) and pprebody_pct  > -0.01 and pprebody_pct  > 0.8 and close > prev_high and open_p > prev_close:
-            if prebody_pct < 0.3 and prev_close < pprev_close :
-             patterns.append("【晨星】(反转迹象-从空转多)")
+        if (curr['MA5'] < curr[
+            'MA10']) and pprebody_pct > -0.01 and pprebody_pct > 0.8 and close > prev_high and open_p > prev_close:
+            if prebody_pct < 0.3 and prev_close < pprev_close:
+                patterns.append("【晨星】(反转迹象-从空转多)")
 
-         # 6.夜星
-        if (curr['MA5'] > curr['MA10']) and pprev_chg_pct  > 0.01 and pprebody_pct  > 0.8 and close < prev_low and open_p < prev_close:
+        # 6.夜星
+        if (curr['MA5'] > curr[
+            'MA10']) and pprev_chg_pct > 0.01 and pprebody_pct > 0.8 and close < prev_low and open_p < prev_close:
             if prebody_pct < 0.3 and prev_close > pprev_close:
-             patterns.append("【夜星】(反转迹象-从多转空)")
+                patterns.append("【夜星】(反转迹象-从多转空)")
 
         # 6.步步为营
         if (curr['MA5'] > curr['MA10']) and pprev_chg_pct > 0.015:
@@ -267,7 +268,6 @@ def analyze_kline_pattern(query: str, trade_date: str = None):
         if (curr['MA5'] < curr['MA10']) and pprev_chg_pct > -0.015:
             if pprev_chg_pct < prev_chg_pct < chg_pct < 0:
                 patterns.append("【步步为营】(空头力量减弱，小心反弹)")
-
 
         # 1. 计算 ATR (波动率尺子) 用于动态衡量箱体
         # TR = Max(High-Low, Abs(High-PrevClose), Abs(Low-PrevClose))
@@ -293,7 +293,7 @@ def analyze_kline_pattern(query: str, trade_date: str = None):
                 if len(df) <= period + 1: continue
 
                 # 1. 截取箱体 (不含今天)
-                recent_box = df.iloc[-(period+1):-1]
+                recent_box = df.iloc[-(period + 1):-1]
                 box_high = recent_box['high_price'].max()
                 box_low = recent_box['low_price'].min()
                 box_height = box_high - box_low
@@ -329,7 +329,7 @@ def analyze_kline_pattern(query: str, trade_date: str = None):
                         msg = f"【{p_name}突破】，压缩比{atr_ratio:.1f}ATR)"
                         patterns.append(msg)
                         breakout_found = True
-                        break # 找到最有爆发力的就不找了
+                        break  # 找到最有爆发力的就不找了
 
                     # B. 向下破位
                     if close < box_low and body_pct > 0.6:
@@ -366,13 +366,17 @@ def analyze_kline_pattern(query: str, trade_date: str = None):
 
                         # 动态阈值 (复用之前的逻辑)
                         if period <= 5:
-                            max_atr_multiple = 2.5; p_name_prev = "极致压缩"
+                            max_atr_multiple = 2.5;
+                            p_name_prev = "极致压缩"
                         elif period <= 10:
-                            max_atr_multiple = 4.0; p_name_prev = "短线旗形"
+                            max_atr_multiple = 4.0;
+                            p_name_prev = "短线旗形"
                         elif period <= 20:
-                            max_atr_multiple = 6.0; p_name_prev = "标准箱体"
+                            max_atr_multiple = 6.0;
+                            p_name_prev = "标准箱体"
                         else:
-                            max_atr_multiple = 10.0; p_name_prev = "长线平台"
+                            max_atr_multiple = 10.0;
+                            p_name_prev = "长线平台"
 
                         # 4. 判断逻辑：如果昨天那个时候是压缩状态
                         if atr_ratio_prev <= max_atr_multiple:
@@ -423,7 +427,6 @@ def analyze_kline_pattern(query: str, trade_date: str = None):
         if body_pct < 0.1 and 0.5 < uplo_pct < 1.5:
             patterns.append("【十字星】(多空对峙)")
 
-
         # C. 趋势位置判断
         trends = []
         if close > curr['MA5']:
@@ -453,14 +456,155 @@ def analyze_kline_pattern(query: str, trade_date: str = None):
         elif curr['MA5'] < curr['MA20'] < curr['MA10']:
             trends.append("震荡偏空格局")
 
-        # --- 6. 输出报告 ---
-        report = f"""
-        📊 **{symbol} K线技术面诊断** ({date})
+        # ============================================================
+        #  【新增】近几日K线形态概览 & 多日组合分析
+        # ============================================================
 
-        1. **形态信号**：{' 🔥 '.join(patterns) if patterns else '普通震荡K线。'}
-        2. **趋势**：{'，'.join(trends)}。
-        3. **价格**：
-           - 收盘：{close} (涨跌 {chg_pct * 100:.2f}%)
+        # A. 辅助函数：判断单根K线基本形态
+        def classify_single_kline(o, h, l, c, prev_c):
+            """判断单根K线形态，返回简短描述"""
+            body = abs(c - o)
+            total = h - l if h != l else 0.01
+            upper = h - max(c, o)
+            lower = min(c, o) - l
+            body_pct = body / total
+            chg = (c - prev_c) / prev_c if prev_c else 0
+
+            # 涨跌方向
+            direction = "阳" if c > o else "阴" if c < o else "平"
+
+            # 实体大小
+            if body_pct > 0.8 and abs(chg) > 0.025:
+                size = "大"
+            elif body_pct > 0.5:
+                size = "中"
+            elif body_pct < 0.15:
+                # 十字星或小实体
+                if body_pct < 0.08:
+                    if lower > body * 2 and upper < body:
+                        return f"锤子线({chg * 100:+.1f}%)"
+                    elif upper > body * 2 and lower < body:
+                        return f"倒锤子({chg * 100:+.1f}%)"
+                    else:
+                        return f"十字星({chg * 100:+.1f}%)"
+                size = "小"
+            else:
+                size = "小"
+
+            return f"{size}{direction}({chg * 100:+.1f}%)"
+
+        # B. 生成近5日K线概览
+        recent_klines = []
+        for i in range(-5, 0):
+            if len(df) > abs(i):
+                row = df.iloc[i]
+                prev_row = df.iloc[i - 1] if len(df) > abs(i - 1) else row
+                kline_desc = classify_single_kline(
+                    row['open_price'], row['high_price'],
+                    row['low_price'], row['close_price'],
+                    prev_row['close_price']
+                )
+                day_label = ["T-4", "T-3", "T-2", "T-1", "今日"][i + 5]
+                recent_klines.append(f"{day_label}: {kline_desc}")
+
+        # C. 多日组合形态识别
+        combo_patterns = []
+
+        # 获取近几日涨跌幅
+        recent_changes = []
+        for i in range(-5, 0):
+            if len(df) > abs(i) and len(df) > abs(i - 1):
+                row = df.iloc[i]
+                prev_row = df.iloc[i - 1]
+                chg = (row['close_price'] - prev_row['close_price']) / prev_row['close_price']
+                recent_changes.append(chg)
+
+        # 连续阳线/阴线判断
+        consecutive_up = sum(1 for c in recent_changes[-3:] if c > 0.005)
+        consecutive_down = sum(1 for c in recent_changes[-3:] if c < -0.005)
+
+        if consecutive_up >= 3:
+            # 红三兵判断：连续3阳且都是实体阳线
+            if all(c > 0.01 for c in recent_changes[-3:]):
+                combo_patterns.append("【红三兵】(强势上攻，多头气势如虹)")
+            else:
+                combo_patterns.append(f"【连续{consecutive_up}阳】(多头占优)")
+
+        if consecutive_down >= 3:
+            # 三只乌鸦判断：连续3阴且都是实体阴线
+            if all(c < -0.01 for c in recent_changes[-3:]):
+                combo_patterns.append("【三只乌鸦】(空头肆虐，注意风险)")
+            else:
+                combo_patterns.append(f"【连续{consecutive_down}阴】(空头占优)")
+
+        # 先跌后涨（V型反转雏形）
+        if len(recent_changes) >= 4:
+            if recent_changes[-4] < -0.01 and recent_changes[-3] < -0.01 and recent_changes[-2] > 0 and recent_changes[
+                -1] > 0.01:
+                combo_patterns.append("【V型反转雏形】(连跌后连涨，关注反转确认)")
+
+        # 先涨后跌（倒V雏形）
+        if len(recent_changes) >= 4:
+            if recent_changes[-4] > 0.01 and recent_changes[-3] > 0.01 and recent_changes[-2] < 0 and recent_changes[
+                -1] < -0.01:
+                combo_patterns.append("【倒V见顶雏形】(连涨后连跌，注意回调风险)")
+
+        # 缩量整理（波动收窄）
+        recent_ranges = []
+        for i in range(-5, 0):
+            if len(df) > abs(i):
+                row = df.iloc[i]
+                recent_ranges.append(row['high_price'] - row['low_price'])
+        if len(recent_ranges) >= 3:
+            if recent_ranges[-1] < recent_ranges[-2] < recent_ranges[-3]:
+                combo_patterns.append("【波动收窄】(整理蓄势，关注方向选择)")
+
+        # 放量突破
+        if len(recent_ranges) >= 3:
+            avg_range = sum(recent_ranges[:-1]) / len(recent_ranges[:-1])
+            if recent_ranges[-1] > avg_range * 1.5 and chg_pct > 0.015:
+                combo_patterns.append("【放量突破】(波动放大配合上涨，多头发力)")
+            elif recent_ranges[-1] > avg_range * 1.5 and chg_pct < -0.015:
+                combo_patterns.append("【放量下跌】(波动放大配合下跌，空头发力)")
+
+        # D. 整合多日趋势判断
+        multi_day_trend = ""
+        if len(recent_changes) >= 5:
+            total_chg = sum(recent_changes)
+            up_days = sum(1 for c in recent_changes if c > 0)
+            down_days = sum(1 for c in recent_changes if c < 0)
+
+            if total_chg > 0.05 and up_days >= 4:
+                multi_day_trend = "📈 近5日强势上涨，多头主导"
+            elif total_chg < -0.05 and down_days >= 4:
+                multi_day_trend = "📉 近5日持续下跌，空头主导"
+            elif abs(total_chg) < 0.02:
+                multi_day_trend = "↔️ 近5日横盘震荡，方向待选"
+            elif total_chg > 0:
+                multi_day_trend = "📊 近5日小幅上涨，震荡偏多"
+            else:
+                multi_day_trend = "📊 近5日小幅下跌，震荡偏空"
+
+        # --- 6. 输出报告 (增强版) ---
+        report = f"""
+📊 **{symbol} K线技术面诊断** ({date})
+
+**一、今日形态信号**
+{' 🔥 '.join(patterns) if patterns else '普通震荡K线，无明显形态。'}
+
+**二、近5日K线概览**
+{' → '.join(recent_klines)}
+
+**三、多日组合形态**
+{' | '.join(combo_patterns) if combo_patterns else '暂无明显组合形态。'}
+
+**四、趋势研判**
+- 均线位置：{'，'.join(trends)}
+- 多日趋势：{multi_day_trend}
+
+**五、价格数据**
+- 今日收盘：{close} (涨跌 {chg_pct * 100:+.2f}%)
+- MA5: {curr['MA5']:.2f} | MA10: {curr['MA10']:.2f} | MA20: {curr['MA20']:.2f}
         """
 
         return report

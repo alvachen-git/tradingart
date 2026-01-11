@@ -52,8 +52,8 @@ engine = get_db_engine()
 @tool
 def query_broker_history(broker_name: str):
     """
-    查询指定期货商(broker_name)最近 5 个交易日的持仓明细。
-    输入必须是完整的期货商名称，例如 '中信期货'。
+    查询指定期货商最近 5 个交易日的持仓明细。
+    输入必须完整的期货商名称，例如 '中信期货'。
     """
     print(f"[*] Agent 正在查询: {broker_name}")
     try:
@@ -1061,7 +1061,7 @@ def get_commodity_iv_info(query: str):
 #   子函数 A: ETF 期权 IV 查询
 # ==========================================
 def _query_etf_iv(etf_code, etf_name, query, need_rank, limit_days):
-    """查询 ETF 期权的 IV 数据（从 etf_iv_history 表）"""
+    """查询 ETF 期权的 IV 数据"""
     try:
         # 【调试日志】打印查询信息
         print(f"[ETF IV 查询] 标的: {etf_name}, 代码: {etf_code}, 查询天数: {limit_days}")
@@ -1132,7 +1132,7 @@ def _query_etf_iv(etf_code, etf_name, query, need_rank, limit_days):
                     trend_text = "➡️ 近一周波动率维持窄幅震荡"
 
             return f"""
-📊 **{etf_name} ({etf_code}) 波动率速报**
+📊 **{etf_name} ({etf_code}) 波动率**
 --------------------------------
 📅 日期: {date_str}
 🔥 **当前 IV: {curr_iv:.2f}%**
@@ -1171,7 +1171,7 @@ def _query_etf_iv(etf_code, etf_name, query, need_rank, limit_days):
 📺 历史最高: {max_iv:.2f}%
 📻 历史最低: {min_iv:.2f}%
 --------------------------------
-💡 *策略参考: 当前IV处于{'历史高位，权利金较贵，卖方具有统计上优势' if iv_rank > 50 else '历史低位，权利金便宜，买方风险收益比更佳'}。*
+💡 *策略参考: 当前IV处于{'历史高位，权利金较贵，卖方有统计上优势' if iv_rank > 50 else '历史低位，权利金便宜，买方有潜力'}。*
             """
 
     except Exception as e:
@@ -1182,7 +1182,7 @@ def _query_etf_iv(etf_code, etf_name, query, need_rank, limit_days):
 #   子函数 B: 商品期权 IV 查询（原有逻辑）
 # ==========================================
 def _query_commodity_iv(query, need_rank, limit_days):
-    """查询商品期权的 IV 数据（从 commodity_iv_history 表）"""
+    """查询商品期权的 IV 数据"""
 
     # 1. 商品代码映射
     target_code = None
@@ -1288,14 +1288,14 @@ def _query_commodity_iv(query, need_rank, limit_days):
                 iv_5d_ago = df_iv.iloc[4]['iv']
                 diff_5d = curr_iv - iv_5d_ago
                 if diff_5d > 2:
-                    trend_text = "🌊 近期波动率显著放大，市场激情"
+                    trend_text = "🌊 近期波动率放大，市场激情"
                 elif diff_5d < -2:
-                    trend_text = "💤 近期波动率持续走低，行情平淡"
+                    trend_text = "💤 近期波动率走低，行情平淡"
                 else:
                     trend_text = "➡️ 近一周波动率维持窄幅震荡"
 
             return f"""
-📊 **{target_name} ({iv_search_code}) 波动率速报**
+📊 **{target_name} ({iv_search_code}) 波动率**
 --------------------------------
 📅 日期: {date_str}
 🔥 **当前 IV: {curr_iv:.2f}%**
@@ -1636,8 +1636,8 @@ def get_static_maturity_map():
 @tool
 def search_broker_holdings_on_date(broker_name: str, date: str, symbol: str = None):
     """
-    查询持仓数据，支持两种模式：
-    1. 查询【某家期货商】的持仓（。
+    查持仓数据，支持两种模式：
+    1. 查询【某家期货商】的持仓
     2. 查询【所有期货商】在某天针对【某品种】的持仓排名。
 
     参数:
@@ -1899,7 +1899,7 @@ def log_token_usage(username, model_name, input_tokens, output_tokens, query_tex
 @tool
 def get_stock_valuation(symbol: str):
     """
-    【估值分析工具】支持股票和指数。
+    【估值分析】支持股票和指数。
     查询当前的估值指标(PE/PB)以及在历史(过去3-10年)中的分位水平。
     用于判断是"便宜"还是"贵"。
 
@@ -1984,7 +1984,7 @@ def get_stock_valuation(symbol: str):
             mv_val = mv_val / 10000.0
             mv_unit = "万亿"
 
-        report = f"📊 **{symbol} ({ts_code}) 估值深度分析** ({curr['trade_date']})\n"
+        report = f"📊 **{symbol} ({ts_code}) 估值分析** ({curr['trade_date']})\n"
         report += f"- **类型**: {'指数' if asset_type == 'index' else '个股'}\n"
         report += f"- **总市值**: {mv_val:.2f} {mv_unit}\n"
         report += "--------------------------------\n"
@@ -2012,7 +2012,6 @@ def get_stock_valuation(symbol: str):
 @tool
 def tool_compare_stocks(stock_list: str):
     """
-    【多股对比工具】
     用于对比多只股票的市值、市盈率(PE)、市净率(PB)等指标。
     当用户问“对比A和B”、“谁的市值更高”、“给这些股票排个序”时使用。
 
