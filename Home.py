@@ -626,9 +626,10 @@ def get_agent(current_user="访客", user_query=""):  # 传入 current_user
 
     【你的行为准则】
     1. 股票没有期权，客户问股票时，不要给期权策略，除非是用ETF期权来对冲股票。
-    2. 期权策略的建议，需要考虑波动率和距离到期日，使用工具`check_option_expiry_status`和知识库搭配回答
-    3. 绝对不要把工具的函数名称透露给客户
-    4. 给出明确操作建议，根据用户风险偏好来给他喜欢的策略，如果是保守的，就不要给激进建议，如果是激进的，就给进攻很强的策略。
+    2. 期权策略的建议，需要考虑波动率和距离到期日，使用工具`check_option_expiry_status`和知识库搭配回答。
+    3. 绝对不要把工具的函数名称透露给客户。
+    4. 如果思考步数过长，直接根据已知的信息做总结。
+    5. 给出明确操作建议，根据用户风险偏好来给他喜欢的策略，如果是保守的，就不要给激进建议，如果是激进的，就给进攻很强的策略。
         
 
     【回答格式】
@@ -788,7 +789,7 @@ def process_user_input(prompt_text):
 
                     response = agent.invoke(
                         {"messages": history},
-                        config={"recursion_limit": 100,
+                        config={"recursion_limit": 60,
                                 "callbacks": [monitor_callback]
                                 }
 
@@ -847,16 +848,44 @@ def process_user_input(prompt_text):
             # 🔥🔥 [核心修改] 捕获"思考步数过多"的错误 🔥🔥
             except GraphRecursionError:
                 status_placeholder.empty()
-                # 这里写您想要的友好提示
-                friendly_error = """
-                🤔 **这个问题有点复杂，AI 思考过度了...**                             
-                建议你把问题拆解得更细一点。
+                # --- 启动救援模式 ---
+                print("⚠️ [GraphRecursionError] 触发救援模式")
 
-                """
-                response_container.warning(friendly_error)
+                try:
+                    # 1. 定义一个救援用的 LLM（可以直接复用 ChatTongyi）
+                    rescue_llm = ChatTongyi(model="qwen-plus", temperature=0.3)
 
-                # (可选) 记录错误日志
-                print("❌ [GraphRecursionError] AI 陷入死循环或步数超限")
+                    # 2. 构建救援 Prompt
+                    # 我们把之前的历史记录发给它，并强制它总结
+                    rescue_system_prompt = SystemMessage(content="""
+                                    系统检测到你之前的思考过程过长。
+                                    请立刻停止工具调用！
+                                    请根据你【已经知道的信息】和【上下文历史】，直接给用户一个总结性的回答。
+                                    """)
+
+                    # 组合消息：历史记录 + 强制总结指令
+                    rescue_messages = history + [rescue_system_prompt]
+
+                    # 3. 强制生成回答
+                    rescue_response = rescue_llm.invoke(rescue_messages)
+                    ai_response = rescue_response.content
+
+                    # 4. 正常显示救援后的回答
+                    message_data = {
+                        "role": "ai",
+                        "content": ai_response,
+                        "chart": None
+                    }
+                    st.session_state.messages.append(message_data)
+                    placeholder = st.empty()
+                    placeholder.markdown(ai_response)
+
+                    # 渲染按钮
+                    native_share_button(ai_response, key=f"share_rescue_{int(time.time())}")
+
+                except Exception as rescue_e:
+                    # 如果连救援都失败了，再报错
+                    response_container.error(f"🤯 AI 甚至在尝试救援时都失败了: {rescue_e}")
 
             # 捕获其他通用错误
             except Exception as e:
