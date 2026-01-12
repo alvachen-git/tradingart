@@ -312,7 +312,7 @@ def get_available_patterns():
               AND pattern != ''
             GROUP BY pattern
             ORDER BY cnt DESC
-            LIMIT 5
+            LIMIT 10
         """
 
         with engine.connect() as conn:
