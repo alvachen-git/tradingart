@@ -795,6 +795,12 @@ def process_user_input(prompt_text):
 
                     )
                     ai_response = response["messages"][-1].content
+
+                    # 🔥🔥【核心修改】手动检测死循环特征 🔥🔥
+                    # 如果 AI 返回了这句话，说明它其实已经报错了，但被吞掉了。
+                    # 我们手动 raise 一个错误，强行跳转到下面的 except 救援逻辑！
+                    if "Sorry, need more steps" in ai_response or "Agent stopped" in ai_response:
+                        raise GraphRecursionError("强制触发救援模式")
                     # ========================================================
                     # 🔥 [修改区域]：检票员逻辑 (Inspector Strategy)
                     # ========================================================
