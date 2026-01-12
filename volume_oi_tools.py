@@ -10,6 +10,7 @@ from dotenv import load_dotenv
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 import symbol_map
+from symbol_map import get_contract_multiplier
 import traceback
 import re
 
@@ -110,16 +111,34 @@ def get_volume_oi(query: str):
             has_month = bool(re.search(r'\d{3,4}', code))
             if has_month:
                 sql = text(
-                    "SELECT trade_date,ts_code,vol,oi FROM futures_price WHERE ts_code=:c ORDER BY trade_date DESC LIMIT 1")
+                    "SELECT trade_date,ts_code,vol,oi,close_price FROM futures_price WHERE ts_code=:c ORDER BY trade_date DESC LIMIT 1")
                 df = pd.read_sql(sql, engine, params={"c": code})
             else:
                 clean = ''.join([i for i in code if not i.isdigit()])
                 sql = text(
-                    f"SELECT trade_date,ts_code,vol,oi FROM futures_price WHERE ts_code IN ('{clean}0','{clean}') ORDER BY trade_date DESC LIMIT 1")
+                    f"SELECT trade_date,ts_code,vol,oi,close_price FROM futures_price WHERE ts_code IN ('{clean}0','{clean}') ORDER BY trade_date DESC LIMIT 1")
                 df = pd.read_sql(sql, engine)
             if df.empty: return f"⚠️ 无数据: {q}"
             r = df.iloc[0]
-            return f"{r['ts_code']} ({r['trade_date']}): 成交{fmt_vol(r['vol'])}手, 持仓{fmt_vol(r['oi'])}手"
+
+            # 获取合约乘数并计算成交额和持仓额
+            multiplier = get_contract_multiplier(r['ts_code'])
+            price = r.get('close_price', 0) or 0
+
+            # 计算成交额和持仓额（单位：万元）
+            # 对于股指期货，multiplier已经是每点价值（元），所以直接用价格×乘数×手数
+            # 对于商品期货，multiplier是吨/手，所以用价格×乘数×手数
+            turnover = (r['vol'] * price * multiplier) / 10000 if r['vol'] and price else 0
+            position_value = (r['oi'] * price * multiplier) / 10000 if r['oi'] and price else 0
+
+            result = f"{r['ts_code']} ({r['trade_date']}): 成交{fmt_vol(r['vol'])}手"
+            if turnover > 0:
+                result += f", 成交额{fmt_amt(turnover / 1000)}"  # fmt_amt需要千元单位
+            result += f", 持仓{fmt_vol(r['oi'])}手"
+            if position_value > 0:
+                result += f", 持仓额{fmt_amt(position_value / 1000)}"
+
+            return result
 
         elif asset_type == 'stock':
             is_hk = code.endswith('.HK')
@@ -155,9 +174,9 @@ def get_futures_oi_ranking(query: str):
 
         clean = ''.join([i for i in symbol.upper() if not i.isdigit()])
         sql = text(f"""
-            SELECT t1.ts_code,t1.trade_date,t1.vol,t1.oi FROM futures_price t1
-            INNER JOIN (SELECT ts_code,MAX(trade_date) md FROM futures_price 
-                WHERE ts_code LIKE '{clean}%' AND ts_code NOT LIKE '%0' AND ts_code REGEXP '^{clean}[0-9]{{3,4}}$' GROUP BY ts_code) t2 
+            SELECT t1.ts_code,t1.trade_date,t1.vol,t1.oi,t1.close_price FROM futures_price t1
+            INNER JOIN (SELECT ts_code,MAX(trade_date) md FROM futures_price
+                WHERE ts_code LIKE '{clean}%' AND ts_code NOT LIKE '%0' AND ts_code REGEXP '^{clean}[0-9]{{3,4}}$' GROUP BY ts_code) t2
             ON t1.ts_code=t2.ts_code AND t1.trade_date=t2.md ORDER BY t1.oi DESC LIMIT 4
         """)
         df = pd.read_sql(sql, engine)
@@ -166,7 +185,17 @@ def get_futures_oi_ranking(query: str):
         result = f"📊 {query}({clean})持仓排名 ({df.iloc[0]['trade_date']})\n"
         for i, r in df.iterrows():
             mark = "🥇" if i == 0 else "🥈" if i == 1 else "🥉" if i == 2 else f"{i + 1}."
-            result += f"{mark} {r['ts_code']}: 持仓{fmt_vol(r['oi'])}手\n"
+
+            # 获取合约乘数并计算持仓额
+            multiplier = get_contract_multiplier(r['ts_code'])
+            price = r.get('close_price', 0) or 0
+            position_value = (r['oi'] * price * multiplier) / 10000 if r['oi'] and price else 0
+
+            result += f"{mark} {r['ts_code']}: 持仓{fmt_vol(r['oi'])}手"
+            if position_value > 0:
+                result += f", 持仓额{fmt_amt(position_value / 1000)}"
+            result += "\n"
+
         return result
     except Exception as e:
         return f"❌ 错误: {e}"
