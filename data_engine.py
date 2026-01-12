@@ -1452,9 +1452,22 @@ def check_option_expiry_status(query: str):
 
             if user_month:
                 # 用户指定了月份
+                # 【修复】郑商所品种使用3位月份格式（如MA602而非MA2602）
+                CZCE_PRODUCTS = {'CF', 'SR', 'TA', 'MA', 'OI', 'RM', 'FG', 'ZC', 'SF', 'SM',
+                                 'AP', 'CJ', 'UR', 'SA', 'PF', 'PK', 'PX', 'SH', 'WH', 'PM'}
+
+                is_czce = product_code.upper() in CZCE_PRODUCTS
+
                 if len(user_month) <= 2:
-                    curr = datetime.now().year % 100
-                    target_key = f"{product_code}{curr}{int(user_month):02d}"
+                    if is_czce:
+                        year_digit = str(datetime.now().year % 10)
+                        target_key = f"{product_code}{year_digit}{int(user_month):02d}"
+                    else:
+                        curr = datetime.now().year % 100
+                        target_key = f"{product_code}{curr}{int(user_month):02d}"
+                elif len(user_month) == 4 and is_czce:
+                    # 郑商所：2602 → 602
+                    target_key = f"{product_code}{user_month[1:]}"
                 else:
                     target_key = f"{product_code}{user_month}"
 
@@ -1536,7 +1549,7 @@ def check_option_expiry_status(query: str):
         # ==========================================
         #  统一计算
         # ==========================================
-        today = datetime.now()
+        today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)  # 只保留日期
         # 兼容处理: 如果数据库里是数字(20250325)或字符串
         expiry_date = pd.to_datetime(str(expiry_date))
         days_left = (expiry_date - today).days
