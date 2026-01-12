@@ -15,7 +15,7 @@ from datetime import datetime, timedelta
 from auth_ui import show_auth_dialog, sidebar_user_menu
 from streamlit_lottie import st_lottie
 from kline_tools import analyze_kline_pattern
-from screener_tool import search_top_stocks
+from screener_tool import search_top_stocks,get_available_patterns
 from news_tools import get_financial_news
 from langgraph.errors import GraphRecursionError
 from fund_flow_tools import tool_get_retail_money_flow
@@ -566,7 +566,7 @@ if "messages" not in st.session_state:
 def get_agent(current_user="访客", user_query=""):  # 传入 current_user
     # ... (这里保留您原来的 prompt 和 tools) ...
     tools = [analyze_kline_pattern, search_investment_knowledge, get_market_snapshot, get_commodity_iv_info,get_financial_news,search_broker_holdings_on_date,tool_analyze_position_change,tool_query_specific_option,get_historical_price,get_volume_oi,get_futures_oi_ranking,get_option_oi_ranking,get_option_volume_abnormal,get_option_oi_abnormal,
-             get_price_statistics, check_option_expiry_status,tool_stock_hedging_analysis,tool_futures_correlation_check,tool_stock_correlation_check,search_top_stocks,calculate_hedging_beta,tool_get_retail_money_flow,draw_chart_tool,search_web,get_stock_valuation,tool_compare_stocks,get_futures_fund_flow,get_futures_fund_ranking]
+             get_price_statistics, check_option_expiry_status,tool_stock_hedging_analysis,tool_futures_correlation_check,tool_stock_correlation_check,search_top_stocks,calculate_hedging_beta,tool_get_retail_money_flow,draw_chart_tool,search_web,get_stock_valuation,tool_compare_stocks,get_futures_fund_flow,get_futures_fund_ranking,get_available_patterns]
     if not os.getenv("DASHSCOPE_API_KEY"):
         st.error("❌ 未配置 API KEY");
         return None
@@ -627,7 +627,7 @@ def get_agent(current_user="访客", user_query=""):  # 传入 current_user
     【你的行为准则】
     1. 股票没有期权，客户问股票时，不要给期权策略，除非是用ETF期权来对冲股票。
     2. 期权策略的建议，需要考虑波动率和距离到期日，使用工具`check_option_expiry_status`和知识库搭配回答
-    3. 如果客户问最近某商品的技术面，可以把前面几天的K线都一起分析后给出总结
+    3. 绝对不要把工具的函数名称透露给客户
     4. 给出明确操作建议，根据用户风险偏好来给他喜欢的策略，如果是保守的，就不要给激进建议，如果是激进的，就给进攻很强的策略。
         
 
