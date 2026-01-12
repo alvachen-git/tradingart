@@ -27,7 +27,7 @@ import extra_streamlit_components as stx
 import streamlit.components.v1 as components
 import uuid #用于生成唯一ID
 from market_tools import get_market_snapshot, get_price_statistics,tool_query_specific_option,get_historical_price
-from data_engine import get_commodity_iv_info, check_option_expiry_status,search_broker_holdings_on_date,tool_analyze_position_change,tool_compare_stocks,get_stock_valuation
+from data_engine import get_commodity_iv_info, check_option_expiry_status,search_broker_holdings_on_date,tool_analyze_position_change,tool_compare_stocks,get_stock_valuation,get_capital_flow_trend,get_top_static_capital,get_top_flowing_capital
 from captcha_utils import generate_captcha_image
 from search_tools import search_web
 from market_correlation import tool_stock_hedging_analysis, tool_futures_correlation_check,tool_stock_correlation_check
@@ -565,7 +565,7 @@ if "messages" not in st.session_state:
 def get_agent(current_user="访客", user_query=""):  # 传入 current_user
     # ... (这里保留您原来的 prompt 和 tools) ...
     tools = [analyze_kline_pattern, search_investment_knowledge, get_market_snapshot, get_commodity_iv_info,get_financial_news,search_broker_holdings_on_date,tool_analyze_position_change,tool_query_specific_option,get_historical_price,get_volume_oi,get_futures_oi_ranking,get_option_oi_ranking,get_option_volume_abnormal,get_option_oi_abnormal,
-             get_price_statistics, check_option_expiry_status,tool_stock_hedging_analysis,tool_futures_correlation_check,tool_stock_correlation_check,search_top_stocks,calculate_hedging_beta,tool_get_retail_money_flow,draw_chart_tool,search_web,get_stock_valuation,tool_compare_stocks]
+             get_price_statistics, check_option_expiry_status,tool_stock_hedging_analysis,tool_futures_correlation_check,tool_stock_correlation_check,search_top_stocks,calculate_hedging_beta,tool_get_retail_money_flow,draw_chart_tool,search_web,get_stock_valuation,tool_compare_stocks,get_capital_flow_trend,get_top_static_capital,get_top_flowing_capital]
     if not os.getenv("DASHSCOPE_API_KEY"):
         st.error("❌ 未配置 API KEY");
         return None

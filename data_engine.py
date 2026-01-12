@@ -2080,3 +2080,279 @@ def tool_compare_stocks(stock_list: str):
 
     except Exception as e:
         return f"对比失败: {e}"
+
+
+# ==========================================
+# 资金流动分析工具
+# ==========================================
+
+@tool
+def get_capital_flow_trend(symbol: str, days: int = 5):
+    """
+    【资金流动趋势分析】查询某商品期货最近几天的资金流动情况。
+    分析成交量、持仓量及资金流入流出的趋势变化。
+
+    Args:
+        symbol: 商品名称或代码，如 '碳酸锂', 'lc', '螺纹钢', 'rb'
+        days: 查询最近多少天，默认5天
+
+    Returns:
+        包含成交量、持仓量、流动资金、静态资金的趋势分析
+    """
+    if engine is None:
+        return "❌ 数据库连接失败"
+
+    try:
+        # 1. 识别商品代码
+        import symbol_map
+        res = symbol_map.resolve_symbol(symbol)
+
+        if not res or res[1] != 'future':
+            return f"⚠️ 未找到期货品种: {symbol}"
+
+        ts_code, _ = res
+        # 主力合约通常是去掉数字的代码，或者代码末尾是0
+        clean_code = ''.join([i for i in ts_code.upper() if not i.isdigit()])
+
+        # 如果用户输入的已经带月份，就用原始代码；否则用主力合约(末尾0)
+        if any(char.isdigit() for char in ts_code):
+            query_code = ts_code.upper()
+        else:
+            query_code = clean_code + '0'
+
+        # 2. 查询最近N天的数据
+        sql = f"""
+            SELECT trade_date, ts_code, close_price, vol, oi, pct_chg
+            FROM futures_price
+            WHERE ts_code = '{query_code}'
+            ORDER BY trade_date DESC
+            LIMIT {days}
+        """
+        df = pd.read_sql(sql, engine)
+
+        if df.empty:
+            return f"⚠️ 未找到 {symbol} ({query_code}) 的最近数据"
+
+        # 反转顺序，让最早的在前面
+        df = df.sort_values('trade_date').reset_index(drop=True)
+
+        # 3. 计算资金指标（简化计算，不考虑合约乘数）
+        # 流动资金 = 成交量 × 收盘价 (代表当日资金流动规模)
+        # 静态资金 = 持仓量 × 收盘价 (代表沉淀在市场的资金)
+        df['流动资金(亿)'] = (df['vol'] * df['close_price'] / 100000000).round(2)
+        df['静态资金(亿)'] = (df['oi'] * df['close_price'] / 100000000).round(2)
+
+        # 4. 计算变化量和变化率
+        df['流动资金变化'] = df['流动资金(亿)'].diff().round(2)
+        df['静态资金变化'] = df['静态资金(亿)'].diff().round(2)
+        df['成交量变化%'] = (df['vol'].pct_change() * 100).round(2)
+        df['持仓量变化%'] = (df['oi'].pct_change() * 100).round(2)
+
+        # 5. 生成分析报告
+        latest = df.iloc[-1]
+        product_name = symbol
+
+        # 判断资金流向
+        if len(df) > 1:
+            flow_trend = "增加 ⬆️" if df['流动资金(亿)'].iloc[-1] > df['流动资金(亿)'].iloc[-2] else "减少 ⬇️"
+            static_trend = "增加 ⬆️" if df['静态资金(亿)'].iloc[-1] > df['静态资金(亿)'].iloc[-2] else "减少 ⬇️"
+        else:
+            flow_trend = "-"
+            static_trend = "-"
+
+        report = f"💰 **{product_name} ({query_code}) 资金流动分析**\n\n"
+        report += f"📅 **最新日期**: {latest['trade_date']}\n"
+        report += f"💵 **收盘价**: {latest['close_price']:.2f}\n"
+        report += f"📊 **涨跌幅**: {latest['pct_chg']:.2f}%\n"
+        report += "--------------------------------\n"
+        report += f"🔄 **流动资金**: {latest['流动资金(亿)']} 亿元 ({flow_trend})\n"
+        report += f"   └ 成交量: {latest['vol']:.0f} 手\n"
+        report += f"🏦 **静态资金沉淀**: {latest['静态资金(亿)']} 亿元 ({static_trend})\n"
+        report += f"   └ 持仓量: {latest['oi']:.0f} 手\n"
+        report += "\n**最近趋势** (由远到近):\n"
+
+        # 生成趋势表格
+        display_df = df[['trade_date', '收盘价', '成交量', '持仓量', '流动资金(亿)', '静态资金(亿)', '流动资金变化', '静态资金变化']].copy()
+        display_df.columns = ['日期', '收盘价', '成交量', '持仓量', '流动资金', '静态资金', '流动Δ', '静态Δ']
+        display_df['收盘价'] = display_df['收盘价'].round(2)
+        display_df['成交量'] = display_df['成交量'].apply(lambda x: f"{x/10000:.1f}万" if x >= 10000 else f"{x:.0f}")
+        display_df['持仓量'] = display_df['持仓量'].apply(lambda x: f"{x/10000:.1f}万" if x >= 10000 else f"{x:.0f}")
+
+        report += display_df.to_markdown(index=False)
+
+        return report
+
+    except Exception as e:
+        return f"❌ 分析失败: {str(e)}"
+
+
+@tool
+def get_top_static_capital(top_n: int = 10, date: str = None):
+    """
+    【静态资金沉淀排行】查询全市场哪些商品期货的静态资金沉淀最大。
+    静态资金沉淀 = 持仓量 × 价格，反映有多少资金沉淀在该品种上。
+
+    Args:
+        top_n: 返回前N名，默认10
+        date: 查询日期(YYYYMMDD格式)，默认最新交易日
+
+    Returns:
+        按静态资金沉淀排序的商品列表
+    """
+    if engine is None:
+        return "❌ 数据库连接失败"
+
+    try:
+        # 1. 确定查询日期
+        if date is None:
+            date_sql = "SELECT MAX(trade_date) as last_date FROM futures_price"
+            with engine.connect() as conn:
+                result = conn.execute(text(date_sql)).fetchone()
+                date = str(result[0]).replace('-', '')
+
+        # 2. 查询所有主力合约的数据
+        # 主力合约通常是 ts_code 以 '0' 结尾或者没有数字的
+        sql = f"""
+            SELECT ts_code, trade_date, close_price, vol, oi, pct_chg
+            FROM futures_price
+            WHERE trade_date = '{date}'
+            AND (ts_code LIKE '%0' OR ts_code NOT REGEXP '[0-9]')
+            AND oi > 0
+        """
+        df = pd.read_sql(sql, engine)
+
+        if df.empty:
+            return f"⚠️ 未找到日期 {date} 的数据"
+
+        # 3. 计算静态资金沉淀
+        # 静态资金 = 持仓量(oi) × 收盘价(close_price)
+        df['静态资金(亿)'] = (df['oi'] * df['close_price'] / 100000000).round(2)
+        df['流动资金(亿)'] = (df['vol'] * df['close_price'] / 100000000).round(2)
+
+        # 4. 排序并取前N名
+        df = df.sort_values('静态资金(亿)', ascending=False).head(top_n)
+
+        # 5. 添加品种中文名
+        from volume_oi_tools import COMMODITY_MAP
+        # 创建代码到中文名的映射
+        code_map = {v.upper(): k for k, v in COMMODITY_MAP.items()}
+
+        def get_name(code):
+            # 去掉数字后缀
+            clean = ''.join([i for i in code if not i.isdigit()])
+            return code_map.get(clean, clean)
+
+        df['品种'] = df['ts_code'].apply(get_name)
+
+        # 6. 生成报告
+        report = f"🏆 **静态资金沉淀排行榜** (TOP {top_n})\n"
+        report += f"📅 **数据日期**: {date}\n"
+        report += f"💡 静态资金 = 持仓量 × 价格 (反映资金沉淀规模)\n"
+        report += "================================\n\n"
+
+        # 生成排名表格
+        result_df = df[['品种', 'ts_code', '静态资金(亿)', '持仓量', '收盘价', '流动资金(亿)', '涨跌幅']].copy()
+        result_df.columns = ['品种', '合约', '静态资金(亿)', '持仓量', '价格', '流动资金(亿)', '涨跌%']
+        result_df['持仓量'] = result_df['持仓量'].apply(lambda x: f"{x/10000:.1f}万")
+        result_df['价格'] = result_df['价格'].round(2)
+        result_df['涨跌%'] = result_df['涨跌%'].apply(lambda x: f"{x:+.2f}%" if pd.notna(x) else "-")
+
+        # 添加排名标记
+        result_df.insert(0, '排名', ['🥇', '🥈', '🥉'] + [f"{i}." for i in range(4, top_n+1)])
+
+        report += result_df.to_markdown(index=False)
+
+        # 添加总结
+        total_static = df['静态资金(亿)'].sum()
+        report += f"\n\n📊 **TOP {top_n} 总沉淀**: {total_static:.2f} 亿元"
+
+        return report
+
+    except Exception as e:
+        return f"❌ 查询失败: {str(e)}"
+
+
+@tool
+def get_top_flowing_capital(top_n: int = 10, date: str = None):
+    """
+    【流动资金排行】查询全市场哪些商品期货的流动资金最大。
+    流动资金 = 成交量 × 价格，反映该品种的资金活跃度。
+
+    Args:
+        top_n: 返回前N名，默认10
+        date: 查询日期(YYYYMMDD格式)，默认最新交易日
+
+    Returns:
+        按流动资金排序的商品列表
+    """
+    if engine is None:
+        return "❌ 数据库连接失败"
+
+    try:
+        # 1. 确定查询日期
+        if date is None:
+            date_sql = "SELECT MAX(trade_date) as last_date FROM futures_price"
+            with engine.connect() as conn:
+                result = conn.execute(text(date_sql)).fetchone()
+                date = str(result[0]).replace('-', '')
+
+        # 2. 查询所有主力合约的数据
+        sql = f"""
+            SELECT ts_code, trade_date, close_price, vol, oi, pct_chg
+            FROM futures_price
+            WHERE trade_date = '{date}'
+            AND (ts_code LIKE '%0' OR ts_code NOT REGEXP '[0-9]')
+            AND vol > 0
+        """
+        df = pd.read_sql(sql, engine)
+
+        if df.empty:
+            return f"⚠️ 未找到日期 {date} 的数据"
+
+        # 3. 计算流动资金
+        # 流动资金 = 成交量(vol) × 收盘价(close_price)
+        df['流动资金(亿)'] = (df['vol'] * df['close_price'] / 100000000).round(2)
+        df['静态资金(亿)'] = (df['oi'] * df['close_price'] / 100000000).round(2)
+
+        # 4. 排序并取前N名
+        df = df.sort_values('流动资金(亿)', ascending=False).head(top_n)
+
+        # 5. 添加品种中文名
+        from volume_oi_tools import COMMODITY_MAP
+        code_map = {v.upper(): k for k, v in COMMODITY_MAP.items()}
+
+        def get_name(code):
+            clean = ''.join([i for i in code if not i.isdigit()])
+            return code_map.get(clean, clean)
+
+        df['品种'] = df['ts_code'].apply(get_name)
+
+        # 6. 计算活跃度指标（流动资金/静态资金的比率）
+        df['活跃度'] = (df['流动资金(亿)'] / df['静态资金(亿)'] * 100).round(2)
+
+        # 7. 生成报告
+        report = f"🔥 **流动资金排行榜** (TOP {top_n})\n"
+        report += f"📅 **数据日期**: {date}\n"
+        report += f"💡 流动资金 = 成交量 × 价格 (反映资金活跃度)\n"
+        report += "================================\n\n"
+
+        # 生成排名表格
+        result_df = df[['品种', 'ts_code', '流动资金(亿)', '成交量', '静态资金(亿)', '活跃度', '涨跌幅']].copy()
+        result_df.columns = ['品种', '合约', '流动资金(亿)', '成交量', '静态资金(亿)', '活跃度%', '涨跌%']
+        result_df['成交量'] = result_df['成交量'].apply(lambda x: f"{x/10000:.1f}万")
+        result_df['涨跌%'] = result_df['涨跌%'].apply(lambda x: f"{x:+.2f}%" if pd.notna(x) else "-")
+
+        # 添加排名标记
+        result_df.insert(0, '排名', ['🥇', '🥈', '🥉'] + [f"{i}." for i in range(4, top_n+1)])
+
+        report += result_df.to_markdown(index=False)
+
+        # 添加总结
+        total_flow = df['流动资金(亿)'].sum()
+        report += f"\n\n📊 **TOP {top_n} 总流动**: {total_flow:.2f} 亿元"
+        report += f"\n💡 **活跃度%** = 流动资金 / 静态资金 × 100 (数值越高，说明换手越活跃)"
+
+        return report
+
+    except Exception as e:
+        return f"❌ 查询失败: {str(e)}"
