@@ -386,3 +386,223 @@ def get_option_oi_abnormal(query: str = "全部"):
         return result
     except Exception as e:
         return f"❌ 错误: {e}"
+
+
+# ==========================================
+#  在 volume_oi_tools.py 末尾添加这个新工具
+#  修正版：正确关联 option_basic 和 option_daily
+# ==========================================
+
+@tool
+def analyze_etf_option_sentiment(query: str = "50ETF"):
+    """
+    分析ETF期权的持仓变化，解读资金对后市的看法。
+
+    分析维度：
+    1. 认购/认沽总持仓变化 → 判断多空情绪
+    2. 最大持仓合约行权价移动 → 判断压力位/支撑位变化
+
+    输入：ETF名称，如"50ETF"、"300ETF"、"创业板ETF"
+    """
+    if engine is None: return "❌ 数据库未连接"
+
+    try:
+        # 1. 解析ETF标的
+        underlying, etf_name = get_etf_underlying(query)
+        if not underlying:
+            return "⚠️ 请指定ETF，如：50ETF、300ETF、500ETF、创业板ETF、科创50ETF"
+
+        # 2. 获取最近两个交易日
+        date_sql = text("SELECT DISTINCT trade_date FROM option_daily ORDER BY trade_date DESC LIMIT 2")
+        dates = pd.read_sql(date_sql, engine)
+        if len(dates) < 2:
+            return "⚠️ 数据不足，需要至少2个交易日的数据"
+
+        today = dates.iloc[0]['trade_date']
+        yesterday = dates.iloc[1]['trade_date']
+
+        # 3. 查询今日和昨日的持仓数据
+        # 关键：通过 ts_code 关联 option_basic 和 option_daily
+        sql = text("""
+                   SELECT od.trade_date,
+                          ob.call_put,
+                          ob.exercise_price,
+                          od.oi,
+                          od.ts_code
+                   FROM option_daily od
+                            INNER JOIN option_basic ob ON od.ts_code = ob.ts_code
+                   WHERE od.trade_date IN (:today, :yesterday)
+                     AND ob.underlying = :underlying
+                     AND ob.delist_date >= :today
+                   ORDER BY od.trade_date, ob.call_put, od.oi DESC
+                   """)
+        df = pd.read_sql(sql, engine, params={
+            "today": today,
+            "yesterday": yesterday,
+            "underlying": underlying
+        })
+
+        if df.empty:
+            return f"⚠️ {etf_name}期权暂无数据"
+
+        # 4. 分离今日和昨日数据
+        df_today = df[df['trade_date'] == today]
+        df_yesterday = df[df['trade_date'] == yesterday]
+
+        if df_today.empty or df_yesterday.empty:
+            return f"⚠️ {etf_name}期权数据不完整，需要连续两个交易日的数据"
+
+        # 5. 计算认购/认沽总持仓变化
+        call_today = df_today[df_today['call_put'] == 'C']['oi'].sum()
+        call_yesterday = df_yesterday[df_yesterday['call_put'] == 'C']['oi'].sum()
+        put_today = df_today[df_today['call_put'] == 'P']['oi'].sum()
+        put_yesterday = df_yesterday[df_yesterday['call_put'] == 'P']['oi'].sum()
+
+        call_chg = call_today - call_yesterday
+        put_chg = put_today - put_yesterday
+        call_chg_pct = (call_chg / call_yesterday * 100) if call_yesterday > 0 else 0
+        put_chg_pct = (put_chg / put_yesterday * 100) if put_yesterday > 0 else 0
+
+        # 6. 找出最大持仓合约（认购/认沽分别找）
+        call_today_df = df_today[df_today['call_put'] == 'C'].copy()
+        call_yesterday_df = df_yesterday[df_yesterday['call_put'] == 'C'].copy()
+        put_today_df = df_today[df_today['call_put'] == 'P'].copy()
+        put_yesterday_df = df_yesterday[df_yesterday['call_put'] == 'P'].copy()
+
+        # 最大持仓的行权价（需要重置索引避免 KeyError）
+        if not call_today_df.empty:
+            call_today_df = call_today_df.reset_index(drop=True)
+            call_strike_today = call_today_df.loc[call_today_df['oi'].idxmax(), 'exercise_price']
+            call_max_oi_today = call_today_df['oi'].max()
+        else:
+            call_strike_today, call_max_oi_today = 0, 0
+
+        if not call_yesterday_df.empty:
+            call_yesterday_df = call_yesterday_df.reset_index(drop=True)
+            call_strike_yesterday = call_yesterday_df.loc[call_yesterday_df['oi'].idxmax(), 'exercise_price']
+        else:
+            call_strike_yesterday = 0
+
+        if not put_today_df.empty:
+            put_today_df = put_today_df.reset_index(drop=True)
+            put_strike_today = put_today_df.loc[put_today_df['oi'].idxmax(), 'exercise_price']
+            put_max_oi_today = put_today_df['oi'].max()
+        else:
+            put_strike_today, put_max_oi_today = 0, 0
+
+        if not put_yesterday_df.empty:
+            put_yesterday_df = put_yesterday_df.reset_index(drop=True)
+            put_strike_yesterday = put_yesterday_df.loc[put_yesterday_df['oi'].idxmax(), 'exercise_price']
+        else:
+            put_strike_yesterday = 0
+
+        call_strike_move = call_strike_today - call_strike_yesterday
+        put_strike_move = put_strike_today - put_strike_yesterday
+
+        # ==========================================
+        # 7. 核心解读逻辑
+        # ==========================================
+        signals = []
+        bullish_score = 0  # 看多得分
+        bearish_score = 0  # 看空得分
+
+        # 7.1 认购持仓变化解读
+        # 期权市场以卖方为主导（机构），认购持仓增加 = 机构卖认购 = 看空
+        if call_chg_pct > 10:
+            signals.append(f"🔴 认购持仓大增 {call_chg_pct:+.1f}%，卖方（机构）加码压制上方，**偏空信号**")
+            bearish_score += 2
+        elif call_chg_pct > 5:
+            signals.append(f"🟠 认购持仓增加 {call_chg_pct:+.1f}%，卖方略偏谨慎")
+            bearish_score += 1
+        elif call_chg_pct < -10:
+            signals.append(f"🟢 认购持仓大减 {call_chg_pct:+.1f}%，卖方平仓撤退，**上方压力减轻**")
+            bullish_score += 1
+        elif call_chg_pct < -5:
+            signals.append(f"🟢 认购持仓减少 {call_chg_pct:+.1f}%，上方压力略减")
+
+        # 7.2 认沽持仓变化解读
+        # 认沽持仓增加 = 机构卖认沽 = 看多（愿意接货）
+        if put_chg_pct > 10:
+            signals.append(f"🟢 认沽持仓大增 {put_chg_pct:+.1f}%，卖方（机构）愿意接货，**偏多信号**")
+            bullish_score += 2
+        elif put_chg_pct > 5:
+            signals.append(f"🟢 认沽持仓增加 {put_chg_pct:+.1f}%，卖方看好下方支撑")
+            bullish_score += 1
+        elif put_chg_pct < -10:
+            signals.append(f"🔴 认沽持仓大减 {put_chg_pct:+.1f}%，卖方平仓撤离，**下方支撑减弱**")
+            bearish_score += 1
+        elif put_chg_pct < -5:
+            signals.append(f"🟠 认沽持仓减少 {put_chg_pct:+.1f}%，支撑略减弱")
+
+        # 7.3 认购最大持仓行权价移动解读
+        # 认购最大持仓 = 压力位，上移 = 压力位上移 = 看多
+        if call_strike_move > 0:
+            signals.append(f"🟢 认购最大持仓行权价上移 {call_strike_yesterday}→{call_strike_today}，**压力位上移，偏多**")
+            bullish_score += 2
+        elif call_strike_move < 0:
+            signals.append(f"🔴 认购最大持仓行权价下移 {call_strike_yesterday}→{call_strike_today}，**压力位下移，偏空**")
+            bearish_score += 2
+        else:
+            signals.append(f"⚪ 认购最大持仓行权价不变 {call_strike_today}，压力位稳定")
+
+        # 7.4 认沽最大持仓行权价移动解读
+        # 认沽最大持仓 = 支撑位，上移 = 支撑位上移 = 看多
+        if put_strike_move > 0:
+            signals.append(f"🟢 认沽最大持仓行权价上移 {put_strike_yesterday}→{put_strike_today}，**支撑位上移，偏多**")
+            bullish_score += 2
+        elif put_strike_move < 0:
+            signals.append(f"🔴 认沽最大持仓行权价下移 {put_strike_yesterday}→{put_strike_today}，**支撑位下移，偏空**")
+            bearish_score += 2
+        else:
+            signals.append(f"⚪ 认沽最大持仓行权价不变 {put_strike_today}，支撑位稳定")
+
+        # 8. 综合判断
+        if bullish_score > bearish_score + 2:
+            overall = "📈 **综合研判：机构偏多**"
+            overall_detail = "多个信号指向看涨，资金布局偏乐观"
+        elif bearish_score > bullish_score + 2:
+            overall = "📉 **综合研判：机构偏空**"
+            overall_detail = "多个信号指向看跌，资金布局偏谨慎"
+        elif bullish_score > bearish_score:
+            overall = "📊 **综合研判：中性偏多**"
+            overall_detail = "信号略偏乐观，但不够强烈"
+        elif bearish_score > bullish_score:
+            overall = "📊 **综合研判：中性偏空**"
+            overall_detail = "信号略偏谨慎，但不够强烈"
+        else:
+            overall = "📊 **综合研判：多空均衡**"
+            overall_detail = "暂无明显方向，观望为主"
+
+        # 9. 组装报告
+        result = f"""📊 **{etf_name}期权持仓分析** ({yesterday} → {today})
+
+**一、持仓量变化**
+| 类型 | 昨日持仓 | 今日持仓 | 变化 |
+|------|----------|----------|------|
+| 认购 | {fmt_vol(call_yesterday)} | {fmt_vol(call_today)} | {call_chg_pct:+.1f}% |
+| 认沽 | {fmt_vol(put_yesterday)} | {fmt_vol(put_today)} | {put_chg_pct:+.1f}% |
+
+**二、最大持仓合约（压力/支撑位）**
+| 类型 | 昨日行权价 | 今日行权价 | 移动 | 今日持仓 |
+|------|------------|------------|------|----------|
+| 认购(压力位) | {call_strike_yesterday} | {call_strike_today} | {'↑上移' if call_strike_move > 0 else '↓下移' if call_strike_move < 0 else '→不变'} | {fmt_vol(call_max_oi_today)} |
+| 认沽(支撑位) | {put_strike_yesterday} | {put_strike_today} | {'↑上移' if put_strike_move > 0 else '↓下移' if put_strike_move < 0 else '→不变'} | {fmt_vol(put_max_oi_today)} |
+
+**三、信号解读**
+{chr(10).join(signals)}
+
+**四、{overall}**
+{overall_detail}
+
+---
+**解读原理**：
+- ETF期权市场以机构卖方为主导
+- 认购持仓上升 = 机构卖Call压制 = 偏空
+- 认沽持上升 = 机构卖Put接货 = 偏多
+- 最大持仓行权价 = 市场认可的压力/支撑位
+"""
+        return result
+
+    except Exception as e:
+        import traceback
+        return f"❌ 分析出错: {e}\n{traceback.format_exc()}"
