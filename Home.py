@@ -627,7 +627,7 @@ def get_agent(current_user="访客", user_query=""):  # 传入 current_user
     【你的行为准则】
     1. 股票没有期权，客户问股票时，不要给期权策略，除非是用ETF期权来对冲股票。
     2. 期权策略的建议，需要考虑波动率和距离到期日，使用工具`check_option_expiry_status`和知识库搭配回答。
-    3. 绝对不要把工具的函数名称透露给客户。
+    3. 国内主流商品期货都有对应期权，先查数据库再回答。
     4. 如果思考步数过长，直接根据已知的信息做总结。
     5. 给出明确操作建议，根据用户风险偏好来给他喜欢的策略，如果是保守的，就不要给激进建议，如果是激进的，就给进攻很强的策略。
         
@@ -789,7 +789,7 @@ def process_user_input(prompt_text):
 
                     response = agent.invoke(
                         {"messages": history},
-                        config={"recursion_limit": 60,
+                        config={"recursion_limit": 100,
                                 "callbacks": [monitor_callback]
                                 }
 
