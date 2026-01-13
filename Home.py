@@ -789,7 +789,7 @@ def process_user_input(prompt_text):
 
                     response = agent.invoke(
                         {"messages": history},
-                        config={"recursion_limit": 100,
+                        config={"recursion_limit": 80,
                                 "callbacks": [monitor_callback]
                                 }
 
