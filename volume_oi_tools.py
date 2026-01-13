@@ -606,3 +606,131 @@ def analyze_etf_option_sentiment(query: str = "50ETF"):
     except Exception as e:
         import traceback
         return f"❌ 分析出错: {e}\n{traceback.format_exc()}"
+
+
+# ==========================================
+#  新增工具：查询ETF期权可用行权价
+#  添加到 volume_oi_tools.py 末尾
+# ==========================================
+
+@tool
+def get_etf_option_strikes(query: str = "50ETF"):
+    """
+    查询指定ETF期权当前可用的行权价列表，用于制定交易策略。
+
+    返回：当月/次月合约的所有行权价，标注平值附近位置。
+    输入：ETF名称，如"50ETF"、"300ETF"、"创业板ETF"
+    """
+    if engine is None: return "❌ 数据库未连接"
+
+    try:
+        # 1. 解析ETF标的
+        underlying, etf_name = get_etf_underlying(query)
+        if not underlying:
+            return "⚠️ 请指定ETF，如：50ETF、300ETF、500ETF、创业板ETF、科创50ETF"
+
+        # 2. 获取ETF当前价格
+        etf_price_sql = text("""
+                             SELECT close_price
+                             FROM stock_price
+                             WHERE ts_code = :underlying
+                             ORDER BY trade_date DESC LIMIT 1
+                             """)
+        etf_df = pd.read_sql(etf_price_sql, engine, params={"underlying": underlying})
+        etf_price = etf_df.iloc[0]['close_price'] if not etf_df.empty else None
+
+        # 3. 获取最新交易日
+        date_sql = text("SELECT MAX(trade_date) as latest FROM option_daily")
+        latest_date = pd.read_sql(date_sql, engine).iloc[0]['latest']
+
+        # 4. 查询当前可用的行权价（未到期合约）
+        sql = text("""
+                   SELECT DISTINCT ob.exercise_price,
+                                   ob.call_put,
+                                   SUBSTRING(ob.name, LOCATE('期权', ob.name) + 2, 4) as exp_month,
+                                   od.oi,
+                                   od.vol
+                   FROM option_basic ob
+                            INNER JOIN option_daily od ON ob.ts_code = od.ts_code
+                   WHERE ob.underlying = :underlying
+                     AND ob.delist_date >= :latest_date
+                     AND od.trade_date = :latest_date
+                   ORDER BY ob.exercise_price
+                   """)
+        df = pd.read_sql(sql, engine, params={
+            "underlying": underlying,
+            "latest_date": latest_date
+        })
+
+        if df.empty:
+            return f"⚠️ {etf_name}期权暂无可用合约"
+
+        # 5. 获取所有唯一行权价
+        strikes = sorted(df['exercise_price'].unique())
+
+        # 6. 找出平值附近的行权价
+        if etf_price:
+            # 找最接近ETF价格的行权价作为平值
+            atm_strike = min(strikes, key=lambda x: abs(x - etf_price))
+            atm_idx = strikes.index(atm_strike)
+        else:
+            atm_idx = len(strikes) // 2
+            atm_strike = strikes[atm_idx]
+
+        # 7. 统计每个行权价的持仓量
+        call_oi = df[df['call_put'] == 'C'].groupby('exercise_price')['oi'].sum().to_dict()
+        put_oi = df[df['call_put'] == 'P'].groupby('exercise_price')['oi'].sum().to_dict()
+
+        # 8. 获取到期月份
+        months = df['exp_month'].unique()
+        month_str = '/'.join(sorted(set(months)))
+
+        # 9. 组装结果
+        etf_price_str = f"{etf_price:.3f}" if etf_price else "未知"
+        result = f"""📋 **{etf_name}期权可用行权价** ({latest_date})
+
+**ETF现价**: {etf_price_str}
+**平值(ATM)**: {atm_strike}
+**到期月份**: {month_str}
+
+**行权价列表** (共{len(strikes)}个):
+"""
+
+        # 显示平值附近的行权价（上下各5档）
+        start_idx = max(0, atm_idx - 5)
+        end_idx = min(len(strikes), atm_idx + 6)
+
+        result += "\n| 行权价 | 位置 | 认购持仓 | 认沽持仓 |\n"
+        result += "|--------|------|----------|----------|\n"
+
+        for i in range(start_idx, end_idx):
+            strike = strikes[i]
+            if strike == atm_strike:
+                pos = "**⭐平值**"
+            elif strike > atm_strike:
+                pos = f"虚值+{i - atm_idx}"
+            else:
+                pos = f"实值{i - atm_idx}"
+
+            c_oi = call_oi.get(strike, 0)
+            p_oi = put_oi.get(strike, 0)
+            result += f"| {strike} | {pos} | {fmt_vol(c_oi)} | {fmt_vol(p_oi)} |\n"
+
+        # 10. 添加完整行权价列表（供AI参考）
+        result += f"\n**全部行权价**: {', '.join([str(s) for s in strikes])}\n"
+
+        # 11. 添加策略参考提示
+        result += f"""
+---
+💡 **参考行权价**（基于当前平值 {atm_strike}）:
+- 保守牛市价差: 买入 购{strikes[max(atm_idx - 1, 0)]}(实值) + 卖出 购{strikes[min(atm_idx + 1, len(strikes) - 1)]}(浅虚值)
+- 积极牛市价差: 买入 购{strikes[min(atm_idx + 1, len(strikes) - 1)]}(虚值) + 卖出 购{strikes[min(atm_idx + 2, len(strikes) - 1)]}(更虚值)
+- 反比例认购: 卖出 购{atm_strike}(平值)1张 + 买入 购{strikes[min(atm_idx + 1, len(strikes) - 1)]}(虚值)3张
+- 备兑开仓(Covered Call): 卖出 购{strikes[min(atm_idx + 1, len(strikes) - 1)]} 或 购{strikes[min(atm_idx + 2, len(strikes) - 1)]}
+- 多头保险策略: 买入 沽{strikes[max(atm_idx - 1, 0)]} 或 沽{strikes[max(atm_idx - 2, 0)]}
+"""
+        return result
+
+    except Exception as e:
+        import traceback
+        return f"❌ 查询出错: {e}\n{traceback.format_exc()}"

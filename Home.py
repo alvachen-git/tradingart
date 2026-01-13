@@ -22,7 +22,7 @@ from fund_flow_tools import tool_get_retail_money_flow
 from plot_tools import draw_chart_tool
 from futures_fund_flow_tools import get_futures_fund_flow,get_futures_fund_ranking
 from vision_tools import analyze_financial_image
-from volume_oi_tools import get_volume_oi, get_futures_oi_ranking, get_option_oi_ranking,get_option_volume_abnormal, get_option_oi_abnormal,analyze_etf_option_sentiment
+from volume_oi_tools import get_volume_oi, get_futures_oi_ranking, get_option_oi_ranking,get_option_volume_abnormal, get_option_oi_abnormal,analyze_etf_option_sentiment,get_etf_option_strikes
 import time
 import extra_streamlit_components as stx
 import streamlit.components.v1 as components
@@ -566,7 +566,7 @@ if "messages" not in st.session_state:
 def get_agent(current_user="访客", user_query=""):  # 传入 current_user
     # ... (这里保留您原来的 prompt 和 tools) ...
     tools = [analyze_kline_pattern, search_investment_knowledge, get_market_snapshot, get_commodity_iv_info,get_financial_news,search_broker_holdings_on_date,tool_analyze_position_change,tool_query_specific_option,get_historical_price,get_volume_oi,get_futures_oi_ranking,get_option_oi_ranking,get_option_volume_abnormal,get_option_oi_abnormal,
-             get_price_statistics, check_option_expiry_status,tool_stock_hedging_analysis,tool_futures_correlation_check,tool_stock_correlation_check,search_top_stocks,calculate_hedging_beta,tool_get_retail_money_flow,draw_chart_tool,search_web,get_stock_valuation,tool_compare_stocks,get_futures_fund_flow,get_futures_fund_ranking,get_available_patterns,analyze_etf_option_sentiment]
+             get_price_statistics, check_option_expiry_status,tool_stock_hedging_analysis,tool_futures_correlation_check,tool_stock_correlation_check,search_top_stocks,calculate_hedging_beta,tool_get_retail_money_flow,draw_chart_tool,search_web,get_stock_valuation,tool_compare_stocks,get_futures_fund_flow,get_futures_fund_ranking,get_available_patterns,analyze_etf_option_sentiment,get_etf_option_strikes]
     if not os.getenv("DASHSCOPE_API_KEY"):
         st.error("❌ 未配置 API KEY");
         return None
@@ -622,6 +622,7 @@ def get_agent(current_user="访客", user_query=""):  # 传入 current_user
     3. 当客户问“推荐股票”、“选股”-> 用`search_top_stocks`（选分数最高的）
     4. 只要客户问保证金问题-> 必须参考 `search_investment_knowledge`。
     5. 查新闻时，先用`get_financial_news`，如果没找到信息，再用`search_web`。
+    6. 给ETF期权策略建议时，必须调用`get_etf_option_strikes`查询，禁止编造不存在的合约！
     
 
     【你的行为准则】
