@@ -85,7 +85,7 @@ def analyze_kline_pattern(query: str, trade_date: str = None):
                 sql = f"""
                     SELECT trade_date, open_price, high_price, low_price, close_price 
                     FROM futures_price
-                    WHERE ts_code='{symbol}'
+                    WHERE ts_code LIKE '{symbol}%%'
                     {date_condition}
                     ORDER BY trade_date DESC LIMIT 60
                 """
@@ -95,7 +95,7 @@ def analyze_kline_pattern(query: str, trade_date: str = None):
                 sql = f"""
                     SELECT trade_date, open_price, high_price, low_price, close_price 
                     FROM futures_price
-                    WHERE (ts_code='{clean_symbol}0' OR ts_code='{clean_symbol}')
+                    WHERE (ts_code LIKE '{clean_symbol}0%%' OR ts_code LIKE '{clean_symbol}%%')
                     {date_condition}
                     ORDER BY trade_date DESC LIMIT 60
                 """

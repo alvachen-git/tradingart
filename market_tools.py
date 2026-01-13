@@ -210,8 +210,8 @@ def get_market_snapshot(query: str):
             df = pd.read_sql(sql, engine, params={"code": target_code})
 
         else:
-            sql = text("SELECT * FROM futures_price WHERE ts_code=:code ORDER BY trade_date DESC LIMIT 1")
-            df = pd.read_sql(sql, engine, params={"code": target_code})
+            sql = text("SELECT * FROM futures_price WHERE ts_code LIKE :code ORDER BY trade_date DESC LIMIT 1")
+            df = pd.read_sql(sql, engine, params={"code": f"{target_code}%"})
 
         if df.empty: return f"暫無 {query} 最新數據"
 
