@@ -19,6 +19,7 @@ from screener_tool import search_top_stocks,get_available_patterns
 from news_tools import get_financial_news
 from langgraph.errors import GraphRecursionError
 from fund_flow_tools import tool_get_retail_money_flow
+from polymarket_tool import tool_get_polymarket_sentiment
 from plot_tools import draw_chart_tool
 from futures_fund_flow_tools import get_futures_fund_flow,get_futures_fund_ranking
 from vision_tools import analyze_financial_image
@@ -565,7 +566,7 @@ if "messages" not in st.session_state:
 # ==========================================
 def get_agent(current_user="访客", user_query=""):  # 传入 current_user
     # ... (这里保留您原来的 prompt 和 tools) ...
-    tools = [analyze_kline_pattern, search_investment_knowledge, get_market_snapshot, get_commodity_iv_info,get_financial_news,search_broker_holdings_on_date,tool_analyze_position_change,tool_query_specific_option,get_historical_price,get_volume_oi,get_futures_oi_ranking,get_option_oi_ranking,get_option_volume_abnormal,get_option_oi_abnormal,
+    tools = [analyze_kline_pattern, search_investment_knowledge, get_market_snapshot, get_commodity_iv_info,get_financial_news,search_broker_holdings_on_date,tool_analyze_position_change,tool_query_specific_option,get_historical_price,get_volume_oi,get_futures_oi_ranking,get_option_oi_ranking,get_option_volume_abnormal,get_option_oi_abnormal,tool_get_polymarket_sentiment,
              get_price_statistics, check_option_expiry_status,tool_stock_hedging_analysis,tool_futures_correlation_check,tool_stock_correlation_check,search_top_stocks,calculate_hedging_beta,tool_get_retail_money_flow,draw_chart_tool,search_web,get_stock_valuation,tool_compare_stocks,get_futures_fund_flow,get_futures_fund_ranking,get_available_patterns,analyze_etf_option_sentiment,get_etf_option_strikes]
     if not os.getenv("DASHSCOPE_API_KEY"):
         st.error("❌ 未配置 API KEY");
