@@ -21,7 +21,13 @@ DB_NAME = os.getenv("DB_NAME")
 def get_db_engine():
     if not all([DB_USER, DB_PASSWORD, DB_HOST, DB_NAME]): return None
     db_url = f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
-    return create_engine(db_url)
+    return create_engine(
+        db_url,
+        pool_pre_ping=True,      # 每次查询前检查连接是否有效
+        pool_recycle=7200,       # 1小时回收连接
+        pool_size=5,             # 连接池大小
+        max_overflow=10          # 最大溢出连接数
+    )
 
 
 engine = get_db_engine()
@@ -184,8 +190,8 @@ def get_price_statistics(query_list: str, start_date: str, end_date: str):
 @tool
 def get_market_snapshot(query: str):
     """
-    【数据库最新日线查询】(非实时)
-    用于查询数据库中已收录的**最新一条日线记录**（通常是昨日收盘价，或者下午5点后更新的今日收盘价）。
+    【数据库最新日线查询】
+    查询数据库中已收录的**最新一条日线记录**
     输入：品种名称（如 "豆粕"、"茅台"）。
     """
     if engine is None: return "數據庫未連接"
@@ -210,7 +216,7 @@ def get_market_snapshot(query: str):
             df = pd.read_sql(sql, engine, params={"code": target_code})
 
         else:
-            sql = text("SELECT * FROM futures_price WHERE ts_code LIKE :code ORDER BY trade_date DESC LIMIT 1")
+            sql = text("SELECT * FROM futures_price WHERE ts_code LIKE :code AND ts_code NOT LIKE '%TAS%' ORDER BY trade_date DESC LIMIT 1")
             df = pd.read_sql(sql, engine, params={"code": f"{target_code}%"})
 
         if df.empty: return f"暫無 {query} 最新數據"

@@ -24,7 +24,14 @@ DB_NAME = os.getenv("DB_NAME")
 
 def get_db_engine():
     if not all([DB_USER, DB_PASSWORD, DB_HOST, DB_NAME]): return None
-    return create_engine(f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}")
+    db_url = f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
+    return create_engine(
+        db_url,
+        pool_pre_ping=True,      # 每次查询前检查连接是否有效
+        pool_recycle=7200,       # 1小时回收连接
+        pool_size=5,             # 连接池大小
+        max_overflow=10          # 最大溢出连接数
+    )
 
 
 engine = get_db_engine()

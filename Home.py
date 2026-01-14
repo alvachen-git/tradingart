@@ -623,6 +623,7 @@ def get_agent(current_user="访客", user_query=""):  # 传入 current_user
     4. 只要客户问保证金问题-> 必须参考 `search_investment_knowledge`。
     5. 查新闻时，先用`get_financial_news`，如果没找到信息，再用`search_web`。
     6. 给ETF期权策略建议时，必须调用`get_etf_option_strikes`查询，禁止编造不存在的合约！
+    7. 当客户问价格-> 必须调用 `get_market_snapshot`，禁止编造价格！
     
 
     【你的行为准则】

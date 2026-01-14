@@ -22,7 +22,7 @@ def get_db_engine():
     if not all([DB_USER, DB_PASSWORD, DB_HOST, DB_NAME]):
         return None
     db_url = f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
-    return create_engine(db_url, pool_recycle=3600, pool_pre_ping=True)
+    return create_engine(db_url, pool_recycle=7200, pool_pre_ping=True)
 
 
 engine = get_db_engine()
@@ -85,20 +85,38 @@ def analyze_kline_pattern(query: str, trade_date: str = None):
                 sql = f"""
                     SELECT trade_date, open_price, high_price, low_price, close_price 
                     FROM futures_price
-                    WHERE ts_code LIKE '{symbol}%%'
+                    WHERE ts_code LIKE '{symbol}%%' AND ts_code NOT LIKE '%%TAS%%'
                     {date_condition}
                     ORDER BY trade_date DESC LIMIT 60
                 """
             else:
                 # 用户只输入品种（如 白银），查询主力合约
                 clean_symbol = ''.join([i for i in symbol if not i.isdigit()])
+
+                # 步骤1：找出主力合约（持仓量最大的）
+                sql_main = f"""
+                        SELECT ts_code FROM futures_price 
+                        WHERE ts_code LIKE '{clean_symbol}%%' 
+                          AND ts_code NOT LIKE '%%TAS%%'
+                          AND ts_code REGEXP '[0-9]{{4}}$'
+                        ORDER BY trade_date DESC, oi DESC 
+                        LIMIT 1
+                    """
+                df_main = pd.read_sql(sql_main, engine)
+
+                if df_main.empty:
+                    return f"未找到 {query} 的主力合约"
+
+                main_contract = df_main.iloc[0]['ts_code']
+
+                # 步骤2：只查主力合约的K线数据
                 sql = f"""
-                    SELECT trade_date, open_price, high_price, low_price, close_price 
-                    FROM futures_price
-                    WHERE (ts_code LIKE '{clean_symbol}0%%' OR ts_code LIKE '{clean_symbol}%%')
-                    {date_condition}
-                    ORDER BY trade_date DESC LIMIT 60
-                """
+                        SELECT trade_date, open_price, high_price, low_price, close_price 
+                        FROM futures_price
+                        WHERE ts_code = '{main_contract}'
+                        {date_condition}
+                        ORDER BY trade_date DESC LIMIT 60
+                    """
             df = pd.read_sql(sql, engine)
 
         # 🔥【新增】指数查询逻辑
