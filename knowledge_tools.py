@@ -28,16 +28,17 @@ embeddings = DashScopeEmbeddings(model="text-embedding-v1")
 def search_investment_knowledge(query: str):
     """
     【投资知识库检索】
-    当用户询问具体的金融概念、交易策略、行业研报观点或宏观经济逻辑时，**必须**调用此工具。
-    输入：搜索关键词（例如 "MACD战法"、"碳酸锂供需"）。
-    输出：相关的知识片段。
+    当用户询问期权策略、波动率、K线、商品基本面、交易理念时，**必须**调用此工具。
+
+    输入：用户的搜索关键词或完整问题。
+    输出：从知识库中检索到的相关上下文片段。
     """
-    if not os.path.exists("./qdrant_db"):
+    if not os.path.exists("../future-app/qdrant_db"):
         return "知识库尚未构建，请联系管理员运行 build_knowledge.py。"
 
     try:
         # --- A. 初始化原生客户端 ---
-        client = QdrantClient(path="./qdrant_db")
+        client = QdrantClient(path="../future-app/qdrant_db")
         collection_name = "finance_knowledge"
 
         # --- B. 生成查询向量 ---

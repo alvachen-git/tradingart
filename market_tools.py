@@ -190,8 +190,8 @@ def get_price_statistics(query_list: str, start_date: str, end_date: str):
 @tool
 def get_market_snapshot(query: str):
     """
-    【数据库最新日线查询】
-    查询数据库中已收录的**最新一条日线记录**
+    【最新价格查询】
+    查询数据库中已收录的**最新日线记录**
     输入：品种名称（如 "豆粕"、"茅台"）。
     """
     if engine is None: return "數據庫未連接"

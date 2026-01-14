@@ -617,13 +617,12 @@ def get_agent(current_user="访客", user_query=""):  # 传入 current_user
     
 
     【工具使用指南】：
-    1. 当前/最新价格数据 -> 用 `get_market_snapshot`。
+    1. 当客户问价格-> 必须调用 `get_market_snapshot`，禁止编造价格！
     2. 被问 **历史某一天** 或 **指定日期** 的价格-> 可以用 `get_price_statistics`。
     3. 当客户问“推荐股票”、“选股”-> 用`search_top_stocks`（选分数最高的）
     4. 只要客户问保证金问题-> 必须参考 `search_investment_knowledge`。
     5. 查新闻时，先用`get_financial_news`，如果没找到信息，再用`search_web`。
     6. 给ETF期权策略建议时，必须调用`get_etf_option_strikes`查询，禁止编造不存在的合约！
-    7. 当客户问价格-> 必须调用 `get_market_snapshot`，禁止编造价格！
     
 
     【你的行为准则】
