@@ -1480,6 +1480,27 @@ def check_option_expiry_status(query: str):
                     LIMIT 1
                 """
                 df_d = pd.read_sql(sql_d, local_engine)
+                today_str = datetime.now().strftime('%Y%m%d')
+                if df_d.empty:
+                    # 备选兜底：如果上面都没查到，尝试宽泛查询
+                    sql_fallback = f"""
+                                    SELECT ts_code, maturity_date 
+                                    FROM commodity_option_basic 
+                                    WHERE ts_code LIKE '{product_code}%%' 
+                                       OR ts_code LIKE '{product_code.lower()}%%'
+                                    ORDER BY maturity_date ASC 
+                                    LIMIT 10
+                                """
+                    df_fallback = pd.read_sql(sql_fallback, local_engine)
+                    # 过滤过期和 TAS
+                    df_fallback = df_fallback[
+                        (df_fallback['maturity_date'] >= today_str) &
+                        (~df_fallback['ts_code'].str.contains('TAS'))
+                        ]
+
+                    # 正则二次匹配
+                    pattern = re.compile(f"^{product_code}\\d", re.IGNORECASE)
+                    df_opt = df_fallback[df_fallback['ts_code'].apply(lambda x: bool(pattern.match(x)))].head(1)
 
                 if df_d.empty:
                     return f"⚠️ 未找到合约【{target_key}】的到期日，请确认月份是否正确。"
