@@ -17,8 +17,15 @@ def fetch_top_markets(limit=20) -> List[dict]:
         "order": "volume24hr",  # 事件层面：依然按热度拉取
         "ascending": "false"
     }
+    # 🔥 [新增] 定义代理配置
+    proxies = {
+        "http": "http://127.0.0.1:7890",
+        "https": "http://127.0.0.1:7890",
+    }
     try:
-        resp = requests.get(GAMMA_API_URL, params=params, headers=headers, timeout=10)
+        # 🔥 [修改] 在 requests.get 中加入 proxies=proxies
+        resp = requests.get(GAMMA_API_URL, params=params, headers=headers, timeout=10, proxies=proxies)
+
         if resp.status_code == 200:
             return resp.json()
         return []
