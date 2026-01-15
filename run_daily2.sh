@@ -13,14 +13,17 @@ echo "⏰ 任务开始: $(date)" >> update.log
 
 
 # 使用 python3 运行，将输出追加到 update.log，错误也追加到 update.log
-echo ">>> [1/3] 开始更新期货席位数据..." >> update.log
+echo ">>> [1/4] 开始更新期货席位数据..." >> update.log
 /usr/bin/python3 update_open_oneday.py >> update.log 2>&1
 
-echo ">>> [2/3] 开始更新美股价格数据..." >> update.log
+echo ">>> [2/4] 开始更新美股价格数据..." >> update.log
 /usr/bin/python3 update_stock_tiingo.py >> update.log 2>&1
 
-echo ">>> [3/3] 开始更新债券收益数据..." >> update.log
+echo ">>> [3/4] 开始更新债券收益数据..." >> update.log
 /usr/bin/python3 update_bond_data.py >> update.log 2>&1
+
+echo ">>> [4/4] 开始更新热搜数据..." >> update.log
+/usr/bin/python3 trend_monitor.py >> update.log 2>&1
 
 # 7. 结束
 echo "✅ 任务结束: $(date)" >> update.log
