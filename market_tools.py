@@ -7,6 +7,7 @@ from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 import symbol_map
 import traceback
+from datetime import datetime
 import streamlit as st
 
 # 1. 初始化環境
@@ -726,3 +727,290 @@ def get_historical_price(query: str, trade_date: str):
     except Exception as e:
         print(f"查询错误: {traceback.format_exc()}")
         return f"❌ 查询出错: {e}"
+
+
+# ==========================================
+#  AI 工具
+# ==========================================
+from langchain.tools import tool
+import pandas as pd
+from sqlalchemy import text
+
+
+@tool
+def get_trending_hotspots(category: str = "all"):
+    """
+    【热点发现】
+    获取当前正在上升的热点话题。
+
+    参数:
+    - category: "all"=全部, "finance"=仅金融相关
+
+    当用户问"最近什么热门"、"有什么新热点"、"市场在关注什么"时使用。
+    """
+    if engine is None:
+        return "❌ 数据库未连接"
+
+    try:
+        if category == "finance":
+            sql = text("""
+                       SELECT keyword, source, alert_type, description, created_at
+                       FROM trend_alert_v2
+                       WHERE is_finance_related = 1
+                         AND created_at >= DATE_SUB(NOW(), INTERVAL 3 DAY)
+                       ORDER BY created_at DESC LIMIT 20
+                       """)
+        else:
+            sql = text("""
+                       SELECT keyword, source, alert_type, description, created_at
+                       FROM trend_alert_v2
+                       WHERE created_at >= DATE_SUB(NOW(), INTERVAL 3 DAY)
+                       ORDER BY created_at DESC LIMIT 30
+                       """)
+
+        df = pd.read_sql(sql, engine)
+
+        if df.empty:
+            return "📭 近3天暂无新发现的热点。"
+
+        result = "🔥 **近期热点动态**\n\n"
+
+        # 按类型分组
+        new_items = df[df['alert_type'] == 'new']
+        rising_items = df[df['alert_type'] == 'rising']
+        persistent_items = df[df['alert_type'] == 'persistent']
+
+        if not new_items.empty:
+            result += "**🆕 新上榜热点:**\n"
+            for _, row in new_items.head(10).iterrows():
+                source_emoji = '🔍' if row['source'] == 'google' else '🎵'
+                result += f"{source_emoji} **{row['keyword']}** - {row['description']}\n"
+            result += "\n"
+
+        if not rising_items.empty:
+            result += "**📈 快速上升:**\n"
+            for _, row in rising_items.head(5).iterrows():
+                source_emoji = '🔍' if row['source'] == 'google' else '🎵'
+                result += f"{source_emoji} **{row['keyword']}** - {row['description']}\n"
+            result += "\n"
+
+        if not persistent_items.empty:
+            result += "**🔄 持续热点:**\n"
+            for _, row in persistent_items.head(5).iterrows():
+                source_emoji = '🔍' if row['source'] == 'google' else '🎵'
+                result += f"{source_emoji} **{row['keyword']}** - {row['description']}\n"
+
+        return result
+
+    except Exception as e:
+        return f"查询出错: {e}"
+
+
+@tool
+def get_today_hotlist(source: str = "all"):
+    """
+    【今日热榜】
+    获取今天的完整热搜榜单。
+
+    参数:
+    - source: "all"=全部, "google"=Google热搜, "douyin"=抖音热榜
+
+    当用户问"今天热搜"、"抖音热榜"、"Google热搜"时使用。
+    """
+    if engine is None:
+        return "❌ 数据库未连接"
+
+    try:
+        if source == "all":
+            sql = text("""
+                       SELECT keyword, source, ranking, hot_score
+                       FROM trend_hotlist
+                       WHERE trend_date = CURDATE()
+                       ORDER BY source, ranking LIMIT 50
+                       """)
+        else:
+            sql = text("""
+                       SELECT keyword, source, ranking, hot_score
+                       FROM trend_hotlist
+                       WHERE trend_date = CURDATE()
+                         AND source = :source
+                       ORDER BY ranking LIMIT 10
+                       """)
+
+        params = {"source": source} if source != "all" else {}
+        df = pd.read_sql(sql, engine, params=params)
+
+        if df.empty:
+            return "📭 今日暂无热榜数据。"
+
+        result = f"📊 **今日热榜** ({datetime.now().strftime('%Y-%m-%d')})\n\n"
+
+        for src in df['source'].unique():
+            src_df = df[df['source'] == src].head(20)
+            src_name = 'Google 热搜' if src == 'google' else '抖音热榜'
+            src_emoji = '🔍' if src == 'google' else '🎵'
+
+            result += f"**{src_emoji} {src_name} TOP20:**\n"
+            for _, row in src_df.iterrows():
+                score_text = f" ({row['hot_score']:,})" if row['hot_score'] > 0 else ""
+                result += f"{row['ranking']}. {row['keyword']}{score_text}\n"
+            result += "\n"
+
+        return result
+
+    except Exception as e:
+        return f"查询出错: {e}"
+
+
+@tool
+def analyze_keyword_trend(keyword: str):
+    """
+    【关键词趋势分析】
+    分析某个关键词的搜索趋势变化（近30天）。
+
+    当用户问"XX热度怎么样"、"XX趋势"、"XX关注度"时使用。
+    """
+    if engine is None:
+        return "❌ 数据库未连接"
+
+    try:
+        # 1. 查询趋势历史
+        sql_trend = text("""
+                         SELECT trend_date, source, trend_value
+                         FROM trend_history
+                         WHERE keyword LIKE :keyword
+                           AND trend_date >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)
+                         ORDER BY trend_date
+                         """)
+
+        df_trend = pd.read_sql(sql_trend, engine, params={"keyword": f"%{keyword}%"})
+
+        # 2. 查询热榜出现情况
+        sql_hotlist = text("""
+                           SELECT trend_date, source, ranking
+                           FROM trend_hotlist
+                           WHERE keyword LIKE :keyword
+                             AND trend_date >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)
+                           ORDER BY trend_date
+                           """)
+
+        df_hotlist = pd.read_sql(sql_hotlist, engine, params={"keyword": f"%{keyword}%"})
+
+        if df_trend.empty and df_hotlist.empty:
+            return f"📭 未找到 **{keyword}** 的趋势数据。"
+
+        result = f"📊 **{keyword}** 趋势分析\n\n"
+
+        # 热榜出现情况
+        if not df_hotlist.empty:
+            days_on_list = df_hotlist['trend_date'].nunique()
+            avg_rank = df_hotlist['ranking'].mean()
+            best_rank = df_hotlist['ranking'].min()
+
+            result += f"**热榜表现 (近30天):**\n"
+            result += f"  • 上榜天数: {days_on_list} 天\n"
+            result += f"  • 平均排名: #{avg_rank:.0f}\n"
+            result += f"  • 最高排名: #{best_rank}\n\n"
+
+        # 趋势指数
+        if not df_trend.empty:
+            for src in df_trend['source'].unique():
+                src_df = df_trend[df_trend['source'] == src].sort_values('trend_date')
+
+                if len(src_df) >= 7:
+                    recent = src_df.tail(7)['trend_value'].mean()
+                    earlier = src_df.head(7)['trend_value'].mean()
+                    change = ((recent - earlier) / earlier * 100) if earlier > 0 else 0
+
+                    trend_emoji = "📈" if change > 20 else ("📉" if change < -20 else "➡️")
+                    src_name = 'Google' if src == 'google' else '抖音'
+
+                    result += f"**{src_name}趋势指数:** {trend_emoji} {change:+.1f}%\n"
+                    result += f"  当前: {recent:.0f} | 之前: {earlier:.0f}\n\n"
+
+        return result
+
+    except Exception as e:
+        return f"查询出错: {e}"
+
+
+@tool
+def get_finance_related_trends():
+    """
+    【金融相关热点】
+    获取近期与金融市场可能相关的热点话题。
+
+    当用户问"有什么消息影响行情"、"最近有什么利好利空"时使用。
+    系统会自动判断热点是否与金融相关。
+    """
+    if engine is None:
+        return "❌ 数据库未连接"
+
+    try:
+        sql = text("""
+                   SELECT keyword, source, alert_type, description, created_at
+                   FROM trend_alert_v2
+                   WHERE is_finance_related = 1
+                     AND created_at >= DATE_SUB(NOW(), INTERVAL 7 DAY)
+                   ORDER BY created_at DESC LIMIT 20
+                   """)
+
+        df = pd.read_sql(sql, engine)
+
+        if df.empty:
+            return "✅ 近7天暂无发现与金融市场明显相关的新热点。"
+
+        result = "💹 **金融相关热点** (近7天)\n\n"
+        result += "以下热点可能与金融市场相关：\n\n"
+
+        for _, row in df.iterrows():
+            type_emoji = {'new': '🆕', 'rising': '📈', 'persistent': '🔄'}.get(row['alert_type'], '📌')
+            source_emoji = '🔍' if row['source'] == 'google' else '🎵'
+
+            result += f"{type_emoji}{source_emoji} **{row['keyword']}**\n"
+            result += f"   {row['description']}\n\n"
+
+        result += "\n💡 **提示**: 这些热点可能影响相关商品或股票，建议结合具体品种分析。"
+
+        return result
+
+    except Exception as e:
+        return f"查询出错: {e}"
+
+
+@tool
+def search_hotlist_history(keyword: str, days: int = 7):
+    """
+    【热榜历史搜索】
+    搜索某个关键词在热榜中的历史出现情况。
+
+    当用户想知道某个话题是否上过热搜、什么时候上的时使用。
+    """
+    if engine is None:
+        return "❌ 数据库未连接"
+
+    try:
+        sql = text("""
+                   SELECT trend_date, source, ranking, hot_score
+                   FROM trend_hotlist
+                   WHERE keyword LIKE :keyword
+                     AND trend_date >= DATE_SUB(CURDATE(), INTERVAL :days DAY)
+                   ORDER BY trend_date DESC
+                   """)
+
+        df = pd.read_sql(sql, engine, params={"keyword": f"%{keyword}%", "days": days})
+
+        if df.empty:
+            return f"📭 近{days}天热榜中未找到 **{keyword}** 相关内容。"
+
+        result = f"🔍 **{keyword}** 热榜历史 (近{days}天)\n\n"
+
+        for _, row in df.iterrows():
+            source_name = 'Google' if row['source'] == 'google' else '抖音'
+            score_text = f" (热度:{row['hot_score']:,})" if row['hot_score'] > 0 else ""
+            result += f"📅 {row['trend_date']} | {source_name} #{row['ranking']}{score_text}\n"
+
+        return result
+
+    except Exception as e:
+        return f"查询出错: {e}"
