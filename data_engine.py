@@ -1517,10 +1517,12 @@ def check_option_expiry_status(query: str):
                 # 使用 MySQL 的 REGEXP 操作符
                 # ^{product_code}[0-9] 意思是以 "代码+数字" 开头
                 # 例如：^M[0-9] 能匹配 M2601，但不能匹配 MA2601
+                # 🔥【修复】同时查询大写(UR)和小写(ur)，防止漏掉郑商所数据
                 sql_opt = f"""
                     SELECT ts_code, maturity_date 
                     FROM commodity_option_basic 
-                    WHERE ts_code LIKE '{product_code}%%' AND ts_code NOT LIKE '%%TAS%%'
+                    WHERE (ts_code LIKE '{product_code}%%' OR ts_code LIKE '{product_code.lower()}%%')
+                      AND ts_code NOT LIKE '%%TAS%%'
                       AND maturity_date >= '{today_str}'
                     ORDER BY maturity_date ASC 
                     LIMIT 1
