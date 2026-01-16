@@ -240,6 +240,80 @@ st.markdown("""
     [data-testid="stSidebar"] p, [data-testid="stSidebar"] span, [data-testid="stSidebar"] div {
         color: #cbd5e1 !important;
     }
+    @media (max-width: 768px) {
+        
+        /* 1. 极致利用屏幕宽度 */
+        /* 把左右留白从默认的 1rem 压缩到 0.5rem，让文字几乎贴边显示，增加阅读视野 */
+        .block-container {
+            padding-left: 12px !important;
+            padding-right: 12px !important;
+        }
+
+        /* 2. 聊天气泡紧凑化 */
+        /* 减小头像和文字之间的距离，减少气泡内部的留白 */
+        .stChatMessage {
+            gap: 0.5rem !important;
+        }
+        [data-testid="stChatMessageContent"] {
+            padding-right: 0 !important; /* 防止右侧留白过多 */
+        }
+
+        /* 3. 强制缩小标题字号 (关键！) */
+        /* 无论 AI 输出的是 # 还是 ##，在手机上都强制变成小标题样式 */
+        [data-testid="stChatMessageContent"] h1,
+        [data-testid="stChatMessageContent"] h2,
+        [data-testid="stChatMessageContent"] h3 {
+            font-size: 17px !important; /* 从 24px+ 降到 17px，接近正文略大一点 */
+            font-weight: 700 !important;
+            margin-top: 12px !important;
+            margin-bottom: 6px !important;
+            line-height: 1.4 !important;
+            letter-spacing: 0.5px;
+        }
+
+        /* 4. 正文排版优化 */
+        /* 调整行高和字号，使其更像原生 APP */
+        [data-testid="stChatMessageContent"] p, 
+        [data-testid="stChatMessageContent"] li {
+            font-size: 15px !important; /* 黄金阅读字号 */
+            line-height: 1.6 !important; /* 舒适的行高 */
+            margin-bottom: 8px !important;
+            text-align: justify; /* 两端对齐，让文字块更整齐 */
+        }
+
+        /* 5. 列表（ul/ol）紧凑化 */
+        [data-testid="stChatMessageContent"] ul,
+        [data-testid="stChatMessageContent"] ol {
+            padding-left: 20px !important; /* 减小缩进 */
+            margin-bottom: 10px !important;
+        }
+        [data-testid="stChatMessageContent"] li {
+            margin-bottom: 4px !important; /* 列表项之间紧凑一点 */
+        }
+
+        /* 6. 表格（Table）样式大整形 (针对图2那样的大表格) */
+        [data-testid="stChatMessageContent"] table {
+            font-size: 13px !important; /* 表格字要小 */
+            width: 100% !important;
+            display: table !important; /* 强制表格布局 */
+        }
+        /* 表头和单元格 */
+        [data-testid="stChatMessageContent"] th,
+        [data-testid="stChatMessageContent"] td {
+            padding: 6px 8px !important; /* 极度压缩单元格内边距 */
+            line-height: 1.3 !important;
+        }
+        /* 表头背景微调，融合深色模式 */
+        [data-testid="stChatMessageContent"] th {
+            background-color: rgba(255,255,255,0.05) !important;
+        }
+        
+        /* 7. 代码块优化 */
+        [data-testid="stChatMessageContent"] code {
+            font-size: 13px !important;
+            padding: 2px 4px !important;
+        }
+    }
 </style>
 """, unsafe_allow_html=True)
 
