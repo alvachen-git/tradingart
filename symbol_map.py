@@ -2148,6 +2148,8 @@ COMMON_ALIASES = {
     "沪深300股指": "IF", "上证50股指": "IH", "中证500股指": "IC", "中证1000股指": "IM",
     "十债": "T", "10年国债": "T", "五年债": "TF", "5年国债": "TF",
     "二债": "TS", "2年国债": "TS", "三十债": "TL", "30年国债": "TL",
+    "IF": "IF", "IH": "IH", "IC": "IC", "IM": "IM",
+    "T": "T", "TF": "TF", "TS": "TS", "TL": "TL",
 
     # --- ETF ---
     "50ETF": "510050.SH", "上证50ETF": "510050.SH",
@@ -2287,15 +2289,17 @@ def resolve_symbol(query):
         number_part = digit_match.group(1)
         prefix_part = query[:digit_match.start()].strip()
 
-        # A. 前缀是中文 (如 "豆粕")
+        # 🔥【核心修复】构建一个全小写的 values 列表进行比对
+        all_values_lower = [str(v).lower() for v in COMMON_ALIASES.values()]
+
+        # 情况1: 前缀就在 Keys 里 (因为我们在修改1里把 IM 加进去了)
         if prefix_part in COMMON_ALIASES:
             base_code = COMMON_ALIASES[prefix_part]
-            # 排除股票/指数 (带有 .SH/.SZ 的)
             if '.' not in base_code:
                 return f"{base_code.upper()}{number_part}", 'future'
 
-        # B. 前缀是代码 (如 "RB")
-        if prefix_part.lower() in COMMON_ALIASES.values():
+        # 情况2: 前缀在 Values 里 (兼容大小写)
+        if prefix_part.lower() in all_values_lower:
             return f"{prefix_part.upper()}{number_part}", 'future'
 
     # --- 2. 查常用字典 (主力连续 / ETF / 指数 / 股票简称) ---
@@ -2311,7 +2315,8 @@ def resolve_symbol(query):
             return code, 'future'  # 期货
 
     # 检查是否直接输入了期货品种代码 (如 'M', 'RB')
-    if query.lower() in COMMON_ALIASES.values():
+    # 🔥【核心修复】同样使用全小写比对
+    if query.lower() in [str(v).lower() for v in COMMON_ALIASES.values()]:
         return query.upper(), 'future'
 
     # --- 3. 查全市场字典 (股票/ETF) ---

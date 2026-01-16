@@ -621,8 +621,7 @@ def get_agent(current_user="访客", user_query=""):  # 传入 current_user
     1. 当客户问价格-> 必须调用 `get_market_snapshot`，禁止编造价格！
     2. 被问 **历史某一天** 或 **指定日期** 的价格-> 可以用 `get_price_statistics`。
     3. 当客户问“推荐股票”、“选股”-> 用`search_top_stocks`（选分数最高的）
-    4. 只要客户问保证金问题-> 必须参考 `search_investment_knowledge`。
-    5. 给ETF或商品期权策略时，必须调用`get_etf_option_strikes`查询，禁止编造不存在的合约！
+    4. 给ETF或商品期权策略时，必须调用`get_etf_option_strikes`查询，禁止编造不存在的合约！
     
 
     【你的行为准则】
@@ -631,6 +630,10 @@ def get_agent(current_user="访客", user_query=""):  # 传入 current_user
     3. 国内商品期货都有期权，先查数据库再回答。
     4. 如果思考步数过长，直接根据已知的信息做总结。
     5. 给出明确操作建议，根据用户风险偏好来给他喜欢的策略，如果是保守的，就不要给激进建议，如果是激进的，就给进攻很强的策略。
+    
+    【高效执行协议)】
+    1. **单次命中原则**：如果调用一个工具（如 `analyze_kline_pattern`）信息已经足够，就直接回答，不要进行额外的推理。
+    
         
 
     【回答格式】
@@ -792,7 +795,7 @@ def process_user_input(prompt_text):
 
                     response = agent.invoke(
                         {"messages": history},
-                        config={"recursion_limit": 80,
+                        config={"recursion_limit": 100,
                                 "callbacks": [monitor_callback]
                                 }
 
@@ -910,28 +913,138 @@ def process_user_input(prompt_text):
 #  6. 页面渲染：Welcome Screen (空状态) [修改点：新增]
 # ==========================================
 def show_welcome_screen():
-    st.markdown("<br><br>", unsafe_allow_html=True)
-    # --- 修复 1：优化标题排版 ---
-    # white-space: nowrap -> 强制不换行
-    # font-size: clamp(...) -> 智能字体大小（最小 1.8rem，最大 3rem，中间自适应）
-    # margin-bottom: 0.5rem -> 调整下边距
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    # --- 1. 注入酷炫的 CSS 动画和样式 ---
     st.markdown("""
-            <div style="text-align: center;">
-                <h1 style='
-                    color: #fff; 
-                    white-space: nowrap; 
-                    font-size: clamp(2rem, 5vw, 3rem); 
-                    margin-bottom: 0.5rem;
-                '>
-                    🤓 嗨，我是爱波塔
-                </h1>
-                <p style='color: #8b949e; font-size: 1rem;'>
-                    陪你在金融市场奋斗
-                </p>
+        <style>
+        /* A. 标题流光渐变效果 (保持不变) */
+        .hero-title {
+            font-size: clamp(2.5rem, 6vw, 4rem);
+            font-weight: 900;
+            background: linear-gradient(120deg, #ffffff 0%, #3b82f6 50%, #8b5cf6 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            text-align: center;
+            margin-bottom: 10px;
+            filter: drop-shadow(0 0 15px rgba(59, 130, 246, 0.5));
+            animation: breathe 3s ease-in-out infinite alternate;
+        }
+        @keyframes breathe {
+            from { filter: drop-shadow(0 0 10px rgba(59, 130, 246, 0.4)); }
+            to { filter: drop-shadow(0 0 25px rgba(139, 92, 246, 0.7)); }
+        }
+
+        /* B. 副标题容器 (Flex布局居中) */
+        .hero-subtitle {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            margin-bottom: 40px;
+        }
+
+       /* 🔥 [核心修改] 打字机无限循环特效 */
+        .typewriter-text {
+            color: #94a3b8;
+            font-family: 'Courier New', monospace;
+            font-size: clamp(1rem, 2vw, 1.2rem);
+            letter-spacing: 2px;
+            
+            overflow: hidden;
+            white-space: nowrap;
+            border-right: 3px solid #3b82f6; /* 光标 */
+            
+            width: 0;
+            
+            /* 修改点说明：
+               1. typing 5s: 延长到5秒，动作更优雅。
+               2. infinite: 无限循环。
+               3. alternate: 往返播放 (打字 -> 删字 -> 打字 -> 删字...) 
+               这样看起来像是 AI 在不断输入、修正。
+            */
+            animation: 
+                typing 5s steps(22, end) infinite alternate, 
+                blink-caret 0.75s step-end infinite;
+        }
+
+        /* 宽度展开动画 */
+        @keyframes typing {
+            from { width: 0; }
+            to { width: 23ch; } 
+        }
+
+        /* 光标闪烁动画 */
+        @keyframes blink-caret {
+            from, to { border-color: transparent; }
+            50% { border-color: #3b82f6; }
+        }
+
+        /* C. 按钮变身：酷炫卡片 (居中版) */
+        .stMainBlockContainer div.stButton > button {
+            background: rgba(30, 41, 59, 0.6) !important;
+            backdrop-filter: blur(10px) !important;
+            border: 1px solid rgba(255, 255, 255, 0.1) !important;
+            color: #e2e8f0 !important;
+            border-radius: 16px !important;
+            padding: 25px 20px !important;
+            font-size: 16px !important;
+            font-weight: 600 !important;
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1) !important;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.2) !important;
+            text-align: center !important;
+            display: flex !important;
+            flex-direction: column !important;
+            align-items: center !important;
+            justify-content: center !important;
+            position: relative !important;
+            overflow: hidden !important;
+        }
+
+        .stMainBlockContainer div.stButton > button:hover {
+            transform: translateY(-5px) scale(1.02) !important;
+            background: linear-gradient(135deg, rgba(59, 130, 246, 0.2) 0%, rgba(30, 41, 59, 0.8) 100%) !important;
+            border-color: #3b82f6 !important;
+            box-shadow: 0 15px 30px rgba(59, 130, 246, 0.3) !important;
+            color: #ffffff !important;
+        }
+        
+        .stMainBlockContainer div.stButton > button:active {
+            transform: scale(0.98) !important;
+            box-shadow: 0 2px 10px rgba(59, 130, 246, 0.2) !important;
+        }
+
+        /* 装饰箭头 */
+        .stMainBlockContainer div.stButton > button::after {
+            content: "➜";
+            position: absolute;
+            right: 20px;
+            top: 50%;
+            transform: translateY(-50%);
+            opacity: 0;
+            transition: all 0.3s ease;
+            font-size: 20px;
+            color: #3b82f6;
+        }
+        .stMainBlockContainer div.stButton > button:hover::after {
+            opacity: 1;
+            right: 15px;
+        }
+        </style>
+    """, unsafe_allow_html=True)
+
+    # --- 2. 渲染标题 ---
+    st.markdown("""
+            <div style="padding: 20px 0;">
+                <div class="hero-title">
+                    ⚡ 嗨，我是爱波塔
+                </div>
+                <div class="hero-subtitle">
+                    <div class="typewriter-text">
+                        陪你在金融市场奋斗
+                    </div>
+                </div>
             </div>
         """, unsafe_allow_html=True)
-
-    st.markdown("<br>", unsafe_allow_html=True)
 
     # --- 快捷指令卡片 ---
     col1, col2, col3 = st.columns(3)
@@ -943,21 +1056,21 @@ def show_welcome_screen():
         st.session_state.pending_prompt = text
 
     with col1:
-        st.button("📉 波动率分析-50ETF期权现在贵吗？",
+        st.button("创业板期权策略推荐什么？",
                      use_container_width=True,
                      on_click=set_prompt_callback,
-                     args=("50ETF期权现在的IV高吗？",)
+                     args=("现在创业板适合什么期权策略",)
          )
 
     with col2:
-        st.button("📅 期权学习-什么是牛市价差？",
+        st.button("期权学习-什么是牛市价差？",
                      use_container_width=True,
                      on_click=set_prompt_callback,
-                     args=("期权的牛市价差是什么策略？",)
+                     args=("牛市价差策略是什么？",)
          )
 
     with col3:
-        st.button("🎯 K线分析-强势股票",
+        st.button("K线分析-强势股票",
                      use_container_width=True,
                      on_click=set_prompt_callback,
                      args=("最近有哪些K线强势的股票推荐",)
