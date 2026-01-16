@@ -230,8 +230,9 @@ st.markdown("""
 
     /* 调整底部输入框样式 */
     .stChatInput {
-        padding-bottom: 20px;
+        padding-bottom: 5px;
     }
+
         /* 3. 侧边栏文字强制变白 */
     [data-testid="stSidebar"] {
         background-color: #0f172a !important;
@@ -920,7 +921,9 @@ def show_welcome_screen():
         <style>
         /* A. 标题流光渐变效果 (保持不变) */
         .hero-title {
-            font-size: clamp(2.5rem, 6vw, 4rem);
+            /* 1.8rem (手机) -> 6vw (平板) -> 4rem (电脑) */
+            font-size: clamp(1.8rem, 6vw, 4rem);
+            
             font-weight: 900;
             background: linear-gradient(120deg, #ffffff 0%, #3b82f6 50%, #8b5cf6 100%);
             -webkit-background-clip: text;
@@ -929,6 +932,9 @@ def show_welcome_screen():
             margin-bottom: 10px;
             filter: drop-shadow(0 0 15px rgba(59, 130, 246, 0.5));
             animation: breathe 3s ease-in-out infinite alternate;
+            
+            /* 🔥 修改2：强制只有一行，绝不换行 */
+            white-space: nowrap;
         }
         @keyframes breathe {
             from { filter: drop-shadow(0 0 10px rgba(59, 130, 246, 0.4)); }
