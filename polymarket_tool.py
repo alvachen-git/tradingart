@@ -47,7 +47,10 @@ def tool_get_polymarket_sentiment(keywords: str) -> str:
     if not keywords:
         return "请提供有效的搜索关键词。"
 
-    keyword_list = [k.strip().lower() for k in keywords.split(",")]
+    if "," in keywords:
+        keyword_list = [k.strip().lower() for k in keywords.split(",") if k.strip()]
+    else:
+        keyword_list = [k.strip().lower() for k in keywords.split(" ") if k.strip()]
 
     # 1. 拉取热门事件 (Limit 60 确保能覆盖到大部分热点)
     events = fetch_top_markets(limit=60)
@@ -117,7 +120,8 @@ def tool_get_polymarket_sentiment(keywords: str) -> str:
                 )
 
     if not found_markets:
-        return f"在 Polymarket 热门榜单中，暂时未发现关于 '{keywords}' 的活跃预测。"
+        # 🔥 [修改点 3]：返回明确的失败提示，诱导 Agent 去搜 Google
+        return f"Polymarket 暂无关于 '{keywords}' 的热门预测。建议改用 search_web 查询最新新闻。"
 
     # 返回最相关的结果
     result_text = "\n\n".join(found_markets[:3])
