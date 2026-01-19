@@ -185,7 +185,8 @@ def generalist_node(state: AgentState, llm):
 
 
     prompt = f"""
-        你是一位王牌量化分析师。【当前日期】：{current_date}。
+        你是一位王牌量化分析师。交易理念是顺势而为。
+        【当前日期】：{current_date}。
         客户需求：{query}。
         分析品种：{symbol_input}。
    
@@ -305,33 +306,52 @@ def analyst_node(state: AgentState, llm):
             """
 
     # 2. 注入“严谨”人设进行润色
-    persona_prompt = f"""
-    你是一位严谨的技术分析师。【当前日期】：{current_date}。
-    【当前标的】：{symbol}
-    【客户历史记忆】：{mem_context}
+    is_chart_only = any(kw in query for kw in ["画", "图", "走势", "K线图", "k线图"])
 
-    【ETF期权持仓数据】：{extra_instruction}
-    【客户需求】：{query}
-    
-    【可调用工具】
-    1. 技术面分析-> `analyze_kline_pattern` ，获取K线形态和趋势。
-    2. 获取标的一段时间价格-> `get_price_statistics` 。
-    3. 分析的品种如果只有1个，只能调用1次`analyze_kline_pattern` 
-    4. 画图/走势图 -> `draw_chart_tool`
+    if is_chart_only:
+        # 🔥 画图快速模式 - 简化 prompt
+        persona_prompt = f"""
+            你是一位技术分析画图师。【当前日期】：{current_date}。
+            【当前标的】：{symbol}
+            【客户需求】：{query}
 
+            【任务】：
+            用户想要看图表，请直接调用 `draw_chart_tool` 画图。
 
-    【任务】：
-    1. 发掘进场机会。
-    2. 重点指出潜在的背离、或假突破风险，如果可以，也给出支撑位和压力位。
-    3. 如果没有明显机会，直说“建议观望”。
-    4. 如果用户的指令模糊，可参考上文历史确认分析对象。
-    """
+            【回复要求】：
+            1. 画完图后，只需要简短说明图表的关键信息（如当前价格、涨跌幅）。
+            2. 不要做冗长的分析。
+            """
+    else:
+        # 正常分析模式
+        persona_prompt = f"""
+            你是一位严谨的技术分析师。遵循趋势交易。
+            【当前日期】：{current_date}。
+            【当前标的】：{symbol}
+            【客户历史记忆】：{mem_context}
+
+            【ETF期权持仓数据】：{extra_instruction}
+            【客户需求】：{query}
+
+            【可调用工具】
+            1. 技术面分析-> `analyze_kline_pattern` ，获取K线形态和趋势。
+            2. 获取标的一段时间价格-> `get_price_statistics` 。
+            3. 分析的品种如果只有1个，只能调用1次`analyze_kline_pattern` 
+            4. 客户没要求画图，就不要用`draw_chart_tool`
+
+            【任务】：
+            1. 发掘突破进场机会。
+            2. 如果有反转的风险，可以提醒。
+            3. 如果没有明显机会，直说"建议观望"。
+            4. 如果用户的指令模糊，可参考上文历史确认分析对象。
+            """
 
 
     # 简单的方向提取 (给策略员用)
     analyst_agent = create_react_agent(llm, tools, prompt=persona_prompt)
 
     partial_response = ""
+    chart_img = ""
 
     try:
         # 执行推理 (给予足够的递归次数，因为处理价差可能需要调2次工具)
@@ -342,6 +362,18 @@ def analyst_node(state: AgentState, llm):
 
         last_response = result["messages"][-1].content
         partial_response = last_response
+
+        chart_match = re.search(r'IMAGE_CREATED:(chart_[a-zA-Z0-9_]+\.json)', last_response)
+        if chart_match:
+            chart_img = chart_match.group(1)
+            print(f"📊 analyst_node 提取到图表: {chart_img}")
+        if not chart_img:
+            for msg in result.get("messages", []):
+                content = getattr(msg, 'content', str(msg))
+                chart_match = re.search(r'IMAGE_CREATED:(chart_[a-zA-Z0-9_]+\.json)', content)
+                if chart_match:
+                    chart_img = chart_match.group(1)
+                    break
 
         # 提取信号
         trend_signal = "震荡"
@@ -360,7 +392,8 @@ def analyst_node(state: AgentState, llm):
             "messages": [HumanMessage(content=f"【技术分析】\n{last_response}")],
             "trend_signal": trend_signal,  # 存入趋势
             "key_levels": key_levels_str,  # 存入点位 (新增)
-            "technical_summary": tech_summary_str  # 存入摘要 (新增)
+            "technical_summary": tech_summary_str,  # 存入摘要 (新增)
+            "chart_img": chart_img
         }
 
     except GeneratorExit:
@@ -1231,7 +1264,7 @@ def finalizer_node(state: AgentState, llm):
                 【当前日期】：{today_str}
                 【用户问题】：{user_query}
 
-                【团队报告池】：
+                【团队报告池，必须优先采用！】：
                 {context_text}
                 
                 【客户对话历史记忆】{mem_context}
@@ -1242,14 +1275,14 @@ def finalizer_node(state: AgentState, llm):
                 【任务】：
                 请将上述零散报告整合成一份《深度投资决策书》，要求**排版精美、逻辑结构化**。
                 1. 技术面分析以K线为主，均线为辅。
-                2. 知识要参考{kb_context}，但要根据当下市场情况，自己理解后输出
+                2. 知识要参考{kb_context}，但要根据当下市场情况，自己理解后输出。
                 3. 如果记忆{mem_context}有客户的持仓或偏好，在报告里可以针对性的写。               
-                4. 禁止篡改数据：所有数值需参考【团队报告池】。
+                4. 所有价格数据（当前价、支撑位、压力位、均线值），必须使用来自【团队报告池】！
                 
                 【注意事项】：
                 1. 中国的股票没有期权，客户问股票时，不要给期权策略，除非是用ETF期权来对冲股票。
                 2. 如果某品种有利好消息但却下跌，要提醒利多不涨，可能反转，而如果有坏消息但却不跌，要提醒利空不跌，可能阶段底部到了。
-                3. 资料库数据是每天下午5点后更新。
+                3. 价格数据是每天下午5点后更新。
 
                 【排版强制要求】：
                 1. **头部信息**：使用引用块 `>` 展示签发人、日期和地点。
@@ -1282,10 +1315,14 @@ def finalizer_node(state: AgentState, llm):
         final_verdict = llm.invoke(cio_prompt)
 
         # 🔥 [新增] 从原始报告中提取图表路径（因为 finalizer 是整理者，图表在前面节点生成）
-        chart_img = ""
-        chart_match = re.search(r'!\[.*?\]\((chart_[a-zA-Z0-9_]+\.json)\)', context_text)
-        if chart_match:
-            chart_img = chart_match.group(1)
+        chart_img = state.get("chart_img", "")
+
+        # 如果 state 中没有，尝试从报告内容中提取
+        if not chart_img:
+            chart_match = re.search(r'IMAGE_CREATED:(chart_[a-zA-Z0-9_]+\.json)', context_text)
+            if chart_match:
+                chart_img = chart_match.group(1)
+                print(f"📊 finalizer 从报告中提取到图表: {chart_img}")
 
         return {
             "messages": [HumanMessage(content=f"【最终决策】\n{final_verdict.content}")],
