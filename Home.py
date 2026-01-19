@@ -13,41 +13,23 @@ import memory_utils as mem
 import threading
 from datetime import datetime, timedelta
 from auth_ui import show_auth_dialog, sidebar_user_menu
-from streamlit_lottie import st_lottie
-from kline_tools import analyze_kline_pattern
-from screener_tool import search_top_stocks,get_available_patterns
-from news_tools import get_financial_news
-from langgraph.errors import GraphRecursionError
-from fund_flow_tools import tool_get_retail_money_flow
-from polymarket_tool import tool_get_polymarket_sentiment
-from plot_tools import draw_chart_tool
-from futures_fund_flow_tools import get_futures_fund_flow,get_futures_fund_ranking
+from agent_core import build_trading_graph
 from vision_tools import analyze_financial_image
-from volume_oi_tools import get_volume_oi, get_futures_oi_ranking, get_option_oi_ranking,get_option_volume_abnormal, get_option_oi_abnormal,analyze_etf_option_sentiment,get_etf_option_strikes
+from data_engine import get_commodity_iv_info
 import time
 import extra_streamlit_components as stx
 import streamlit.components.v1 as components
 import uuid #用于生成唯一ID
-from market_tools import get_market_snapshot, get_price_statistics,tool_query_specific_option,get_historical_price,get_trending_hotspots,get_today_hotlist,analyze_keyword_trend,get_finance_related_trends,search_hotlist_history
-from data_engine import get_commodity_iv_info, check_option_expiry_status,search_broker_holdings_on_date,tool_analyze_position_change,tool_compare_stocks,get_stock_valuation
-from captcha_utils import generate_captcha_image
-from search_tools import search_web
-from market_correlation import tool_stock_hedging_analysis, tool_futures_correlation_check,tool_stock_correlation_check
+from market_tools import get_market_snapshot,tool_query_specific_option
 from sqlalchemy import text
 from dotenv import load_dotenv
-from beta_tool import calculate_hedging_beta
-from knowledge_tools import search_investment_knowledge
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.outputs import LLMResult
 # --- AI 相关导入 ---
 from langchain_community.chat_models import ChatTongyi
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 
-try:
-    from langgraph.prebuilt import create_react_agent
-except ImportError:
-    st.error("❌ 请先安装 LangGraph: `pip install langgraph`")
-    st.stop()
+
 
 # 1. 初始化环境
 load_dotenv(override=True)
@@ -69,6 +51,14 @@ st.set_page_config(
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CHART_DIR = os.path.join(BASE_DIR, "static", "charts")
 
+def stream_text_generator(text, delay=0.01):
+    """
+    打字机效果生成器：将长文本拆分成字符逐个输出
+    delay: 每个字符的延迟时间 (秒)，0.005-0.02 之间体感最佳
+    """
+    for char in text:
+        yield char
+        time.sleep(delay)
 # ==========================================
 #  2. 极简主义 CSS 注入 [修改点：新增卡片样式]
 # ==========================================
@@ -314,6 +304,58 @@ st.markdown("""
             padding: 2px 4px !important;
         }
     }
+    [data-testid="stStatusWidget"] {
+        background-color: #151b26 !important; /* 深蓝黑背景 */
+        border: 1px solid #3b82f6 !important; /* 蓝色边框 */
+        border-radius: 10px !important;
+        padding: 15px !important;
+    }
+
+    /* 强制内部所有文字变白 */
+    [data-testid="stStatusWidget"] p,
+    [data-testid="stStatusWidget"] div,
+    [data-testid="stStatusWidget"] span,
+    [data-testid="stStatusWidget"] label {
+        color: #e2e8f0 !important;
+    }
+
+    /* 修复标题栏 */
+    [data-testid="stStatusWidget"] header {
+        background-color: transparent !important;
+        color: #ffffff !important;
+    }
+
+    /* 修复图标颜色 */
+    [data-testid="stStatusWidget"] svg {
+        fill: #3b82f6 !important;
+        color: #3b82f6 !important;
+    }
+    
+    /* 展开后的内容区域背景 */
+    [data-testid="stStatusWidget"] > div {
+        background-color: transparent !important;
+    }
+    /* =============================================
+       🔥 [修复 1] 折叠框 (Expander) 样式修复
+       ============================================= */
+    /* 折叠框的头部 (点击区域) */
+    [data-testid="stExpander"] summary {
+        color: #e2e8f0 !important; /* 亮灰白文字 */
+        font-weight: 600 !important;
+    }
+    [data-testid="stExpander"] summary:hover {
+        color: #3b82f6 !important; /* 悬停变蓝 */
+    }
+    [data-testid="stExpander"] svg {
+        fill: #e2e8f0 !important; /* 箭头变白 */
+    }
+    /* 折叠框展开后的内部区域 */
+    [data-testid="stExpanderDetails"] {
+        background-color: transparent !important; /* 去掉默认白底 */
+        color: #cbd5e1 !important; /* 内部文字颜色 */
+        border: 1px solid rgba(255,255,255,0.1);
+        border-radius: 8px;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -371,6 +413,9 @@ def clean_chart_tag(response_text):
     # 3. 删掉旧标记
     text = re.sub(r'\[CHART_FILE:.*?\]', '', text)
     text = re.sub(r'\[CHART_JSON:.*?\]', '', text)
+
+    # 🔥 [新增] 删掉 IMAGE_CREATED 标记
+    text = re.sub(r'IMAGE_CREATED:chart_[a-zA-Z0-9_]+\.json', '', text)
 
     # 4. 清理多余空行
     text = re.sub(r'\n{3,}', '\n\n', text)
@@ -639,89 +684,43 @@ if "messages" not in st.session_state:
 # ==========================================
 #  4. AI Agent 定义 (完全保留您的核心逻辑)
 # ==========================================
-def get_agent(current_user="访客", user_query=""):  # 传入 current_user
-    # ... (这里保留您原来的 prompt 和 tools) ...
-    tools = [analyze_kline_pattern, search_investment_knowledge, get_market_snapshot, get_commodity_iv_info,get_financial_news,search_broker_holdings_on_date,tool_analyze_position_change,tool_query_specific_option,get_historical_price,get_volume_oi,get_futures_oi_ranking,get_option_oi_ranking,get_option_volume_abnormal,get_option_oi_abnormal,tool_get_polymarket_sentiment,get_trending_hotspots,get_today_hotlist,analyze_keyword_trend,get_finance_related_trends,search_hotlist_history,
-             get_price_statistics, check_option_expiry_status,tool_stock_hedging_analysis,tool_futures_correlation_check,tool_stock_correlation_check,search_top_stocks,calculate_hedging_beta,tool_get_retail_money_flow,draw_chart_tool,search_web,get_stock_valuation,tool_compare_stocks,get_futures_fund_flow,get_futures_fund_ranking,get_available_patterns,analyze_etf_option_sentiment,get_etf_option_strikes]
-    if not os.getenv("DASHSCOPE_API_KEY"):
-        st.error("❌ 未配置 API KEY");
+def get_agent(current_user="访客", user_query=""):
+    # 1. 初始化 LLM (保持不变)
+    api_key = os.getenv("DASHSCOPE_API_KEY")
+    if not api_key:
+        st.error("❌ 未配置 API KEY")
         return None
 
-    llm = ChatTongyi(model="qwen-plus", temperature=0.2)
+    # 1. ⚡ 快马 (Turbo): 便宜、速度快 -> 用于主管分发、简单闲聊
+    llm_turbo = ChatTongyi(
+        model="qwen-turbo",
+        temperature=0.1,
+        api_key=api_key
+    )
 
-    # --- 🔥【核心修复 1】强制使用北京时间 (UTC+8) ---
-    # 服务器通常是 UTC，直接 +8 小时修正
-    utc_now = datetime.utcnow()
-    china_now = utc_now + timedelta(hours=8)
+    # 2. ⚖️ 专才 (Plus): 性价比高、能力均衡 -> 用于技术分析、数据总结
+    llm_plus = ChatTongyi(
+        model="qwen-plus",
+        temperature=0.2,  # 稍微增加一点创造性
+        api_key=api_key
+    )
 
-    weekday_cn = ["一", "二", "三", "四", "五", "六", "日"][china_now.weekday()]
+    # 3. 🧠 大脑 (Max): 最贵、逻辑最强 -> 用于期权策略、王牌分析、CIO总结
+    llm_max = ChatTongyi(
+        model="qwen-max",
+        temperature=0.4,
+        api_key=api_key,
+        request_timeout=300  # 复杂任务给多点时间
+    )
+    # 2. 构建图 (The Graph)
+    # 直接调用 agent_core.py 里的函数
+    graph_app = build_trading_graph(
+        fast_llm=llm_turbo,
+        mid_llm=llm_plus,
+        smart_llm=llm_max
+    )
 
-    # --- 🔥【核心修复 2】获取数据库里的“最新行情日期” ---
-    # 如果今天是周六，db_latest_date 应该是周五
-    db_latest_date = de.get_latest_data_date()
-
-    # --- 日期计算逻辑 (基于北京时间) ---
-    # 本周范围
-    current_week_start = (china_now - timedelta(days=china_now.weekday())).strftime('%Y%m%d')
-    # 上周范围
-    last_week_start_dt = china_now - timedelta(days=china_now.weekday() + 7)
-    last_week_end_dt = china_now - timedelta(days=china_now.weekday() + 1)
-    last_week_start = last_week_start_dt.strftime('%Y%m%d')
-    last_week_end = last_week_end_dt.strftime('%Y%m%d')
-
-    # 上月范围
-    first_day_this_month = china_now.replace(day=1)
-    last_day_last_month = first_day_this_month - timedelta(days=1)
-    first_day_last_month = last_day_last_month.replace(day=1)
-
-    last_month_start = first_day_last_month.strftime('%Y%m%d')
-    last_month_end = last_day_last_month.strftime('%Y%m%d')
-    last_month_name = first_day_last_month.strftime('%Y年%m月')
-
-
-    system_message = f"""
-    你是拥有30年经验的资深交易员，擅长K线技术分析和期权，遵守顺势交易。 
-    
-
-    【当前时间基准】：
-    1. **现实时间**：{china_now.strftime('%Y年%m月%d日 %H:%M')} (周{weekday_cn})。
-    2. **数据最新日期**：【{db_latest_date}】。
-       - 当用户问“今天”、“最新”的行情时，**必须**使用日期 `{db_latest_date}` 进行查询。
-    【日期参考】
-        上周: {last_week_start}-{last_week_end}
-        上月: {last_month_start}-{last_month_end}
-    
-
-    【工具使用指南】：
-    1. 当客户问价格-> 必须调用 `get_market_snapshot`，禁止编造价格！
-    2. 被问 **历史某一天** 或 **指定日期** 的价格-> 可以用 `get_price_statistics`。
-    3. 当客户问“推荐股票”、“选股”-> 用`search_top_stocks`（选分数最高的）
-    4. 给ETF或商品期权策略时，必须调用`get_etf_option_strikes`查询，禁止编造不存在的合约！
-    
-
-    【你的行为准则】
-    1. 股票没有期权，客户问股票时，不要给期权策略，除非是用ETF期权来对冲股票。
-    2. 期权策略的建议，需要考虑波动率和距离到期日，使用工具`check_option_expiry_status`和知识库搭配回答。
-    3. 国内商品期货都有期权，先查数据库再回答。
-    4. 如果思考步数过长，直接根据已知的信息做总结。
-    5. 给出明确操作建议，根据用户风险偏好来给他喜欢的策略，如果是保守的，就不要给激进建议，如果是激进的，就给进攻很强的策略。
-    
-    【高效执行协议)】
-    1. **单次命中原则**：如果调用一个工具（如 `analyze_kline_pattern`）信息已经足够，就直接回答，不要进行额外的推理。
-    
-        
-
-    【回答格式】
-   先给结论，然后解释理由。期权策略的使用要结合K线技术面和IV。
-    """
-
-    try:
-        return create_react_agent(llm, tools, state_modifier=system_message)
-    except TypeError:
-        try:
-            return create_react_agent(llm, tools, messages_modifier=system_message)
-        except:
-            return create_react_agent(llm, tools)
+    return graph_app
 
 
 # 定义随机幽默加载文案
@@ -750,239 +749,456 @@ LOADING_JOKES = [
 
 
 # ==========================================
+#  🔥 新增：极速伪路由 (Fast Pass)
+# ==========================================
+def fast_router_check(user_query):
+    """
+    检查用户问题是否可以走快速通道。
+    返回: (bool, str) -> (是否命中, 回复内容)
+    """
+
+    # 1. 定义【绝对需要 Agent 思考】的复杂词 (负面清单 - 增强版)
+    # 🔥 [修改点] 增加了 "概率", "几成", "可能", "战争", "局势" 等词，防止地缘政治问题被拦截
+    complex_keywords = [
+        "策略", "建议", "怎么做", "分析", "为何", "原因", "预测","K线","技术面","分析",
+        "教学", "是什么", "含义", "解释", "持仓", "风险", "复盘", "总结","账户","资金",
+        "止损", "止盈", "平仓", "割肉", "买入", "卖出", "加仓","相关性","相关度",
+        "牛市价差", "熊市价差", "备兑", "跨式", "双卖","为什么","期权","距离",
+        "高吗", "低吗", "合适吗", "能买吗","IV","波动率",
+        "概率", "几成", "可能性", "胜率", "会打吗"
+    ]
+
+    # 2. 定义【简单查询】的触发词 (正面清单 - 收紧版)
+    # 🔥 [修改点] 去掉了单独的 "多少"，改为 "多少钱", "多少点"
+    price_keywords = [
+        "价格", "现价", "收盘", "开盘", "最新价", "报价",
+        "多少点", "多少钱", "几点"
+    ]
+
+    # 3. 状态判断
+    has_complex = any(k in user_query for k in complex_keywords)
+    has_price = any(k in user_query for k in price_keywords)
+
+    # 4. 特殊补丁：如果用户只输入了 代码+多少 (例如 "茅台多少")
+    # 虽然 "多少" 被删了，但我们要允许 "代码+多少" 的模糊匹配，前提是它不包含 complex 词
+    # 简单的正则判断：是否有 "多少" 且没有 "概率/人口" 等
+    is_fuzzy_price = "多少" in user_query and not has_complex
+
+    # 过滤词 (有些词虽然像查询，但其实是期权链查询，不适合 snapshot)
+    forbidden_terms = ["iv", "IV", "波动率", "期权", "认购", "认沽", "call", "put"]
+    has_forbidden = any(k in user_query for k in forbidden_terms)
+
+    # 5. 路由逻辑
+    # 只有在 (命中精准价格词 OR 命中模糊多少) AND (没有复杂词) AND (没有禁用词) 时才触发
+    is_fast_query = (has_price or is_fuzzy_price) and (not has_complex) and (not has_forbidden)
+
+    if not is_fast_query:
+        return False, None
+
+    # --- ⚡ 走快速通道处理 (仅限 Snapshot) ---
+    with st.chat_message("assistant", avatar="🤖"):
+        with st.status("⚡ 正在连接交易所行情...", expanded=True) as status:
+            try:
+                # 确保顶部已导入: from market_tools import get_market_snapshot
+                res = get_market_snapshot.invoke(user_query)
+
+                status.write(res)
+                status.update(label="✅ 报价完成", state="complete", expanded=True)
+
+                return True, res
+
+            except Exception as e:
+                return False, None
+
+    return False, None
+
+# ==========================================
 #  5. 核心逻辑处理函数 [修改点：封装成函数以便复用]
 # ==========================================
 def process_user_input(prompt_text):
     """处理用户输入（无论是来自输入框还是快捷卡片）"""
-    # 1. 显示用户消息
-    # --- 🔥 [新增逻辑] 处理图片 ---
-    # 检查是否有上传的文件
+
+    # --- 1. 图片识别逻辑 (保留) ---
     image_context = ""
     if st.session_state.get("portfolio_uploader"):
         with st.status("📸 正在识别持仓截图...", expanded=True) as status:
             st.write("AI 正在观察图片...")
-            # 调用视觉模型提取文字
             vision_result = analyze_financial_image(st.session_state.portfolio_uploader)
             status.update(label="✅ 图片识别完成", state="complete", expanded=False)
-
-            # 将识别结果拼接到上下文中，但不直接展示给用户看，而是作为 AI 的“潜意识”
-            image_context = f"\n\n【用户上传图，视觉模型提取的信息如下，请务必基于这信息，回答用户下面的问题】：\n{vision_result}\n----------------\n"
-
-            # (可选) 可以在界面上显示识别到了什么，增强信任感
+            image_context = f"\n\n【用户上传图信息】：\n{vision_result}\n----------------\n"
             with st.chat_message("ai"):
                 st.caption(f"已识别图片内容：\n{vision_result[:100]}...")
 
-     # 2. 显示用户提问
+    # --- 2. 显示用户提问 (保留) ---
     st.session_state.messages.append({"role": "user", "content": prompt_text})
     with st.chat_message("user"):
         st.markdown(prompt_text)
-        # 如果有图片，顺便显示一下缩略图
         if st.session_state.get("portfolio_uploader"):
             st.image(st.session_state.portfolio_uploader, width=200)
 
-    # 2. 生成 AI 回复
-    current_user = st.session_state.get('user_id', "访客")
-    # 真正的 Prompt = 图片提取出的持仓数据 + 用户的问题
+    related_memories = "暂无相关历史记忆"
+    try:
+        # 获取当前用户ID (如果没登录就用 default)
+        current_user = st.session_state.get("user_id", "guest")
+
+        # 调用 memory_utils 里的函数
+        # 注意：这里会自动去向量库找和 prompt 相似的历史对话
+        found_mem = mem.retrieve_relevant_memory(
+            user_id=current_user,
+            query=prompt,
+            k=3  # 只找最近3条最相关的
+        )
+
+        MAX_CHARS = 2000
+
+        if found_mem:
+            if len(found_mem) > MAX_CHARS:
+                found_mem = found_mem[:MAX_CHARS] + "...(已截断)"
+            related_memories = found_mem
+
+    except Exception as e:
+        print(f"❌ 记忆检索失败: {e}")
+
+    # ---------------------------------------------------------
+    # 构造输入 (注入 memory_context)
+    # ---------------------------------------------------------
+    inputs = {
+        "user_query": prompt,
+        "messages": [HumanMessage(content=prompt)],
+        "is_complex_task": False,
+        # 🔥 把搜到的记忆传给 Agent
+        "memory_context": related_memories
+    }
+
+    # 构造最终 Prompt
     final_prompt = image_context + prompt_text
-    # [修改] 调用 get_agent 时传入用户的 prompt_text，以便去搜记忆
-    agent = get_agent(current_user, user_query=final_prompt)
 
-    if agent:
-        with st.chat_message("assistant"):
-            status_placeholder = st.empty()
-            response_container = st.empty()
-            # ===========================
-            # 🔄 [修改部分开始] 替换原本的 st.spinner
-            # ===========================
+    # --- 3. 极速伪路由检查 (保留) ---
+    is_hit, fast_response = fast_router_check(final_prompt)
+    if is_hit:
+        st.session_state.messages.append({"role": "assistant", "content": fast_response})
+        st.rerun()
+        return
 
-            # 2. 随机选一句骚话
-            random_msg = random.choice(LOADING_JOKES)
+    # ============================================================
+    # 🔥🔥🔥 [修正区域]：LangGraph + 记忆检索 (RAG)
+    # ============================================================
 
-            # 4. 使用随机文案作为 Spinner 文字，包裹后续的耗时操作
-            try:
-                with st.spinner(f"🤖 {random_msg}"):
-                    # 3. 显示动画
-                    # =================================================
-                    # 🧠 [核心修改 1]：在这里检索记忆
-                    # =================================================
-                    # 【优化】定义触发词：只有涉及用户自身情况时，才加载画像和记忆
-                    # 这样能节省大量 System Prompt 的 Token
-                    personal_keywords = ["之前", "持仓", "账户", "买", "卖", "建议", "仓位", "风险", "风格" , "推荐"]
-                    need_personal_context = any(k in final_prompt for k in personal_keywords)
+    current_user = st.session_state.get('user_id', "访客")
 
-                    memory_context = ""
-                    # 确保这一行和上面的代码对齐
-                    if current_user != "访客" and need_personal_context:
-                        # 检索最近 3 条最相关的记忆
-                        found = mem.retrieve_relevant_memory(current_user, final_prompt, k=2)
-                        if found:
-                            memory_context = f"""
-                                                \n【🔍 必须参考的历史记忆】
-                                                 {found}
-                                                 """
+    # 🧠 [恢复功能 1]：检索历史记忆 & 用户画像
+    # 只有涉及用户自身情况时，才加载画像和记忆，节省 Token
+    personal_keywords = ["之前", "持仓", "账户", "买", "卖", "建议", "仓位", "风险", "风格", "推荐"]
+    need_personal_context = any(k in final_prompt for k in personal_keywords)
 
-                        # 获取用户画像
-                        user_profile = de.get_user_profile(current_user)
-                        risk = user_profile.get('risk_preference', '未知')
+    system_instruction = ""  # 初始化为空
+    #[关键修复]：必须在这里先定义默认值，防止跳过 if 块后报错！
+    risk = "稳健型"
 
-                        # 将 画像 + 记忆 组合成一条强力的 SystemMessage
-                        super_system_prompt = f"""
-                                                    【当前用户档案】
-                                                     - 用户名：{current_user}
-                                                     - 风险偏好：{risk}
+    if current_user != "访客" and need_personal_context:
+        try:
+            # A. 检索向量库记忆
+            found = mem.retrieve_relevant_memory(current_user, final_prompt, k=2)
+            memory_context = f"\n【🔍 参考历史记忆】\n{found}" if found else ""
 
-                                                        {memory_context}
+            # B. 获取用户画像 (风险偏好)
+            user_profile = de.get_user_profile(current_user)
+            risk = user_profile.get('risk_preference', '未知')
 
-                                                     【回答指令】
-                                                     请结合上述记忆和当前问题进行回答。如果记忆里有相关持仓信息，请主动提及。
-                                                     """
-                    else:
-                        # ⚠️ 注意：这里的 else 必须和上面的 if 垂直对齐
-                        # 如果只是查行情，给个最简单的空串，或者通用指令
-                        super_system_prompt = ""
+            # C. 组合成 System Prompt
+            system_instruction = f"""
+            【当前用户档案】
+            - 用户名：{current_user}
+            - 风险偏好：{risk}
+            {memory_context}
 
-                    # 构建 LangChain 消息历史
-                    max_history_rounds = 2
-                    recent_messages = st.session_state.messages[-max_history_rounds:]
+            【回答要求】
+            请结合上述记忆和当前问题进行回答。如果记忆里有相关持仓信息，请主动提及。
+            """
+            print(f"🧠 已注入记忆上下文 (风险偏好: {risk})")
+        except Exception as e:
+            print(f"记忆检索失败: {e}")
 
-                    history = []
-                    for m in recent_messages:
-                        if m["role"] == "user":
-                            history.append(HumanMessage(content=m["content"]))
-                        else:
-                            history.append(AIMessage(content=m["content"]))
+    # 初始化 Graph Agent
+    app = get_agent(current_user, user_query=final_prompt)
 
-                    # 🔥【核心修复】如果有图片识别信息，替换最后一条用户消息
-                    if image_context and history:
-                        for i in range(len(history) - 1, -1, -1):
-                            if isinstance(history[i], HumanMessage):
-                                history[i] = HumanMessage(content=final_prompt)
-                                break
+    if app:
+        with st.chat_message("assistant", avatar="🤖"):
 
-                    # ⚡ 暴力注入：把这个超级指令插在最前面
-                    history.insert(0, SystemMessage(content=super_system_prompt))
+            report_card = {
+                "analyst": "", "monitor": "", "strategist": "",
+                "researcher": "", "news": "", "generalist": "","screener": "",
+                "chatter": "", "finalizer": "" # 👈 加上这俩
+            }
+            final_img_path = None
 
-                    # 1. 实例化回调对象
-                    monitor_callback = TokenMonitorCallback(
-                        username=current_user,
-                        query_text=final_prompt
-                    )
+            with st.status("🚀 交易团队正在协作...", expanded=True) as status:
 
-                    response = agent.invoke(
-                        {"messages": history},
-                        config={"recursion_limit": 100,
-                                "callbacks": [monitor_callback]
-                                }
+                # 🧠 [恢复功能 2]：构造输入消息列表 (含对话历史)
+                # 🔥 [新增] 将最近的对话历史也传给 Agent，以便理解上下文
+                input_messages = []
 
-                    )
-                    ai_response = response["messages"][-1].content
+                # A. 先加入系统指令
+                if system_instruction:
+                    input_messages.append(SystemMessage(content=system_instruction))
 
-                    # 🔥🔥【核心修改】手动检测死循环特征 🔥🔥
-                    # 如果 AI 返回了这句话，说明它其实已经报错了，但被吞掉了。
-                    # 我们手动 raise 一个错误，强行跳转到下面的 except 救援逻辑！
-                    if "Sorry, need more steps" in ai_response or "Agent stopped" in ai_response:
-                        raise GraphRecursionError("强制触发救援模式")
-                    # ========================================================
-                    # 🔥 [修改区域]：检票员逻辑 (Inspector Strategy)
-                    # ========================================================
+                history_msgs = st.session_state.messages[:-1] if len(st.session_state.messages) > 1 else []
+                recent_history = history_msgs[-2:] if len(history_msgs) > 2 else history_msgs
 
-                    attached_chart = None
+                for msg in recent_history:
+                    if msg["role"] == "user":
+                        input_messages.append(HumanMessage(content=msg["content"]))
+                    elif msg["role"] in ["assistant", "ai"]:
+                        # 截取 AI 回复的前 500 字，防止 Token 爆炸
+                        content = msg["content"][:500] + "..." if len(msg["content"]) > 500 else msg["content"]
+                        input_messages.append(AIMessage(content=content))
 
-                    # 1. 倒序遍历消息记录，寻找工具的返回值 (ToolMessage)
-                    # LangGraph 返回的 messages 列表里包含了：Human -> AI -> Tool -> AI(Final)
-                    for msg in reversed(response["messages"]):
-                        # 检查是否是工具消息 (type='tool') 且包含我们的暗号
-                        if msg.type == 'tool' and "IMAGE_CREATED:" in msg.content:
-                            # 提取文件名
-                            attached_chart = msg.content.split("IMAGE_CREATED:")[1].strip()
-                            print(f"🎫 检票成功，发现图表: {attached_chart}")
-                            break  # 找到一张最新的就够了
+                # C. 最后加入当前问题
+                input_messages.append(HumanMessage(content=final_prompt))
 
-                    # 2. 存入历史记录 (带 chart 字段)
-                    message_data = {
-                        "role": "ai",
-                        "content": ai_response,
-                        "chart": attached_chart
-                    }
-                    st.session_state.messages.append(message_data)
+                inputs = {
+                    "user_query": final_prompt,
+                    "messages": input_messages,  # 👈 这里传入带记忆的消息列表
+                    "risk_preference": risk
+                }
 
-                    # 3. 界面即时显示
-                    placeholder = st.empty()
-                    # 彻底清理可能残留的标记 (双保险)
-                    display_text = clean_chart_tag(ai_response).replace("IMAGE_CREATED:", "")
-                    placeholder.markdown(display_text)
-
-                    # 4. 渲染图表
-                    if attached_chart:
-                        render_chart_by_filename(attached_chart)
-
-
-                    # ==========================================
-                    #  💾 [新增]：将对话存入向量数据库
-                    # ==========================================
-                    # 只有登录用户才存，或者是访客也可以存(看您需求)
-                    if current_user != "访客":
-                        mem.save_interaction(current_user, final_prompt, ai_response)
-                        print(f"已存档记忆: {final_prompt[:10]}...")
-
-                    # 更新记忆
-                    if hasattr(de, 'update_user_memory_async'):
-                        de.update_user_memory_async(current_user, final_prompt)
-                    # [关键] 在这里直接渲染按钮，为了防止刷新前看不见
-                    # 注意：这里不需要存入 session_state，因为上面的"历史消息循环"会负责存储后的渲染
-                    native_share_button(ai_response, key=f"share_new_{int(time.time())}")
-
-            # 🔥🔥 [核心修改] 捕获"思考步数过多"的错误 🔥🔥
-            except GraphRecursionError:
-                status_placeholder.empty()
-                # --- 启动救援模式 ---
-                print("⚠️ [GraphRecursionError] 触发救援模式")
+                # 🔥 [修改] 使用 invoke 代替 stream，避免 GeneratorExit 问题
+                input_message_count = len(input_messages)
+                status.write("🔄 正在分析中，请稍候...")
 
                 try:
-                    # 1. 定义一个救援用的 LLM（可以直接复用 ChatTongyi）
-                    rescue_llm = ChatTongyi(model="qwen-plus", temperature=0.3)
+                    # 使用 invoke 一次性执行完成
+                    final_state = app.invoke(inputs, {"recursion_limit": 25})
 
-                    # 2. 构建救援 Prompt
-                    # 我们把之前的历史记录发给它，并强制它总结
-                    rescue_system_prompt = SystemMessage(content="""
-                                    系统检测到你之前的思考过程过长。
-                                    请立刻停止工具调用！
-                                    请根据你【已经知道的信息】和【上下文历史】，直接给用户一个总结性的回答。
-                                    """)
+                    # 🔥🔥🔥 [修复] 只处理新生成的消息，跳过历史消息
+                    messages = final_state.get("messages", [])
+                    new_messages = messages[input_message_count:]  # ← 关键修复：切片取新消息
+                    seen_contents = set()
+                    for msg in new_messages:
+                        content = getattr(msg, 'content', str(msg))
+                        # 跳过重复内容
+                        content_hash = hash(content[:100])  # 用前100字符做哈希
+                        if content_hash in seen_contents:
+                            continue
+                        seen_contents.add(content_hash)
+                        print(f"📝 新消息: {content[:80]}...")
 
-                    # 组合消息：历史记录 + 强制总结指令
-                    rescue_messages = history + [rescue_system_prompt]
+                        # 🔥 [修复] 按优先级顺序检查，带标签的优先
+                        if "【技术分析】" in content:
+                            report_card["analyst"] = content
+                        elif "【数据监控】" in content:
+                            report_card["monitor"] = content
+                        elif "【王牌分析】" in content:
+                            report_card["generalist"] = content
+                        elif "【最终决策】" in content:
+                            report_card["finalizer"] = content
+                            print(f"✅ 找到最终决策")
+                        elif "【情报与舆情】" in content:
+                            report_card["researcher"] = content
+                            report_card["news"] = content
+                            print(f"✅ 找到情报与舆情")
+                        elif "【闲聊】" in content or "【知识问答】" in content:
+                            report_card["chatter"] = content
+                        elif "【期权策略】" in content:
+                            report_card["strategist"] = content
+                        # 🔥 [修复] Fallback 放在最后，且排除系统消息
+                        elif "【精选股票】" in content:
+                            report_card["screener"] = content
+                        elif (content.strip() and
+                              "【" not in content and
+                              "PASS" not in content and
+                              "已制定计划" not in content and
+                              len(content) > 30):
+                            # 只有当没有其他内容时才使用
+                            if not report_card.get("chatter"):
+                                report_card["chatter"] = content
 
-                    # 3. 强制生成回答
-                    rescue_response = rescue_llm.invoke(rescue_messages)
-                    ai_response = rescue_response.content
+                    # 提取其他状态字段
+                    if final_state.get("trend_signal"):
+                        status.write(f"📈 **技术分析**: 趋势 {final_state.get('trend_signal')}")
+                    if final_state.get("fund_data"):
+                        report_card["monitor"] = final_state.get("fund_data")
+                        status.write(f"💰 **资金监控**: 数据已更新")
+                    if final_state.get("option_strategy"):
+                        report_card["strategist"] = final_state.get("option_strategy")
+                        status.write(f"⚖️ **期权策略**: 已生成")
+                    if final_state.get("news_summary"):
+                        report_card["news"] = final_state.get("news_summary")
+                        status.write(f"📰 **情报**: 已检索")
 
-                    # 4. 正常显示救援后的回答
-                    message_data = {
-                        "role": "ai",
-                        "content": ai_response,
-                        "chart": None
-                    }
-                    st.session_state.messages.append(message_data)
-                    placeholder = st.empty()
-                    placeholder.markdown(ai_response)
+                    # 提取图表路径
+                    chart_img = final_state.get("chart_img", "")
+                    if chart_img:
+                        final_img_path = chart_img
+                        print(f"🔍 从 final_state.chart_img 获取: {final_img_path}")
 
-                    # 渲染按钮
-                    native_share_button(ai_response, key=f"share_rescue_{int(time.time())}")
+                    # 🔥 [新增] 如果 final_state 没有 chart_img，尝试从消息内容中提取
+                    if not final_img_path:
+                        print(f"🔍 开始遍历 {len(messages)} 条消息查找图表...")
+                        for msg in reversed(messages):
+                            content = getattr(msg, 'content', str(msg))
+                            # 检查是否包含 IMAGE_CREATED 标记
+                            if "IMAGE_CREATED:" in content:
+                                # 使用正则提取文件名，更安全
+                                chart_match = re.search(r'IMAGE_CREATED:(chart_[a-zA-Z0-9_]+\.json)', content)
+                                if chart_match:
+                                    final_img_path = chart_match.group(1)
+                                    print(f"🎫 检票成功，发现图表: {final_img_path}")
+                                    break
 
-                except Exception as rescue_e:
-                    # 如果连救援都失败了，再报错
-                    response_container.error(f"🤯 AI 甚至在尝试救援时都失败了: {rescue_e}")
+                    status.update(label="✅ 分析完成", state="complete", expanded=False)
 
-            # 捕获其他通用错误
-            except Exception as e:
-                status_placeholder.empty()
-                # 如果是其他错误，也转成中文
-                error_msg = str(e)
-                if "recursion limit" in error_msg.lower(): # 双重保险，防止某些版本抛出 ValueError
-                     response_container.warning("🤔 AI 思考步数超限，请尝试把问题描述得更具体一些。")
+                except Exception as e:
+                    status.update(label="❌ 执行中断", state="error")
+                    st.error(f"Agent Error: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    return
+
+            # --- 拼接最终报告 ---
+            final_response_md = ""
+
+            # 获取各角色的输出
+            chatter_txt = report_card.get("chatter", "")
+            generalist_txt = report_card.get("generalist", "")
+            finalizer_txt = report_card.get("finalizer", "")
+            researcher_txt = report_card.get("researcher", "")
+            screener_txt = report_card.get("screener", "")
+
+            # === 场景 1: 闲聊/知识问答 ===
+            if finalizer_txt and "PASS" not in finalizer_txt:
+                final_response_md = finalizer_txt
+                print("✅ 使用 finalizer 输出")
+
+                # === 场景 1: 闲聊/知识问答 ===
+            elif chatter_txt and "已制定计划" not in chatter_txt:
+                final_response_md = chatter_txt
+                print("✅ 使用 chatter 输出")
+
+                # === 场景 2: 王牌分析师 (自带总结) ===
+            elif generalist_txt:
+                final_response_md = generalist_txt
+                print("✅ 使用 generalist 输出")
+
+                # === 场景 2.5: 情报研究员单独输出 ===
+            elif researcher_txt:
+                final_response_md = researcher_txt
+                print("✅ 使用 researcher 输出")
+
+            elif screener_txt:
+                final_response_md = screener_txt
+                status.update(label="✅ 选股策略已生成", state="complete")
+
+            # === 场景 3: 交易团队协作 (核心修改逻辑) ===
+            else:
+                # 检查 CIO 是否发话了
+                # 如果 CIO 内容不是 "PASS" 且不为空，说明触发了“多源整合模式”
+                is_integrated_report = finalizer_txt and "PASS" not in finalizer_txt
+
+                if is_integrated_report:
+                    # 🔥 [整合模式]：只显示 CIO 的总结，隐藏前面分析师的零散报告
+                    # 这样就解决了“信息重复”的问题
+                    final_response_md = finalizer_txt
+
                 else:
-                    response_container.error(f"🤯 AI 大脑过载了: {error_msg}")
+                    # 🔥 [单兵模式]：CIO 觉得没问题放行了 (PASS)
+                    # 此时按顺序显示各个分析师的原话 (保留漂亮排版)
+
+                    # 1. 技术分析
+                    if report_card["analyst"]:
+                        final_response_md += f"{report_card['analyst']}\n\n"
+
+                    # 2. 资金监控
+                    if report_card["monitor"] and report_card["monitor"] != "无数据":
+                        final_response_md += f"### 💸 资金面监控\n{report_card['monitor']}\n\n"
+
+                    # 3. 期权策略
+                    if report_card["strategist"]:
+                        final_response_md += f"### ⚖️ 衍生品策略建议\n{report_card['strategist']}\n\n"
+
+                    # 🔥 [新增] 优先显示选股结果
+                    if report_card["screener"]:
+                        final_response_md += f"{report_card['screener']}\n\n"
+
+                    # 4. 新闻
+                    if report_card["news"]:
+                        final_response_md += f"### 📰 相关情报\n{report_card['news']}\n"
+
+                    # 如果 CIO 有修正意见 (即不是 PASS 但也不是完整报告，可能是纠错)，追加在最后
+                    if finalizer_txt and "PASS" not in finalizer_txt:
+                        final_response_md += f"\n\n---\n{finalizer_txt}"
+
+            # 渲染图表和文字
+            if final_img_path:
+                render_chart_by_filename(final_img_path)
+            # 清理文本中的 Markdown 图片语法，避免显示破图
+            final_response_md = clean_chart_tag(final_response_md)
+
+            if not final_response_md.strip() or "need more steps" in final_response_md.lower():
+                print("⚠️ 报告为空或不完整，尝试 fallback...")
+                messages = final_state.get("messages", [])
+
+                # 策略1：尝试找工具返回的有用内容
+                tool_results = []
+                for msg in messages:
+                    msg_type = getattr(msg, 'type', '')
+                    content = getattr(msg, 'content', str(msg))
+                    # 收集工具返回的内容（通常比较长且有用）
+                    if msg_type == 'tool' and content and len(content) > 100:
+                        tool_results.append(content)
+
+                if tool_results:
+                    # 取最近的工具结果
+                    combined = "\n\n---\n\n".join(tool_results[-2:])
+                    final_response_md = f"### 📊 已收集的信息\n\n{combined}"
+                    print(f"✅ 从工具结果 fallback 成功")
+                else:
+                    # 策略2：找最后一条有意义的消息
+                    for msg in reversed(messages):
+                        content = getattr(msg, 'content', str(msg))
+                        # 跳过系统消息、空消息、计划消息和错误消息
+                        if (content.strip() and
+                                "PASS" not in content and
+                                "已制定计划" not in content and
+                                "need more steps" not in content.lower() and
+                                len(content) > 20):
+                            final_response_md = content
+                            print(f"✅ Fallback 成功: {content[:50]}...")
+                            break
+
+            with st.chat_message("assistant", avatar="🤖"):
+                # 注意：如果文本太长，为了防止打字太慢，可以把 delay 调低，或者按“词”分割
+                if len(final_response_md) > 1000:
+                    # 如果内容很长，打字速度加快
+                    st.write_stream(stream_text_generator(final_response_md, delay=0.005))
+                else:
+                    # 内容短，正常速度
+                    st.write_stream(stream_text_generator(final_response_md, delay=0.015))
+
+            # --- 存入 Session 历史 ---
+            message_data = {
+                "role": "ai",
+                "content": final_response_md,
+                "chart": final_img_path
+            }
+            st.session_state.messages.append(message_data)
+
+            # 🧠 [恢复功能 3]：存入向量数据库 (长期记忆)
+            if current_user != "访客":
+                try:
+                    # 存入向量库
+                    mem.save_interaction(current_user, final_prompt, final_response_md)
+
+                    # 触发后台画像更新 (如果你的 data_engine 有这个功能)
+                    if hasattr(de, 'update_user_memory_async'):
+                        de.update_user_memory_async(current_user, final_prompt)
+
+                    print(f"💾 记忆已存档: {final_prompt[:10]}...")
+                except Exception as e:
+                    print(f"记忆存储失败: {e}")
+
+            # 生成分享按钮
+            native_share_button(prompt_text, final_response_md, key=f"share_new_{int(time.time())}")
 
 # ==========================================
 #  6. 页面渲染：Welcome Screen (空状态) [修改点：新增]

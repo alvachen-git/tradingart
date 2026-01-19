@@ -1,5 +1,7 @@
 import pandas as pd
+import re
 import plotly.graph_objects as go
+import plotly.express as px
 from plotly.subplots import make_subplots
 from langchain_core.tools import tool
 import symbol_map
@@ -633,6 +635,91 @@ def _plot_stock_comparison(stock_names_str, period):
         return f"❌ 绘制失败: {e}"
 
 
+def plot_correlation_scatter(symbol_a, symbol_b, period='1y'):
+    """
+    绘制两个品种的相关性散点图 (Scatter Plot)
+    """
+    try:
+        # 1. 解析代码
+        res_a = symbol_map._resolve_symbol_smart(symbol_a)
+        res_b = symbol_map._resolve_symbol_smart(symbol_b)
+
+        if not res_a[0] or not res_b[0]:
+            return f"❌ 无法识别品种: {symbol_a} 或 {symbol_b}"
+
+        code_a, type_a = res_a
+        code_b, type_b = res_b
+
+        # 2. 获取数据
+        start_date = _calculate_start_date(period)
+
+        # 定义内部获取数据的 helper (复用 get_price_data 的逻辑)
+        def _fetch(code, asset_type):
+            table = TABLE_MAP.get(asset_type, 'stock_price')
+            col_code = 'ts_code'
+            query = f"SELECT trade_date, close FROM {table} WHERE {col_code}='{code}' AND trade_date>='{start_date}' ORDER BY trade_date"
+            return pd.read_sql(query, engine)
+
+        df_a = _fetch(code_a, type_a)
+        df_b = _fetch(code_b, type_b)
+
+        if df_a.empty or df_b.empty:
+            return "❌ 数据不足，无法分析相关性"
+
+        # 3. 数据对齐 (Merge on Date)
+        # 必须确保只保留两天都有交易的日期
+        merged_df = pd.merge(df_a, df_b, on='trade_date', suffixes=('_A', '_B'))
+
+        if len(merged_df) < 10:
+            return "❌ 有效重叠数据太少，无法计算相关性"
+
+        # 4. 计算相关系数 (Pearson Correlation)
+        corr_value = merged_df['close_A'].corr(merged_df['close_B'])
+
+        # 5. 绘图 (散点图 + 趋势线)
+        import plotly.express as px
+
+        # 使用 Plotly Express 快速画带有趋势线的散点图
+        fig = px.scatter(
+            merged_df,
+            x='close_A',
+            y='close_B',
+            trendline="ols",  # 增加线性回归线
+            title=f"【{symbol_a} vs {symbol_b}】价格相关性分析 (近{period})",
+            hover_data=['trade_date'],
+            labels={'close_A': f"{symbol_a} 价格", 'close_B': f"{symbol_b} 价格"}
+        )
+
+        # 增加相关系数的标注
+        fig.add_annotation(
+            xref="paper", yref="paper",
+            x=0.05, y=0.95,
+            text=f"相关系数 (Correlation): <b>{corr_value:.4f}</b>",
+            showarrow=False,
+            font=dict(size=16, color="red"),
+            bgcolor="rgba(255,255,255,0.8)"
+        )
+
+        # 优化样式
+        fig.update_layout(
+            template="plotly_dark",
+            height=600,
+            xaxis_title=f"{symbol_a} ({code_a})",
+            yaxis_title=f"{symbol_b} ({code_b})"
+        )
+
+        # 6. 保存并返回
+        filename = f"chart_corr_{uuid.uuid4().hex[:8]}.json"
+        with open(os.path.join(CHART_DIR, filename), "w", encoding="utf-8") as f:
+            f.write(fig.to_json())
+
+        return f"![Correlation Chart]({filename})\n\nIMAGE_CREATED:{filename}\n\n📊 **分析结果**：\n- **{symbol_a}** 与 **{symbol_b}** 的相关系数为 **{corr_value:.4f}**。\n- 系数越接近 1 代表正相关性越强（同涨同跌）；接近 -1 代表负相关；接近 0 代表无相关。"
+
+    except Exception as e:
+        import traceback
+        return f"❌ 相关性图表生成失败: {str(e)}"
+
+
 # ==========================================
 #  🛠️ 对外暴露工具 (API 升级)
 # ==========================================
@@ -647,9 +734,11 @@ def draw_chart_tool(query: str, chart_type: str = "kline", time_period: str = "6
        * 期货商持仓: '豆粕,永安期货' (默认总持仓)
        * 指定持仓类型: '豆粕,永安期货,净持仓' (支持: 净持仓, 多单, 空单)
        * 价差: 'M2505,M2509'
+       * 相关性：黄金和白银
     - chart_type: 图表类型
        * 'kline': K线图 (包含成交量)
        * 'line_oi': 持仓量(Open Interest)折线图 (仅期货)
+       * 'line_pe': 市盈率PE走势图 (仅股票/指数)
        * 'line_pe': 市盈率PE走势图 (仅股票/指数)
        * 'spread_diff': 价差图 (A - B)
        * 'spread_ratio': 比价图 (A / B)
@@ -657,8 +746,23 @@ def draw_chart_tool(query: str, chart_type: str = "kline", time_period: str = "6
     - time_period: 时间范围 ('1m', '3m', '6m', '1y', 'ytd')
     """
     # 1. 价差分析
+    query = query.replace("：", ":").replace("，", ",").strip()
+
     if 'spread' in chart_type:
         return _plot_spread_chart(query, time_period, mode='diff' if 'diff' in chart_type else 'ratio')
+
+    if "相关" in query or "correlation" in query.lower():
+        # 尝试提取两个品种，支持逗号、和、与、vs
+        # 移除关键词
+        clean_q = re.sub(r'(相关性|的|分析|图|画|之间|与|和|vs)', ' ', query)
+        parts = re.split(r'[,\s]+', clean_q)
+        parts = [p.strip() for p in parts if p.strip()]
+
+        if len(parts) >= 2:
+            # 调用刚才新写的散点图函数
+            return plot_correlation_scatter(parts[0], parts[1])
+        else:
+            return "❌ 相关性分析需要两个品种，例如：'黄金 白银 相关性'"
 
     # 2. 涨跌对比
     if chart_type == 'bar_compare':

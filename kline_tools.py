@@ -28,6 +28,51 @@ def get_db_engine():
 engine = get_db_engine()
 
 
+# 🔥 [新增] 插入这个函数，用于把 "SH" 翻译回 "烧碱"
+def _get_chinese_name(code_str):
+    """
+    输入 SH2603，返回 '烧碱'
+    输入 IM2605，返回 '中证1000股指期货'
+    原理：利用 symbol_map 里的字典进行反向查找
+    """
+    if not isinstance(code_str, str):
+        return str(code_str)
+
+        # ========================================================
+        # 🛑 1. 第一道防线：股票/ETF 过滤器 (旧代码没有这一步)
+        # ========================================================
+        # 只要包含小数点 "." (如 600519.SH, 300059.SZ)，一律视为股票
+        # 直接返回原代码，绝对不要去查期货字典！
+    if "." in code_str:
+        return code_str
+
+        # ========================================================
+        # 🔍 2. 第二道防线：严格正则匹配 (旧代码可能用了错误的 search)
+        # ========================================================
+    import re
+    # 使用 ^ 符号，强制要求必须以字母开头
+    # 这样能过滤掉奇怪的格式，只匹配像 "RB2505", "IM2412" 这种标准期货格式
+    match = re.match(r'^([A-Za-z]+)', code_str)
+
+    if match:
+        product_code = match.group(1).upper()  # 提取品种代码，如 RB, SH, IM
+
+        # 3. 查字典 (这是唯一需要依赖外部数据的地方)
+        try:
+            # 尝试从 symbol_map 导入映射表
+            from symbol_map import PRODUCT_MAP
+            if product_code in PRODUCT_MAP:
+                return PRODUCT_MAP[product_code]
+        except ImportError:
+            # 如果 symbol_map 里没有 PRODUCT_MAP，或者导入失败
+            # 可以在这里做一个简单的兜底，或者直接 pass
+            pass
+        except Exception as e:
+            print(f"反查名称出错: {e}")
+
+    # 4. 兜底：如果啥都没查到，返回原始代码
+    return code_str
+
 # --- 2. 核心工具定义 ---
 
 @tool
@@ -75,6 +120,24 @@ def analyze_kline_pattern(query: str, trade_date: str = None):
                 ORDER BY trade_date DESC LIMIT 60
             """
             df = pd.read_sql(sql, engine)
+            # 🔥🔥🔥 [新增核心修复]：兜底查询
+            # 如果在股票表没查到，且代码看起来像指数 (399开头是深市指数, 000开头可能是沪市指数)，尝试去指数表查
+            if df.empty:
+                # 尝试查询 index_price 表
+                print(f"⚠️ 股票表未查到 {symbol}，尝试查询指数表...")
+                sql_index = f"""
+                                SELECT trade_date, open_price, high_price, low_price, close_price 
+                                FROM index_price
+                                WHERE ts_code='{symbol}' 
+                                {date_condition} 
+                                ORDER BY trade_date DESC LIMIT 60
+                            """
+                df_index = pd.read_sql(sql_index, engine)
+
+                # 如果指数表查到了，就用指数表的数据
+                if not df_index.empty:
+                    df = df_index
+                    asset_type = 'index'  # 修正类型，防止后面逻辑出错
 
         elif asset_type == 'future':
             # 🔥【核心修复】判断是否指定了具体合约月份
@@ -300,13 +363,12 @@ def analyze_kline_pattern(query: str, trade_date: str = None):
 
         # 定义扫描周期
         scan_periods = [5, 10, 20, 30, 60]
-        breakout_found = False
 
         # 获取昨日的 ATR (作为基准，不用今天的防止未来函数)
-        ref_atr = df['atr'].iloc[-2]
+        ref_atr = df['atr'].iloc[-2] if len(df) > 2 else 0
 
+        # ========== 第一步：检测当前的【真突破/真破位】 ==========
         if not pd.isna(ref_atr) and ref_atr > 0:
-
             for period in scan_periods:
                 if len(df) <= period + 1: continue
 
@@ -316,102 +378,72 @@ def analyze_kline_pattern(query: str, trade_date: str = None):
                 box_low = recent_box['low_price'].min()
                 box_height = box_high - box_low
 
-                # 2. 【核心】计算 ATR 倍数 (ATR Ratio)
-                # 含义：箱体高度 相当于 几天的平均波动？
-                # 倍数越小，说明压缩越极致
+                # 2. 计算 ATR 倍数
                 atr_ratio = box_height / ref_atr
 
-                # 3. 动态阈值设置 (这里是精华)
-                # 5天横盘：箱体高度不应超过 2.5 倍 ATR (非常极致)
-                # 10天横盘：箱体高度不应超过 4.0 倍 ATR
-                # 20天横盘：箱体高度不应超过 6.0 倍 ATR
-                # 60天横盘：箱体高度不应超过 10.0 倍 ATR
-                if period <= 5:
-                    max_atr_multiple = 2.5
-                    p_name = "极致压缩"
-                elif period <= 10:
-                    max_atr_multiple = 4.0
-                    p_name = "短线旗形"
-                elif period <= 20:
-                    max_atr_multiple = 6.0
-                    p_name = "标准箱体"
-                else:
-                    max_atr_multiple = 10.0
-                    p_name = "长线平台"
+                # 3. 动态阈值
+                if period <= 5: max_atr_multiple = 2.5; p_name = "极致压缩"
+                elif period <= 10: max_atr_multiple = 4.0; p_name = "短线旗形"
+                elif period <= 20: max_atr_multiple = 6.0; p_name = "标准箱体"
+                else: max_atr_multiple = 10.0; p_name = "长线平台"
 
                 # 4. 判断逻辑
                 if atr_ratio <= max_atr_multiple:
-
-                    # A. 向上突破 (需配合中阳线/大阳线)
+                    # A. 向上突破
                     if close > box_high and body_pct > 0.6:
-                        msg = f"【{p_name}突破】，压缩比{atr_ratio:.1f}ATR)"
+                        msg = f"【{p_name}突破】(压缩比{atr_ratio:.1f}ATR)"
                         patterns.append(msg)
-                        breakout_found = True
-                        break  # 找到最有爆发力的就不找了
+                        break  # 找到一个就退出，避免重复
 
                     # B. 向下破位
                     if close < box_low and body_pct > 0.6:
-                        msg = f"【{p_name}破位】，压缩比{atr_ratio:.1f}ATR)"
+                        msg = f"【{p_name}破位】(压缩比{atr_ratio:.1f}ATR)"
                         patterns.append(msg)
-                        breakout_found = True
+                        break # 找到一个就退出
+
+        # ========== 第二步：检测【假突破/假跌破】(陷阱) ==========
+        # 逻辑：昨天突破了箱体，今天又跌回箱体以内
+        # 这一步必须移到上面的 for 循环外面，独立运行
+
+        # 1. 获取前天 ATR
+        ref_atr_prev = df['atr'].iloc[-3] if len(df) > 3 else 0
+
+        if not pd.isna(ref_atr_prev) and ref_atr_prev > 0:
+            for period in scan_periods:
+                # 至少需要 period + 2 天的数据 (今天+昨天+周期)
+                if len(df) <= period + 2: continue
+
+                # 3. 定义 "昨天突破前" 的箱体 (不含昨天和今天)
+                # 切片 [-(period+2) : -2]
+                box_prev_days = df.iloc[-(period + 2):-2]
+
+                box_high_prev = box_prev_days['high_price'].max()
+                box_low_prev = box_prev_days['low_price'].min()
+                box_height_prev = box_high_prev - box_low_prev
+
+                atr_ratio_prev = box_height_prev / ref_atr_prev
+
+                # 动态阈值
+                if period <= 5: max_atr_multiple = 2.5; p_name_prev = "极致压缩"
+                elif period <= 10: max_atr_multiple = 4.0; p_name_prev = "短线旗形"
+                elif period <= 20: max_atr_multiple = 6.0; p_name_prev = "标准箱体"
+                else: max_atr_multiple = 10.0; p_name_prev = "长线平台"
+
+                # 4. 判断逻辑：如果昨天那个时候是压缩状态
+                if atr_ratio_prev <= max_atr_multiple:
+                    # A. 假突破 (Bull Trap)
+                    # 条件: 昨天收盘 > 上沿 (真突破), 今天收盘 < 上沿 (跌回)
+                    if prev_close > box_high_prev and close < box_high_prev:
+                        msg = f"【假突破(多头陷阱)】(昨天突破{period}日{p_name_prev}，今天跌回，警惕诱多！)"
+                        patterns.append(msg)
+                        break # 找到一个最有代表性的就退出
+
+                    # B. 假跌破 (Bear Trap)
+                    # 条件: 昨天收盘 < 下沿 (真跌破), 今天收盘 > 下沿 (收回)
+                    if prev_close < box_low_prev and close > box_low_prev:
+                        msg = f"【假跌破(空头陷阱)】(昨天跌破{period}日{p_name_prev}，今天收回，警惕诱空！)"
+                        patterns.append(msg)
                         break
-
-                # =================================================================
-                # 【新增】ATR 假突破/假跌破识别 (False Breakout/Breakdown)
-                # 逻辑：昨天突破了箱体，今天又跌回箱体以内
-                # =================================================================
-
-                # 1. 获取前天 ATR (用于判断昨天突破前的盘整状态，因为要还原昨天的场景)
-                ref_atr_prev = df['atr'].iloc[-3] if len(df) > 3 else 0
-
-                # 2. 只有当前天有有效的 ATR 时才计算
-                if not pd.isna(ref_atr_prev) and ref_atr_prev > 0:
-                    for period in scan_periods:
-                        # 至少需要 period + 2 天的数据 (今天+昨天+周期)
-                        if len(df) <= period + 2: continue
-
-                        # 3. 定义 "昨天突破前" 的箱体 (不含昨天和今天)
-                        # 索引: -1是今天, -2是昨天. 切片 [-(period+2) : -2]
-                        box_prev_days = df.iloc[-(period + 2):-2]
-
-                        # 计算那个时候的箱体上下沿
-                        box_high_prev = box_prev_days['high_price'].max()
-                        box_low_prev = box_prev_days['low_price'].min()
-                        box_height_prev = box_high_prev - box_low_prev
-
-                        # 计算压缩比
-                        atr_ratio_prev = box_height_prev / ref_atr_prev
-
-                        # 动态阈值 (复用之前的逻辑)
-                        if period <= 5:
-                            max_atr_multiple = 2.5;
-                            p_name_prev = "极致压缩"
-                        elif period <= 10:
-                            max_atr_multiple = 4.0;
-                            p_name_prev = "短线旗形"
-                        elif period <= 20:
-                            max_atr_multiple = 6.0;
-                            p_name_prev = "标准箱体"
-                        else:
-                            max_atr_multiple = 10.0;
-                            p_name_prev = "长线平台"
-
-                        # 4. 判断逻辑：如果昨天那个时候是压缩状态
-                        if atr_ratio_prev <= max_atr_multiple:
-
-                            # A. 假突破 (Bull Trap)
-                            # 条件: 昨天收盘 > 上沿 (真突破), 今天收盘 < 上沿 (跌回)
-                            if prev_close > box_high_prev and close < box_high_prev:
-                                msg = f"【假突破(多头陷阱)】(昨天突破{period}日{p_name_prev}，今天跌回，警惕诱多！)"
-                                patterns.append(msg)
-                                break
-
-                                # B. 假跌破 (Bear Trap)
-                            # 条件: 昨天收盘 < 下沿 (真跌破), 今天收盘 > 下沿 (收回)
-                            if prev_close < box_low_prev and close > box_low_prev:
-                                msg = f"【假跌破(空头陷阱)】(昨天跌破{period}日{p_name_prev}，今天收回，警惕诱空！)"
-                                patterns.append(msg)
-                                break
 
         # --- 基础形态 ---
 
@@ -604,8 +636,23 @@ def analyze_kline_pattern(query: str, trade_date: str = None):
                 multi_day_trend = "📊 近5日小幅下跌，震荡偏空"
 
         # --- 6. 输出报告 (增强版) ---
+        month_part = ""
+        # 🔥 [修正] 把 symbol_code 改为 symbol
+        match = re.search(r'\d+', symbol)
+        if match:
+            month_part = match.group()
+
+        # 2. 反查中文名 (SH -> 烧碱)
+        # 🔥 [修正] 把 symbol_code 改为 symbol
+        cn_name = _get_chinese_name(symbol)
+
+        # 3. 组合显示名称 (例如：烧碱2603)
+        # 🔥 [修正] 把 symbol_code 改为 symbol
+        display_name = f"{cn_name}{month_part}" if cn_name != symbol else symbol
+
+        # 🔥 [修改结束]
         report = f"""
-📊 **{symbol} K线技术面诊断** ({date})
+📊 **{display_name} ({symbol}) 技术面诊断**
 
 **一、今日形态信号**
 {' 🔥 '.join(patterns) if patterns else '普通震荡K线，无明显形态。'}

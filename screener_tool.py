@@ -98,6 +98,21 @@ PATTERN_ALIAS = {
     "见顶": ["见顶", "倒V"],
 
     "空头反击": ["空头反击"],
+# === 🔥 [新增] 危险/风险相关别名 ===
+    "破位": ["破位", "跌破", "下破"],
+    "跌破": ["跌破", "破位"],
+    "跌破支撑": ["跌破", "破位"],
+    "破位下跌": ["破位", "跌破"],
+    "头部形态": ["见顶", "头肩顶", "M头"],
+    "头肩顶": ["头肩顶", "见顶"],
+    "M头": ["M头", "双顶"],
+    "双顶": ["双顶", "M头"],
+    "下跌趋势": ["空头排列", "下跌"],
+    "弱势": ["空头排列", "弱势"],
+    "危险": ["空头吞噬", "三只乌鸦", "破位", "跌破","夜星"],
+    "风险": ["空头吞噬", "三只乌鸦", "破位", "跌破"],
+    "要卖": ["空头吞噬", "见顶", "破位"],
+    "卖出信号": ["空头吞噬", "见顶", "破位", "三只乌鸦"],
     "放量下跌": ["放量下跌"],
 
     "大阴线": ["大阴线", "大阴"],
@@ -157,7 +172,7 @@ def resolve_pattern_keywords(user_input: str) -> list:
 # ==========================================
 
 @tool
-def search_top_stocks(condition: str = "综合评分", industry: str = None, limit: int = 10):
+def search_top_stocks(condition: str = "综合评分", industry: str = None, limit: int = 10,sort_order: str = "desc"):
     """
     【智能选股器】
     根据K线形态、技术形态、评分和行业板块筛选股票。
@@ -216,11 +231,10 @@ def search_top_stocks(condition: str = "综合评分", industry: str = None, lim
                 params[param_name] = f"%{keyword}%"
 
             base_sql += " AND (" + " OR ".join(pattern_conditions) + ")"
-            # 形态搜索时，优先按形态匹配度排序，再按分数
-            base_sql += " ORDER BY score DESC"
-        else:
-            # 综合评分模式
-            base_sql += " ORDER BY score DESC"
+
+            # 🔥 [修复] 统一在这里处理排序，避免重复 ORDER BY
+        order_direction = "ASC" if sort_order.lower() == "asc" else "DESC"
+        base_sql += f" ORDER BY score {order_direction}"
 
         base_sql += f" LIMIT {limit}"
 
@@ -245,12 +259,18 @@ def search_top_stocks(condition: str = "综合评分", industry: str = None, lim
             return msg
 
         # 6. 格式化输出
+        is_risk_mode = sort_order.lower() == "asc"
         title_suffix = f" - {industry}板块" if industry else ""
         search_desc = f"【{condition}】形态" if is_pattern_search else "综合评分"
 
-        result_text = f"📅 **选股结果 ({max_date}){title_suffix}**\n"
-        result_text += f"🔍 筛选条件: {search_desc}\n"
-        result_text += f"📊 共找到 {len(df)} 只符合条件的股票\n\n"
+        if is_risk_mode:
+            result_text = f"⚠️ **风险股票警示 ({max_date}){title_suffix}**\n"
+            result_text += f"🔍 筛选条件: {search_desc} (按风险排序)\n"
+            result_text += f"🚨 共找到 {len(df)} 只需要警惕的股票\n\n"
+        else:
+            result_text = f"📅 **选股结果 ({max_date}){title_suffix}**\n"
+            result_text += f"🔍 筛选条件: {search_desc}\n"
+            result_text += f"📊 共找到 {len(df)} 只符合条件的股票\n\n"
 
         for idx, row in df.iterrows():
             score_icon = "🌟" if row['score'] >= 80 else "📈" if row['score'] >= 60 else "📊"
@@ -414,7 +434,7 @@ if __name__ == "__main__":
     print("=" * 60)
     print("测试1: 搜索红三兵形态")
     print("=" * 60)
-    result = search_top_stocks.invoke({"condition": "红三兵"})
+    result = search_top_stocks.invoke({"condition": "金针探底"})
     print(result)
 
     print("\n" + "=" * 60)

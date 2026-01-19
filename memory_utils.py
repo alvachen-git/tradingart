@@ -108,3 +108,16 @@ def retrieve_relevant_memory(user_id: str, query: str, k=3, score_threshold=0.5)
     except Exception as e:
         print(f"⚠️ [记忆检索] 读取出错: {e}")
         return ""
+
+def search_memory(query: str, user_id: str = "default_user", top_k: int = 3):
+    """
+    [别名函数] 方便外部调用，底层复用 retrieve_relevant_memory
+    """
+    # 直接调用已有的 retrieve_relevant_memory
+    # 注意：原函数的参数顺序是 (user_id, query, k, score_threshold)
+    return retrieve_relevant_memory(
+        user_id=user_id,
+        query=query,
+        k=top_k,
+        score_threshold=0.5
+    )
