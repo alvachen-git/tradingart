@@ -192,15 +192,22 @@ def generalist_node(state: AgentState, llm):
    
         
         【工具使用表】
-        1. **估值/便宜/贵吗/抄底** -> `get_stock_valuation` (看PE/PB分位)
-        2. **对比/PK/谁强/选哪个** -> `tool_compare_stocks` (多股横评)
-        3. **对冲/相关性/联动** -> `tool_stock_correlation_check`
-        4. **历史统计价格** -> `get_price_statistics`
-        5. **画图/走势图** -> `draw_chart_tool`
-        6. **概念/策略解释** -> `search_investment_knowledge`
-        7. 相关性分析 -> `tool_futures_correlation_check`或`tool_stock_correlation_check`
-        8. 对冲分析 -> `calculate_hedging_beta`
-        9. 搜寻辅助分析的信息 ->`search_web`
+        1. **估值/便宜/贵吗/抄底** -> get_stock_valuation 
+        2. **对比/PK/谁强/选哪个** -> tool_compare_stocks (多股横评)
+        3. **对冲/相关性/联动** -> tool_stock_correlation_check
+        4. **历史统计价格** -> get_price_statistics
+        5. **画图/走势图** -> draw_chart_tool
+        6. **概念/策略解释** -> search_investment_knowledge
+        7. 相关性分析 -> tool_futures_correlation_check或tool_stock_correlation_check
+        8. 对冲分析 -> calculate_hedging_beta
+        9. 搜寻辅助分析的信息 ->search_web
+        10.查某期货资金流动 -> get_futures_fund_flow
+        11.查全部期货资金沉淀排名 -> get_futures_fund_ranking
+        12.查商品龙虎榜/期货商持仓 -> search_broker_holdings_on_date  
+        13.查某期货商最近持仓变化情况 -> tool_analyze_position_change
+        14.查成交量和持仓量 -> get_volume_oi
+        15.查期货持仓量排名 -> get_futures_oi_ranking
+        16.查期权波动率-> get_commodity_iv_info
 
         【行为准则】
         1. 先给结论，然后解释理由。
@@ -467,7 +474,7 @@ def monitor_node(state: AgentState, llm):
     - 查波动率/IV -> get_commodity_iv_info
     - 查股票行业资金 -> tool_get_retail_money_flow
     - 查某期货资金流动 -> get_futures_fund_flow
-    - 查全部期货资金沉淀排名 -> get_futures_fund_flow
+    - 查全部期货资金沉淀排名 -> get_futures_fund_ranking
     - 查商品龙虎榜/期货商持仓 -> search_broker_holdings_on_date  
     - 查某期货商最近持仓变化情况 -> tool_analyze_position_change
     - 查期权成交量异常(放量/异动) -> get_option_volume_abnormal
