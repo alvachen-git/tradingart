@@ -218,7 +218,7 @@ def generalist_node(state: AgentState, llm):
         # 给予足够的递归步数，但不要太高避免 GeneratorExit
         result = general_agent.invoke(
             {"messages": state["messages"]},
-            {"recursion_limit": 30}
+            {"recursion_limit": 60}
             # 降低到 15，足够完成大部分任务
         )
 
@@ -319,8 +319,8 @@ def analyst_node(state: AgentState, llm):
             用户想要看图表，请直接调用 `draw_chart_tool` 画图。
 
             【回复要求】：
-            1. 画完图后，只需要简短说明图表的关键信息（如当前价格、涨跌幅）。
-            2. 不要做冗长的分析。
+            1. 画完图后，只要简短说明图表关键信息（如当前价格、涨跌幅）。
+            2. 绝对不要做冗长的分析！
             """
     else:
         # 正常分析模式
