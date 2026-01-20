@@ -680,6 +680,9 @@ if 'is_logged_in' not in st.session_state:
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
+# 🔥 [新增] 图片上传器的动态 key，用于清除图片
+if "uploader_key" not in st.session_state:
+    st.session_state.uploader_key = 0
 
 # ==========================================
 #  4. AI Agent 定义 (完全保留您的核心逻辑)
@@ -820,10 +823,13 @@ def process_user_input(prompt_text):
 
     # --- 1. 图片识别逻辑 (保留) ---
     image_context = ""
-    if st.session_state.get("portfolio_uploader"):
+    current_uploader_key = f"portfolio_uploader_{st.session_state.uploader_key}"
+    uploaded_image = st.session_state.get(current_uploader_key)
+
+    if uploaded_image:
         with st.status("📸 正在识别持仓截图...", expanded=True) as status:
             st.write("AI 正在观察图片...")
-            vision_result = analyze_financial_image(st.session_state.portfolio_uploader)
+            vision_result = analyze_financial_image(uploaded_image)
             status.update(label="✅ 图片识别完成", state="complete", expanded=False)
             image_context = f"\n\n【用户上传图信息】：\n{vision_result}\n----------------\n"
             with st.chat_message("ai"):
@@ -877,6 +883,9 @@ def process_user_input(prompt_text):
     is_hit, fast_response = fast_router_check(final_prompt)
     if is_hit:
         st.session_state.messages.append({"role": "assistant", "content": fast_response})
+        # 🔥 [新增] 清除已使用的图片
+        if uploaded_image:
+            st.session_state.uploader_key += 1
         st.rerun()
         return
 
@@ -1184,6 +1193,10 @@ def process_user_input(prompt_text):
                 "chart": final_img_path
             }
             st.session_state.messages.append(message_data)
+
+            # 🔥 [新增] 清除已使用的图片，避免带入下次对话
+            if uploaded_image:  # 如果本次对话有图片
+                st.session_state.uploader_key += 1
 
             # 🧠 [恢复功能 3]：存入向量数据库 (长期记忆)
             if current_user != "访客":
@@ -1577,9 +1590,8 @@ with st.sidebar:
             st.markdown("⚠️ **确定要删除所有聊天记录吗？**\n\n此操作无法撤销。")
             if st.button("🚨 确认删除", type="primary", use_container_width=True, key="btn_clear_chat"):
                 st.session_state.messages = []
-                # 🔥 [新增] 同时清空上传的图片
-                if "portfolio_uploader" in st.session_state:
-                    del st.session_state.portfolio_uploader
+                # 🔥 [修改] 清空上传的图片，通过增加 key 计数器实现
+                st.session_state.uploader_key += 1
                 st.rerun()
 
     # 客服卡片 CSS 样式
@@ -1664,8 +1676,10 @@ else:
 with st.container():
     # 使用 Expander 把上传控件收起来，避免占用太高空间
     with st.expander("📸 可以上传持仓、K线等图", expanded=False):
+        # 🔥 [修改] 使用动态 key，便于清除图片
+        uploader_key = f"portfolio_uploader_{st.session_state.uploader_key}"
         uploaded_img = st.file_uploader("支持 JPG/PNG，截图越清晰越好", type=["jpg", "jpeg", "png"],
-                                        key="portfolio_uploader")
+                                        key=uploader_key)
 
         if uploaded_img:
             st.image(uploaded_img, caption="已加载截图", width=200)
