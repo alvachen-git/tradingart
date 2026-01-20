@@ -936,7 +936,7 @@ def process_user_input(prompt_text):
 
             report_card = {
                 "analyst": "", "monitor": "", "strategist": "",
-                "researcher": "", "news": "", "generalist": "","screener": "",
+                "researcher": "", "news": "", "generalist": "","screener": "","roaster": "",
                 "chatter": "", "finalizer": "" # 👈 加上这俩
             }
             final_img_path = None
@@ -977,7 +977,7 @@ def process_user_input(prompt_text):
 
                 try:
                     # 使用 invoke 一次性执行完成
-                    final_state = app.invoke(inputs, {"recursion_limit": 25})
+                    final_state = app.invoke(inputs, {"recursion_limit": 30})
 
                     # 🔥🔥🔥 [修复] 只处理新生成的消息，跳过历史消息
                     messages = final_state.get("messages", [])
@@ -1013,6 +1013,8 @@ def process_user_input(prompt_text):
                         # 🔥 [修复] Fallback 放在最后，且排除系统消息
                         elif "【精选股票】" in content:
                             report_card["screener"] = content
+                        elif "【毒舌点评】" in content:
+                            report_card["roaster"] = content
                         elif (content.strip() and
                               "【" not in content and
                               "PASS" not in content and
@@ -1075,6 +1077,10 @@ def process_user_input(prompt_text):
             screener_txt = report_card.get("screener", "")
 
             # === 场景 1: 闲聊/知识问答 ===
+            if report_card["roaster"]:
+                final_response_md = report_card["roaster"]
+                status.update(label="✅ 吐槽完毕", state="complete")
+
             if finalizer_txt and "PASS" not in finalizer_txt:
                 final_response_md = finalizer_txt
                 print("✅ 使用 finalizer 输出")

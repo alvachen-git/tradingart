@@ -1677,7 +1677,7 @@ def search_broker_holdings_on_date(broker_name: str, date: str, symbol: str = No
     2. 查询【所有期货商】在某天针对【某品种】的持仓排名。
 
     参数:
-    - broker_name: 期货商名称 。如果要查全市场排名，请填 '所有' 或 'All'。
+    - broker_name: 期货商名称 ，例如国泰君安。如果要查全市场排名，请填 '所有' 或 'All'。
     - date: 查询日期 (YYYYMMDD)。
     - symbol: (可选) 品种代码，如 'RB', 'CU'。当 broker_name='所有' 时，此项必填。
     """
@@ -1873,6 +1873,119 @@ def tool_analyze_position_change(symbol: str, start_date: str, end_date: str, so
     except Exception as e:
         return f"分析失败: {str(e)}"
 
+
+def tool_analyze_broker_positions(broker_name: str, start_date: str, end_date: str, sort_by: str = "long"):
+    """
+    【期货商持仓分析器】
+    查询某期货商在一段时间内各品种的持仓变化情况。
+
+    适用场景：
+    - "国泰君安最近在做多什么品种"
+    - "中信期货这周增仓了哪些"
+    - "永安期货最近的持仓变化"
+
+    参数:
+    - broker_name: 期货商名称，如 '国泰君安', '中信期货', '永安期货'。
+    - start_date: 开始日期 (YYYYMMDD)，如 '20260110'。
+    - end_date: 结束日期 (YYYYMMDD)，如 '20260120'。
+    - sort_by: 排序方式。'long' (按多单增量), 'short' (按空单增量), 'net' (按净持仓变动)。默认 'long'。
+
+    返回: 该期货商在各品种上的持仓变化表格。
+    """
+    print(f"[*] 分析期货商持仓: {broker_name} ({start_date} -> {end_date})")
+
+    try:
+        # 1. 清洗日期
+        d1 = start_date.replace('-', '').replace('/', '')
+        d2 = end_date.replace('-', '').replace('/', '')
+
+        # 2. 查询该期货商在两个日期的所有持仓
+        sql = f"""
+            SELECT 
+                ts_code,
+                long_vol, 
+                short_vol, 
+                REPLACE(trade_date, '-', '') as t_date
+            FROM futures_holding 
+            WHERE broker = '{broker_name}'
+              AND REPLACE(trade_date, '-', '') IN ('{d1}', '{d2}')
+              AND ts_code NOT LIKE '%%TAS%%'
+        """
+        df = pd.read_sql(sql, engine)
+
+        if df.empty:
+            return f"未找到【{broker_name}】在 {start_date} 或 {end_date} 的持仓数据。\n请检查期货商名称是否正确，或该期货商当天是否上榜。"
+
+        # 3. 提取品种代码（去掉合约月份，如 CU2503 -> CU）
+        def extract_product(ts_code):
+            # 提取字母部分作为品种代码
+            import re
+            match = re.match(r'([A-Za-z]+)', ts_code)
+            return match.group(1).upper() if match else ts_code
+
+        df['product'] = df['ts_code'].apply(extract_product)
+
+        # 4. 按品种和日期聚合（因为一个品种可能有多个合约月份）
+        df_agg = df.groupby(['product', 't_date'])[['long_vol', 'short_vol']].sum().reset_index()
+
+        # 5. 拆分成两个表进行对比
+        df_start = df_agg[df_agg['t_date'] == d1].set_index('product')
+        df_end = df_agg[df_agg['t_date'] == d2].set_index('product')
+
+        if df_start.empty and df_end.empty:
+            return f"数据缺失：【{broker_name}】在这两天都没有持仓数据。"
+
+        # 6. 计算差值 (End - Start)
+        df_end, df_start = df_end.align(df_start, join='outer', fill_value=0)
+
+        df_diff = pd.DataFrame()
+        df_diff['多单变化'] = df_end['long_vol'] - df_start['long_vol']
+        df_diff['空单变化'] = df_end['short_vol'] - df_start['short_vol']
+        df_diff['净持仓变化'] = df_diff['多单变化'] - df_diff['空单变化']
+        df_diff['当前多单'] = df_end['long_vol']
+        df_diff['当前空单'] = df_end['short_vol']
+        df_diff['当前净持仓'] = df_end['long_vol'] - df_end['short_vol']
+
+        # 7. 过滤掉无变化的品种
+        df_diff = df_diff[(df_diff['多单变化'] != 0) | (df_diff['空单变化'] != 0)]
+
+        if df_diff.empty:
+            return f"【{broker_name}】在 {start_date} 到 {end_date} 期间持仓无明显变化。"
+
+        # 8. 排序逻辑
+        if sort_by == 'short':
+            df_diff = df_diff.sort_values('空单变化', ascending=False)
+            filter_desc = "空单增加排序"
+            direction = "做空"
+        elif sort_by == 'net':
+            df_diff = df_diff.sort_values('净持仓变化', ascending=False)
+            filter_desc = "净多头增加排序"
+            direction = "净多"
+        else:  # default long
+            df_diff = df_diff.sort_values('多单变化', ascending=False)
+            filter_desc = "多单增加排序"
+            direction = "做多"
+
+        # 9. 取前 10
+        res = df_diff.head(10).reset_index()
+
+        # 10. 翻译品种代码为中文
+        from data_engine import PRODUCT_MAP
+        res['品种'] = res['product'].apply(lambda x: PRODUCT_MAP.get(x, x))
+
+        # 整理输出列
+        output_cols = ['品种', '净持仓变化', '当前净持仓', '多单变化', '空单变化']
+        res = res[output_cols]
+
+        # 11. 生成简评
+        top_products = res.head(3)['品种'].tolist()
+        summary = f"【{broker_name}】近期主要{direction}品种: {', '.join(top_products)}"
+
+        return f"📊 **{broker_name} 持仓变动分析** ({start_date} vs {end_date})\n📉 排序: {filter_desc}\n\n" + res.to_markdown(
+            index=False) + f"\n\n💡 {summary}"
+
+    except Exception as e:
+        return f"分析失败: {str(e)}"
 
 
 # [新增] 获取数据库中实际存在的最新日期
