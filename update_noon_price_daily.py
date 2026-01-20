@@ -1,0 +1,225 @@
+import tushare as ts
+import requests
+import pandas as pd
+import numpy as np
+from sqlalchemy import create_engine, text
+import os
+from dotenv import load_dotenv
+import time
+from datetime import datetime
+import sys
+
+# --- 1. 初始化配置 ---
+load_dotenv(override=True)
+
+if not os.getenv("DB_USER"):
+    print("❌ [Error] 环境变量未加载，请检查 .env 文件路径")
+    sys.exit(1)
+
+# 数据库连接
+db_url = f"mysql+pymysql://{os.getenv('DB_USER')}:{os.getenv('DB_PASSWORD')}@{os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/{os.getenv('DB_NAME')}"
+engine = create_engine(db_url, pool_recycle=3600)
+
+# Tushare 初始化
+ts.set_token(os.getenv("TUSHARE_TOKEN"))
+pro = ts.pro_api(timeout=120)
+
+# 交易所配置
+EXCHANGE_LIST = ['SHFE', 'DCE', 'CZCE', 'CFFEX', 'INE', 'GFEX']
+
+
+# --- 核心工具：将 Tushare 代码转换为新浪实时代码 ---
+def map_code_to_sina(ts_code, exchange):
+    symbol = ts_code.split('.')[0]
+    if exchange == 'CFFEX':
+        return f"CFF_RE_{symbol}"
+    return f"nf_{symbol}"
+
+
+def get_sina_futures_custom(sina_codes):
+    """
+    专门抓取新浪期货接口 (解决 ts.get_realtime_quotes 解析失败的问题)
+    """
+    if not sina_codes: return pd.DataFrame()
+
+    url = f"http://hq.sinajs.cn/list={','.join(sina_codes)}"
+    headers = {'Referer': 'http://finance.sina.com.cn/'}
+
+    try:
+        r = requests.get(url, headers=headers, timeout=5)
+        text = r.text
+    except Exception as e:
+        print(f"      [!] 网络请求失败: {e}")
+        return pd.DataFrame()
+
+    data_list = []
+
+    # 解析每一行
+    # 格式: var hq_str_nf_RB2505="螺纹钢2505,145859,3600.00,3620.00,..."
+    lines = text.split('\n')
+    for line in lines:
+        if not line.strip(): continue
+        try:
+            # 提取 code (nf_RB2505)
+            eq_idx = line.find('=')
+            if eq_idx == -1: continue
+
+            code_part = line[:eq_idx]  # var hq_str_nf_RB2505
+            sina_code = code_part.split('_')[-2] + '_' + code_part.split('_')[-1]  # nf_RB2505
+            if 'CFF_RE_' in code_part:  # 特殊处理中金所
+                sina_code = 'CFF_RE_' + code_part.split('_')[-1]
+
+            # 提取数据内容
+            val_part = line[eq_idx + 1:].strip().strip('";')
+            if not val_part: continue
+
+            vals = val_part.split(',')
+
+            # 新浪期货标准字段映射:
+            # 0:名称, 1:时间, 2:开盘, 3:最高, 4:最低, 5:昨收(参考),
+            # 6:买价, 7:卖价, 8:最新价, 9:结算价, 10:昨结算,
+            # 11:买量, 12:卖量, 13:持仓量, 14:成交量, ...
+
+            if len(vals) < 15: continue
+
+            # 只要有成交量的
+            vol = float(vals[14])
+            if vol == 0: continue
+
+            data_list.append({
+                'sina_code': sina_code,
+                'price': float(vals[8]),  # 最新价 -> close
+                'open': float(vals[2]),
+                'high': float(vals[3]),
+                'low': float(vals[4]),
+                'pre_close': float(vals[10]),  # 昨结算作为 pre_close (期货逻辑)
+                'volume': vol,
+                'amount': 0,  # 盘中接口通常不算额，设为0
+                'position': float(vals[13])  # 持仓量
+            })
+
+        except:
+            continue
+
+    return pd.DataFrame(data_list)
+
+
+# --- 核心工具：获取实时快照并清洗 ---
+def fetch_realtime_snapshot(exchange):
+    print(f"   [*] 正在获取 {exchange} 的活跃合约列表...")
+
+    df_list = pd.DataFrame()
+
+    # 1. 获取列表 (优先 Tushare, 失败走本地)
+    try:
+        df_list = pro.fut_basic(exchange=exchange, fut_type='1', status='L', fields='ts_code,symbol')
+    except:
+        pass
+
+    if df_list.empty:
+        # 本地兜底逻辑 (代码省略，保持您原有的即可)
+        # ... 如果您需要这部分代码请告诉我，否则假设您保留了原有的本地兜底 ...
+        print(f"      ⚠️ 无法获取合约列表，跳过 {exchange}")
+        return pd.DataFrame()
+
+    # 2. 生成新浪代码
+    # 定义映射函数 (内联或调用外部均可)
+    def _map_sina(code):
+        sym = code.split('.')[0]
+        if exchange == 'CFFEX': return f"CFF_RE_{sym}"
+        return f"nf_{sym}"
+
+    df_list['sina_code'] = df_list['ts_code'].apply(_map_sina)
+    sina_codes = df_list['sina_code'].tolist()
+
+    print(f"      -> 锁定 {len(sina_codes)} 个合约，开始请求新浪实时接口...")
+
+    # 3. 分批抓取 (改用自定义函数!)
+    all_realtime_data = []
+    chunk_size = 50  # 新浪URL长度限制，一次50个比较稳
+
+    for i in range(0, len(sina_codes), chunk_size):
+        try:
+            batch = sina_codes[i: i + chunk_size]
+            # 🔥【关键修改】这里不用 ts.get_realtime_quotes 了，用我们手写的
+            df_rt = get_sina_futures_custom(batch)
+
+            if not df_rt.empty:
+                all_realtime_data.append(df_rt)
+
+            # 稍微快一点，因为我们自己写的解析更快，但还是留点间隔
+            time.sleep(0.05)
+        except Exception as e:
+            print(f"Batch error: {e}")
+
+    if not all_realtime_data:
+        return pd.DataFrame()
+
+    # 4. 合并数据
+    df_snapshot = pd.concat(all_realtime_data, ignore_index=True)
+
+    # 5. 还原合并 (inner join 确保只保留我们要的)
+    df_merged = pd.merge(df_snapshot, df_list, left_on='sina_code', right_on='sina_code', how='inner')
+
+    # 6. 字段清洗与重命名
+    output = pd.DataFrame()
+    output['ts_code'] = df_merged['ts_code']
+    output['trade_date'] = datetime.now().strftime('%Y%m%d')
+
+    output['open_price'] = pd.to_numeric(df_merged['open'])
+    output['high_price'] = pd.to_numeric(df_merged['high'])
+    output['low_price'] = pd.to_numeric(df_merged['low'])
+    output['close_price'] = pd.to_numeric(df_merged['price'])
+
+    pre_close = pd.to_numeric(df_merged['pre_close'])
+    output['vol'] = pd.to_numeric(df_merged['volume'])
+    output['oi'] = pd.to_numeric(df_merged['position'])
+
+    # 临时用最新价填充结算价
+    output['settle_price'] = output['close_price']
+
+    # 计算涨跌幅
+    # 防止分母为0
+    output['pct_chg'] = 0.0
+    mask = pre_close > 0
+    output.loc[mask, 'pct_chg'] = (output.loc[mask, 'close_price'] - pre_close[mask]) / pre_close[mask] * 100
+
+    return output
+
+
+# --- 测试模式开关 ---
+TEST_MODE = True  # ⚠️ 设置为 True 可以只打印不入库
+
+if __name__ == "__main__":
+    today = datetime.now().strftime('%Y%m%d')
+    print(f"🚀 [Midday Update] 启动... (TEST_MODE={TEST_MODE})")
+
+    if not TEST_MODE:
+        # 正式模式：先删除今日数据
+        try:
+            with engine.connect() as conn:
+                conn.execute(text(f"DELETE FROM futures_price WHERE trade_date = '{today}'"))
+                conn.commit()
+            print("🧹 [1/3] 今日旧数据已清理")
+        except Exception as e:
+            print(f"⚠️ 清理失败: {e}")
+
+    # 循环抓取
+    for ex in EXCHANGE_LIST:
+        try:
+            df = fetch_realtime_snapshot(ex)
+            if df.empty: continue
+
+            if TEST_MODE:
+                print(f"🔍 [测试] {ex} 抓取到 {len(df)} 条数据，前3行预览:")
+                print(df.head(3).to_markdown(index=False))  # 打印预览
+                print("-" * 30)
+            else:
+                # 正式入库
+                df.to_sql('futures_price', engine, if_exists='append', index=False, chunksize=2000)
+                print(f"✅ {ex}: 入库 {len(df)} 条")
+
+        except Exception as e:
+            print(f"❌ {ex} 异常: {e}")
+
+    print("🏁 完成")

@@ -90,7 +90,7 @@ def supervisor_node(state: AgentState, llm):
     【可用员工】
     - analyst: 技术分析师 (看K线、定趋势)
     - monitor: 资金监控员 (看股票和期货资金流、期货商持仓、查持仓量和成交量、查价格、查合约)
-    - researcher: 情报研究员 (看新闻、宏观、热点、地缘政治、货币政策、Polymarket上的概率分析)
+    - researcher: 情报研究员 (看新闻、宏观、热点、地缘政治、货币政策、Polymarket上的概率分析、抖音热搜)
     - strategist: 期权策略员 (给策略，**必须依赖 analyst**) 
     - screener: 选股大师 (当用户问"推荐股票"、"什么股票好"、"选股"时使用)
     - chatter: 知识问答和闲聊 (例如解释一下IV，什么是牛市价差，"最近美联储什么时候开会")
@@ -106,8 +106,8 @@ def supervisor_node(state: AgentState, llm):
        - symbol 填 "白银,黄金" (用逗号分隔)
        - plan 派 `['generalist']` (让王牌去处理多品种)。
     5. 中国个股无期权，如果用户问个股策略，**不要**派 `strategist`，只派 `['analyst', 'monitor']` 即可。
-    6. 如果问题太复杂，不知道派谁 -> 就派 `['generalist']` 去处理。
-    7. **知识/百科/闲聊**: 问概念、问人名、问名词 -> 派 `['chatter']`。
+    6. 如果觉得用户的问题太复杂或奇怪，先派['chatter']去聊聊拆解需求。
+    7. **知识/百科/闲聊**: 问概念、问人名、问名词 -> 派 ['chatter']。
     8. 如果用户想分析行情但**没说名字** (如"帮我分析一下") -> plan=['chatter'] (让Chatter去问用户要代码)。
     """
 
@@ -582,15 +582,16 @@ def strategist_node(state: AgentState, llm):
            - 再根据 IV 高低和客户风险偏好来选择期权策略
 
         3. **风险偏好适配**：
-           - 【保守型】：只推荐风险有限的策略（牛市价差、熊市价差、备兑开仓），禁止裸卖
-           - 【稳健型】：可以适度进攻（买平值期权、卖虚值期权、比率价差、价差策略）
-           - 【激进型】：可以尝试高风险高收益策略（买深虚期权、做末日期权、飞龙在天、双卖期权）
+           - 【保守型】：只推荐风险有限的策略（牛市价差、熊市价差、比率价差），禁止裸卖
+           - 【稳健型】：可以适度进攻（买平值期权、顺势卖虚值期权、价差策略、备兑策略、合成期货）
+           - 【激进型】：可以用积极策略（有趋势时买深虚期权、买末日期权、飞龙在天，没趋势时就双卖期权，或者卖末日期权）
 
         【输出要求】
         1. 给出 1-2 个具体的期权策略建议
         2. 给策略时，期权行权价选择不要乱编，一定要用`tool_query_specific_option`查过
         3. 解释为什么这个策略适合当前市场和客户风险偏好
         4. 给出止损/止盈建议
+        5. 禁止自己编造假数据！
 
         【工具使用提示】
         - 查 IV：`get_commodity_iv_info`
@@ -751,7 +752,7 @@ def chatter_node(state: AgentState, llm=None):
     current_date = datetime.now().strftime("%Y年%m月%d日")
 
     # 判断是否是简单问候（不需要工具）
-    is_greeting = len(user_query) < 5 and any(x in user_query for x in ["你好", "嗨", "早", "谢", "hello", "hi", "嘿"])
+    is_greeting = len(user_query) < 5 and any(x in user_query for x in ["你好", "嗨", "早", "谢", "hello", "hi", "嘿", "晚上好", "早上好", "早安", "中午好", "下午好"])
 
     if is_greeting:
         # 简单问候直接回复，不启动 ReAct
@@ -799,8 +800,7 @@ def chatter_node(state: AgentState, llm=None):
 
         【禁止事项】
         - 不要编造数据或策略
-        - 不要忽略知识库的内容
-        - 如果知识库有答案，不要只引用网络搜索结果
+        - 知识库内容要优先参考
         """
 
     # === 🔥 创建 ReAct Agent ===
@@ -992,7 +992,7 @@ def screener_node(state: AgentState, llm):
         try:
             result = screener_react_agent.invoke(
                 {"messages": [HumanMessage(content=query)]},
-                {"recursion_limit": 20}
+                {"recursion_limit": 40}
             )
 
             last_response = result["messages"][-1].content
@@ -1291,6 +1291,7 @@ def finalizer_node(state: AgentState, llm):
                 1. 中国的股票没有期权，客户问股票时，不要给期权策略，除非是用ETF期权来对冲股票。
                 2. 如果某品种有利好消息但却下跌，要提醒利多不涨，可能反转，而如果有坏消息但却不跌，要提醒利空不跌，可能阶段底部到了。
                 3. 价格数据是每天下午5点后更新。
+                4. 如果没有数据支持，就不能乱编内容！ 
 
                 【排版强制要求】：
                 1. **头部信息**：使用引用块 `>` 展示签发人、日期和地点。
