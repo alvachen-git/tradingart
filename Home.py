@@ -1577,6 +1577,9 @@ with st.sidebar:
             st.markdown("⚠️ **确定要删除所有聊天记录吗？**\n\n此操作无法撤销。")
             if st.button("🚨 确认删除", type="primary", use_container_width=True, key="btn_clear_chat"):
                 st.session_state.messages = []
+                # 🔥 [新增] 同时清空上传的图片
+                if "portfolio_uploader" in st.session_state:
+                    del st.session_state.portfolio_uploader
                 st.rerun()
 
     # 客服卡片 CSS 样式

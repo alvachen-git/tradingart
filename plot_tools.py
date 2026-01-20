@@ -721,6 +721,64 @@ def plot_correlation_scatter(symbol_a, symbol_b, period='1y'):
 
 
 # ==========================================
+#  🔥 新增：饼图/环形图绘制函数
+# ==========================================
+def _plot_pie_chart(query, title_prefix="资产分布"):
+    """
+    解析格式: "类别A:100, 类别B:200"
+    """
+    try:
+        # 1. 解析字符串为数据
+        # 支持中文冒号和英文冒号，支持逗号分隔
+        items = re.split(r'[,，、]', query)
+        labels = []
+        values = []
+
+        data_for_summary = []
+
+        for item in items:
+            if ":" in item or "：" in item:
+                # 分割名称和数值
+                parts = re.split(r'[:：]', item)
+                if len(parts) >= 2:
+                    name = parts[0].strip()
+                    try:
+                        # 提取数字 (支持 30% 或 3000)
+                        val_str = parts[1].strip().replace('%', '')
+                        val = float(val_str)
+                        labels.append(name)
+                        values.append(val)
+                        data_for_summary.append({"label": name, "value": val})
+                    except:
+                        continue
+
+        if not labels:
+            return "❌ 无法解析数据，请使用格式：'股票:50, 债券:30, 现金:20'"
+
+        # 2. 绘图 (环形图)
+        fig = go.Figure(data=[go.Pie(
+            labels=labels,
+            values=values,
+            hole=.4,  # 变成环形图
+            textinfo='label+percent',  # 显示标签和百分比
+            insidetextorientation='radial'
+        )])
+
+        fig.update_layout(
+            title=f"{title_prefix}",
+            template="plotly_dark",
+            height=450
+        )
+
+        filename = save_chart_as_json(fig, f"pie_{uuid.uuid4().hex[:6]}")
+        summary = _generate_data_summary(data_for_summary, title_prefix)
+
+        return f"{summary}\n\nIMAGE_CREATED:{filename}"
+
+    except Exception as e:
+        return f"❌ 饼图绘制失败: {e}"
+
+# ==========================================
 #  🛠️ 对外暴露工具 (API 升级)
 # ==========================================
 @tool
@@ -732,6 +790,7 @@ def draw_chart_tool(query: str, chart_type: str = "kline", time_period: str = "6
     - query:
        * K线/总持仓: '豆粕'
        * 期货商持仓: '豆粕,永安期货' (默认总持仓)
+       * 饼图: '股票:60, 债券:40' 或 '腾讯:50, 阿里:30, 茅台:20'
        * 指定持仓类型: '豆粕,永安期货,净持仓' (支持: 净持仓, 多单, 空单)
        * 价差: 'M2505,M2509'
        * 相关性：黄金和白银
@@ -742,11 +801,16 @@ def draw_chart_tool(query: str, chart_type: str = "kline", time_period: str = "6
        * 'line_pe': 市盈率PE走势图 (仅股票/指数)
        * 'spread_diff': 价差图 (A - B)
        * 'spread_ratio': 比价图 (A / B)
+       * 'pie' (饼图/占比图)
        * 'bar_compare': 多股涨跌幅对比
     - time_period: 时间范围 ('1m', '3m', '6m', '1y', 'ytd')
     """
     # 1. 价差分析
     query = query.replace("：", ":").replace("，", ",").strip()
+
+    if chart_type == 'pie':
+        # query 格式预期: "A:10, B:20"
+        return _plot_pie_chart(query, title_prefix="占比分析")
 
     if 'spread' in chart_type:
         return _plot_spread_chart(query, time_period, mode='diff' if 'diff' in chart_type else 'ratio')
