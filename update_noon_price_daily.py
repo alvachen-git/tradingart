@@ -184,7 +184,37 @@ def fetch_realtime_snapshot(exchange):
     mask = pre_close > 0
     output.loc[mask, 'pct_chg'] = (output.loc[mask, 'close_price'] - pre_close[mask]) / pre_close[mask] * 100
 
-    return output
+    # ========================================================
+    # 🔥🔥🔥 【核心新增】 生成主力合约逻辑 (参考 update_future_price_daily)
+    # ========================================================
+
+    # A. 提取品种符号 (如 RB2505.SHF -> RB)
+    # 这里的正则 ^([a-zA-Z]+) 提取开头的字母部分
+    output['symbol'] = output['ts_code'].str.extract(r'^([a-zA-Z]+)')
+
+    # B. 找到每个品种持仓量(OI)最大的合约索引
+    # dropna() 是防止解析失败，groupby('symbol')['oi'].idxmax() 找最大持仓那一行
+    idx_max = output.dropna(subset=['symbol']).groupby('symbol')['oi'].idxmax()
+
+    # C. 提取主力合约行
+    df_dom = output.loc[idx_max].copy()
+
+    # D. 将 ts_code 改为主力代码 (如 RB2505.SHF 改为 RB)
+    # 这一步非常关键，数据库里通常用纯字母代码表示主力连续
+    df_dom['ts_code'] = df_dom['symbol']
+
+    # E. 合并：原始合约 + 主力合约
+    output_final = pd.concat([output, df_dom], ignore_index=True)
+
+    # F. 去重 (保留最后出现的，防止万一有重复)
+    output_final = output_final.drop_duplicates(subset=['ts_code'], keep='last')
+
+    # G. 清理临时列
+    if 'symbol' in output_final.columns:
+        output_final = output_final.drop(columns=['symbol'])
+
+    # 返回处理好的最终数据
+    return output_final
 
 
 # --- 测试模式开关 ---
