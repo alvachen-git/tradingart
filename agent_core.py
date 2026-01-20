@@ -225,7 +225,7 @@ def generalist_node(state: AgentState, llm):
         # 给予足够的递归步数，但不要太高避免 GeneratorExit
         result = general_agent.invoke(
             {"messages": state["messages"]},
-            {"recursion_limit": 60}
+            {"recursion_limit": 80}
             # 降低到 15，足够完成大部分任务
         )
 
@@ -365,7 +365,7 @@ def analyst_node(state: AgentState, llm):
         # 执行推理 (给予足够的递归次数，因为处理价差可能需要调2次工具)
         result = analyst_agent.invoke(
             {"messages": state["messages"]},
-            {"recursion_limit": 10}
+            {"recursion_limit": 20}
         )
 
         last_response = result["messages"][-1].content
@@ -502,7 +502,7 @@ def monitor_node(state: AgentState, llm):
         # 限制迭代次数，防止死循环
         result = monitor_agent.invoke(
             {"messages": [HumanMessage(content=user_q)]},
-            {"recursion_limit": 15}  # 降低到 15
+            {"recursion_limit": 20}  # 降低到 15
         )
         last_response = result["messages"][-1].content
         partial_response = last_response
@@ -610,7 +610,7 @@ def strategist_node(state: AgentState, llm):
     try:
         result = strategist_agent.invoke(
             {"messages": [HumanMessage(content=user_q)]},
-            {"recursion_limit": 40}  # 期权分析可能需要多轮工具调用
+            {"recursion_limit": 50}  # 期权分析可能需要多轮工具调用
         )
 
         last_response = result["messages"][-1].content
