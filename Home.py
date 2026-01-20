@@ -1141,6 +1141,8 @@ def process_user_input(prompt_text):
                 # 策略1：尝试找工具返回的有用内容
                 tool_results = []
                 for msg in messages:
+                    if isinstance(msg, SystemMessage):
+                        continue
                     msg_type = getattr(msg, 'type', '')
                     content = getattr(msg, 'content', str(msg))
                     # 收集工具返回的内容（通常比较长且有用）

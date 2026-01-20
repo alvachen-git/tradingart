@@ -188,7 +188,7 @@ def fetch_realtime_snapshot(exchange):
 
 
 # --- 测试模式开关 ---
-TEST_MODE = True  # ⚠️ 设置为 True 可以只打印不入库
+TEST_MODE = False  # ⚠️ 设置为 True 可以只打印不入库
 
 if __name__ == "__main__":
     today = datetime.now().strftime('%Y%m%d')
