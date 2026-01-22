@@ -181,100 +181,123 @@ def draft_report(raw_material):
 
     ## 1. 格式：纯 HTML 代码（无 Markdown）
 
-    ## 2. 整体风格 - 优雅金融风
-    - 背景：柔和的深蓝灰色 (#2d3748)，不要纯黑
-    - 卡片背景：稍亮的灰蓝 (#3d4a5c) 或半透明白
-    - 主色调：金色 (#f6c744)、天蓝 (#63b3ed)、翠绿 (#68d391)
-    - 文字：主要内容用 #e2e8f0（亮灰白），次要用 #a0aec0
-    - 字体大小：正文 16px，小字 14px，标题 22-26px
+    ## 2. ⚠️ 邮件兼容性要求（极重要！）
+    部分邮箱（如139邮箱、QQ邮箱）会剥离CSS背景色，所以：
+    - **正文文字必须用深色 #1a202c**，确保白底下也能看清
+    - **次要文字用 #4a5568**
+    - **标题用深色版主题色**（见下方色板）
+    - 每个div必须同时加 style="background:..." 和 bgcolor="..." 双重保障
+    - 用 table 布局替代 CSS grid，兼容性更好
 
-    ## 3. HTML 结构模板（请严格遵循，注意字体大小）：
+    ## 3. 邮件兼容色板（必须严格遵守）
+    | 用途 | 颜色 |
+    |------|------|
+    | 正文文字 | #1a202c (深黑) |
+    | 次要文字 | #4a5568 (深灰) |
+    | 金色标题 | #b7791f |
+    | 蓝色标题 | #2b6cb0 |
+    | 绿色标题 | #276749 |
+    | 紫色标题 | #6b46c1 |
+    | 红色标题 | #c53030 |
+    | 灰色标题 | #4a5568 |
+
+    ## 4. HTML 结构模板（邮件兼容版）：
 
     ```html
-    <div style="max-width: 700px; margin: 0 auto; font-family: -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', sans-serif; background: linear-gradient(180deg, #2d3748 0%, #1a202c 100%); padding: 35px; border-radius: 20px; line-height: 1.8;">
+    <div style="max-width: 700px; margin: 0 auto; font-family: 'PingFang SC', 'Microsoft YaHei', sans-serif; background: #2d3748; padding: 35px; border-radius: 20px; line-height: 1.8;" bgcolor="#2d3748">
 
       <!-- 头部 -->
-      <div style="text-align: center; padding-bottom: 30px; border-bottom: 2px solid rgba(255,255,255,0.1);">
+      <div style="text-align: center; padding-bottom: 30px; border-bottom: 2px solid #4a5568;">
         <h1 style="color: #f6c744; font-size: 32px; margin: 0; letter-spacing: 3px; font-weight: 700;">📊 爱波塔复盘晚报</h1>
-        <p style="color: #a0aec0; font-size: 16px; margin-top: 12px;">{today} {weekday} | 深度复盘</p>
+        <p style="color: #4a5568; font-size: 16px; margin-top: 12px;">{today} {weekday} | 深度复盘</p>
       </div>
 
       <!-- 🚀 市场头条 -->
       <div style="margin-top: 30px;">
-        <h2 style="color: #63b3ed; font-size: 22px; margin-bottom: 18px; font-weight: 600;">
+        <h2 style="color: #2b6cb0; font-size: 22px; margin-bottom: 18px; font-weight: 600; border-left: 4px solid #3182ce; padding-left: 12px;">
           🚀 市场头条
         </h2>
-        <div style="background: rgba(99, 179, 237, 0.15); border-left: 5px solid #63b3ed; padding: 20px; border-radius: 0 12px 12px 0;">
-          <p style="color: #e2e8f0; font-size: 16px; margin: 0; line-height: 1.9;">
-            <!-- 头条内容，字要大 -->
+        <div style="background: #ebf8ff; border: 1px solid #3182ce; padding: 20px; border-radius: 12px;" bgcolor="#ebf8ff">
+          <p style="color: #1a202c; font-size: 16px; margin: 0; line-height: 1.9;">
+            <!-- 头条内容 -->
           </p>
         </div>
       </div>
 
       <!-- 💰 资金暗流 -->
       <div style="margin-top: 30px;">
-        <h2 style="color: #68d391; font-size: 22px; margin-bottom: 18px; font-weight: 600;">
+        <h2 style="color: #276749; font-size: 22px; margin-bottom: 18px; font-weight: 600; border-left: 4px solid #38a169; padding-left: 12px;">
           💰 资金暗流
         </h2>
-        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 18px;">
-          <div style="background: rgba(104, 211, 145, 0.12); padding: 20px; border-radius: 12px; border: 1px solid rgba(104, 211, 145, 0.25);">
-            <h4 style="color: #68d391; margin: 0 0 12px 0; font-size: 17px; font-weight: 600;">📈 股票板块</h4>
-            <p style="color: #e2e8f0; font-size: 15px; margin: 0; line-height: 1.8;">
-              <!-- 内容 -->
-            </p>
-          </div>
-          <div style="background: rgba(104, 211, 145, 0.12); padding: 20px; border-radius: 12px; border: 1px solid rgba(104, 211, 145, 0.25);">
-            <h4 style="color: #68d391; margin: 0 0 12px 0; font-size: 17px; font-weight: 600;">📊 期货商持仓</h4>
-            <p style="color: #e2e8f0; font-size: 15px; margin: 0; line-height: 1.8;">
-              <!-- 内容 -->
-            </p>
-          </div>
-        </div>
+        <table width="100%" cellpadding="0" cellspacing="8" border="0">
+          <tr>
+            <td width="50%" valign="top">
+              <div style="background: #f0fff4; padding: 20px; border-radius: 12px; border: 1px solid #38a169;" bgcolor="#f0fff4">
+                <h4 style="color: #276749; margin: 0 0 12px 0; font-size: 17px; font-weight: 600;">📈 股票板块</h4>
+                <p style="color: #1a202c; font-size: 15px; margin: 0; line-height: 1.8;">
+                  <!-- 内容 -->
+                </p>
+              </div>
+            </td>
+            <td width="50%" valign="top">
+              <div style="background: #f0fff4; padding: 20px; border-radius: 12px; border: 1px solid #38a169;" bgcolor="#f0fff4">
+                <h4 style="color: #276749; margin: 0 0 12px 0; font-size: 17px; font-weight: 600;">📊 期货商持仓</h4>
+                <p style="color: #1a202c; font-size: 15px; margin: 0; line-height: 1.8;">
+                  <!-- 内容 -->
+                </p>
+              </div>
+            </td>
+          </tr>
+        </table>
       </div>
 
       <!-- 🏆 商品期货全景 -->
       <div style="margin-top: 30px;">
-        <h2 style="color: #f6c744; font-size: 22px; margin-bottom: 18px; font-weight: 600;">
+        <h2 style="color: #b7791f; font-size: 22px; margin-bottom: 18px; font-weight: 600; border-left: 4px solid #d69e2e; padding-left: 12px;">
           🏆 商品期货全景
         </h2>
-        <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 14px;">
-          <!-- 每个商品一个卡片，示例（黄金）： -->
-          <div style="background: rgba(246, 199, 68, 0.1); padding: 16px; border-radius: 12px; border: 1px solid rgba(246, 199, 68, 0.25);">
-            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
-              <span style="color: #f6c744; font-weight: 700; font-size: 17px;">🥇 黄金</span>
-              <span style="background: #48bb78; color: white; padding: 4px 12px; border-radius: 6px; font-size: 13px; font-weight: 600;">看多</span>
-            </div>
-            <p style="color: #e2e8f0; font-size: 15px; margin: 0; line-height: 1.7;">
-              形态：xxx<br>支撑：xxx | 压力：xxx
-            </p>
-          </div>
-          <!-- 白银 -->
-          <div style="background: rgba(246, 199, 68, 0.1); padding: 16px; border-radius: 12px; border: 1px solid rgba(246, 199, 68, 0.25);">
-            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
-              <span style="color: #cbd5e0; font-weight: 700; font-size: 17px;">🥈 白银</span>
-              <span style="background: #ecc94b; color: #1a202c; padding: 4px 12px; border-radius: 6px; font-size: 13px; font-weight: 600;">震荡</span>
-            </div>
-            <p style="color: #e2e8f0; font-size: 15px; margin: 0; line-height: 1.7;">
-              形态：xxx<br>支撑：xxx | 压力：xxx
-            </p>
-          </div>
-          <!-- 原油 -->
-          <!-- 铜 -->
-          <!-- 螺纹钢 -->
-          <!-- 铁矿石 -->
-          <!-- 豆粕 -->
-          <!-- 棕榈油 -->
-          <!-- 共8个卡片 -->
-        </div>
+        <table width="100%" cellpadding="0" cellspacing="8" border="0">
+          <tr>
+            <!-- 黄金 -->
+            <td width="50%" valign="top">
+              <div style="background: #fffff0; padding: 16px; border-radius: 12px; border: 1px solid #d69e2e;" bgcolor="#fffff0">
+                <div style="margin-bottom: 10px;">
+                  <span style="color: #b7791f; font-weight: 700; font-size: 17px;">🥇 黄金</span>
+                  <span style="background: #38a169; color: white; padding: 4px 12px; border-radius: 6px; font-size: 13px; font-weight: 600; margin-left: 10px;">看多</span>
+                </div>
+                <p style="color: #1a202c; font-size: 15px; margin: 0; line-height: 1.7;">
+                  形态：xxx<br>支撑：xxx | 压力：xxx
+                </p>
+              </div>
+            </td>
+            <!-- 白银 -->
+            <td width="50%" valign="top">
+              <div style="background: #fffff0; padding: 16px; border-radius: 12px; border: 1px solid #d69e2e;" bgcolor="#fffff0">
+                <div style="margin-bottom: 10px;">
+                  <span style="color: #4a5568; font-weight: 700; font-size: 17px;">🥈 白银</span>
+                  <span style="background: #d69e2e; color: white; padding: 4px 12px; border-radius: 6px; font-size: 13px; font-weight: 600; margin-left: 10px;">震荡</span>
+                </div>
+                <p style="color: #1a202c; font-size: 15px; margin: 0; line-height: 1.7;">
+                  形态：xxx<br>支撑：xxx | 压力：xxx
+                </p>
+              </div>
+            </td>
+          </tr>
+          <!-- 第二行：原油、铜 -->
+          <!-- 第三行：碳酸锂、铁矿石 -->
+          <!-- 第四行：豆粕、棕榈油 -->
+          <!-- 第五行：棉花、PTA -->
+          <!-- 共10个商品，用5行2列的table布局 -->
+        </table>
       </div>
 
       <!-- ⚖️ 期权波动率 -->
       <div style="margin-top: 30px;">
-        <h2 style="color: #b794f4; font-size: 22px; margin-bottom: 18px; font-weight: 600;">
+        <h2 style="color: #6b46c1; font-size: 22px; margin-bottom: 18px; font-weight: 600; border-left: 4px solid #805ad5; padding-left: 12px;">
           ⚖️ 期权波动率
         </h2>
-        <div style="background: rgba(183, 148, 244, 0.12); padding: 20px; border-radius: 12px; border: 1px solid rgba(183, 148, 244, 0.25);">
-          <p style="color: #e2e8f0; font-size: 15px; margin: 0; line-height: 1.8;">
+        <div style="background: #faf5ff; padding: 20px; border-radius: 12px; border: 1px solid #805ad5;" bgcolor="#faf5ff">
+          <p style="color: #1a202c; font-size: 15px; margin: 0; line-height: 1.8;">
             <!-- ETF期权数据 -->
           </p>
         </div>
@@ -282,35 +305,35 @@ def draft_report(raw_material):
 
       <!-- 🐂 每日牛股 -->
       <div style="margin-top: 30px;">
-        <h2 style="color: #fc8181; font-size: 22px; margin-bottom: 18px; font-weight: 600;">
+        <h2 style="color: #c53030; font-size: 22px; margin-bottom: 18px; font-weight: 600; border-left: 4px solid #e53e3e; padding-left: 12px;">
           🐂 每日牛股
         </h2>
-        <div style="background: rgba(252, 129, 129, 0.12); padding: 20px; border-radius: 12px; border: 1px solid rgba(252, 129, 129, 0.25);">
-          <p style="color: #e2e8f0; font-size: 15px; margin: 0; line-height: 1.8;">
-            <!-- 牛股列表，每只股票换行 -->
+        <div style="background: #fff5f5; padding: 20px; border-radius: 12px; border: 1px solid #e53e3e;" bgcolor="#fff5f5">
+          <p style="color: #1a202c; font-size: 15px; margin: 0; line-height: 1.8;">
+            <!-- 牛股列表 -->
           </p>
         </div>
       </div>
 
       <!-- 🐻 风险警示 -->
       <div style="margin-top: 30px;">
-        <h2 style="color: #a0aec0; font-size: 22px; margin-bottom: 18px; font-weight: 600;">
+        <h2 style="color: #4a5568; font-size: 22px; margin-bottom: 18px; font-weight: 600; border-left: 4px solid #718096; padding-left: 12px;">
           🐻 风险警示
         </h2>
-        <div style="background: rgba(160, 174, 192, 0.12); padding: 20px; border-radius: 12px; border: 1px solid rgba(160, 174, 192, 0.25);">
-          <p style="color: #e2e8f0; font-size: 15px; margin: 0; line-height: 1.8;">
+        <div style="background: #f7fafc; padding: 20px; border-radius: 12px; border: 1px solid #718096;" bgcolor="#f7fafc">
+          <p style="color: #1a202c; font-size: 15px; margin: 0; line-height: 1.8;">
             <!-- 熊股列表 -->
           </p>
         </div>
       </div>
 
       <!-- 💡 明日策略 -->
-      <div style="margin-top: 35px; background: linear-gradient(135deg, rgba(246, 199, 68, 0.18) 0%, rgba(99, 179, 237, 0.18) 100%); padding: 25px; border-radius: 16px; border: 2px solid rgba(246, 199, 68, 0.35);">
-        <h2 style="color: #f6c744; font-size: 22px; margin: 0 0 18px 0; font-weight: 600;">
+      <div style="margin-top: 35px; background: #fffff0; padding: 25px; border-radius: 16px; border: 3px solid #d69e2e;" bgcolor="#fffff0">
+        <h2 style="color: #b7791f; font-size: 22px; margin: 0 0 18px 0; font-weight: 600;">
           💡 明日策略
         </h2>
-        <p style="color: #e2e8f0; font-size: 16px; line-height: 2; margin: 0;">
-          <!-- 操作建议，字要大一点 -->
+        <p style="color: #1a202c; font-size: 16px; line-height: 2; margin: 0;">
+          <!-- 操作建议 -->
         </p>
       </div>
 
@@ -332,19 +355,19 @@ def draft_report(raw_material):
     | 元素 | 字号 | 颜色 |
     |------|------|------|
     | 大标题 | 32px | #f6c744 (金色) |
-    | 板块标题 | 22px | 各板块主题色 |
-    | 卡片小标题 | 17px | 主题色 |
-    | 正文内容 | 15-16px | #e2e8f0 (亮灰白) |
-    | 次要文字 | 14px | #a0aec0 (灰色) |
+    | 板块标题 | 22px | 深色版主题色(见色板) |
+    | 卡片小标题 | 17px | 深色版主题色 |
+    | **正文内容** | 15-16px | **#1a202c (深黑)** |
+    | 次要文字 | 14px | #4a5568 (深灰) |
     | 行高 | 1.7-2.0 | - |
 
     ## 5. 趋势标签颜色
-    - 看多：背景 #48bb78，白字
-    - 看空：背景 #fc8181，白字  
-    - 震荡：背景 #ecc94b，深色字 #1a202c
+    - 看多：背景 #38a169，白字
+    - 看空：背景 #e53e3e，白字  
+    - 震荡：背景 #d69e2e，白字
 
     ## 6. 内容要求
-    - **商品期货全景**：必须包含 10 个商品的分析卡片
+    - **商品期货全景**：必须包含 10 个商品的分析卡片，用table布局(5行2列)
     - 每个商品显示：趋势标签、形态、支撑/压力位
     - 数据必须来自素材，不要编造
     -  明日策略的内容要具体，但用幽默的文风表达

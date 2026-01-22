@@ -56,6 +56,87 @@ class AgentState(TypedDict):
     memory_context: str
 
 
+# 期权合约乘数表（每张期权对应的标的数量）
+OPTION_MULTIPLIER = {
+    # ETF期权 (份)
+    "510050": (10000, "份"), "510300": (10000, "份"), "510500": (10000, "份"),
+    "159901": (10000, "份"), "159915": (10000, "份"), "159919": (10000, "份"),
+    "159922": (10000, "份"), "588000": (10000, "份"), "588080": (10000, "份"),
+
+    # 股指期权 (点×100元)
+    "IO": (100, "点"), "MO": (100, "点"), "HO": (100, "点"),
+
+    # 贵金属
+    "AU": (1000, "克"), "AG": (15, "千克"),
+
+    # 有色
+    "CU": (5, "吨"), "AL": (5, "吨"), "ZN": (5, "吨"), "PB": (5, "吨"), "SN": (1, "吨"), "NI": (1, "吨"),
+
+    # 黑色
+    "I": (100, "吨"), "RB": (10, "吨"), "HC": (10, "吨"), "J": (100, "吨"), "JM": (60, "吨"),"SM": (5, "吨"),"SF": (5, "吨"),
+    "PS": (3, "吨"),"LC": (1, "吨"),"SI": (5, "吨"),"PT": (1000, "吨"),"PD": (1000, "吨"),"SH": (30, "吨"),"AO": (20, "吨"),
+
+    # 能化
+    "SC": (1000, "桶"), "FU": (10, "吨"), "LU": (10, "吨"), "PG": (20, "吨"),
+    "MA": (10, "吨"), "TA": (5, "吨"), "PP": (5, "吨"), "L": (5, "吨"),
+    "V": (5, "吨"), "EB": (5, "吨"), "EG": (10, "吨"), "RU": (10, "吨"), "NR": (10, "吨"),"BR": (5, "吨"),
+    "BU": (10, "吨"), "SA": (20, "吨"), "FG": (20, "吨"), "UR": (20, "吨"),
+
+    # 农产品
+    "M": (10, "吨"), "Y": (10, "吨"), "P": (10, "吨"), "OI": (10, "吨"), "RM": (10, "吨"),
+    "C": (10, "吨"), "A": (10, "吨"), "CF": (5, "吨"), "SR": (10, "吨"),
+    "AP": (10, "吨"), "PK": (5, "吨"), "CJ": (5, "吨"), "LH": (16, "吨"),
+}
+
+
+def get_option_multiplier(symbol: str) -> str:
+    """
+    根据标的代码获取期权合约乘数，返回精简的提示字符串
+    支持单品种和多品种（逗号分隔）
+    """
+    import re
+    if not symbol:
+        return ""
+
+    # 处理多品种情况 (如 "M,SR" 或 "豆粕,白糖")
+    symbols = re.split(r'[,，、/\s]+', symbol.strip())
+    results = []
+
+    for sym in symbols:
+        sym = sym.strip().upper()
+        if not sym:
+            continue
+
+        # 1. 直接匹配 ETF (6位数字)
+        if sym.isdigit() and len(sym) == 6:
+            if sym in OPTION_MULTIPLIER:
+                m, u = OPTION_MULTIPLIER[sym]
+                results.append(f"{sym}={m}{u}")
+            else:
+                results.append(f"{sym}=10000份")  # ETF默认
+            continue
+
+        # 2. 股指期权 (IO/MO/HO开头)
+        for prefix in ["IO", "MO", "HO"]:
+            if sym.startswith(prefix):
+                results.append(f"{prefix}=100点(每点100元)")
+                break
+        else:
+            # 3. 商品期权 - 提取字母部分
+            match = re.match(r'^([A-Za-z]+)', sym)
+            if match:
+                code = match.group(1).upper()
+                if code in OPTION_MULTIPLIER:
+                    m, u = OPTION_MULTIPLIER[code]
+                    results.append(f"{code}={m}{u}")
+
+    if not results:
+        return ""
+
+    # 返回精简格式
+    return "、".join(results)
+
+
 # ==========================================
 # 2. 定义 Supervisor (大管家)
 # ==========================================
@@ -107,10 +188,9 @@ def supervisor_node(state: AgentState, llm):
        - symbol 填 "白银,黄金" (用逗号分隔)
        - plan 派 `['generalist']` (让王牌去处理多品种)。
     5. 中国个股无期权，如果用户问个股策略，**不要**派 `strategist`，只派 `['analyst', 'monitor']` 即可。
-    6.**毒舌/吐槽**: 客户如果要求吐槽，或想"开启毒舌模式" -> plan=['roaster']。
-    7. 如果觉得用户的问题太复杂或奇怪，先派['chatter']去聊聊拆解需求。
-    8. **知识/百科/闲聊**: 问概念、问人名、问名词 -> 派 ['chatter']。
-    9. 如果用户想分析行情但**没说名字** (如"帮我分析一下") -> plan=['chatter'] (让Chatter去问用户要代码)。
+    6. 如果觉得用户的问题太复杂或奇怪，先派['chatter']去聊聊拆解需求。
+    7. **知识/百科/闲聊**: 问概念、问人名、问名词 -> 派 ['chatter']。
+    8. 如果用户想分析行情但**没说名字** (如"帮我分析一下") -> plan=['chatter'] (让Chatter去问用户要代码)。
     """
 
     # 🔥 [修改] 将历史对话也包含在 query 中
@@ -552,6 +632,11 @@ def strategist_node(state: AgentState, llm):
     tech_view = state.get("technical_summary", "")
     current_date = datetime.now().strftime("%Y年%m月%d日")
     key_level = state.get("key_levels", "")
+
+    # [新增] 获取合约乘数
+    multiplier_str = get_option_multiplier(symbol)
+    multiplier_hint = f"\n        【合约乘数】：{multiplier_str}（计算盈亏时必须乘以此数）" if multiplier_str else ""
+
     # === 🔥 期权策略专用工具集 ===
     tools = [
         # 期权数据工具
@@ -572,23 +657,16 @@ def strategist_node(state: AgentState, llm):
         你是一位**资深期权交易策略师**，擅长根据市场数据设计期权策略。
 
         【当前日期】：{current_date}
-        【分析标的】：{symbol}
+        【分析标的】：{symbol}{multiplier_hint}
         【客户问题】：{user_q}
         【客户风险偏好】：{risk_pref} 
         【客户历史记忆】：{mem_context}
         【技术面参考】：{trend} 、 {tech_view}
 
-        【你的工作流程】
-        1. **数据收集阶段**：
-           - 先用 `get_market_snapshot` 获取标的现价
-           - 用 `get_commodity_iv_info` 查看波动率(IV)状态，判断期权"贵不贵"
-           - 用 `check_option_expiry_status` 查看距离到期日还有多久
-           - 用 `tool_query_specific_option` 查询具体期权合约的价格
-           - 用 `search_investment_knowledge` 查询交易策略使用情境
-
-        2. **策略设计阶段**：
-           - 先根据技术面趋势选择"看涨"、"看跌"或者中性方向
-           - 再根据 IV 高低和客户风险偏好来选择期权策略
+        【工作流程】
+        1. **收集数据**：用 `get_market_snapshot` 获取现价，`get_commodity_iv_info` 看IV，`check_option_expiry_status` 看到期日
+        2. **查询合约**：用 `tool_query_specific_option` 查具体期权价格（格式："标的 行权价 认购/认沽"），权利金价格也要乘上合约乘数。
+        3. **设计策略**：根据趋势+IV+风险偏好选择策略，可以查知识库辅助`search_investment_knowledge`
 
         3. **风险偏好适配**：
            - 【保守型】：只推荐风险有限的策略（牛市价差、熊市价差、比率价差），禁止裸卖
@@ -596,18 +674,12 @@ def strategist_node(state: AgentState, llm):
            - 【激进型】：可以用积极策略（有趋势时买深虚期权、买末日期权、飞龙在天，没趋势时就双卖期权，或者卖末日期权）
 
         【输出要求】
-        1. 给出 1-2 个具体的期权策略建议
-        2. 给策略时，期权行权价选择不要乱编，一定要用`tool_query_specific_option`查过
-        3. 解释为什么这个策略适合当前市场和客户风险偏好
+        1. 给出 1-2 个具体的期权策略建议，行权价必须用工具查过
+        2. **计算盈亏示例时，必须乘以合约乘数**
+        3. 解释为什么这个策略适合市场或客户，可以查知识库辅助`search_investment_knowledge`
         4. 给出止损/止盈建议
         5. 禁止自己编造假数据！
 
-        【工具使用提示】
-        - 查 IV：`get_commodity_iv_info`
-        - 查到期日：`check_option_expiry_status`
-        - 查标的价格：`get_market_snapshot`
-        - 查期权价格：`tool_query_specific_option`（格式："标的 行权价 认购/认沽"）
-        - 查知识库：`search_investment_knowledge`
         """
 
     # === 🔥 创建 ReAct Agent ===
