@@ -25,7 +25,7 @@ FUT_TO_OPT = {v: k for k, v in SPECIAL_MAPPING.items()}
 # 目标品种
 TARGETS = ['LC', 'SI', 'PS', 'pd', 'pt', 'IH', 'IF', 'IM', 'au', 'ag', 'cu', 'al', 'zn', 'ni', 'sn',
            'rb', 'i', 'sm', 'sf', 'fg', 'sa', 'm', 'a', 'b', 'rm', 'y', 'oi', 'p', 'ta', 'pr', 'ma', 'v', 'eb', 'eg', 'l', 'pp',
-           'ru','br','lg','lh','px',
+           'ru','br','lg','lh','px','bz',
            'c', 'cf', 'ap', 'cj', 'pk', 'jd', 'sr', 'ao', 'sh', 'ur', 'sp', 'fu', 'bu', 'sc']
 
 
