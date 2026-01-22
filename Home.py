@@ -760,15 +760,74 @@ def fast_router_check(user_query):
     返回: (bool, str) -> (是否命中, 回复内容)
     """
 
+    # ============================================================
+    # 🔥 [新增功能] 晚报订阅/退订 极速拦截
+    # ============================================================
+
+    # 1. 定义关键词
+    sub_keywords = ["订阅晚报", "订阅日报", "开启晚报", "开通晚报", "订阅复盘"]
+    unsub_keywords = ["取消订阅", "退订", "关闭晚报", "不要晚报", "取消日报"]
+
+    # 2. 检查是否命中
+    is_sub_intent = any(k in user_query for k in sub_keywords)
+    is_unsub_intent = any(k in user_query for k in unsub_keywords)
+
+    if is_sub_intent or is_unsub_intent:
+        # 获取当前用户
+        current_user = st.session_state.get("user_id", "访客")
+
+        # A. 如果未登录
+        if current_user == "访客" or not current_user:
+            return True, "🔒 **请先登录**\n\n您需要登录后才能管理晚报订阅设置。"
+
+        # B. 启动 UI 状态条 (让用户感觉 AI 在处理)
+        with st.chat_message("assistant", avatar="🤖"):
+            with st.status("⚙️ 正在处理订阅设置...", expanded=True) as status:
+
+                # C. 检查是否绑定了邮箱
+                has_email = de.check_user_email_status(current_user)
+
+                # --- 核心逻辑：如果没邮箱，直接拒绝 ---
+                if not has_email:
+                    time.sleep(0.5)  # 模拟一点处理时间
+                    status.update(label="❌ 缺少邮箱信息", state="error")
+                    return True, """
+                        ### ❌ 无法订阅
+
+                        您尚未绑定邮箱，AI 无法为您发送晚报。
+
+                        **如何解决：**
+                        1. 请点击左侧侧边栏的 **“个人资料”**区域。
+                        2. 在账号设置里绑定您的邮箱并完成验证。
+                        3. 绑定成功后，再次对我说“订阅晚报”即可。
+                        """
+
+                # D. 如果有邮箱，执行数据库更新
+                if is_sub_intent:
+                    success = de.update_newsletter_subscription(current_user, True)
+                    status.update(label="✅ 设置已更新", state="complete")
+                    if success:
+                        return True, "### ✅ 订阅成功！\n\n爱波塔复盘晚报将在每晚8点55发送至您的邮箱。\n\n(如需取消，请随时对我说“取消订阅”)"
+                    else:
+                        return True, "⚠️ 系统繁忙，订阅状态更新失败，请稍后再试或联系客服。"
+
+                elif is_unsub_intent:
+                    success = de.update_newsletter_subscription(current_user, False)
+                    status.update(label="✅ 设置已更新", state="complete")
+                    if success:
+                        return True, "### ✅ 已取消订阅\n\n您将不再收到复盘晚报。\n\n(如需重新开启，请对我说“订阅晚报”)"
+                    else:
+                        return True, "⚠️ 系统繁忙，操作失败，请稍后再试。"
+
     # 1. 定义【绝对需要 Agent 思考】的复杂词 (负面清单 - 增强版)
     # 🔥 [修改点] 增加了 "概率", "几成", "可能", "战争", "局势" 等词，防止地缘政治问题被拦截
     complex_keywords = [
         "策略", "建议", "怎么做", "分析", "为何", "原因", "预测","K线","技术面","分析",
         "教学", "是什么", "含义", "解释", "持仓", "风险", "复盘", "总结","账户","资金",
         "止损", "止盈", "平仓", "割肉", "买入", "卖出", "加仓","相关性","相关度",
-        "牛市价差", "熊市价差", "备兑", "跨式", "双卖","为什么","期权","距离",
+        "牛市价差", "熊市价差", "备兑", "跨式", "双卖","为什么","期权","距离","吗",
         "高吗", "低吗", "合适吗", "能买吗","IV","波动率",
-        "概率", "几成", "可能性", "胜率", "会打吗"
+        "概率", "几成", "可能性", "胜率", "吧"
     ]
 
     # 2. 定义【简单查询】的触发词 (正面清单 - 收紧版)

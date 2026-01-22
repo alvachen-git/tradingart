@@ -432,9 +432,9 @@ def get_industries_list() -> list:
 # ==========================================
 if __name__ == "__main__":
     print("=" * 60)
-    print("测试1: 搜索红三兵形态")
+    print("测试1: 搜索破位形态")
     print("=" * 60)
-    result = search_top_stocks.invoke({"condition": "金针探底"})
+    result = search_top_stocks.invoke({"condition": "破位"})
     print(result)
 
     print("\n" + "=" * 60)

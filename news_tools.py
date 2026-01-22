@@ -187,4 +187,4 @@ def get_financial_news(query: str = ""):
 
 if __name__ == "__main__":
     # 测试代码
-    print(get_financial_news.invoke({"query": "委内瑞拉"}))
+    print(get_financial_news.invoke({"query": "暴涨"}))

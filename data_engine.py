@@ -2229,3 +2229,41 @@ def tool_compare_stocks(stock_list: str):
 
     except Exception as e:
         return f"对比失败: {e}"
+
+
+def check_user_email_status(username):
+    """
+    检查用户是否绑定了邮箱
+    返回: (bool) True表示有邮箱, False表示无
+    """
+    try:
+        # 示例 SQL，请根据你的表结构修改 table_users 和 email 字段名
+        sql = text("SELECT email FROM users WHERE username = :user")
+        with engine.connect() as conn:
+            result = conn.execute(sql, {"user": username}).fetchone()
+
+        if result and result[0] and str(result[0]).strip() != "":
+            return True
+        return False
+    except Exception as e:
+        print(f"Check email error: {e}")
+        return False
+
+
+def update_newsletter_subscription(username, is_subscribed):
+    """
+    更新用户的订阅状态
+    is_subscribed: True (订阅) / False (取消)
+    """
+    try:
+        # 假设你的 users 表里有一个字段叫 is_newsletter_active (布尔值)
+        status_val = 1 if is_subscribed else 0
+        sql = text("UPDATE users SET is_subscribed = :status WHERE username = :user")
+
+        with engine.connect() as conn:
+            conn.execute(sql, {"status": status_val, "user": username})
+            conn.commit()
+        return True
+    except Exception as e:
+        print(f"Update subscription error: {e}")
+        return False

@@ -24,7 +24,7 @@ from plot_tools import draw_chart_tool
 from futures_fund_flow_tools import get_futures_fund_flow, get_futures_fund_ranking
 from volume_oi_tools import get_volume_oi, get_futures_oi_ranking, get_option_oi_ranking, get_option_volume_abnormal, get_option_oi_abnormal, analyze_etf_option_sentiment, get_etf_option_strikes
 from market_tools import get_market_snapshot, get_price_statistics,tool_query_specific_option,get_historical_price,get_trending_hotspots,get_today_hotlist,analyze_keyword_trend,get_finance_related_trends,search_hotlist_history
-from data_engine import get_commodity_iv_info, check_option_expiry_status,search_broker_holdings_on_date,tool_analyze_position_change,tool_compare_stocks,get_stock_valuation,get_latest_data_date
+from data_engine import get_commodity_iv_info, check_option_expiry_status,search_broker_holdings_on_date,tool_analyze_position_change,tool_compare_stocks,get_stock_valuation,get_latest_data_date,tool_analyze_broker_positions
 from search_tools import search_web
 from market_correlation import tool_stock_hedging_analysis, tool_futures_correlation_check,tool_stock_correlation_check
 from beta_tool import calculate_hedging_beta
@@ -61,7 +61,7 @@ class AgentState(TypedDict):
 # ==========================================
 # 定义输出结构，强制 LLM 返回 JSON 格式的任务列表
 class PlanningOutput(BaseModel):
-    plan: List[Literal["analyst", "researcher", "monitor", "strategist", "chatter", "generalist", "screener"]] = Field(
+    plan: List[Literal["analyst", "researcher", "monitor", "strategist", "chatter", "generalist", "screener", "roaster"]] = Field(
         description="执行步骤列表。注意依赖关系：期权(strategist)必须排在分析(analyst)之后。"
     )
     symbol: str = Field(description="核心标的代码。如果是对比问题或无法提取单一标的，请留空或填'MULTI'", default="")
@@ -95,6 +95,7 @@ def supervisor_node(state: AgentState, llm):
     - screener: 选股大师 (当用户问"推荐股票"、"什么股票好"、"选股"时使用)
     - chatter: 知识问答和闲聊 (例如解释一下IV，什么是牛市价差，"最近美联储什么时候开会")
     - generalist: 【王牌分析师】处理对比(A和B谁强)、多品种分析、画图或深度复杂问题。
+    - roaster: *毒舌分析师* (当用户要求"吐槽"、"挑战我"、"毒舌模式"时使用)。
 
     【调度规则 (严格遵守)】
     1. **追求效率**: 只问资金流就只派 `monitor`；只问持仓量或价格就只派 `monitor`；只问新闻或热点就只派 `researcher`；只问技术分析就只派`analyst`。
@@ -106,9 +107,10 @@ def supervisor_node(state: AgentState, llm):
        - symbol 填 "白银,黄金" (用逗号分隔)
        - plan 派 `['generalist']` (让王牌去处理多品种)。
     5. 中国个股无期权，如果用户问个股策略，**不要**派 `strategist`，只派 `['analyst', 'monitor']` 即可。
-    6. 如果觉得用户的问题太复杂或奇怪，先派['chatter']去聊聊拆解需求。
-    7. **知识/百科/闲聊**: 问概念、问人名、问名词 -> 派 ['chatter']。
-    8. 如果用户想分析行情但**没说名字** (如"帮我分析一下") -> plan=['chatter'] (让Chatter去问用户要代码)。
+    6.**毒舌/吐槽**: 客户如果要求吐槽，或想"开启毒舌模式" -> plan=['roaster']。
+    7. 如果觉得用户的问题太复杂或奇怪，先派['chatter']去聊聊拆解需求。
+    8. **知识/百科/闲聊**: 问概念、问人名、问名词 -> 派 ['chatter']。
+    9. 如果用户想分析行情但**没说名字** (如"帮我分析一下") -> plan=['chatter'] (让Chatter去问用户要代码)。
     """
 
     # 🔥 [修改] 将历史对话也包含在 query 中
@@ -180,7 +182,7 @@ def generalist_node(state: AgentState, llm):
         tool_futures_correlation_check, tool_stock_correlation_check, calculate_hedging_beta,
         tool_get_retail_money_flow, draw_chart_tool, get_stock_valuation, tool_compare_stocks,
         get_futures_fund_flow, get_futures_fund_ranking, get_available_patterns, analyze_etf_option_sentiment,
-        get_etf_option_strikes,search_web
+        get_etf_option_strikes,search_web,tool_analyze_broker_positions
     ]
 
 
@@ -441,6 +443,7 @@ def monitor_node(state: AgentState, llm):
         get_volume_oi,
         get_market_snapshot,
         get_etf_option_strikes,
+        tool_analyze_broker_positions,
         get_futures_oi_ranking
     ]
 
@@ -453,16 +456,19 @@ def monitor_node(state: AgentState, llm):
     tool_instruction = ""
     if is_etf_or_stock:
         tool_instruction = """
-            ⚠️ **特别注意**：
-            1. `tool_get_retail_money_flow` 只能查全市场行业概况，不支持查单只股票/ETF代码。
-            2. 如果是 ETF，可以尝试查 `get_commodity_iv_info` 。
-            3. 如果没有合适工具，直接回答 "暂无该品种资金数据"，不要强行调用。
-            """
+        ⚠️ **特别注意 (ETF/股票)**：
+        1. `tool_get_retail_money_flow` 只能查全市场行业概况，不支持查单只股票/ETF代码。
+        2. 如果是 ETF，可以尝试查 `get_commodity_iv_info` 。
+        3. 如果没有合适工具，直接回答 "暂无该品种资金数据"，不要编造数据。
+                """
     else:
         tool_instruction = """
-            ⚠️ **特别注意**：
-            1. 当前标的可能是期货。优先使用 `get_futures_fund_flow` 和 `tool_analyze_position_change`。
-            """
+        ⚠️ **特别注意 (期货)**：
+        1. 查某品种当天的期货商多空排名 -> search_broker_holdings_on_date(broker_name='所有', symbol='品种名', date='日期')
+        2. 查某品种一段时间各期货商的持仓变化 -> tool_analyze_position_change(symbol='品种名', start_date, end_date)
+        3. 查期货资金流 -> get_futures_fund_flow(symbol='品种名')
+        4. 如果工具返回"未找到数据"，如实告知用户，不要编造假数据！
+                """
     # 2. 定义 Prompt
     # 告诉他只做数据搬运工，不要给建议
     prompt = f"""
@@ -470,20 +476,23 @@ def monitor_node(state: AgentState, llm):
     - 今天日期：{current_date}
     - 数据库最新交易日：{latest_trade_date}
 
-    【你的工具箱】
+    【你的工具箱 - 根据问题类型选择正确的工具】
     - 查波动率/IV -> get_commodity_iv_info
     - 查股票行业资金 -> tool_get_retail_money_flow
     - 查某期货资金流动 -> get_futures_fund_flow
     - 查全部期货资金沉淀排名 -> get_futures_fund_ranking
-    - 查商品龙虎榜/期货商持仓 -> search_broker_holdings_on_date  
-    - 查某期货商最近持仓变化情况 -> tool_analyze_position_change
+    - 查某天某品种的期货商持仓排名（龙虎榜） -> search_broker_holdings_on_date 
+    - 查某品种一段时间内各期货商的持仓变化 -> tool_analyze_position_change 
+    - 查某期货商在各品种的持仓变化 -> tool_analyze_broker_positions （当前净持仓代表期货商对这品种的趋势判断）
     - 查期权成交量异常(放量/异动) -> get_option_volume_abnormal
     - 查期权持仓量异常(大单增仓) -> get_option_oi_abnormal
     - 查期权持仓量排名 -> get_option_oi_ranking
     - 查成交量和持仓量 -> get_volume_oi
     - 查期货持仓量排名 -> get_futures_oi_ranking
-    - 查期权合约价格 ->  get_etf_option_strikes,
+    - 查期权合约价格 -> get_etf_option_strikes
     - 查标的价格 -> get_market_snapshot
+    
+    {tool_instruction}
 
     【要求】
     1. 精准使用工具，不要乱调用，除非客户有要求全面分析。
@@ -653,7 +662,8 @@ def researcher_node(state: AgentState,llm=None):
         analyze_keyword_trend,  # 查特定关键词热度趋势
         search_hotlist_history,  # 查热点历史回溯
         search_web,  # 兜底：通用联网搜索
-        get_financial_news  # 兜底：传统财经新闻
+        get_financial_news,  # 兜底：传统财经新闻
+        get_trending_hotspots
     ]
     system_prompt = f"""
         你是一位**顶级市场情报官 (Market Intelligence Officer)**。
@@ -676,6 +686,7 @@ def researcher_node(state: AgentState,llm=None):
         3. 📈 **特定概念热度验证** (如 "低空经济最近热吗"):
            - **调用** `analyze_keyword_trend`。
            - 用数据证明该话题是处于"升温期"还是"退潮期"。
+           - **调用** get_trending_hotspots 查最近有什么热点趋势
         
         4. 📈 **当天财经快讯** :
            - **调用** `get_financial_news`。
@@ -1146,6 +1157,63 @@ def screener_node(state: AgentState, llm):
         "symbol": next_symbol
     }
 
+
+# ==========================================
+#  🌶️ 7. 毒舌分析师 (Roaster Node) - 创意功能
+# ==========================================
+def roaster_node(state: AgentState, llm):
+    query = state["user_query"]
+    symbol = state.get("symbol", "")
+
+    # 1. 给他一些基本工具，让他吐槽时有理有据
+    tools = [
+        get_market_snapshot,  # 看价格 (跌了才能嘲笑)
+        get_stock_valuation,  # 看估值 (贵了才能骂韭菜)
+        analyze_kline_pattern,  # 看形态 (破位了才能补刀)
+        get_price_statistics,
+        tool_get_retail_money_flow,  # 股票行业资金
+        get_futures_fund_flow,
+        tool_compare_stocks
+    ]
+
+    # 2. 注入“毒舌”人设 Prompt
+    prompt = f"""
+    你现在是**金融界的“脱口秀演员”兼“毒舌评论员”**。
+    用户把持仓或关注的股票给你看，你的任务是**无情吐槽、犀利点评**。
+
+    【当前关注】：{symbol if symbol else "用户的这个标的"}
+    【用户问题】："{query}"
+
+    【行为准则】：
+    1. **人设风格**：
+       - 幽默、讽刺、使用网络热梗，比喻要夸张（例如：“这K线走得像心电图停了一样”）。
+    3. **数据驱动的吐槽**：
+       - 先调用工具看数据。
+       - 如果 **PE很高** -> 举例吐槽：“你买的是股票还是梦？这泡沫戳破了能淹死人。”
+       - 如果 **下跌趋势** -> 举例吐槽：“这种飞刀你也敢接？手不想要了？”
+
+    【输出要求】：
+    - 不要写长篇大论，要短小精悍，字字扎心。
+    - 结尾给一个“韭菜指数”评分（0-100，越高越韭）。
+    """
+
+    # 3. 创建 Agent
+    roaster_agent = create_react_agent(llm, tools, prompt=prompt)
+
+    try:
+        result = roaster_agent.invoke({"messages": state["messages"]})
+        last_response = result["messages"][-1].content
+
+        return {
+            "messages": [HumanMessage(content=f"【毒舌点评】\n{last_response}")]
+        }
+    except Exception as e:
+        return {
+            "messages": [HumanMessage(content=f"【毒舌点评】\n槽点太多，我都无语了... (系统错误: {e})")]
+        }
+
+
+
 # ⚪ 6. 聊天/总结节点 (Finalizer)
 # 🔥 [升级]：单信源模式(审核不重写) vs 多信源模式(统稿)
 def finalizer_node(state: AgentState, llm):
@@ -1166,6 +1234,27 @@ def finalizer_node(state: AgentState, llm):
         # 直接返回 PASS，不做任何 LLM 思考，毫秒级响应
         return {
             "messages": [HumanMessage(content="PASS")]
+        }
+    if "【毒舌点评】" in context_text:
+        # 🔥 roaster 的毒舌吐槽，直接返回原文，不要改写！
+        print("🔥 检测到毒舌点评，跳过 finalizer 整合")
+
+        # 🔥 [修复] 只提取【毒舌点评】部分，不要包含用户原始提问
+        roaster_content = ""
+        for msg in worker_msgs:
+            if "【毒舌点评】" in msg.content:
+                roaster_content = msg.content
+                break
+
+        # 提取图表路径（如果有）
+        chart_img = state.get("chart_img", "")
+        if not chart_img:
+            chart_match = re.search(r'IMAGE_CREATED:(chart_[a-zA-Z0-9_]+\.json)', context_text)
+            if chart_match:
+                chart_img = chart_match.group(1)
+        return {
+            "messages": [HumanMessage(content=roaster_content if roaster_content else context_text)],
+            "chart_img": chart_img
         }
     # === 判断逻辑：单兵还是团战？ ===
     # 如果只有 1 个工种发言（或者没有发言），且不是王牌分析师（王牌本来就是总结好的）
@@ -1362,10 +1451,11 @@ def build_trading_graph(fast_llm, mid_llm, smart_llm):
     # CIO -> 用 Max (聪明)
     workflow.add_node("finalizer", lambda state: finalizer_node(state, mid_llm))
     # 其他工具人 (不需要 LLM，或者随便给一个)
-    workflow.add_node("monitor", lambda state: monitor_node(state, fast_llm))
+    workflow.add_node("monitor", lambda state: monitor_node(state, mid_llm))
     workflow.add_node("researcher", lambda state: researcher_node(state, mid_llm))
     workflow.add_node("chatter", lambda state: chatter_node(state, mid_llm))
     workflow.add_node("screener", lambda state: screener_node(state, mid_llm))
+    workflow.add_node("roaster", lambda state: roaster_node(state, mid_llm))
 
     # 2. 设置入口
     workflow.set_entry_point("supervisor")
@@ -1434,6 +1524,7 @@ def build_trading_graph(fast_llm, mid_llm, smart_llm):
             "researcher": "researcher",
             "generalist": "generalist",
             "chatter": "chatter",
+            "roaster": "roaster",
             "screener": "screener",
             "finalizer": "finalizer"
         }
@@ -1461,7 +1552,7 @@ def build_trading_graph(fast_llm, mid_llm, smart_llm):
     # 流程变成：Manager(路由) -> Worker -> Manager_Pop(删除任务) -> Manager(路由)
 
     # 重新定义 Edge:
-    for node_name in ["analyst", "monitor", "strategist", "researcher", "generalist","screener"]:
+    for node_name in ["analyst", "monitor", "strategist", "researcher", "generalist","screener","roaster"]:
         workflow.add_edge(node_name, "manager_pop")
 
     workflow.add_edge("chatter", END)
