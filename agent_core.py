@@ -290,11 +290,13 @@ def generalist_node(state: AgentState, llm):
         14.查成交量和持仓量 -> get_volume_oi
         15.查期货持仓量排名 -> get_futures_oi_ranking
         16.查期权波动率-> get_commodity_iv_info
+        17.查期权合约价格-> `tool_query_specific_option` 
 
         【行为准则】
         1. 先给结论，然后解释理由。
         2. 不要简单复述，要有深度洞察。
         3. 禁止空谈，必须用工具获取的数据说话。
+        4. 不要编造数据，如果没查到数据就说不知道。
         """
 
     general_agent = create_react_agent(llm, tools, prompt=prompt)
