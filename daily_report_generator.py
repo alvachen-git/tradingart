@@ -86,7 +86,7 @@ def collect_data_via_agent():
     - 针对今天的热点事件（如美联储、地缘），调用 `tool_get_polymarket_sentiment` 看市场押注概率
 
     ## 第三步：资金流向
-    - 调用 `tool_get_retail_money_flow` 看当天股票板块资金
+    - 调用 `tool_get_retail_money_flow` ，看今天天股票资金前3大流出和流入的板块是什么
 
     ## 第四步：期货商持仓分析 
     - 调用 `search_broker_holdings_on_date` 记录以下期货商的前3大多头净持仓和前3大空头净持仓

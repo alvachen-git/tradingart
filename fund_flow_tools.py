@@ -167,7 +167,7 @@ def tool_get_retail_money_flow(days: int = 1):
         sql = f"""
             SELECT 
                 industry,
-                SUM(medium_net_inflow + small_net_inflow) as hidden_flow,
+                SUM(medium_net_inflow + main_net_inflow) as hidden_flow,
                 SUM(main_net_inflow) as main_flow,  -- 查出来仅作对比参考
                 AVG(pct_change) as avg_pct
             FROM sector_moneyflow 
