@@ -169,7 +169,7 @@ def supervisor_node(state: AgentState, llm):
     你是交易团队的主管，根据问题制定计划。
 
     【可用员工】
-    - analyst: 技术分析师 (看K线、定趋势)
+    - analyst: 技术分析师 (看K线、定趋势),分析如何操作
     - monitor: 资金监控员 (看股票和期货资金流、期货商持仓、查持仓量和成交量、查价格、查合约)
     - researcher: 情报研究员 (看新闻、宏观、热点、地缘政治、货币政策、Polymarket上的概率分析、抖音热搜)
     - strategist: 期权策略员 (给策略，**必须依赖 analyst**) 
@@ -307,7 +307,7 @@ def generalist_node(state: AgentState, llm):
         # 给予足够的递归步数，但不要太高避免 GeneratorExit
         result = general_agent.invoke(
             {"messages": state["messages"]},
-            {"recursion_limit": 80}
+            {"recursion_limit": 100}
             # 降低到 15，足够完成大部分任务
         )
 
