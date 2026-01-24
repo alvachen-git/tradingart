@@ -1,3 +1,11 @@
+"""
+每日复盘晚报生成器 v2.1
+基于原版升级：
+- 🔥 新增：发布到订阅中心数据库
+- 🔥 新增：自动创建站内消息通知
+- 🔥 更新：邮件群发使用新的订阅表
+"""
+
 import pandas as pd
 import os
 import time
@@ -22,6 +30,9 @@ from email_utils2 import send_email
 from search_tools import search_web
 from polymarket_tool import tool_get_polymarket_sentiment
 from market_tools import get_today_hotlist, get_finance_related_trends
+
+# 🔥 新增：订阅服务
+import subscription_service as sub_svc
 
 # 1. 初始化环境
 load_dotenv(override=True)
@@ -86,7 +97,7 @@ def collect_data_via_agent():
     - 针对今天的热点事件（如美联储、地缘），调用 `tool_get_polymarket_sentiment` 看市场押注概率
 
     ## 第三步：资金流向
-    - 调用 `tool_get_retail_money_flow` ，看今天天股票资金前3大流出和流入的板块是什么
+    - 调用 `tool_get_retail_money_flow`，看今天天股票资金前3大流出和流入的板块是什么
 
     ## 第四步：期货商持仓分析 
     - 调用 `search_broker_holdings_on_date` 记录以下期货商的前3大多头净持仓和前3大空头净持仓
@@ -197,7 +208,7 @@ def draft_report(raw_material):
     | 原油 | 🛢️ |
     | 铜 | 🔶 |
     | 碳酸锂 | 🔋 |
-    | 铁矿石 | �ite |
+    | 铁矿石 | ite |
     | 豆粕 | 🌱 |
     | 橡胶 | 🌴 |
     | 棉花 | 🌸 |
@@ -431,18 +442,94 @@ def draft_report(raw_material):
     return html
 
 
+# ==========================================
+# 🔥 新增：发布到订阅中心
+# ==========================================
+def extract_summary(html_content: str) -> str:
+    """从HTML中提取摘要（市场头条部分）"""
+    import re
+    # 尝试提取市场头条内容
+    match = re.search(r'市场头条.*?<p[^>]*>(.*?)</p>', html_content, re.DOTALL)
+    if match:
+        # 去除HTML标签
+        summary = re.sub(r'<[^>]+>', '', match.group(1))
+        return summary[:200].strip()
+    return ""
+
+
+def publish_to_subscription_center(html_content: str):
+    """
+    🔥 发布晚报到订阅中心数据库
+    - 插入 content_items 表
+    - 自动为订阅用户创建站内消息
+    """
+    print("📤 [发布] 正在发布到订阅中心...")
+
+    today_str = datetime.now().strftime("%m月%d日")
+    weekday = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"][datetime.now().weekday()]
+
+    title = f"{today_str} {weekday} 复盘晚报"
+    summary = extract_summary(html_content)
+
+    try:
+        success, result = sub_svc.publish_content(
+            channel_code="daily_report",
+            title=title,
+            content=html_content,
+            summary=summary if summary else f"{today_str}市场复盘分析"
+        )
+
+        if success:
+            print(f"✅ [发布] 成功发布到数据库，内容ID: {result}")
+            return True, result
+        else:
+            print(f"❌ [发布] 发布失败: {result}")
+            return False, result
+    except Exception as e:
+        print(f"❌ [发布] 发布异常: {e}")
+        return False, str(e)
+
+
+# ==========================================
+# 🔥 更新：邮件群发（使用新订阅表）
+# ==========================================
 def blast_emails(html_content):
-    """发送邮件"""
-    print("📧 准备群发...")
+    """
+    发送邮件给订阅用户
+    🔥 更新：使用 user_subscriptions 表查询订阅用户
+    """
+    print("📧 准备群发邮件...")
     try:
         with engine.connect() as conn:
-            sql = text(
-                "SELECT username, email FROM users WHERE is_subscribed = 1 AND email IS NOT NULL AND email != ''")
+            # 🔥 使用新的订阅表查询
+            sql = text("""
+                       SELECT u.username, u.email
+                       FROM users u
+                                JOIN user_subscriptions us ON u.username = us.user_id
+                                JOIN content_channels c ON us.channel_id = c.id
+                       WHERE c.code = 'daily_report'
+                         AND us.is_active = 1
+                         AND us.notify_email = 1
+                         AND (us.expire_at IS NULL OR us.expire_at > NOW())
+                         AND u.email IS NOT NULL
+                         AND u.email != ''
+                       """)
             df = pd.read_sql(sql, conn)
 
         if df.empty:
+            # 🔥 兼容旧表：如果新表没数据，尝试旧表
+            print("📭 新订阅表无用户，尝试旧表...")
+            try:
+                with engine.connect() as conn:
+                    sql_old = text(
+                        "SELECT username, email FROM users WHERE is_subscribed = 1 AND email IS NOT NULL AND email != ''")
+                    df = pd.read_sql(sql_old, conn)
+            except:
+                pass
+
+        if df.empty:
             print("📭 无订阅用户。")
-            return
+            return 0
 
         today_str = datetime.now().strftime("%m月%d日")
         subject = f"【爱波塔】{today_str} | 复盘晚报"
@@ -468,8 +555,13 @@ def blast_emails(html_content):
                 # 确保单个人出错不会卡死整个循环
                 print(f" -> 处理用户 {row['username']} 时发生未知错误: {inner_e}")
                 continue
+
+        print(f"📧 邮件群发完成，成功 {success_cnt}/{len(df)} 人")
+        return success_cnt
+
     except Exception as e:
         print(f"❌ 群发错误: {e}")
+        return 0
 
 
 if __name__ == "__main__":
@@ -487,11 +579,22 @@ if __name__ == "__main__":
             f.write(report_html)
         print("📄 预览文件已保存: preview_report.html")
 
-        # 3. 发送
+        # 3. 发布和发送
         if len(report_html) > 300:
-            blast_emails(report_html)
+            # 🔥 新增：发布到订阅中心数据库
+            pub_success, pub_result = publish_to_subscription_center(report_html)
+
+            # 发送邮件
+            email_count = blast_emails(report_html)
+
+            # 汇总
+            print(f"\n{'=' * 50}")
+            print(f"📊 发布结果汇总")
+            print(f"{'=' * 50}")
+            print(f"数据库发布: {'✅ 成功' if pub_success else '❌ 失败'}")
+            print(f"邮件发送: {email_count} 人")
         else:
-            print("❌ 报告内容过少，取消发送")
+            print("❌ 报告内容过少，取消发布")
     else:
         print("❌ 采集素材失败")
 
