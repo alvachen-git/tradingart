@@ -23,7 +23,7 @@ def view_all_memories():
 
         # 2. 直接通过 get() 方法获取所有数据
         # ChromaDB 的 get() 默认返回前 100 条，我们可以设大一点
-        data = vector_store.get(limit=10000)
+        data = vector_store.get(limit=20000)
 
         ids = data['ids']
         documents = data['documents']
@@ -37,30 +37,13 @@ def view_all_memories():
         records = []
         for i, doc_id in enumerate(ids):
             meta = metadatas[i] if metadatas else {}
-            content = documents[i]
-
-            # [修改点 2] 增加显示字数：将 50 改为 200 (或任何你想要的长度)
-            preview_length = 200
-            display_content = content[:preview_length] + "..." if len(content) > preview_length else content
-
             records.append({
                 "User ID": meta.get('user_id', 'Unknown'),
                 "Time": meta.get('timestamp', 'N/A'),
-                "Content (Snippet)": display_content
+                "Content (Snippet)": documents[i][:50] + "..." if len(documents[i]) > 50 else documents[i]
             })
 
         df = pd.DataFrame(records)
-        if not df.empty:
-            try:
-                # 尝试将 Time 转为标准时间格式以便排序（可选，视你存储的格式而定）
-                # df['Time'] = pd.to_datetime(df['Time'])
-                df = df.sort_values(by='Time', ascending=False)
-            except Exception:
-                # 如果转换失败或无法排序，就保持原样
-                pass
-
-            # 只取前 1000 条
-        df = df.head(1000)
         print(f"✅ 共找到 {len(df)} 条记忆：")
         print("-" * 60)
         # 打印表格，设置显示宽度防止折行太乱
