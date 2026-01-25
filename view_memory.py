@@ -50,6 +50,14 @@ def view_all_memories():
             })
 
         df = pd.DataFrame(records)
+        if not df.empty:
+            try:
+                # 尝试将 Time 转为标准时间格式以便排序（可选，视你存储的格式而定）
+                # df['Time'] = pd.to_datetime(df['Time'])
+                df = df.sort_values(by='Time', ascending=False)
+            except Exception:
+                # 如果转换失败或无法排序，就保持原样
+                pass
 
             # 只取前 1000 条
         df = df.head(1000)
