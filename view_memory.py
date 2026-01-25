@@ -40,7 +40,7 @@ def view_all_memories():
             records.append({
                 "User ID": meta.get('user_id', 'Unknown'),
                 "Time": meta.get('timestamp', 'N/A'),
-                "Content (Snippet)": documents[i][:50] + "..." if len(documents[i]) > 50 else documents[i]
+                "Content (Snippet)": documents[i][:100] + "..." if len(documents[i]) > 50 else documents[i]
             })
 
         df = pd.DataFrame(records)
