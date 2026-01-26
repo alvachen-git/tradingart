@@ -31,14 +31,14 @@ EXCHANGE_LIST = ['SHFE', 'DCE', 'CZCE', 'CFFEX', 'INE', 'GFEX']
 # --- 核心工具：将 Tushare 代码转换为新浪实时代码 ---
 def map_code_to_sina(ts_code, exchange):
     symbol = ts_code.split('.')[0]
-    if exchange == 'CFFEX':
-        return f"CFF_RE_{symbol}"
     return f"nf_{symbol}"
 
 
 def get_sina_futures_custom(sina_codes):
     """
-    专门抓取新浪期货接口 (解决 ts.get_realtime_quotes 解析失败的问题)
+    [已修复] 基于 2026-01-26 实测数据校准：
+    - 中金所 (IM/IF/IC/IH) 使用无前缀格式 (索引偏移 -2)
+    - 商品期货 (RB/M/SR) 使用标准格式
     """
     if not sina_codes: return pd.DataFrame()
 
@@ -53,52 +53,86 @@ def get_sina_futures_custom(sina_codes):
         return pd.DataFrame()
 
     data_list = []
-
-    # 解析每一行
-    # 格式: var hq_str_nf_RB2505="螺纹钢2505,145859,3600.00,3620.00,..."
     lines = text.split('\n')
+
     for line in lines:
         if not line.strip(): continue
         try:
-            # 提取 code (nf_RB2505)
+            # 1. 解析代码
             eq_idx = line.find('=')
             if eq_idx == -1: continue
 
-            code_part = line[:eq_idx]  # var hq_str_nf_RB2505
-            sina_code = code_part.split('_')[-2] + '_' + code_part.split('_')[-1]  # nf_RB2505
-            if 'CFF_RE_' in code_part:  # 特殊处理中金所
-                sina_code = 'CFF_RE_' + code_part.split('_')[-1]
+            code_part = line[:eq_idx]
+            if code_part.startswith("var hq_str_"):
+                sina_code = code_part.replace("var hq_str_", "")
+            else:
+                parts = code_part.split('_')
+                sina_code = parts[-2] + '_' + parts[-1]
 
-            # 提取数据内容
+            # 2. 解析数据
             val_part = line[eq_idx + 1:].strip().strip('";')
             if not val_part: continue
-
             vals = val_part.split(',')
 
-            # 新浪期货标准字段映射:
-            # 0:名称, 1:时间, 2:开盘, 3:最高, 4:最低, 5:昨收(参考),
-            # 6:买价, 7:卖价, 8:最新价, 9:结算价, 10:昨结算,
-            # 11:买量, 12:卖量, 13:持仓量, 14:成交量, ...
+            # 3. 核心分流逻辑 (基于你的截图证据)
+            # 中金所代码特征: nf_IM, nf_IF, nf_IC, nf_IH, nf_T, nf_TF, nf_TS
+            is_cffex = any(
+                x in sina_code.upper() for x in ['NF_IF', 'NF_IC', 'NF_IH', 'NF_IM', 'NF_TF', 'NF_T', 'NF_TS'])
 
-            if len(vals) < 15: continue
+            if is_cffex:
+                # --- 中金所 (IM2603) 格式 ---
+                # 截图证实: 0:开盘, 1:最高, 2:最低, 3:最新价, 4:成交量, 5:成交额, 6:持仓量
+                if len(vals) < 7: continue
+                try:
+                    open_p = float(vals[0])
+                    high_p = float(vals[1])
+                    low_p = float(vals[2])
+                    current_p = float(vals[3])
+                    vol = float(vals[4])
+                    oi = float(vals[6])
 
-            # 只要有成交量的
-            vol = float(vals[14])
-            if vol == 0: continue
+                    # 中金所接口经常不返回昨收，暂用开盘价兜底，防止涨跌幅计算报错
+                    pre_close = open_p
+                except:
+                    continue
 
-            data_list.append({
+            else:
+                # --- 商品期货 (RB2605) 格式 ---
+                # 截图证实: 0:名, 1:时, 2:开, 3:高, 4:低 ... 8:现价 ... 13:持仓 ... 14:成交量
+                if len(vals) < 15: continue
+                try:
+                    open_p = float(vals[2])
+                    high_p = float(vals[3])
+                    low_p = float(vals[4])
+                    current_p = float(vals[8])
+                    pre_close = float(vals[5])
+                    oi = float(vals[13])
+                    vol = float(vals[14])
+                except:
+                    continue
+
+            # 4. 数据有效性检查
+            if open_p == 0 and current_p == 0: continue
+
+            # 双重保险：如果最低价依然大于最高价，强制修正 (防止万一接口抽风)
+            if low_p > high_p:
+                low_p = current_p
+                high_p = current_p
+
+            data_item = {
                 'sina_code': sina_code,
-                'price': float(vals[8]),  # 最新价 -> close
-                'open': float(vals[2]),
-                'high': float(vals[3]),
-                'low': float(vals[4]),
-                'pre_close': float(vals[10]),  # 昨结算作为 pre_close (期货逻辑)
+                'price': current_p,
+                'open': open_p,
+                'high': high_p,
+                'low': low_p,
+                'pre_close': pre_close,
                 'volume': vol,
-                'amount': 0,  # 盘中接口通常不算额，设为0
-                'position': float(vals[13])  # 持仓量
-            })
+                'amount': 0,
+                'position': oi
+            }
+            data_list.append(data_item)
 
-        except:
+        except Exception:
             continue
 
     return pd.DataFrame(data_list)
@@ -126,7 +160,7 @@ def fetch_realtime_snapshot(exchange):
     # 定义映射函数 (内联或调用外部均可)
     def _map_sina(code):
         sym = code.split('.')[0]
-        if exchange == 'CFFEX': return f"CFF_RE_{sym}"
+        # 强制所有交易所（包括中金所）都用 nf_ 接口
         return f"nf_{sym}"
 
     df_list['sina_code'] = df_list['ts_code'].apply(_map_sina)
@@ -218,7 +252,7 @@ def fetch_realtime_snapshot(exchange):
 
 
 # --- 测试模式开关 ---
-TEST_MODE = False  # ⚠️ 设置为 True 可以只打印不入库
+TEST_MODE = False # ⚠️ 设置为 True 可以只打印不入库
 
 if __name__ == "__main__":
     today = datetime.now().strftime('%Y%m%d')
