@@ -630,11 +630,25 @@ def get_etf_option_strikes(query: str = "50ETF"):
     """
     if engine is None: return "❌ 数据库未连接"
 
+    # 解析ETF名称
+    etf_code, asset_type = symbol_map.resolve_symbol(query)
+
+    if not etf_code:
+        return f"无法识别ETF: {query}"
+
+    # 确保代码格式正确(带交易所后缀)
+    if "." not in etf_code:
+        if etf_code.startswith("15") or etf_code.startswith("16"):
+            etf_code += ".SZ"
+        else:
+            etf_code += ".SH"
+
+    print(f"[DEBUG] {query} -> {etf_code}")
+
     try:
-        # 1. 解析ETF标的
-        underlying, etf_name = get_etf_underlying(query)
-        if not underlying:
-            return "⚠️ 请指定ETF，如：50ETF、300ETF、500ETF、创业板ETF、科创50ETF"
+        # ✅ 直接使用已解析的代码
+        underlying = etf_code
+        etf_name = query
 
         # 2. 获取ETF当前价格
         etf_price_sql = text("""

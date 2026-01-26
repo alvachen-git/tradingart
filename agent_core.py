@@ -9,6 +9,7 @@ import json
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage, AIMessage
 from langgraph.prebuilt import create_react_agent
 from langchain_core.prompts import ChatPromptTemplate
+from macro_tools import get_macro_indicator, get_macro_overview, analyze_yield_curve
 from pydantic import BaseModel, Field
 from langchain_openai import ChatOpenAI  # 或 ChatTongyi
 from langgraph.graph import StateGraph, END
@@ -170,7 +171,7 @@ def supervisor_node(state: AgentState, llm):
 
     【可用员工】
     - analyst: 技术分析师 (看K线、定趋势),分析如何操作
-    - monitor: 资金监控员 (看股票和期货资金流、期货商持仓、查持仓量和成交量、查价格、查合约)
+    - monitor: 资金监控员 (看股票和期货资金流、期货商持仓、查持仓量和成交量、查价格、查合约、查利率数据、查汇率)
     - researcher: 情报研究员 (看新闻、宏观、热点、地缘政治、货币政策、Polymarket上的概率分析、抖音热搜)
     - strategist: 期权策略员 (给策略，**必须依赖 analyst**) 
     - screener: 选股大师 (当用户问"推荐股票"、"什么股票好"、"选股"时使用)
@@ -187,10 +188,10 @@ def supervisor_node(state: AgentState, llm):
     4. **多品种/对比**: 问"白银和黄金谁强"、"分析一下螺纹和热卷" -> 
        - symbol 填 "白银,黄金" (用逗号分隔)
        - plan 派 `['generalist']` (让王牌去处理多品种)。
-    5. 中国个股无期权，如果用户问个股策略，**不要**派 `strategist`，只派 `['analyst', 'monitor']` 即可。
-    6. 如果觉得用户的问题太复杂或奇怪，先派['chatter']去聊聊拆解需求。
-    7. **知识/百科/闲聊**: 问概念、问人名、问名词 -> 派 ['chatter']。
-    8. 如果用户想分析行情但**没说名字** (如"帮我分析一下") -> plan=['chatter'] (让Chatter去问用户要代码)。
+    5. 如果客户要画图，
+       - plan 派 `['generalist']` 。
+    6. **知识/百科/闲聊**: 问概念、问人名、问名词 -> 派 ['chatter']。
+    7. 如果用户想分析行情但**没说名字** (如"帮我分析一下") -> plan=['chatter'] (让Chatter去问用户要代码)。
     """
 
     # 🔥 [修改] 将历史对话也包含在 query 中
@@ -262,7 +263,8 @@ def generalist_node(state: AgentState, llm):
         tool_futures_correlation_check, tool_stock_correlation_check, calculate_hedging_beta,
         tool_get_retail_money_flow, draw_chart_tool, get_stock_valuation, tool_compare_stocks,
         get_futures_fund_flow, get_futures_fund_ranking, get_available_patterns, analyze_etf_option_sentiment,
-        get_etf_option_strikes,search_web,tool_analyze_broker_positions
+        get_etf_option_strikes,search_web,tool_analyze_broker_positions,
+        get_macro_indicator,get_macro_overview,analyze_yield_curve
     ]
 
 
@@ -290,7 +292,10 @@ def generalist_node(state: AgentState, llm):
         14.查成交量和持仓量 -> get_volume_oi
         15.查期货持仓量排名 -> get_futures_oi_ranking
         16.查期权波动率-> get_commodity_iv_info
-        17.查期权合约价格-> `tool_query_specific_option` 
+        17.查期权合约价格-> tool_query_specific_option
+        18.查宏观指标 -> get_macro_indicator
+        19.查宏观环境总览 -> get_macro_overview 
+        20.分析收益率曲线 -> analyze_yield_curve 
 
         【行为准则】
         1. 先给结论，然后解释理由。
@@ -309,7 +314,7 @@ def generalist_node(state: AgentState, llm):
         # 给予足够的递归步数，但不要太高避免 GeneratorExit
         result = general_agent.invoke(
             {"messages": state["messages"]},
-            {"recursion_limit": 100}
+            {"recursion_limit": 120}
             # 降低到 15，足够完成大部分任务
         )
 
@@ -397,7 +402,7 @@ def analyst_node(state: AgentState, llm):
             """
 
     # 2. 注入“严谨”人设进行润色
-    is_chart_only = any(kw in query for kw in ["画", "图", "走势", "K线图", "k线图"])
+    is_chart_only = any(kw in query for kw in ["K线图", "k线图"])
 
     if is_chart_only:
         # 🔥 画图快速模式 - 简化 prompt
@@ -526,7 +531,10 @@ def monitor_node(state: AgentState, llm):
         get_market_snapshot,
         get_etf_option_strikes,
         tool_analyze_broker_positions,
-        get_futures_oi_ranking
+        get_futures_oi_ranking,
+        get_macro_indicator,
+        get_macro_overview,
+        analyze_yield_curve
     ]
 
     # 判断是否为 ETF (51/159开头) 或 股票
@@ -573,6 +581,9 @@ def monitor_node(state: AgentState, llm):
     - 查期货持仓量排名 -> get_futures_oi_ranking
     - 查期权合约价格 -> get_etf_option_strikes
     - 查标的价格 -> get_market_snapshot
+    - 查宏观指标 -> get_macro_indicator(indicator_code='US10Y')  
+    - 查宏观环境总览 -> get_macro_overview()  
+    - 分析收益率曲线 -> analyze_yield_curve() 
     
     {tool_instruction}
 
@@ -1456,7 +1467,7 @@ def finalizer_node(state: AgentState, llm):
                 2. 商品期货都有期权！
                 3. 如果某品种有利好消息但却下跌，要提醒利多不涨，可能反转，而如果有坏消息但却不跌，要提醒利空不跌，可能阶段底部到了。
                 4. 价格数据是每天中午11点半和下午5点后更新。
-                5. 如果没有数据支持，就不能乱编内容！ 
+                5. 如果没有数据支持，就不能乱编内容！没数据就简单回答。
 
                 【排版强制要求】：
                 1. **头部信息**：使用引用块 `>` 展示签发人、日期和地点。
