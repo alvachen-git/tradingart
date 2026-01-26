@@ -850,8 +850,8 @@ def fast_router_check(user_query):
     # 2. 定义【简单查询】的触发词 (正面清单 - 收紧版)
     # 🔥 [修改点] 去掉了单独的 "多少"，改为 "多少钱", "多少点"
     price_keywords = [
-        "价格", "现价", "收盘", "开盘", "最新价", "报价",
-        "多少点", "多少钱", "几点"
+        "价格多少", "现价", "收盘", "开盘", "最新价", "报价",
+        "多少点", "多少钱", "几点", "股价", "价格"
     ]
 
     # 3. 状态判断
@@ -878,8 +878,24 @@ def fast_router_check(user_query):
     with st.chat_message("assistant", avatar="🤖"):
         with st.status("⚡ 正在连接交易所行情...", expanded=True) as status:
             try:
-                # 确保顶部已导入: from market_tools import get_market_snapshot
-                res = get_market_snapshot.invoke(user_query)
+                # 🔥🔥🔥 [核心修复 1] 字符串清洗 (脱水处理)
+                # 目的：把 "长江电力价格多少" 变成 "长江电力"
+                clean_query = user_query
+
+                # 按长度降序排，优先删长词 (防止删了"价格"剩下"多少")
+                target_kws = sorted(price_keywords + ["多少"], key=len, reverse=True)
+
+                for kw in target_kws:
+                    clean_query = clean_query.replace(kw, "")
+
+                # 去除标点和空格
+                clean_query = clean_query.replace("?", "").replace("？", "").strip()
+
+                # 如果洗完是空的(用户只发了"价格")，就还原，虽然大概率查不到
+                final_query = clean_query if clean_query else user_query
+
+                # 🔥🔥🔥 [核心修复 2] 传入清洗后的关键词
+                res = get_market_snapshot.invoke(final_query)
 
                 status.write(res)
                 status.update(label="✅ 报价完成", state="complete", expanded=True)
@@ -887,6 +903,8 @@ def fast_router_check(user_query):
                 return True, res
 
             except Exception as e:
+                print(f"❌ 快速行情查询失败: {e}")
+                status.update(label="❌ 查询失败，转入深度分析", state="error")
                 return False, None
 
     return False, None
