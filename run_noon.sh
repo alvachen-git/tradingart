@@ -10,7 +10,7 @@ echo "⏰ 任务开始: $(date)" >> update.log
 
 # 4. 更新【期货数据】
 echo ">>> [1/1] 开始写和发送每日晚报..." >> update.log
-/usr/bin/python3 daily_report_generator.py >> update.log 2>&1
+/usr/bin/python3 update_noon_price_daily.py >> update.log 2>&1
 
 
 # 结束
