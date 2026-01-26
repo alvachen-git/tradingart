@@ -1261,12 +1261,21 @@ def process_user_input(prompt_text):
 
             with st.chat_message("assistant", avatar="🤖"):
                 # 注意：如果文本太长，为了防止打字太慢，可以把 delay 调低，或者按“词”分割
-                if len(final_response_md) > 1000:
-                    # 如果内容很长，打字速度加快
-                    st.write_stream(stream_text_generator(final_response_md, delay=0.005))
-                else:
-                    # 内容短，正常速度
-                    st.write_stream(stream_text_generator(final_response_md, delay=0.015))
+                # 创建一个空的占位符
+                placeholder = st.empty()
+                full_response = ""
+
+                # 动态调整速度
+                delay_time = 0.005 if len(final_response_md) > 1000 else 0.015
+
+                # 手动循环流式输出，并开启 unsafe_allow_html
+                for char in stream_text_generator(final_response_md, delay=delay_time):
+                    full_response += char
+                    # 加一个光标 ▌ 模拟打字效果
+                    placeholder.markdown(full_response + "▌", unsafe_allow_html=True)
+
+                # 循环结束，移除光标，显示最终内容
+                placeholder.markdown(full_response, unsafe_allow_html=True)
 
             # --- 存入 Session 历史 ---
             message_data = {
@@ -1736,7 +1745,7 @@ else:
     st.markdown('<div style="height: 20px;"></div>', unsafe_allow_html=True)
     for i, msg in enumerate(st.session_state.messages):
         with st.chat_message(msg["role"]):
-            st.markdown(msg["content"])
+            st.markdown(msg["content"], unsafe_allow_html=True)
 
             # 如果这条消息里有 "chart" 字段，且不为空，就把它画出来
             if msg.get("chart"):
