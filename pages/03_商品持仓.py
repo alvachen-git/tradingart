@@ -336,9 +336,18 @@ with c_sel:
     st.metric("平均持仓量", f"{int(b_data['平均持仓']):,}")
 
 with c_info:
-
     if selected_broker:
-        history = df_scores[df_scores['broker'] == selected_broker].sort_values('trade_date')
+        # 1. 先筛选数据并拷贝，防止警告
+        history = df_scores[df_scores['broker'] == selected_broker].copy()
+
+        # 🔥【核心修复】强制将 20260101 这种数字/字符串转为真正的日期格式
+        # .astype(str) 是为了防止源数据是 int 类型导致转换失败
+        history['trade_date'] = pd.to_datetime(history['trade_date'].astype(str), format='%Y%m%d')
+
+        # 2. 转换完日期后再排序，确保时间轴正确
+        history = history.sort_values('trade_date')
+
+        # 3. 计算累计分
         history['累计积分'] = history['score'].cumsum()
         # === 美化后的图表绘制 ===
         fig_line = px.area(
