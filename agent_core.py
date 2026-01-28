@@ -782,7 +782,7 @@ def researcher_node(state: AgentState,llm=None):
            - **调用** `get_financial_news`。
            
         5. 📰 **具体资讯/事实核查**:
-           - 如果以上工具查不到，或者需要更多细节，调用 `search_web``，一轮思考只能使用一次。
+           - 如果以上工具查不到，或者需要更多细节，调用 `search_web``，如果第一次搜索没结果，请尝试**换个关键词**再搜一次。。
 
         【输出要求】
         - 如果是预测数据，必须给出**概率/胜率** (如 "特朗普胜率 65%")。
@@ -799,7 +799,7 @@ def researcher_node(state: AgentState,llm=None):
         # 舆情查询可能需要多步（先查热榜，再搜细节），给足步数
         result = researcher_agent.invoke(
             {"messages": [HumanMessage(content=query)]},
-            {"recursion_limit": 50}
+            {"recursion_limit": 30}
         )
 
         last_response = result["messages"][-1].content
@@ -1432,6 +1432,7 @@ def finalizer_node(state: AgentState, llm):
     # 如果只有 1 个工种发言（或者没有发言），且不是王牌分析师（王牌本来就是总结好的）
     symbol = state.get("symbol", "")
     mem_context = state.get("memory_context", "")
+    macro_view = state.get("macro_view", "无宏观分析")
     trend = state.get("trend_signal", "")  # 例如 "看涨"
     key_levels = state.get("key_levels", "")  # 例如 "压力3000"
     is_single_source = len(worker_msgs) <= 1
@@ -1554,8 +1555,21 @@ def finalizer_node(state: AgentState, llm):
                 2. 商品期货都有期权！
                 3. 如果某品种有利好消息但却下跌，要提醒利多不涨，可能反转，而如果有坏消息但却不跌，要提醒利空不跌，可能阶段底部到了。
                 4. 价格数据是每天中午11点半和下午5点后更新。
-                5. 如果没有数据支持，就不能乱编内容！没数据就简单回答。
-                6. 2026年春节长假是2月16日才开始！
+                5. 2026年春节长假是2月16日才开始！
+                
+                【必须遵守的数据准则】
+                1. **绝对禁止捏造数据**。如果没有数据就回答不知道。
+                2. 在分析宏观前，要引用【宏观分析报告】的结论。
+                
+                【已有的宏观分析报告】
+                {macro_view}
+                
+                【数据采信最高原则】
+                当不同分析师提供的数据冲突时，**必须**按以下优先级采信：
+                1. **宏观数据 (美元/美债/利率)**：
+                   - ✅ **唯一权威来源**：【宏观策略 (Macro Analyst)】。
+
+                
 
                 【排版强制要求】：
                 1. **头部信息**：使用引用块 `>` 展示签发人、日期和心情。
@@ -1589,6 +1603,8 @@ def finalizer_node(state: AgentState, llm):
 
         # 🔥 [新增] 从原始报告中提取图表路径（因为 finalizer 是整理者，图表在前面节点生成）
         chart_img = state.get("chart_img", "")
+        if state.get("macro_chart"):  # 如果有宏观图，优先用宏观图
+            chart_img = state.get("macro_chart")
 
         # 如果 state 中没有，尝试从报告内容中提取
         if not chart_img:
