@@ -21,6 +21,7 @@ CHART_DIR = os.path.join(BASE_DIR, "static", "charts")
 os.makedirs(CHART_DIR, exist_ok=True)
 
 
+
 def get_db_engine():
     db_url = f"mysql+pymysql://{os.getenv('DB_USER')}:{os.getenv('DB_PASSWORD')}@{os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/{os.getenv('DB_NAME')}"
     return create_engine(db_url, pool_recycle=3600, pool_pre_ping=True)
@@ -877,3 +878,72 @@ def draw_chart_tool(query: str, chart_type: str = "kline", time_period: str = "6
         return _plot_pe_line(ts_code, target_name, time_period, asset_type)
 
     return f"❌ 不支持: {chart_type}"
+
+
+@tool
+def draw_macro_compare_chart(symbol_a: str = "US10Y", symbol_b: str = "DXY", days: int = 90):
+    """
+    【宏观对比画图】
+    绘制两个宏观指标的双轴对比图，用于观察背离或共振。
+    - symbol_a: 左轴指标 (默认 US10Y)
+    - symbol_b: 右轴指标 (默认 DXY)
+    - days: 回溯天数 (默认 90 天)
+    """
+    if engine is None: return "❌ 数据库未连接"
+
+    try:
+        # 1. 读取数据 A
+        sql = text(f"""
+            SELECT trade_date, close_value 
+            FROM macro_daily 
+            WHERE indicator_code = :code AND trade_date >= DATE_SUB(NOW(), INTERVAL :days DAY)
+            ORDER BY trade_date
+        """)
+        df_a = pd.read_sql(sql, engine, params={"code": symbol_a, "days": days})
+        df_b = pd.read_sql(sql, engine, params={"code": symbol_b, "days": days})
+
+        if df_a.empty or df_b.empty:
+            return "❌ 数据不足，无法画图"
+
+        # 2. 创建双轴图表
+        fig = make_subplots(specs=[[{"secondary_y": True}]])
+
+        # 左轴：指标 A (通常是利率)
+        fig.add_trace(
+            go.Scatter(x=df_a['trade_date'], y=df_a['close_value'], name=symbol_a,
+                       line=dict(color='#ff4b4b', width=2)),
+            secondary_y=False,
+        )
+
+        # 右轴：指标 B (通常是美元)
+        fig.add_trace(
+            go.Scatter(x=df_b['trade_date'], y=df_b['close_value'], name=symbol_b,
+                       line=dict(color='#3b82f6', width=2, dash='dot')),  # 虚线区分
+            secondary_y=True,
+        )
+
+        # 3. 美化布局
+        fig.update_layout(
+            title=f"宏观对比: {symbol_a} vs {symbol_b}",
+            template="plotly_dark",
+            paper_bgcolor='rgba(0,0,0,0)',
+            plot_bgcolor='rgba(0,0,0,0)',
+            hovermode="x unified",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+        )
+
+        # 设定轴标题
+        fig.update_yaxes(title_text=symbol_a, secondary_y=False, color='#ff4b4b')
+        fig.update_yaxes(title_text=symbol_b, secondary_y=True, color='#3b82f6')
+
+        # 4. 保存
+        file_name = f"macro_chart_{uuid.uuid4().hex[:8]}.json"
+        file_path = os.path.join(CHART_DIR, file_name)
+
+        with open(file_path, "w", encoding="utf-8") as f:
+            f.write(fig.to_json())
+
+        return f"✅ 图表已生成: {file_name} (IMAGE_CREATED:{file_name})"
+
+    except Exception as e:
+        return f"❌ 画图失败: {e}"

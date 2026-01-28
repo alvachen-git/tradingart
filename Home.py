@@ -1030,7 +1030,7 @@ def process_user_input(prompt_text):
 
             report_card = {
                 "analyst": "", "monitor": "", "strategist": "",
-                "researcher": "", "news": "", "generalist": "","screener": "","roaster": "",
+                "researcher": "", "news": "", "generalist": "","screener": "","roaster": "","macro_analyst": "",
                 "chatter": "", "finalizer": "" # 👈 加上这俩
             }
             final_img_path = None
@@ -1107,6 +1107,9 @@ def process_user_input(prompt_text):
                         # 🔥 [修复] Fallback 放在最后，且排除系统消息
                         elif "【精选股票】" in content:
                             report_card["screener"] = content
+                        elif "【宏观策略】" in content:
+                            report_card["macro_analyst"] = content
+                            print(f"✅ 找到宏观策略")
                         elif "【毒舌点评】" in content:
                             report_card["roaster"] = content
                         elif (content.strip() and
@@ -1130,6 +1133,11 @@ def process_user_input(prompt_text):
                     if final_state.get("news_summary"):
                         report_card["news"] = final_state.get("news_summary")
                         status.write(f"📰 **情报**: 已检索")
+                    if final_state.get("macro_view"):
+                        # 🔥 [修正] 如果前面消息里没抓到，从 State 补上
+                        if not report_card["macro_analyst"]:
+                            report_card["macro_analyst"] = f"【宏观策略】\n{final_state.get('macro_view')}"
+                        status.write(f"🌍 **宏观**: 分析完成")
 
                     # 提取图表路径
                     chart_img = final_state.get("chart_img", "")
@@ -1212,6 +1220,9 @@ def process_user_input(prompt_text):
                 else:
                     # 🔥 [单兵模式]：CIO 觉得没问题放行了 (PASS)
                     # 此时按顺序显示各个分析师的原话 (保留漂亮排版)
+
+                    if report_card["macro_analyst"]:
+                        final_response_md += f"{report_card['macro_analyst']}\n\n"
 
                     # 1. 技术分析
                     if report_card["analyst"]:

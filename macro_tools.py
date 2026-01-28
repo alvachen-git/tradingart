@@ -5,6 +5,7 @@ from dotenv import load_dotenv
 import os
 from sqlalchemy import create_engine
 import streamlit as st
+from langchain_core.tools import tool
 
 
 # 1. 初始化
@@ -31,67 +32,88 @@ def get_db_engine():
 engine = get_db_engine()
 
 
+# ==================================================
+# 🔥 修改点 1：加上 @tool 装饰器，并支持多指标查询
+# ==================================================
+@tool
 def get_macro_indicator(indicator_code: str, days: int = 30) -> str:
     """
     【宏观指标查询】
-    查询指定宏观指标的最近数据。
+    查询指定宏观指标的最近数据。支持单个或多个指标。
 
     参数:
-    - indicator_code: 指标代码，可选值：
-        国债利率: US2Y, US10Y, US30Y, CN2Y, CN10Y, CN30Y, JP2Y, JP10Y, JP30Y, USHY
-        汇率: DXY(美元指数), USDJPY(美元兑日元), USDEUR(美元兑欧元), USDCNH(美元兑离岸人民币)
-        航运: BDI(波罗的海干散货指数)
+    - indicator_code: 指标代码，多个代码用逗号分隔，例如 "US10Y,DXY,CN10Y"
     - days: 查询最近多少天的数据，默认30天
-
-    返回: 该指标的最新值和趋势分析
     """
+    results = []
+    # 🔥 核心修复：支持逗号分隔的多个代码
+    code_list = [c.strip().upper() for c in indicator_code.split(',') if c.strip()]
+
+    if not code_list:
+        return "❌ 请提供有效的指标代码"
+
     try:
-        sql = text("""
-                   SELECT trade_date, indicator_name, close_value, change_value, change_pct
-                   FROM macro_daily
-                   WHERE indicator_code = :code
-                   ORDER BY trade_date DESC LIMIT :days
-                   """)
+        # 针对每个代码单独查询（比构建复杂的 IN 查询更稳定，且保留你的原逻辑结构）
+        for code in code_list:
+            sql = text("""
+                       SELECT trade_date, indicator_name, close_value, change_value, change_pct
+                       FROM macro_daily
+                       WHERE indicator_code = :code
+                       ORDER BY trade_date DESC LIMIT :days
+                       """)
 
-        with engine.connect() as conn:
-            df = pd.read_sql(sql, conn, params={"code": indicator_code.upper(), "days": days})
+            with engine.connect() as conn:
+                df = pd.read_sql(sql, conn, params={"code": code, "days": days})
 
-        if df.empty:
-            return f"未找到指标 {indicator_code} 的数据"
+            if df.empty:
+                results.append(f"⚠️ {code}: 暂无数据")
+                continue
 
-        # 最新数据
-        latest = df.iloc[0]
-        name = latest["indicator_name"]
-        value = latest["close_value"]
-        change = latest["change_value"]
-        change_pct = latest["change_pct"]
-        date = latest["trade_date"].strftime("%Y-%m-%d") if hasattr(latest["trade_date"], "strftime") else str(
-            latest["trade_date"])
+            # 最新数据
+            latest = df.iloc[0]
+            name = latest["indicator_name"]
+            value = latest["close_value"]
+            change = latest["change_value"]
+            change_pct = latest["change_pct"]
+            date = str(latest["trade_date"])[:10]
 
-        # 计算趋势
-        if len(df) >= 5:
-            recent_5d = df.head(5)["close_value"].mean()
-            older_5d = df.iloc[5:10]["close_value"].mean() if len(df) >= 10 else df.tail(5)["close_value"].mean()
-            trend = "上升" if recent_5d > older_5d else "下降"
-        else:
-            trend = "数据不足"
+            # 计算趋势
+            trend = "震荡"
+            if len(df) >= 5:
+                recent = df.head(5)["close_value"].mean()
+                older = df.tail(5)["close_value"].mean()
+                if recent > older * 1.01:
+                    trend = "上升 📈"
+                elif recent < older * 0.99:
+                    trend = "下降 📉"
 
-        # 计算区间
-        high_30d = df["close_value"].max()
-        low_30d = df["close_value"].min()
+            # 计算区间
+            high = df["close_value"].max()
+            low = df["close_value"].min()
 
-        result = f"""📊 **{name}** ({indicator_code})
-- 最新值: {value:.4f} ({date})
-- 日涨跌: {change:+.4f} ({change_pct:+.2f}%)
-- 近30日趋势: {trend}
-- 30日区间: {low_30d:.4f} ~ {high_30d:.4f}"""
+            # 格式化输出
+            if code == "DXY":
+                val_fmt = f"{value:.2f}"
+            elif code in ["US10Y", "CN10Y"]:
+                val_fmt = f"{value:.2f}%"
+            else:
+                val_fmt = f"{value:.4f}"
 
-        return result
+            item_res = f"""
+📊 **{name}** ({code})
+- 日期: {date}
+- 最新: {val_fmt} (涨跌: {change_pct:+.2f}%)
+- 趋势: {trend}
+- 区间: {low:.2f} ~ {high:.2f}
+"""
+            results.append(item_res)
+
+        return "\n".join(results)
 
     except Exception as e:
         return f"查询失败: {str(e)}"
 
-
+@tool
 def get_macro_overview(category: str = "all") -> str:
     """
     【宏观环境总览】
@@ -169,7 +191,7 @@ def get_macro_overview(category: str = "all") -> str:
     except Exception as e:
         return f"查询失败: {str(e)}"
 
-
+@tool
 def analyze_yield_curve() -> str:
     """
     【收益率曲线分析】

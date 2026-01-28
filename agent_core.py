@@ -21,7 +21,7 @@ from screener_tool import search_top_stocks, get_available_patterns
 from news_tools import get_financial_news
 from fund_flow_tools import tool_get_retail_money_flow
 from polymarket_tool import tool_get_polymarket_sentiment
-from plot_tools import draw_chart_tool
+from plot_tools import draw_chart_tool,draw_macro_compare_chart
 from futures_fund_flow_tools import get_futures_fund_flow, get_futures_fund_ranking
 from volume_oi_tools import get_volume_oi, get_futures_oi_ranking, get_option_oi_ranking, get_option_volume_abnormal, get_option_oi_abnormal, analyze_etf_option_sentiment, get_etf_option_strikes
 from market_tools import get_market_snapshot, get_price_statistics,tool_query_specific_option,get_historical_price,get_trending_hotspots,get_today_hotlist,analyze_keyword_trend,get_finance_related_trends,search_hotlist_history
@@ -55,6 +55,10 @@ class AgentState(TypedDict):
     risk_preference: str
     knowledge_context: str
     memory_context: str
+
+    news_summary: str  # 情报员填入：新闻摘要 (CPI/非农/美联储)
+    macro_view: str  # 宏观分析师填入：宏观定调 (宽松/紧缩)
+    macro_chart: str  # 宏观分析师填入：生成的宏观对比图路径
 
 
 # 期权合约乘数表（每张期权对应的标的数量）
@@ -143,7 +147,7 @@ def get_option_multiplier(symbol: str) -> str:
 # ==========================================
 # 定义输出结构，强制 LLM 返回 JSON 格式的任务列表
 class PlanningOutput(BaseModel):
-    plan: List[Literal["analyst", "researcher", "monitor", "strategist", "chatter", "generalist", "screener", "roaster"]] = Field(
+    plan: List[Literal["analyst", "researcher", "monitor", "strategist", "chatter", "generalist", "screener", "macro_analyst","roaster"]] = Field(
         description="执行步骤列表。注意依赖关系：期权(strategist)必须排在分析(analyst)之后。"
     )
     symbol: str = Field(description="核心标的代码。如果是对比问题或无法提取单一标的，请留空或填'MULTI'", default="")
@@ -171,12 +175,13 @@ def supervisor_node(state: AgentState, llm):
 
     【可用员工】
     - analyst: 技术分析师 (看K线、定趋势),分析如何操作
-    - monitor: 资金监控员 (看股票和期货资金流、期货商持仓、查持仓量和成交量、查价格、查合约、查利率数据、查汇率)
+    - monitor: 资金监控员 (看股票和期货资金流、期货商持仓、查持仓量和成交量、查价格、查合约)
     - researcher: 情报研究员 (看新闻、宏观、热点、地缘政治、货币政策、Polymarket上的概率分析、抖音热搜)
     - strategist: 期权策略员 (给策略，**必须依赖 analyst**) 
     - screener: 选股大师 (当用户问"推荐股票"、"什么股票好"、"选股"时使用)
     - chatter: 知识问答和闲聊 (例如解释一下IV，什么是牛市价差，"最近美联储什么时候开会")
-    - generalist: 【王牌分析师】处理对比(A和B谁强)、多品种分析、画图或深度复杂问题。
+    - generalist: 【王牌分析师】处理对比(A和B谁强)、多品种分析、画价差图或深度复杂问题。
+    - macro_analyst: 宏观策略师 (分析美联储、美债、美元、通胀、CPI、非农、画利率图)
     - roaster: *毒舌分析师* (当用户要求"吐槽"、"挑战我"、"毒舌模式"时使用)。
 
     【调度规则 (严格遵守)】
@@ -188,10 +193,14 @@ def supervisor_node(state: AgentState, llm):
     4. **多品种/对比**: 问"白银和黄金谁强"、"分析一下螺纹和热卷" -> 
        - symbol 填 "白银,黄金" (用逗号分隔)
        - plan 派 `['generalist']` (让王牌去处理多品种)。
-    5. 如果客户要画图，
+    5. **宏观/大宗/贵金属**: 
+       - 问 "现在宏观环境怎么样"、"美联储降息了吗" -> Plan: `['researcher', 'macro_analyst']` (先找新闻，再分析数据)。
+       - 问 "黄金/白银/能买吗" -> Plan: `['analyst', 'researcher', 'macro_analyst', 'strategist']` (黄金对宏观极度敏感，必须加宏观分析)。
+       - 问 "利率/美元走势" -> Plan: `['researcher', 'macro_analyst']`。
+    6. 如果客户要画图，
        - plan 派 `['generalist']` 。
-    6. **知识/百科/闲聊**: 问概念、问人名、问名词 -> 派 ['chatter']。
-    7. 如果用户想分析行情但**没说名字** (如"帮我分析一下") -> plan=['chatter'] (让Chatter去问用户要代码)。
+    7. **知识/百科/闲聊**: 问概念、问人名、问名词 -> 派 ['chatter']。
+    8. 如果用户想分析行情但**没说名字** (如"帮我分析一下") -> plan=['chatter'] (让Chatter去问用户要代码)。
     """
 
     # 🔥 [修改] 将历史对话也包含在 query 中
@@ -532,9 +541,7 @@ def monitor_node(state: AgentState, llm):
         get_etf_option_strikes,
         tool_analyze_broker_positions,
         get_futures_oi_ranking,
-        get_macro_indicator,
-        get_macro_overview,
-        analyze_yield_curve
+        get_macro_indicator
     ]
 
     # 判断是否为 ETF (51/159开头) 或 股票
@@ -582,8 +589,6 @@ def monitor_node(state: AgentState, llm):
     - 查期权合约价格 -> get_etf_option_strikes
     - 查标的价格 -> get_market_snapshot
     - 查宏观指标 -> get_macro_indicator(indicator_code='US10Y')  
-    - 查宏观环境总览 -> get_macro_overview()  
-    - 分析收益率曲线 -> analyze_yield_curve() 
     
     {tool_instruction}
 
@@ -832,7 +837,89 @@ def researcher_node(state: AgentState,llm=None):
         }
 
 
-# agent_core.py
+def macro_analyst_node(state: AgentState, llm):
+    """
+    宏观策略师：全景扫描宏观数据，结合收益率曲线和新闻，判断全球流动性周期。
+    """
+    user_q = state.get("user_query", "")
+    news_context = state.get("news_summary", "暂无最新宏观新闻")
+    current_date = datetime.now().strftime("%Y年%m月%d日")
+
+    # 引入宏观工具 (请确保在文件头部 import 这些工具)
+    # from plot_tools import draw_macro_compare_chart
+    # from macro_tools import get_macro_indicator
+
+    tools = [
+        get_macro_indicator,  # 来自 macro_tools (已升级支持多查)
+        get_macro_overview,  # 来自 macro_tools (看全局)
+        analyze_yield_curve,  # 来自 macro_tools (看倒挂)
+        draw_macro_compare_chart,  # 来自 plot_tools (看双轴走势)
+        get_financial_news  # 来自 news_tools (看新闻找原因)
+    ]
+
+    prompt = f"""
+        你是一位**首席宏观策略师**，信奉 "Don't fight the Fed"。
+        你的核心任务是利用【数据全景 + 收益率曲线 + 核心指标】模型判断全球流动性环境。
+
+        【当前日期】：{current_date}
+        【情报员提供的新闻】：
+        {news_context}
+
+        【分析逻辑与工具调用顺序】
+
+        **第一步：全景与衰退诊断 (必须执行)**
+        1. 调用 `get_macro_overview(category='all')`：
+           - 快速扫一眼全球市场，看是否有异常板块（如BDI暴跌暗示需求不足，非美货币集体暴跌暗示美元虹吸）。
+        2. 调用 `analyze_yield_curve()`：
+           - **这是最关键的一步**。检查美债 10Y-2Y 是否**倒挂**。
+           - 倒挂 = 衰退预警/降息预期升温；陡峭化 = 复苏或通胀预期。
+
+        **第二步：核心锚点验证**
+        1. 调用 `get_macro_indicator(codes='US10Y,DXY,US2Y')`：
+           - 获取精确的最新报价和趋势。
+        2. 结合 `Researcher` 的新闻（CPI/非农/FOMC），解释数据为何波动。
+
+        **第三步：可视化 **
+        - 调用 `draw_macro_compare_chart` 绘制 US10Y vs DXY 的对比图，直观展示流动性收紧还是放松。
+
+        【决策矩阵 (结合收益率曲线)】
+        - **紧缩交易**：US10Y 上行 + DXY 强势 + 曲线正常 -> 经济过热，美联储加息，杀估值。
+        - **衰退交易**：US10Y 下行 + 曲线倒挂(或倒挂加深) -> 市场恐慌，押注降息，利好黄金/美债。
+        - **避险交易 (Risk-Off)**：US10Y 下行 + DXY 强势 -> 衰退恐慌，股市暴跌，美元美债双牛。
+        - **复苏交易**：US10Y 温和上行 + 曲线陡峭化 -> 经济复苏，利好商品/股票。
+        - **滞胀/信任危机**：US10Y 上行 + DXY 弱势 -> 比较罕见，利好实物商品和黄金资产。
+
+        【输出要求】
+        请输出一份逻辑严密的宏观研报：
+        1. **【周期定调】**：明确当前是“紧缩”、“衰退恐慌”还是“复苏”模式。
+        2. **【收益率曲线监测】**：专门一段分析倒挂情况及其隐含的经济衰退概率。
+        3. **【资产影响】**：基于上述判断，对 黄金/股市/大宗商品 的具体影响。
+        """
+
+    macro_agent = create_react_agent(llm, tools, prompt=prompt)
+
+    try:
+        result = macro_agent.invoke(
+            {"messages": [HumanMessage(content=f"请分析当前的宏观流动性环境。用户问题：{user_q}")]},
+            {"recursion_limit": 30}
+        )
+        last_response = result["messages"][-1].content
+
+        # 提取图表
+        chart_img = ""
+        chart_match = re.search(r'(macro_chart_[a-zA-Z0-9_]+\.json)', last_response)
+        if chart_match:
+            chart_img = chart_match.group(1)
+
+        return {
+            "messages": [HumanMessage(content=f"【宏观策略】\n{last_response}")],
+            "macro_view": last_response,
+            "macro_chart": chart_img
+        }
+    except Exception as e:
+        return {
+            "messages": [HumanMessage(content=f"【宏观策略】分析受阻: {e}")]
+        }
 
 # ==========================================
 # 🟣 6. 聊天/知识问答员 (Chatter)
@@ -1471,7 +1558,7 @@ def finalizer_node(state: AgentState, llm):
                 6. 2026年春节长假是2月16日才开始！
 
                 【排版强制要求】：
-                1. **头部信息**：使用引用块 `>` 展示签发人、日期和地点。
+                1. **头部信息**：使用引用块 `>` 展示签发人、日期和心情。
                 2. **核心结论**：必须在最前面，使用 `### 🎯 核心结论` 标题，并用列表展示 3 个关键点。
                 3. **分节标题**：使用 `###` 标题，并在标题前加上 Emoji (如 📈, 💰, ⚖️)。
                 4. **重要警示**：如果涉及风险，使用 `> ⚠️ **风险提示**：...` 的格式高亮。
@@ -1543,6 +1630,7 @@ def build_trading_graph(fast_llm, mid_llm, smart_llm):
     workflow.add_node("chatter", lambda state: chatter_node(state, mid_llm))
     workflow.add_node("screener", lambda state: screener_node(state, mid_llm))
     workflow.add_node("roaster", lambda state: roaster_node(state, mid_llm))
+    workflow.add_node("macro_analyst", lambda state: macro_analyst_node(state, mid_llm))
 
     # 2. 设置入口
     workflow.set_entry_point("supervisor")
@@ -1613,6 +1701,7 @@ def build_trading_graph(fast_llm, mid_llm, smart_llm):
             "chatter": "chatter",
             "roaster": "roaster",
             "screener": "screener",
+            "macro_analyst": "macro_analyst",
             "finalizer": "finalizer"
         }
     )
@@ -1639,7 +1728,7 @@ def build_trading_graph(fast_llm, mid_llm, smart_llm):
     # 流程变成：Manager(路由) -> Worker -> Manager_Pop(删除任务) -> Manager(路由)
 
     # 重新定义 Edge:
-    for node_name in ["analyst", "monitor", "strategist", "researcher", "generalist","screener","roaster"]:
+    for node_name in ["analyst", "monitor", "strategist", "researcher", "generalist","screener","roaster", "macro_analyst"]:
         workflow.add_edge(node_name, "manager_pop")
 
     workflow.add_edge("chatter", END)
