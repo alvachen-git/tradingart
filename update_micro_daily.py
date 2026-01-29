@@ -27,10 +27,9 @@ DB_URL = f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}
 # 连接池配置：服务器长久运行时很重要
 engine = create_engine(DB_URL, pool_recycle=3600, pool_pre_ping=True)
 
-# 🔔 核心配置：每次只回溯更新过去 10 天的数据 (覆盖周末/节假日)
-LOOKBACK_DAYS = 10
-os.environ["HTTP_PROXY"] = "http://127.0.0.1:7890"
-os.environ["HTTPS_PROXY"] = "http://127.0.0.1:7890"
+# 🔔 核心配置：每次只回溯更新过去 N 天的数据 (覆盖周末/节假日)
+LOOKBACK_DAYS = 5
+
 
 # ==========================================
 # 2. 通用工具函数
@@ -43,30 +42,28 @@ def get_date_range():
 
 
 def save_to_db(result_dict):
-    """批量保存到数据库 (REPLACE INTO 模式)"""
+    """批量保存到数据库"""
     if not result_dict:
         return 0
-
     saved_count = 0
-    with engine.begin() as conn:  # 使用事务
+    with engine.begin() as conn:
         for code, data in result_dict.items():
             df = data['df']
-            name = data['name']
-            category = data['category']
-
             if df.empty:
                 continue
 
-            # 写入前最后一次过滤，确保只写入最近的数据
-            # 防止某些接口无视参数返回了全量历史
+            # 双重保险：过滤旧数据
             start_str, _ = get_date_range()
             df = df[df['trade_date'] >= pd.to_datetime(start_str)]
 
             for _, row in df.iterrows():
-                # 计算涨跌 (如果数据源没提供，简单计算)
-                # 注意：增量更新时，很难计算涨跌幅(需要昨天的数据)，这里简化处理或依赖源数据
-                change_val = row.get('change', 0.0)
-                pct_chg = row.get('pct_chg', 0.0)
+                # 安全获取字段
+                chg = row.get('change', 0.0)
+                pct = row.get('pct_chg', 0.0)
+                if pd.isna(chg):
+                    chg = 0.0
+                if pd.isna(pct):
+                    pct = 0.0
 
                 sql = text("""
                            REPLACE
@@ -74,130 +71,150 @@ def save_to_db(result_dict):
                     (trade_date, indicator_code, indicator_name, category, close_value, change_value, change_pct)
                     VALUES (:date, :code, :name, :cat, :val, :chg, :pct)
                            """)
-
                 conn.execute(sql, {
                     "date": row['trade_date'],
                     "code": code,
-                    "name": name,
-                    "cat": category,
+                    "name": data['name'],
+                    "cat": data['category'],
                     "val": row['close_value'],
-                    "chg": change_val,
-                    "pct": pct_chg
+                    "chg": chg,
+                    "pct": pct
                 })
                 saved_count += 1
-
     return saved_count
 
 
 # ==========================================
-# 3. 各板块抓取函数 (高性能版)
+# 3. 各板块抓取函数 (修复版)
 # ==========================================
 
-def fetch_us_bond_yields():
-    """[增量] 美国国债收益率 (Investing.com)"""
-    results = {}
-    print(f"  🇺🇸 更新美债数据 (近{LOOKBACK_DAYS}天)...")
+def fetch_bond_yields():
+    """[修复] 中美国债收益率 (东方财富-AkShare)
 
+    使用接口: ak.bond_zh_us_rate()
+    返回列: 日期, 中国国债收益率2年, 中国国债收益率5年, 中国国债收益率10年, 中国国债收益率30年,
+            美国国债收益率2年, 美国国债收益率5年, 美国国债收益率10年, 美国国债收益率30年,
+            美国国债收益率10年-2年, 美国GDP年增率
+    """
+    results = {}
+    print(f"  🇺🇸🇨🇳 更新中美国债数据 (近{LOOKBACK_DAYS}天)...")
     start_date, end_date = get_date_range()
 
-    # 映射关系: 期限 -> Investing的名称代码
-    # 注意：Investing接口参数名可能变动，这里使用常见参数
-    bonds = {
-        "US2Y": "美国2年期国债收益率",
-        "US10Y": "美国10年期国债收益率",
-        "US30Y": "美国30年期国债收益率"
-    }
-
-    for code, name in bonds.items():
-        try:
-            time.sleep(1)  # 礼貌延时
-            df = ak.index_investing_global(
-                country="美国",
-                index_name=name,
-                period="每日",
-                start_date=start_date,
-                end_date=end_date
-            )
-
-            if not df.empty:
-                df = df.rename(columns={'日期': 'trade_date', '收盘': 'close_value', '涨跌幅': 'pct_chg'})
-                df['trade_date'] = pd.to_datetime(df['trade_date'])
-                df['close_value'] = pd.to_numeric(df['close_value'])
-                # Investing 的涨跌幅是百分比字符串 '1.2%' -> 1.2
-                # df['pct_chg'] = df['pct_chg'].str.rstrip('%').astype(float)
-
-                results[code] = {'df': df, 'name': name, 'category': 'bond'}
-                print(f"    ✓ {code}: 获取 {len(df)} 条")
-        except Exception as e:
-            print(f"    ❌ {code} 失败: {e}")
-
-    return results
-
-
-def fetch_china_bond_yields():
-    """[增量] 中国国债收益率 (AkShare)"""
-    results = {}
-    print(f"  🇨🇳 更新中债数据 (近{LOOKBACK_DAYS}天)...")
-
-    # AkShare 的中债接口通常返回近一年的，我们在内存截取
     try:
-        # 这里的接口比较多变，推荐使用 bond_china_yield
-        df = ak.bond_china_yield(start_date=get_date_range()[0].replace('-', ''),
-                                 end_date=get_date_range()[1].replace('-', ''))
+        # 使用正确的接口
+        df = ak.bond_zh_us_rate(start_date=start_date.replace("-", ""))
 
-        # 假设返回: 日期, 2年, 10年, 30年
-        if not df.empty:
-            df['日期'] = pd.to_datetime(df['日期'])
+        if df.empty:
+            print("    ⚠️ 中美国债数据为空")
+            return results
 
-            # 2年期
-            df_2y = df[['日期', '2年']].rename(columns={'日期': 'trade_date', '2年': 'close_value'})
-            results['CN2Y'] = {'df': df_2y, 'name': '中债2年收益率', 'category': 'bond'}
+        # 统一日期格式
+        df['日期'] = pd.to_datetime(df['日期'])
 
-            # 10年期
-            df_10y = df[['日期', '10年']].rename(columns={'日期': 'trade_date', '10年': 'close_value'})
-            results['CN10Y'] = {'df': df_10y, 'name': '中债10年收益率', 'category': 'bond'}
+        # 过滤最近 N 天
+        start_dt = pd.to_datetime(start_date)
+        df = df[df['日期'] >= start_dt]
 
-            print(f"    ✓ 中债数据: 获取 {len(df)} 条")
+        # --- 美国10年期国债 ---
+        if '美国国债收益率10年' in df.columns:
+            temp_df = df[['日期', '美国国债收益率10年']].copy()
+            temp_df = temp_df.rename(columns={'日期': 'trade_date', '美国国债收益率10年': 'close_value'})
+            temp_df['close_value'] = pd.to_numeric(temp_df['close_value'], errors='coerce')
+            temp_df = temp_df.dropna(subset=['close_value'])
+            results['US10Y'] = {'df': temp_df, 'name': '美国10年期国债收益率', 'category': 'bond'}
+            print(f"    ✓ US10Y: 获取 {len(temp_df)} 条")
+
+        # --- 美国2年期国债 ---
+        if '美国国债收益率2年' in df.columns:
+            temp_df = df[['日期', '美国国债收益率2年']].copy()
+            temp_df = temp_df.rename(columns={'日期': 'trade_date', '美国国债收益率2年': 'close_value'})
+            temp_df['close_value'] = pd.to_numeric(temp_df['close_value'], errors='coerce')
+            temp_df = temp_df.dropna(subset=['close_value'])
+            results['US2Y'] = {'df': temp_df, 'name': '美国2年期国债收益率', 'category': 'bond'}
+            print(f"    ✓ US2Y: 获取 {len(temp_df)} 条")
+
+        # --- 中国10年期国债 ---
+        if '中国国债收益率10年' in df.columns:
+            temp_df = df[['日期', '中国国债收益率10年']].copy()
+            temp_df = temp_df.rename(columns={'日期': 'trade_date', '中国国债收益率10年': 'close_value'})
+            temp_df['close_value'] = pd.to_numeric(temp_df['close_value'], errors='coerce')
+            temp_df = temp_df.dropna(subset=['close_value'])
+            results['CN10Y'] = {'df': temp_df, 'name': '中国10年期国债收益率', 'category': 'bond'}
+            print(f"    ✓ CN10Y: 获取 {len(temp_df)} 条")
+
+        # --- 中国2年期国债 ---
+        if '中国国债收益率2年' in df.columns:
+            temp_df = df[['日期', '中国国债收益率2年']].copy()
+            temp_df = temp_df.rename(columns={'日期': 'trade_date', '中国国债收益率2年': 'close_value'})
+            temp_df['close_value'] = pd.to_numeric(temp_df['close_value'], errors='coerce')
+            temp_df = temp_df.dropna(subset=['close_value'])
+            results['CN2Y'] = {'df': temp_df, 'name': '中国2年期国债收益率', 'category': 'bond'}
+            print(f"    ✓ CN2Y: 获取 {len(temp_df)} 条")
+
+        # --- 美国10Y-2Y利差 ---
+        if '美国国债收益率10年-2年' in df.columns:
+            temp_df = df[['日期', '美国国债收益率10年-2年']].copy()
+            temp_df = temp_df.rename(columns={'日期': 'trade_date', '美国国债收益率10年-2年': 'close_value'})
+            temp_df['close_value'] = pd.to_numeric(temp_df['close_value'], errors='coerce')
+            temp_df = temp_df.dropna(subset=['close_value'])
+            results['US10Y2Y'] = {'df': temp_df, 'name': '美国10Y-2Y利差', 'category': 'bond'}
+            print(f"    ✓ US10Y2Y: 获取 {len(temp_df)} 条")
 
     except Exception as e:
-        print(f"    ❌ 中债失败: {e}")
+        print(f"    ❌ 中美国债数据获取失败: {e}")
+        traceback.print_exc()
 
     return results
 
 
-def fetch_dxy_investing():
-    """[增量] 美元指数 (Investing)"""
+def fetch_dxy_index():
+    """[修复] 美元指数 (东方财富-AkShare)
+
+    使用接口: ak.index_global_hist_em(symbol="美元指数")
+    返回列: 日期, 代码, 名称, 今开, 最新价, 最高, 最低, 振幅
+    """
     results = {}
-    print(f"  💵 更新美元指数 (Investing)...")
-    start_date, end_date = get_date_range()
+    print(f"  💵 更新美元指数 (近{LOOKBACK_DAYS}天)...")
+    start_date, _ = get_date_range()
 
     try:
-        df = ak.index_investing_global(
-            country="美国",
-            index_name="美元指数",
-            period="每日",
-            start_date=start_date,
-            end_date=end_date
-        )
-        if not df.empty:
-            df = df.rename(columns={'日期': 'trade_date', '收盘': 'close_value'})
-            df['trade_date'] = pd.to_datetime(df['trade_date'])
-            df['close_value'] = pd.to_numeric(df['close_value'])
-            results['DXY'] = {'df': df, 'name': '美元指数', 'category': 'fx'}
-            print(f"    ✓ DXY: 获取 {len(df)} 条")
+        # 使用正确的接口
+        df = ak.index_global_hist_em(symbol="美元指数")
+
+        if df.empty:
+            print("    ⚠️ 美元指数数据为空")
+            return results
+
+        # 统一日期格式
+        df['日期'] = pd.to_datetime(df['日期'])
+
+        # 过滤最近 N 天
+        start_dt = pd.to_datetime(start_date)
+        df = df[df['日期'] >= start_dt]
+
+        # 提取需要的列
+        temp_df = df[['日期', '最新价']].copy()
+        temp_df = temp_df.rename(columns={'日期': 'trade_date', '最新价': 'close_value'})
+        temp_df['close_value'] = pd.to_numeric(temp_df['close_value'], errors='coerce')
+        temp_df = temp_df.dropna(subset=['close_value'])
+
+        results['DXY'] = {'df': temp_df, 'name': '美元指数', 'category': 'fx'}
+        print(f"    ✓ DXY: 获取 {len(temp_df)} 条")
+
     except Exception as e:
         print(f"    ❌ DXY 失败: {e}")
+        traceback.print_exc()
+
     return results
 
 
 def fetch_offshore_cny_yahoo():
-    """[增量] 离岸人民币 (Yahoo Finance)"""
+    """[保持不变] 离岸人民币 (Yahoo Finance)"""
     results = {}
     print(f"  💱 更新离岸人民币 (Yahoo)...")
 
     try:
         # CNH=F 是 Yahoo 的离岸人民币代码
-        # period='1mo' 非常快，且足够覆盖lookback
         ticker = yf.Ticker("CNH=F")
         df = ticker.history(period="1mo")
 
@@ -215,29 +232,53 @@ def fetch_offshore_cny_yahoo():
             print(f"    ✓ USDCNH: 获取 {len(temp_df)} 条")
     except Exception as e:
         print(f"    ❌ USDCNH 失败: {e}")
+        traceback.print_exc()
+
     return results
 
 
 def fetch_bdi_index():
-    """[增量] BDI 指数 (AkShare)"""
+    """[修复] BDI 波罗的海干散货指数 (东方财富-AkShare)
+
+    使用接口: ak.macro_shipping_bdi()
+    返回列: 日期, 最新值, 涨跌幅, 近1月涨跌幅, 近3月涨跌幅, 近6月涨跌幅, 近1年涨跌幅, 近2年涨跌幅, 近3年涨跌幅
+    """
     results = {}
     print(f"  🚢 更新波罗的海指数 (BDI)...")
 
     try:
-        # 这个接口通常返回全量，必须做切片
-        df = ak.index_bdi()
-        if not df.empty:
-            df['date'] = pd.to_datetime(df['date'])
+        # 使用正确的接口
+        df = ak.macro_shipping_bdi()
 
-            # 🔥 内存切片，只留最近10天
-            start_dt = pd.to_datetime(get_date_range()[0])
-            df = df[df['date'] >= start_dt]
+        if df.empty:
+            print("    ⚠️ BDI数据为空")
+            return results
 
-            df = df.rename(columns={'date': 'trade_date', 'close': 'close_value'})
-            results['BDI'] = {'df': df, 'name': '波罗的海干散货指数', 'category': 'shipping'}
-            print(f"    ✓ BDI: 获取 {len(df)} 条")
+        # 统一日期格式
+        df['日期'] = pd.to_datetime(df['日期'])
+
+        # 过滤最近 N 天
+        start_dt = pd.to_datetime(get_date_range()[0])
+        df = df[df['日期'] >= start_dt]
+
+        # 提取需要的列
+        temp_df = df[['日期', '最新值']].copy()
+        temp_df = temp_df.rename(columns={'日期': 'trade_date', '最新值': 'close_value'})
+        temp_df['close_value'] = pd.to_numeric(temp_df['close_value'], errors='coerce')
+
+        # 添加涨跌幅（如果有的话）
+        if '涨跌幅' in df.columns:
+            temp_df['pct_chg'] = pd.to_numeric(df['涨跌幅'], errors='coerce')
+
+        temp_df = temp_df.dropna(subset=['close_value'])
+
+        results['BDI'] = {'df': temp_df, 'name': '波罗的海干散货指数', 'category': 'shipping'}
+        print(f"    ✓ BDI: 获取 {len(temp_df)} 条")
+
     except Exception as e:
         print(f"    ❌ BDI 失败: {e}")
+        traceback.print_exc()
+
     return results
 
 
@@ -245,32 +286,26 @@ def fetch_bdi_index():
 # 4. 主执行函数
 # ==========================================
 def run_daily_update():
-    print(f"\n{'=' * 40}")
+    print(f"\n{'=' * 50}")
     print(f"🚀 宏观数据每日更新任务 ({datetime.now().strftime('%Y-%m-%d %H:%M:%S')})")
-    print(f"📅 更新窗口: {get_date_range()[0]} 至 {get_date_range()[1]}")
-    print(f"{'=' * 40}\n")
+    print(f"📅 更新窗口: {get_date_range()[0]} ~ {get_date_range()[1]}")
+    print(f"{'=' * 50}\n")
 
-    total_saved = 0
+    total = 0
 
-    # 1. 债券
-    res = fetch_us_bond_yields()
-    total_saved += save_to_db(res)
+    # 中美国债 (一个接口获取所有)
+    total += save_to_db(fetch_bond_yields())
 
-    res = fetch_china_bond_yields()
-    total_saved += save_to_db(res)
+    # 美元指数
+    total += save_to_db(fetch_dxy_index())
 
-    # 2. 汇率
-    res = fetch_dxy_investing()
-    total_saved += save_to_db(res)
+    # 离岸人民币
+    total += save_to_db(fetch_offshore_cny_yahoo())
 
-    res = fetch_offshore_cny_yahoo()
-    total_saved += save_to_db(res)
+    # BDI指数
+    total += save_to_db(fetch_bdi_index())
 
-    # 3. 航运
-    res = fetch_bdi_index()
-    total_saved += save_to_db(res)
-
-    print(f"\n✅ 任务完成! 本次共更新/插入 {total_saved} 条数据。")
+    print(f"\n✅ 任务完成! 共更新 {total} 条数据。")
 
 
 if __name__ == "__main__":
