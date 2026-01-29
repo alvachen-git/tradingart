@@ -29,7 +29,8 @@ engine = create_engine(DB_URL, pool_recycle=3600, pool_pre_ping=True)
 
 # 🔔 核心配置：每次只回溯更新过去 10 天的数据 (覆盖周末/节假日)
 LOOKBACK_DAYS = 10
-
+os.environ["HTTP_PROXY"] = "http://127.0.0.1:7890"
+os.environ["HTTPS_PROXY"] = "http://127.0.0.1:7890"
 
 # ==========================================
 # 2. 通用工具函数
