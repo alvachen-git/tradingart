@@ -77,7 +77,7 @@ def search_web(query: str) -> str:
         ]
 
         response = client.chat.completions.create(
-            model="glm-4",  # 建议用 GLM-4
+            model="glm-4-flash",  # 建议用 GLM-4
             messages=messages,
             tools=tools
         )
