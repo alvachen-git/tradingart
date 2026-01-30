@@ -72,7 +72,7 @@ def search_web(query: str) -> str:
             {
                 "role": "user",
                 # Prompt 里也可以顺便带上原词，让模型知道上下文
-                "content": f"请搜索以下内容：{optimized_query}。原始问题背景：{query}"
+                "content": f"你可以实时的网络搜索，搜索以下内容：{optimized_query}。原始问题背景：{query}"
             }
         ]
 
