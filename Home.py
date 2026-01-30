@@ -1,4 +1,6 @@
 import streamlit as st
+from task_manager import TaskManager
+import time
 import pandas as pd
 import data_engine as de
 import subscription_service as sub_svc
@@ -105,11 +107,13 @@ st.markdown("""
     /* --- [关键修复 1] 代码块样式修复 --- */
     /* 强制代码块背景为深色，文字为亮色 */
     [data-testid="stChatMessageContent"] code {
-        background-color: #2b313e !important;
-        color: #e6e6e6 !important;
-        border: 1px solid #3b4252;
-        border-radius: 4px;
-        padding: 0.2rem 0.4rem;
+    background-color: #1e3a5f !important;  /* 深蓝色背景 */
+    color: #ffd700 !important;             /* 金黄色文字（更醒目）*/
+    border: 1px solid #4a90e2;             /* 亮蓝色边框 */
+    border-radius: 4px;
+    padding: 0.2rem 0.4rem;
+    font-weight: 500;                      /* 字体加粗 */
+    font-size: 0.95em;                     /* 稍微放大 */
     }
     /* 多行代码块容器 */
     [data-testid="stChatMessageContent"] pre {
@@ -403,9 +407,12 @@ def render_chart_by_filename(filename):
 
 def clean_chart_tag(response_text):
     """清理 AI 乱加的图片链接和标记"""
+    if not response_text:
+        return ""
+
     text = response_text
 
-    # 1. 删掉所有 Markdown 图片语法: ![任意文字](任意链接)
+    # 1. 删掉所有 Markdown 图片语法
     text = re.sub(r'!\[.*?\]\(.*?\)', '', text)
 
     # 2. 删掉 chart_xxx.json 相关链接
@@ -415,13 +422,21 @@ def clean_chart_tag(response_text):
     text = re.sub(r'\[CHART_FILE:.*?\]', '', text)
     text = re.sub(r'\[CHART_JSON:.*?\]', '', text)
 
-    # 🔥 [新增] 删掉 IMAGE_CREATED 标记
+    # 4. 删掉 IMAGE_CREATED 标记
     text = re.sub(r'IMAGE_CREATED:chart_[a-zA-Z0-9_]+\.json', '', text)
 
-    # 4. 清理多余空行
+    # 5. 清理多余空行（最多保留2个换行）
     text = re.sub(r'\n{3,}', '\n\n', text)
 
-    return text.strip()
+    # 🔥 [新增] 优化列表格式
+    # 确保列表项前后有空行
+    text = re.sub(r'([^\n])\n([•\-\*])', r'\1\n\n\2', text)
+
+    # 🔥 [新增] 优化标题格式
+    # 确保 Markdown 标题前后有空行
+    text = re.sub(r'([^\n])\n(#{1,3} )', r'\1\n\n\2', text)
+
+    return text
 
 
 class TokenMonitorCallback(BaseCallbackHandler):
@@ -475,20 +490,21 @@ class TokenMonitorCallback(BaseCallbackHandler):
 
 
 def native_share_button(user_content, ai_content, key):
+    """
+    生成分享按钮，将对话内容转为图片
+    优先使用原生分享（和个人资料页一样的逻辑）
+    """
     unique_id = str(uuid.uuid4())[:8]
     container_id = f"share-container-{unique_id}"
     btn_id = f"btn-{unique_id}"
 
-    # 1. 【核心修改】将 AI 的 Markdown 内容转换为 HTML
-    # extensions=['tables'] 用于支持 | 表格 | 语法
-    # extensions=['nl2br'] 用于支持换行
+    # Markdown 转 HTML
     html_content = markdown.markdown(
         ai_content,
         extensions=['tables', 'fenced_code', 'nl2br']
     )
 
-    # 2. 构建包含样式的 HTML
-    # 注意：我在 <style> 里增加了针对 table, th, td, h3, strong 的样式，让排版更漂亮
+    # 构建分享卡片 HTML
     styled_html = f"""
     <div id="{container_id}" style="
         background: linear-gradient(145deg, #1e293b 0%, #0f172a 100%);
@@ -497,47 +513,19 @@ def native_share_button(user_content, ai_content, key):
         border-radius: 16px;
         font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
         line-height: 1.6;
-        width: 400px; /* 稍微加宽一点以容纳表格 */
+        width: 400px;
         position: fixed; top: -9999px; left: -9999px;
         box-sizing: border-box;
     ">
         <style>
-            #{container_id} table {{
-                border-collapse: collapse;
-                width: 100%;
-                margin: 10px 0;
-                font-size: 12px;
-                color: #e6e6e6;
-            }}
-            #{container_id} th, #{container_id} td {{
-                border: 1px solid #475569;
-                padding: 6px 8px;
-                text-align: left;
-            }}
-            #{container_id} th {{
-                background-color: rgba(255, 255, 255, 0.1);
-                color: #fff;
-                font-weight: bold;
-            }}
-            #{container_id} h1, #{container_id} h2, #{container_id} h3, #{container_id} h4 {{
-                color: #ffffff;
-                margin-top: 15px;
-                margin-bottom: 8px;
-                font-weight: 700;
-            }}
-            #{container_id} strong {{
-                color: #FFD700; /* 金黄色高亮重点 */
-            }}
-            #{container_id} ul, #{container_id} ol {{
-                padding-left: 20px;
-                margin: 5px 0;
-            }}
-            #{container_id} li {{
-                margin-bottom: 4px;
-            }}
-            #{container_id} p {{
-                margin-bottom: 8px;
-            }}
+            #{container_id} table {{ border-collapse: collapse; width: 100%; margin: 10px 0; font-size: 12px; color: #e6e6e6; }}
+            #{container_id} th, #{container_id} td {{ border: 1px solid #475569; padding: 6px 8px; text-align: left; }}
+            #{container_id} th {{ background-color: rgba(255, 255, 255, 0.1); color: #fff; font-weight: bold; }}
+            #{container_id} h1, #{container_id} h2, #{container_id} h3, #{container_id} h4 {{ color: #ffffff; margin-top: 15px; margin-bottom: 8px; font-weight: 700; }}
+            #{container_id} strong {{ color: #FFD700; }}
+            #{container_id} ul, #{container_id} ol {{ padding-left: 20px; margin: 5px 0; }}
+            #{container_id} li {{ margin-bottom: 4px; }}
+            #{container_id} p {{ margin-bottom: 8px; }}
         </style>
 
         <div style="display: flex; align-items: center; margin-bottom: 20px; border-bottom: 1px solid rgba(255,255,255,0.1); padding-bottom: 15px;">
@@ -574,7 +562,7 @@ def native_share_button(user_content, ai_content, key):
     </div>
     """
 
-    # --- 3. JS 逻辑 (保持不变) ---
+    # 🔥 关键：JS 逻辑完全复制自个人资料页（已验证能正常工作）
     html_code = f"""
     <!DOCTYPE html>
     <html>
@@ -587,11 +575,7 @@ def native_share_button(user_content, ai_content, key):
             padding: 5px 12px; border-radius: 20px; font-size: 12px; cursor: pointer;
             display: inline-flex; align-items: center; margin-top: 8px; transition: all 0.2s;
         }}
-        .share-btn:hover, .share-btn:active {{ background-color: #3b82f6; color: white; border-color: #3b82f6; }}
-        #modal-overlay {{ display: none; position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; background: rgba(0,0,0,0.85); z-index: 9999; flex-direction: column; align-items: center; justify-content: center; }}
-        #modal-img {{ max-width: 85%; border-radius: 10px; box-shadow: 0 0 20px rgba(0,0,0,0.5); }}
-        #modal-tip {{ color: white; margin-top: 15px; font-size: 14px; background: #333; padding: 5px 15px; border-radius: 20px; }}
-        #close-btn {{ position: absolute; top: 20px; right: 20px; color: white; font-size: 30px; cursor: pointer; }}
+        .share-btn:hover {{ background-color: #3b82f6; color: white; border-color: #3b82f6; }}
     </style>
     </head>
     <body>
@@ -599,9 +583,6 @@ def native_share_button(user_content, ai_content, key):
         <button class="share-btn" id="{btn_id}" onclick="generateAndShare()">
             <i class="fas fa-share-square" style="margin-right:5px;"></i> 分享完整对话
         </button>
-        <div id="modal-overlay" onclick="closeModal()">
-            <div id="close-btn">&times;</div><img id="modal-img" src="" /><div id="modal-tip">👆 长按图片 -> 转发给朋友</div>
-        </div>
         <script>
         function generateAndShare() {{
             const btn = document.getElementById('{btn_id}');
@@ -611,23 +592,17 @@ def native_share_button(user_content, ai_content, key):
 
             html2canvas(target, {{ backgroundColor: null, scale: 2, logging: false, useCORS: true }}).then(canvas => {{
                 canvas.toBlob(function(blob) {{
-                    const file = new File([blob], "ai-analysis.png", {{ type: "image/png" }});
+                    const file = new File([blob], "aiprota_analysis.png", {{ type: "image/png" }});
                     if (navigator.canShare && navigator.canShare({{ files: [file] }})) {{
-                        navigator.share({{ files: [file], title: '爱波塔 AI 分析' }}).then(() => resetBtn(btn, originalText, true)).catch(() => resetBtn(btn, originalText, false));
+                        navigator.share({{ files: [file], title: '爱波塔 AI 分析' }}).then(() => resetBtn(btn, originalText)).catch(() => resetBtn(btn, originalText));
                     }} else {{
-                        showFallbackModal(canvas.toDataURL('image/png'));
-                        resetBtn(btn, originalText, false);
+                        alert("您的浏览器不支持直接分享，请截图保存。");
+                        resetBtn(btn, originalText);
                     }}
                 }}, 'image/png');
             }});
         }}
-        function showFallbackModal(imgData) {{ document.getElementById('modal-img').src = imgData; document.getElementById('modal-overlay').style.display = 'flex'; }}
-        function closeModal() {{ document.getElementById('modal-overlay').style.display = 'none'; }}
-        function resetBtn(btn, originalText, success) {{
-            if(success) {{ btn.innerHTML = '<i class="fas fa-check"></i> 已调起'; btn.style.borderColor = '#10B981'; btn.style.color = '#10B981'; }} 
-            else {{ btn.innerHTML = originalText; }}
-            setTimeout(() => {{ btn.innerHTML = originalText; btn.style.borderColor = ''; btn.style.color = ''; }}, 3000);
-        }}
+        function resetBtn(btn, text) {{ btn.innerHTML = text; }}
         </script>
     </body>
     </html>
@@ -644,6 +619,10 @@ def get_manager(): return stx.CookieManager(key="master_cookie_manager")
 cookie_manager = get_manager()
 cookies = cookie_manager.get_all() or {}
 
+# 初始化待处理任务状态
+if "pending_task" not in st.session_state:
+    st.session_state.pending_task = None
+
 # 尝试从 Cookie 恢复登录
 # 【关键修复 1】增加 'just_logged_out' 判断，如果刚点了登出，绝不执行自动登录
 should_auto_login = (
@@ -659,8 +638,35 @@ if should_auto_login and cookies:
         if auth.check_token(str(c_user), c_token):
             st.session_state['is_logged_in'] = True
             st.session_state['user_id'] = str(c_user)
-            st.toast(f"欢迎回来，{c_user} (自动登录)")
-            time.sleep(0.3)  # 給一點 UI 反應時間
+
+            # 🔥 [新增] 自动登录后，尝试从 Redis 恢复待处理任务
+            from task_manager import TaskManager
+
+            task_manager = TaskManager()
+            pending_task_data = task_manager.get_user_pending_task(str(c_user))
+
+            if pending_task_data:
+                # 恢复任务信息到 Session State
+                st.session_state.pending_task = {
+                    "task_id": pending_task_data["task_id"],
+                    "prompt": pending_task_data["prompt"],
+                    "image_context": pending_task_data.get("image_context", ""),
+                    "risk": pending_task_data.get("risk_preference", "稳健型"),
+                    "start_time": pending_task_data["start_time"]
+                }
+
+                # 恢复用户消息到历史（如果 messages 为空）
+                if not st.session_state.get("messages"):
+                    st.session_state.messages = [
+                        {"role": "user", "content": pending_task_data["prompt"]}
+                    ]
+
+                st.toast(f"欢迎回来，{c_user} (已恢复您的任务)")
+                print(f"✅ 自动登录后恢复任务: {pending_task_data['task_id']}")
+            else:
+                st.toast(f"欢迎回来，{c_user} (自动登录)")
+
+            time.sleep(0.3)
             st.rerun()
 
 # 【关键修复 2】如果已经是登出后的重跑，现在可以重置标记了
@@ -931,10 +937,6 @@ def process_user_input(prompt_text):
 
     # --- 2. 显示用户提问 (保留) ---
     st.session_state.messages.append({"role": "user", "content": prompt_text})
-    with st.chat_message("user"):
-        st.markdown(prompt_text)
-        if st.session_state.get("portfolio_uploader"):
-            st.image(st.session_state.portfolio_uploader, width=200)
 
     related_memories = "暂无相关历史记忆"
     try:
@@ -1025,315 +1027,36 @@ def process_user_input(prompt_text):
     # 初始化 Graph Agent
     app = get_agent(current_user, user_query=final_prompt)
 
-    if app:
-        with st.chat_message("assistant", avatar="🤖"):
 
-            report_card = {
-                "analyst": "", "monitor": "", "strategist": "",
-                "researcher": "", "news": "", "generalist": "","screener": "","roaster": "","macro_analyst": "",
-                "chatter": "", "finalizer": "" # 👈 加上这俩
-            }
-            final_img_path = None
+    # ==========================================
+    # 🔥 [修改] process_user_input 函数中的执行部分
+    # ==========================================
+    # 创建任务管理器
+    task_manager = TaskManager()
 
-            with st.status("🚀 交易团队正在协作...", expanded=True) as status:
+    # 准备历史消息
+    history_msgs = st.session_state.messages[:-1] if len(st.session_state.messages) > 1 else []
+    recent_history = history_msgs[-4:] if len(history_msgs) > 4 else history_msgs
+    history_for_task = [{"role": msg["role"], "content": msg["content"]} for msg in recent_history]
 
-                # 🧠 [恢复功能 2]：构造输入消息列表 (含对话历史)
-                # 🔥 [新增] 将最近的对话历史也传给 Agent，以便理解上下文
-                input_messages = []
+    # 提交后台任务
+    task_id = task_manager.create_task(
+        user_id=current_user,
+        prompt=final_prompt,
+        image_context=image_context,
+        risk_preference=risk,
+        history_messages=history_for_task
+    )
 
-                # A. 先加入系统指令
-                if system_instruction:
-                    input_messages.append(SystemMessage(content=system_instruction))
+    # 🔥 [新增] 保存任务信息
+    st.session_state.pending_task = {
+        "task_id": task_id,
+        "prompt": final_prompt,
+        "image_context": image_context,
+        "risk": risk,
+        "start_time": time.time()
+    }
 
-                history_msgs = st.session_state.messages[:-1] if len(st.session_state.messages) > 1 else []
-                recent_history = history_msgs[-2:] if len(history_msgs) > 2 else history_msgs
-
-                for msg in recent_history:
-                    if msg["role"] == "user":
-                        input_messages.append(HumanMessage(content=msg["content"]))
-                    elif msg["role"] in ["assistant", "ai"]:
-                        # 截取 AI 回复的前 500 字，防止 Token 爆炸
-                        content = msg["content"][:500] + "..." if len(msg["content"]) > 500 else msg["content"]
-                        input_messages.append(AIMessage(content=content))
-
-                # C. 最后加入当前问题
-                input_messages.append(HumanMessage(content=final_prompt))
-
-                inputs = {
-                    "user_query": final_prompt,
-                    "messages": input_messages,  # 👈 这里传入带记忆的消息列表
-                    "risk_preference": risk
-                }
-
-                # 🔥 [修改] 使用 invoke 代替 stream，避免 GeneratorExit 问题
-                input_message_count = len(input_messages)
-                status.write("🔄 正在分析中，请稍候...")
-
-                try:
-                    # 使用 invoke 一次性执行完成
-                    final_state = app.invoke(inputs, {"recursion_limit": 30})
-
-                    # 🔥🔥🔥 [修复] 只处理新生成的消息，跳过历史消息
-                    messages = final_state.get("messages", [])
-                    new_messages = messages[input_message_count:]  # ← 关键修复：切片取新消息
-                    seen_contents = set()
-                    for msg in new_messages:
-                        content = getattr(msg, 'content', str(msg))
-                        # 跳过重复内容
-                        content_hash = hash(content[:100])  # 用前100字符做哈希
-                        if content_hash in seen_contents:
-                            continue
-                        seen_contents.add(content_hash)
-                        print(f"📝 新消息: {content[:80]}...")
-
-                        # 🔥 [修复] 按优先级顺序检查，带标签的优先
-                        if "【技术分析】" in content:
-                            report_card["analyst"] = content
-                        elif "【数据监控】" in content:
-                            report_card["monitor"] = content
-                        elif "【王牌分析】" in content:
-                            report_card["generalist"] = content
-                        elif "【最终决策】" in content:
-                            report_card["finalizer"] = content
-                            print(f"✅ 找到最终决策")
-                        elif "【情报与舆情】" in content:
-                            report_card["researcher"] = content
-                            report_card["news"] = content
-                            print(f"✅ 找到情报与舆情")
-                        elif "【闲聊】" in content or "【知识问答】" in content:
-                            report_card["chatter"] = content
-                        elif "【期权策略】" in content:
-                            report_card["strategist"] = content
-                        # 🔥 [修复] Fallback 放在最后，且排除系统消息
-                        elif "【精选股票】" in content:
-                            report_card["screener"] = content
-                        elif "【宏观策略】" in content:
-                            report_card["macro_analyst"] = content
-                            print(f"✅ 找到宏观策略")
-                        elif "【毒舌点评】" in content:
-                            report_card["roaster"] = content
-                        elif (content.strip() and
-                              "【" not in content and
-                              "PASS" not in content and
-                              "已制定计划" not in content and
-                              len(content) > 30):
-                            # 只有当没有其他内容时才使用
-                            if not report_card.get("chatter"):
-                                report_card["chatter"] = content
-
-                    # 提取其他状态字段
-                    if final_state.get("trend_signal"):
-                        status.write(f"📈 **技术分析**: 趋势 {final_state.get('trend_signal')}")
-                    if final_state.get("fund_data"):
-                        report_card["monitor"] = final_state.get("fund_data")
-                        status.write(f"💰 **资金监控**: 数据已更新")
-                    if final_state.get("option_strategy"):
-                        report_card["strategist"] = final_state.get("option_strategy")
-                        status.write(f"⚖️ **期权策略**: 已生成")
-                    if final_state.get("news_summary"):
-                        report_card["news"] = final_state.get("news_summary")
-                        status.write(f"📰 **情报**: 已检索")
-                    if final_state.get("macro_view"):
-                        # 🔥 [修正] 如果前面消息里没抓到，从 State 补上
-                        if not report_card["macro_analyst"]:
-                            report_card["macro_analyst"] = f"【宏观策略】\n{final_state.get('macro_view')}"
-                        status.write(f"🌍 **宏观**: 分析完成")
-
-                    # 提取图表路径
-                    chart_img = final_state.get("chart_img", "")
-                    if chart_img:
-                        final_img_path = chart_img
-                        print(f"🔍 从 final_state.chart_img 获取: {final_img_path}")
-
-                    # 🔥 [新增] 如果 final_state 没有 chart_img，尝试从消息内容中提取
-                    if not final_img_path:
-                        print(f"🔍 开始遍历 {len(messages)} 条消息查找图表...")
-                        for msg in reversed(messages):
-                            content = getattr(msg, 'content', str(msg))
-                            # 检查是否包含 IMAGE_CREATED 标记
-                            if "IMAGE_CREATED:" in content:
-                                # 使用正则提取文件名，更安全
-                                chart_match = re.search(r'IMAGE_CREATED:(chart_[a-zA-Z0-9_]+\.json)', content)
-                                if chart_match:
-                                    final_img_path = chart_match.group(1)
-                                    print(f"🎫 检票成功，发现图表: {final_img_path}")
-                                    break
-
-                    status.update(label="✅ 分析完成", state="complete", expanded=False)
-
-                except Exception as e:
-                    status.update(label="❌ 执行中断", state="error")
-                    st.error(f"Agent Error: {e}")
-                    import traceback
-                    traceback.print_exc()
-                    return
-
-            # --- 拼接最终报告 ---
-            final_response_md = ""
-
-            # 获取各角色的输出
-            chatter_txt = report_card.get("chatter", "")
-            generalist_txt = report_card.get("generalist", "")
-            finalizer_txt = report_card.get("finalizer", "")
-            researcher_txt = report_card.get("researcher", "")
-            screener_txt = report_card.get("screener", "")
-
-            # === 场景 1: 闲聊/知识问答 ===
-            if report_card["roaster"]:
-                final_response_md = report_card["roaster"]
-                status.update(label="✅ 吐槽完毕", state="complete")
-
-            if finalizer_txt and "PASS" not in finalizer_txt:
-                final_response_md = finalizer_txt
-                print("✅ 使用 finalizer 输出")
-
-                # === 场景 1: 闲聊/知识问答 ===
-            elif chatter_txt and "已制定计划" not in chatter_txt:
-                final_response_md = chatter_txt
-                print("✅ 使用 chatter 输出")
-
-                # === 场景 2: 王牌分析师 (自带总结) ===
-            elif generalist_txt:
-                final_response_md = generalist_txt
-                print("✅ 使用 generalist 输出")
-
-                # === 场景 2.5: 情报研究员单独输出 ===
-            elif researcher_txt:
-                final_response_md = researcher_txt
-                print("✅ 使用 researcher 输出")
-
-            elif screener_txt:
-                final_response_md = screener_txt
-                status.update(label="✅ 选股策略已生成", state="complete")
-
-            # === 场景 3: 交易团队协作 (核心修改逻辑) ===
-            else:
-                # 检查 CIO 是否发话了
-                # 如果 CIO 内容不是 "PASS" 且不为空，说明触发了“多源整合模式”
-                is_integrated_report = finalizer_txt and "PASS" not in finalizer_txt
-
-                if is_integrated_report:
-                    # 🔥 [整合模式]：只显示 CIO 的总结，隐藏前面分析师的零散报告
-                    # 这样就解决了“信息重复”的问题
-                    final_response_md = finalizer_txt
-
-                else:
-                    # 🔥 [单兵模式]：CIO 觉得没问题放行了 (PASS)
-                    # 此时按顺序显示各个分析师的原话 (保留漂亮排版)
-
-                    if report_card["macro_analyst"]:
-                        final_response_md += f"{report_card['macro_analyst']}\n\n"
-
-                    # 1. 技术分析
-                    if report_card["analyst"]:
-                        final_response_md += f"{report_card['analyst']}\n\n"
-
-                    # 2. 资金监控
-                    if report_card["monitor"] and report_card["monitor"] != "无数据":
-                        final_response_md += f"### 💸 资金面监控\n{report_card['monitor']}\n\n"
-
-                    # 3. 期权策略
-                    if report_card["strategist"]:
-                        final_response_md += f"### ⚖️ 衍生品策略建议\n{report_card['strategist']}\n\n"
-
-                    # 🔥 [新增] 优先显示选股结果
-                    if report_card["screener"]:
-                        final_response_md += f"{report_card['screener']}\n\n"
-
-                    # 4. 新闻
-                    if report_card["news"]:
-                        final_response_md += f"### 📰 相关情报\n{report_card['news']}\n"
-
-                    # 如果 CIO 有修正意见 (即不是 PASS 但也不是完整报告，可能是纠错)，追加在最后
-                    if finalizer_txt and "PASS" not in finalizer_txt:
-                        final_response_md += f"\n\n---\n{finalizer_txt}"
-
-            # 渲染图表和文字
-            if final_img_path:
-                render_chart_by_filename(final_img_path)
-            # 清理文本中的 Markdown 图片语法，避免显示破图
-            final_response_md = clean_chart_tag(final_response_md)
-
-            if not final_response_md.strip() or "need more steps" in final_response_md.lower():
-                print("⚠️ 报告为空或不完整，尝试 fallback...")
-                messages = final_state.get("messages", [])
-
-                # 策略1：尝试找工具返回的有用内容
-                tool_results = []
-                for msg in messages:
-                    if isinstance(msg, SystemMessage):
-                        continue
-                    msg_type = getattr(msg, 'type', '')
-                    content = getattr(msg, 'content', str(msg))
-                    # 收集工具返回的内容（通常比较长且有用）
-                    if msg_type == 'tool' and content and len(content) > 100:
-                        tool_results.append(content)
-
-                if tool_results:
-                    # 取最近的工具结果
-                    combined = "\n\n---\n\n".join(tool_results[-2:])
-                    final_response_md = f"### 📊 已收集的信息\n\n{combined}"
-                    print(f"✅ 从工具结果 fallback 成功")
-                else:
-                    # 策略2：找最后一条有意义的消息
-                    for msg in reversed(messages):
-                        content = getattr(msg, 'content', str(msg))
-                        # 跳过系统消息、空消息、计划消息和错误消息
-                        if (content.strip() and
-                                "PASS" not in content and
-                                "已制定计划" not in content and
-                                "need more steps" not in content.lower() and
-                                len(content) > 20):
-                            final_response_md = content
-                            print(f"✅ Fallback 成功: {content[:50]}...")
-                            break
-
-            with st.chat_message("assistant", avatar="🤖"):
-                # 注意：如果文本太长，为了防止打字太慢，可以把 delay 调低，或者按“词”分割
-                # 创建一个空的占位符
-                placeholder = st.empty()
-                full_response = ""
-
-                # 动态调整速度
-                delay_time = 0.005 if len(final_response_md) > 1000 else 0.015
-
-                # 手动循环流式输出，并开启 unsafe_allow_html
-                for char in stream_text_generator(final_response_md, delay=delay_time):
-                    full_response += char
-                    # 加一个光标 ▌ 模拟打字效果
-                    placeholder.markdown(full_response + "▌", unsafe_allow_html=True)
-
-                # 循环结束，移除光标，显示最终内容
-                placeholder.markdown(full_response, unsafe_allow_html=True)
-
-            # --- 存入 Session 历史 ---
-            message_data = {
-                "role": "ai",
-                "content": final_response_md,
-                "chart": final_img_path
-            }
-            st.session_state.messages.append(message_data)
-
-            # 🔥 [新增] 清除已使用的图片，避免带入下次对话
-            if uploaded_image:  # 如果本次对话有图片
-                st.session_state.uploader_key += 1
-
-            # 🧠 [恢复功能 3]：存入向量数据库 (长期记忆)
-            if current_user != "访客":
-                try:
-                    # 存入向量库
-                    mem.save_interaction(current_user, final_prompt, final_response_md)
-
-                    # 触发后台画像更新 (如果你的 data_engine 有这个功能)
-                    if hasattr(de, 'update_user_memory_async'):
-                        de.update_user_memory_async(current_user, final_prompt)
-
-                    print(f"💾 记忆已存档: {final_prompt[:10]}...")
-                except Exception as e:
-                    print(f"记忆存储失败: {e}")
-
-            # 生成分享按钮
-            native_share_button(prompt_text, final_response_md, key=f"share_new_{int(time.time())}")
 
 # ==========================================
 #  6. 页面渲染：Welcome Screen (空状态) [修改点：新增]
@@ -1487,10 +1210,10 @@ def show_welcome_screen():
         st.session_state.pending_prompt = text
 
     with col1:
-        st.button("创业板期权策略推荐什么？",
+        st.button("创业板技术面如何？",
                      use_container_width=True,
                      on_click=set_prompt_callback,
-                     args=("现在创业板适合什么期权策略",)
+                     args=("创业板技术面分析下",)
          )
 
     with col2:
@@ -1789,6 +1512,153 @@ else:
 
                 # 传入两个参数：问题 + 回答
                 native_share_button(user_question, msg["content"], key=f"share_history_{i}")
+
+# ==========================================
+# 🔥 [新增] 任务恢复机制（正确位置）
+# ==========================================
+if "pending_task" in st.session_state and st.session_state.pending_task:
+    task_info = st.session_state.pending_task
+    task_id = task_info["task_id"]
+    task_start = task_info["start_time"]
+
+    # 获取当前用户
+    current_user = st.session_state.get('user_id', "访客")
+
+    # 检查任务是否超时（30分钟）
+    if time.time() - task_start < 1800:
+        with st.chat_message("assistant", avatar="🤖"):
+            status_placeholder = st.empty()
+            content_placeholder = st.empty()
+
+            # 查询任务状态
+            task_manager = TaskManager()
+            task_status = task_manager.get_task_status(task_id)
+            current_status = task_status["status"]
+
+            if current_status in ["pending", "processing"]:
+                progress_msg = task_status.get("progress", "正在处理...")
+                status_placeholder.success(f"🚀 {progress_msg}")
+
+                # 根据进度消息显示不同的加载文本
+                if "初始化" in progress_msg:
+                    loading_text = "爱波塔正在热身..."
+                elif "构建" in progress_msg:
+                    loading_text = "正在组建分析团队..."
+                elif "协作" in progress_msg:
+                    loading_text = "爱波塔团队正在协作分析..."
+                elif "整理" in progress_msg:
+                    loading_text = "正在整理分析报告..."
+                else:
+                    loading_text = "爱波塔正在处理，请稍候..."
+
+                with content_placeholder.container():
+                    with st.spinner(loading_text):
+                        time.sleep(1.5)
+
+                st.rerun()
+
+            elif current_status == "success":
+                # 任务完成，显示结果
+                status_placeholder.empty()
+                result = task_status.get("result")
+
+                if result and isinstance(result, dict):
+                    final_response_md = result.get("response", "")
+                    final_img_path = result.get("chart", "")
+
+                    if not final_response_md:
+                        final_response_md = "抱歉，AI 分析未返回有效结果。"
+
+                    # 渲染图表
+                    if final_img_path:
+                        try:
+                            render_chart_by_filename(final_img_path)
+                        except Exception as e:
+                            print(f"图表渲染失败: {e}")
+
+                    # 清理图片标签
+                    final_response_md = clean_chart_tag(final_response_md)
+
+                    # 打字机效果（优化：批量更新）
+                    if final_response_md and len(final_response_md) > 0:
+                        placeholder = content_placeholder.empty()
+                        full_response = ""
+
+                        # 🔥 [修复] 批量更新，减少 WebSocket 消息
+                        if len(final_response_md) > 800:
+                            # 长文本：每 50 个字符更新一次
+                            update_interval = 100
+                            chars = list(final_response_md)
+
+                            for i in range(0, len(chars), update_interval):
+                                chunk = ''.join(chars[i:i+update_interval])
+                                full_response += chunk
+                                placeholder.markdown(full_response + "▌", unsafe_allow_html=True)
+                                time.sleep(0.05)  # 每批次延迟 50ms
+
+                            placeholder.markdown(full_response, unsafe_allow_html=True)
+                        else:
+                            # 短文本：正常打字机效果
+                            delay_time = 0.01
+
+                            for char in stream_text_generator(final_response_md, delay=delay_time):
+                                full_response += char
+                                placeholder.markdown(full_response + "▌", unsafe_allow_html=True)
+
+                            placeholder.markdown(full_response, unsafe_allow_html=True)
+
+                    # 存入历史
+                    message_data = {
+                        "role": "ai",
+                        "content": final_response_md,
+                        "chart": final_img_path
+                    }
+                    st.session_state.messages.append(message_data)
+
+                    # 保存记忆
+                    if current_user != "访客":
+                        try:
+                            mem.save_interaction(current_user, task_info["prompt"], final_response_md)
+                        except Exception as e:
+                            print(f"记忆存储失败: {e}")
+
+                # 清除待处理任务
+                del st.session_state.pending_task
+
+                # 🔥 [新增] 同时清除 Redis 中的待处理任务
+                task_manager.clear_user_pending_task(current_user)
+
+                time.sleep(1)
+                st.rerun()  # 刷新页面
+
+            elif current_status == "error":
+                # 任务失败
+                status_placeholder.error("❌ 分析失败")
+                error_msg = task_status.get("error", "未知错误")
+                content_placeholder.error(f"抱歉，分析过程出现问题：{error_msg[:100]}")
+
+                # 清除待处理任务
+                del st.session_state.pending_task
+
+                # 🔥 [新增] 同时清除 Redis 中的待处理任务
+                task_manager.clear_user_pending_task(current_user)
+
+                time.sleep(2)
+                st.rerun()
+    else:
+        # 超时，清除任务
+        st.warning("⏱️ 任务超时，请重新提问")
+        del st.session_state.pending_task
+
+        # 🔥 [新增] 同时清除 Redis 中的待处理任务
+        current_user = st.session_state.get('user_id', "访客")
+        if current_user != "访客":
+            task_manager = TaskManager()
+            task_manager.clear_user_pending_task(current_user)
+
+        st.rerun()
+
+
 
 # ==========================================
 #  E. 图片上传区 (新增)

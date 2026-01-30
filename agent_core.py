@@ -323,7 +323,7 @@ def generalist_node(state: AgentState, llm):
         # 给予足够的递归步数，但不要太高避免 GeneratorExit
         result = general_agent.invoke(
             {"messages": state["messages"]},
-            {"recursion_limit": 120}
+            {"recursion_limit": 100}
             # 降低到 15，足够完成大部分任务
         )
 
