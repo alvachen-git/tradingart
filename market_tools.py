@@ -461,7 +461,50 @@ def tool_query_specific_option(query: str):
                 df_basic = df_basic[df_basic['ts_code'].str.match(f"^{target_code}\d", case=False)]
 
             if df_basic.empty:
-                return f"❌ 数据库中未找到 {target_name} ({target_code}) 的商品期权合约信息。"
+                # 🔥 增强版: 先检查是否真的没有该品种的任何期权数据
+                check_sql = f"""
+                                SELECT COUNT(*) as cnt,
+                                       GROUP_CONCAT(DISTINCT SUBSTRING(ts_code, 1, 6) SEPARATOR ', ') as available_months
+                                FROM commodity_option_basic 
+                                WHERE ts_code REGEXP '{regex_pattern}'
+                                  AND maturity_date >= '{datetime.now().strftime('%Y%m%d')}'
+                                LIMIT 1
+                            """
+
+                try:
+                    df_check = pd.read_sql(check_sql, engine)
+                    total_count = df_check.iloc[0]['cnt']
+
+                    if total_count > 0:
+                        # 品种有期权,但查不到指定月份
+                        available = df_check.iloc[0]['available_months']
+                        return f"""
+            ⚠️ 【{target_name}】有期权，但未找到符合条件的合约
+
+            可能原因:
+            1. 指定的月份不存在或已过期
+            2. 该月份尚未上市
+
+            可用月份示例: {available}
+
+            💡 建议: 请确认月份后重试，或不指定月份让系统自动选择主力合约
+                                    """
+                    else:
+                        # 品种真的没有期权数据
+                        return f"""
+            ❌ 数据库中暂无 {target_name} ({target_code}) 的期权数据
+
+            可能原因:
+            1. 数据尚未同步到数据库
+            2. 该品种确实暂无场内期权
+
+            💡 建议: 
+            - 如果确认该品种有期权,请联系管理员检查数据同步
+            - 或尝试查询其他品种
+                                    """
+                except Exception as e:
+                    # 降级到原提示
+                    return f"❌ 查询 {target_name} 期权时出错: {e}"
 
             # 🔥【修复 2】提取月份 (兼容郑商所 3位年份 和 其他 4位年份)
             # 这里的正则提取逻辑：找到代码中第一串连续的数字

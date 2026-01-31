@@ -187,9 +187,9 @@ def supervisor_node(state: AgentState, llm):
     【调度规则 (严格遵守)】
     1. **追求效率**: 只问资金流就只派 `monitor`；只问持仓量或价格就只派 `monitor`；只问新闻或热点就只派 `researcher`；只问技术分析就只派`analyst`。
     2. **全套服务**: 如果用户问"全面分析"或"怎么做"，默认路径: ["analyst", "monitor", "researcher","strategist"]。
-    3. **单品种**: "500ETF适合价差还是裸买"、"推荐白银期权策略" -> 
+    3. **单品种期权问题**: "500ETF适合价差还是裸买"、"推荐白银期权策略" -> 
        - 只要标的明确(500ETF)，且涉及策略，一律走流水线。
-       - Plan: `['analyst', 'monitor', 'strategist']` (必须先分析再出策略)。
+       - Plan: `['analyst', 'strategist']` (必须先分析再出策略)。
     4. **多品种/对比**: 问"白银和黄金谁强"、"分析一下螺纹和热卷" -> 
        - symbol 填 "白银,黄金" (用逗号分隔)
        - plan 派 `['generalist']` (让王牌去处理多品种)。
@@ -302,9 +302,10 @@ def generalist_node(state: AgentState, llm):
         15.查期货持仓量排名 -> get_futures_oi_ranking
         16.查期权波动率-> get_commodity_iv_info
         17.查期权合约价格-> tool_query_specific_option
-        18.查宏观指标 -> get_macro_indicator
-        19.查宏观环境总览 -> get_macro_overview 
-        20.分析收益率曲线 -> analyze_yield_curve 
+        18.查ETF期权有哪些合约-> get_etf_option_strikes
+        19.查宏观指标 -> get_macro_indicator
+        20.查宏观环境总览 -> get_macro_overview 
+        21.分析收益率曲线 -> analyze_yield_curve 
 
         【行为准则】
         1. 先给结论，然后解释理由。
@@ -680,17 +681,29 @@ def strategist_node(state: AgentState, llm):
         【技术面参考】：{trend} 、 {tech_view}
 
         【工作流程】
-        1. **收集数据**：用 `get_market_snapshot` 获取现价，`get_commodity_iv_info` 看IV，`check_option_expiry_status` 看到期日
-        2. **查询合约**：用 `tool_query_specific_option` 查具体期权价格（格式："标的 行权价 认购/认沽"），权利金价格也要乘上合约乘数。
-        3. **设计策略**：根据趋势+IV+风险偏好选择策略，可以查知识库辅助`search_investment_knowledge`
+        **第一步：获取标的价格和波动率**
+        - 用 `get_market_snapshot` 获取现价，用`get_commodity_iv_info` 看IV，用`check_option_expiry_status` 看到期日。
+              
+        **第二步：设计策略**
+        - **期权策略**：根据技术面趋势+IV+距离到期日+客户风险偏好来选择策略，可以查知识库辅助`search_investment_knowledge`。
+        
+        **第三步：思考行权价合约 (Strikes)**
+        - 如果客户有指定行权价合约，就直接根据客户需求，但可以给出合适的不同建议。
+        - 如果用户没指定，就根据设计的策略和客户风险偏好来看需要哪些合约。
 
-        3. **风险偏好适配**：
+        **第四步：确定策略的执行合约**
+        - **合约选择**：一定要根据标的现价，再来找合适的行权价合约。
+        - **查询合约**：用 `tool_query_specific_option` 查具体期权价格（格式："标的 行权价 认购/认沽"），权利金价格也要乘上合约乘数。
+        - 只有当工具返回了有效的价格数据时，才能推荐该合约。
+        - 如果工具返回“未找到”，请尝试调整行权价再次查询，或者诚实告知用户该档位无合约。
+
+        【风险偏好适配】：
            - 【保守型】：只推荐风险有限的策略（牛市价差、熊市价差、比率价差），禁止裸卖
            - 【稳健型】：可以适度进攻（买平值期权、顺势卖虚值期权、价差策略、备兑策略、合成期货）
            - 【激进型】：可以用积极策略（有趋势时买深虚期权、买末日期权、飞龙在天，没趋势时就双卖期权，或者卖末日期权）
 
         【输出要求】
-        1. 给出 1-2 个具体的期权策略建议，行权价必须用工具查过
+        1. 给出 1-2 个具体的期权策略建议，行权价必须用工具查过。
         2. **计算盈亏示例时，必须乘以合约乘数**
         3. 解释为什么这个策略适合市场或客户，可以查知识库辅助`search_investment_knowledge`
         4. 给出止损/止盈建议

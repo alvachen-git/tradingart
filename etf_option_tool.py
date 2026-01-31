@@ -29,7 +29,7 @@ engine = get_db_engine()
 # ==========================================
 #   功能 1: ETF 期权主力持仓防线分析 (反向侦探版)
 # ==========================================
-@st.cache_data(ttl=600)
+@st.cache_data(ttl=1200)
 def get_etf_option_analysis(etf_code="510050", days=100):
     if engine is None: return None
 
