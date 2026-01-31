@@ -538,7 +538,6 @@ def monitor_node(state: AgentState, llm):
         get_option_oi_ranking,
         get_volume_oi,
         get_market_snapshot,
-        get_etf_option_strikes,
         tool_analyze_broker_positions,
         get_futures_oi_ranking,
         get_macro_indicator
@@ -586,7 +585,6 @@ def monitor_node(state: AgentState, llm):
     - 查期权持仓量排名 -> get_option_oi_ranking
     - 查成交量和持仓量 -> get_volume_oi
     - 查期货持仓量排名 -> get_futures_oi_ranking
-    - 查期权合约价格 -> get_etf_option_strikes
     - 查标的价格 -> get_market_snapshot
     - 查宏观指标 -> get_macro_indicator(indicator_code='US10Y')  
     
