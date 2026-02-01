@@ -225,9 +225,16 @@ def get_market_snapshot(query: str):
         row = df.iloc[0]
         price = row.get('close') or row.get('close_price')
         date = row['trade_date']
-        name = row.get('name', query)
-        ts_code = row.get('ts_code', query)
-        return f"📍 **{name}({ts_code}) 行情**\n日期: {date}\n价格: {price}\n(如需更多历史数据请询问具体时间段)"
+        ts_code = row.get('ts_code', '')
+
+        # 🔥 根据资产类型获取显示名称
+        if asset_type == 'stock':
+            # 股票：使用数据库的name字段
+            display_name = row.get('name', query)
+        else:
+            # 期货/指数：使用用户输入的query（已经是中文名）
+            display_name = query
+        return f"📍 **{display_name}({ts_code}) 行情**\n日期: {date}\n价格: {price}\n(如需更多历史数据请询问具体时间段)"
 
     except Exception as e:
         return f"查询错误: {e}"
