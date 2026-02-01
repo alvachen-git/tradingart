@@ -45,6 +45,7 @@ class AgentState(TypedDict):
 
     # --- 专家结论 (黑板) ---
     symbol: str  # 标的代码 (如 "IM2606")
+    symbol_name: str
     trend_signal: str  # "Bullish"(多), "Bearish"(空), "Neutral"(震荡)
     technical_summary: str  # 例如 "出现大阳线突破，且均线多头排列"
     key_levels: str  # "支撑3400, 压力3600"
@@ -459,6 +460,7 @@ def analyst_node(state: AgentState, llm):
 
     partial_response = ""
     chart_img = ""
+    symbol_name = ""
 
     try:
         # 执行推理 (给予足够的递归次数，因为处理价差可能需要调2次工具)
@@ -469,6 +471,15 @@ def analyst_node(state: AgentState, llm):
 
         last_response = result["messages"][-1].content
         partial_response = last_response
+        # 🔥 提取公司名称（从get_market_snapshot的返回中）
+        symbol_name = ""
+        # 格式："📍 **乾照光电(300102.SZ) 行情**"
+        name_match = re.search(r'📍 \*\*(.+?)\((.+?)\) 行情\*\*', last_response)
+        if name_match:
+            symbol_name = name_match.group(1)
+        else:
+            # 兜底：如果没提取到，用symbol
+            symbol_name = state.get('symbol', '')
 
         chart_match = re.search(r'IMAGE_CREATED:(chart_[a-zA-Z0-9_]+\.json)', last_response)
         if chart_match:
@@ -497,6 +508,7 @@ def analyst_node(state: AgentState, llm):
 
         return {
             "messages": [HumanMessage(content=f"【技术分析】\n{last_response}")],
+            "symbol_name": symbol_name,
             "trend_signal": trend_signal,  # 存入趋势
             "key_levels": key_levels_str,  # 存入点位 (新增)
             "technical_summary": tech_summary_str,  # 存入摘要 (新增)
@@ -509,12 +521,14 @@ def analyst_node(state: AgentState, llm):
         fallback_msg = partial_response if partial_response else f"技术分析已完成对 {symbol} 的初步分析"
         return {
             "messages": [HumanMessage(content=f"【技术分析】\n{fallback_msg}")],
+            "symbol_name": symbol_name,
             "trend_signal": "震荡"
         }
     except Exception as e:
         print(f"Analyst Node Error: {e}")
         return {
             "messages": [HumanMessage(content=f"【技术分析】分析受阻: {e}")],
+            "symbol_name": state.get('symbol', ''),
             "trend_signal": "未知"
         }
 
@@ -523,6 +537,7 @@ def analyst_node(state: AgentState, llm):
 def monitor_node(state: AgentState, llm):
     user_q = state["user_query"]
     symbol = state.get("symbol", "")
+    symbol_name = state.get("symbol_name", "")
     current_date = datetime.now().strftime("%Y年%m月%d日 %A")
     latest_trade_date = get_latest_data_date()
 
@@ -753,6 +768,7 @@ def strategist_node(state: AgentState, llm):
 # 🟤 5. 情报研究员
 def researcher_node(state: AgentState,llm=None):
     symbol = state["symbol"]
+    symbol_name = state.get("symbol_name", "")
     query = state["user_query"]
     current_date = datetime.now().strftime("%Y年%m月%d日 %A")
     # 1. 装备舆情与搜索工具
@@ -772,6 +788,7 @@ def researcher_node(state: AgentState,llm=None):
         【当前真实日期】：{current_date} 
 
         【客户需求】: "{query}"
+        【标的】: {symbol_name}({symbol})  
 
         【工具调用策略】：
 
@@ -1442,6 +1459,7 @@ def finalizer_node(state: AgentState, llm):
     # === 判断逻辑：单兵还是团战？ ===
     # 如果只有 1 个工种发言（或者没有发言），且不是王牌分析师（王牌本来就是总结好的）
     symbol = state.get("symbol", "")
+    symbol_name = state.get("symbol_name", "")
     mem_context = state.get("memory_context", "")
     macro_view = state.get("macro_view", "无宏观分析")
     trend = state.get("trend_signal", "")  # 例如 "看涨"
@@ -1451,6 +1469,8 @@ def finalizer_node(state: AgentState, llm):
     user_query = state.get("user_query", "")
     complex_keywords = ["画", "图", "对比", "分析", "价差", "相关性", "走势"]
     is_complex_task = any(kw in user_query for kw in complex_keywords)
+
+    display_name = f"{symbol_name}({symbol})" if symbol_name else symbol
 
     # 获取当前最后一次执行的计划（用于判断是不是王牌）
     # (由于 state plan 被 pop 了，我们用简单的长度判断通常够用，或者看 context)
@@ -1507,6 +1527,7 @@ def finalizer_node(state: AgentState, llm):
                 你是一位数据检查师。
                 【当前日期】：{today_str}
                 【用户问题】：{user_query}
+                【分析标的】: {display_name} 
 
                 【团队收集的数据】：
                 {context_text}
@@ -1545,6 +1566,7 @@ def finalizer_node(state: AgentState, llm):
                 你的团队（分析师、策略员、监控员等）提交了多份分散的报告。
                 【当前日期】：{today_str}
                 【用户问题】：{user_query}
+                【分析标的】: {display_name} 
 
                 【团队报告池，必须优先采用！】：
                 {context_text}
