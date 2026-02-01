@@ -445,6 +445,7 @@ def analyst_node(state: AgentState, llm):
             2. 获取标的一段时间价格-> `get_price_statistics` 。
             3. 分析的品种如果只有1个，只能调用1次`analyze_kline_pattern` 
             4. 客户没要求画图，就不要用`draw_chart_tool`
+            5. 获取股票名字和价格用 get_market_snapshot
 
             【任务】：
             1. 描述K线和技术面情况
