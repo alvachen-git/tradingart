@@ -811,7 +811,7 @@ def researcher_node(state: AgentState,llm=None):
            - **调用** `get_financial_news`。
            
         5. 📰 **具体资讯/事实核查**:
-           - 如果以上工具查不到，或者需要更多细节，调用 `search_web``，如果第一次搜索没结果，请尝试**换个关键词**再搜一次。。
+           - 如果以上工具查不到，或者需要更多细节，调用 `search_web``，只能使用1次，绝对不要重复使用search_web。
 
         【输出要求】
         - 如果是预测数据，必须给出**概率/胜率** (如 "特朗普胜率 65%")。
@@ -980,7 +980,6 @@ def chatter_node(state: AgentState, llm=None):
         search_investment_knowledge,  # 内部知识库 - 最高优先级
 
         # 网络搜索工具（辅助）
-        search_web,  # 网络搜索 - 补充最新信息
         get_financial_news,  # 财经新闻
 
         # 市场数据工具（如果用户问行情相关）
@@ -999,7 +998,6 @@ def chatter_node(state: AgentState, llm=None):
         【⚠️ 核心原则：知识库优先】
         1. **第一步必须**：先用 `search_investment_knowledge` 检索内部知识库
         2. **第二步可选**：如果知识库信息不足或需要最新数据，再用其他工具补充
-           - `search_web`：搜索网络获取最新信息
            - `get_financial_news`：获取财经新闻
            - `get_market_snapshot`：获取实时行情
 
@@ -1174,7 +1172,7 @@ def screener_node(state: AgentState, llm):
 
             2. **信息收集**：
                - 如果是概念/主题类（如"马斯克概念"、"AI概念"、"低空经济"）：
-                 → 先用 `search_web` 搜索"xxx概念股有哪些"或"xxx相关A股"
+                 → 先用 `search_web` 搜索"xxx概念股有哪些"或"xxx相关A股"，最多使用2次，必须遵守
                  → 获取相关股票名单
 
             3. **技术验证**：
@@ -1186,7 +1184,6 @@ def screener_node(state: AgentState, llm):
                - 说明推荐理由（概念相关性 + 技术面 + 资金面）
 
             【工具使用说明】
-            - `search_web`: 搜索概念股信息，如"马斯克概念股 A股"
             - `search_top_stocks`: 筛选股票，参数 condition(形态)、industry(行业)、limit(数量)
             - `search_investment_knowledge`: 查询内部知识库
             - `tool_get_retail_money_flow`: 查看行业资金流向
