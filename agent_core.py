@@ -188,7 +188,7 @@ def supervisor_node(state: AgentState, llm):
     1. **追求效率**: 只问资金流就只派 `monitor`；只问持仓量或价格就只派 `monitor`；只问新闻或热点就只派 `researcher`；只问技术分析就只派`analyst`。
     2. **全套服务**: 如果用户问"全面分析"或"怎么做"，默认路径: ["analyst", "monitor", "researcher","strategist"]。
     3. **单品种期权问题**: "500ETF适合价差还是裸买"、"推荐白银期权策略" -> 
-       - 只要标的明确(500ETF)，且涉及策略，一律走流水线。
+       - 只要标的明确(500ETF)，且涉及期权交易，一律走流水线。
        - Plan: `['analyst', 'strategist']` (必须先分析再出策略)。
     4. **多品种/对比**: 问"白银和黄金谁强"、"分析一下螺纹和热卷" -> 
        - symbol 填 "白银,黄金" (用逗号分隔)
