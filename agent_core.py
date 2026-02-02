@@ -467,7 +467,7 @@ def analyst_node(state: AgentState, llm):
         # 执行推理 (给予足够的递归次数，因为处理价差可能需要调2次工具)
         result = analyst_agent.invoke(
             {"messages": state["messages"]},
-            {"recursion_limit": 20}
+            {"recursion_limit": 30}
         )
 
         last_response = result["messages"][-1].content
@@ -624,7 +624,7 @@ def monitor_node(state: AgentState, llm):
         # 限制迭代次数，防止死循环
         result = monitor_agent.invoke(
             {"messages": [HumanMessage(content=user_q)]},
-            {"recursion_limit": 20}  # 降低到 15
+            {"recursion_limit": 15}  # 降低到 15
         )
         last_response = result["messages"][-1].content
         partial_response = last_response
@@ -736,7 +736,7 @@ def strategist_node(state: AgentState, llm):
     try:
         result = strategist_agent.invoke(
             {"messages": [HumanMessage(content=user_q)]},
-            {"recursion_limit": 50}  # 期权分析可能需要多轮工具调用
+            {"recursion_limit": 40}  # 期权分析可能需要多轮工具调用
         )
 
         last_response = result["messages"][-1].content
@@ -828,7 +828,7 @@ def researcher_node(state: AgentState,llm=None):
         # 舆情查询可能需要多步（先查热榜，再搜细节），给足步数
         result = researcher_agent.invoke(
             {"messages": [HumanMessage(content=query)]},
-            {"recursion_limit": 30}
+            {"recursion_limit": 20}
         )
 
         last_response = result["messages"][-1].content
@@ -930,7 +930,7 @@ def macro_analyst_node(state: AgentState, llm):
     try:
         result = macro_agent.invoke(
             {"messages": [HumanMessage(content=f"请分析当前的宏观流动性环境。用户问题：{user_q}")]},
-            {"recursion_limit": 30}
+            {"recursion_limit": 20}
         )
         last_response = result["messages"][-1].content
 
