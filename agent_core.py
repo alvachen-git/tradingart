@@ -720,6 +720,9 @@ def strategist_node(state: AgentState, llm):
            - 【保守型】：只推荐风险有限的策略（牛市价差、熊市价差、比率价差），禁止裸卖
            - 【稳健型】：可以适度进攻（买平值期权、顺势卖虚值期权、价差策略、备兑策略、合成期货）
            - 【激进型】：可以用积极策略（有趋势时买深虚期权、买末日期权、飞龙在天，没趋势时就双卖期权，或者卖末日期权）
+           
+        【工具使用特殊提醒】：
+        1. 中证1000有股指期权，不要用get_etf_option_strikes，必须用tool_query_specific_option查期权合约
 
         【输出要求】
         1. 给出 1-2 个具体的期权策略建议，行权价必须用工具查过。
@@ -873,6 +876,8 @@ def macro_analyst_node(state: AgentState, llm):
     宏观策略师：全景扫描宏观数据，结合收益率曲线和新闻，判断全球流动性周期。
     """
     user_q = state.get("user_query", "")
+    symbol = state["symbol"]
+    symbol_name = state.get("symbol_name", "")
     news_context = state.get("news_summary", "暂无最新宏观新闻")
     current_date = datetime.now().strftime("%Y年%m月%d日")
 
@@ -893,6 +898,7 @@ def macro_analyst_node(state: AgentState, llm):
         你的核心任务是利用【数据全景 + 收益率曲线 + 核心指标】模型判断全球流动性环境。
 
         【当前日期】：{current_date}
+        【标的】: {symbol_name}({symbol})  
         【情报员提供的新闻】：
         {news_context}
 
@@ -1589,6 +1595,7 @@ def finalizer_node(state: AgentState, llm):
                 3. 如果某品种有利好消息但却下跌，要提醒利多不涨，可能反转，而如果有坏消息但却不跌，要提醒利空不跌，可能阶段底部到了。
                 4. 价格数据是每天中午11点半和下午5点后更新。
                 5. 2026年春节长假是2月16日才开始！
+                6. 黄金白银的价格只看analyst给的信息！
                 
                 【必须遵守的数据准则】
                 1. **绝对禁止捏造数据**。如果没有数据就回答不知道。
