@@ -30,6 +30,7 @@ from search_tools import search_web
 from market_correlation import tool_stock_hedging_analysis, tool_futures_correlation_check,tool_stock_correlation_check
 from beta_tool import calculate_hedging_beta
 from knowledge_tools import search_investment_knowledge
+from stock_volume_tools import query_stock_volume, search_volume_anomalies
 
 # ==========================================
 # 1. 定义共享记忆 (The State)
@@ -151,7 +152,7 @@ class PlanningOutput(BaseModel):
     plan: List[Literal["analyst", "researcher", "monitor", "strategist", "chatter", "generalist", "screener", "macro_analyst","roaster"]] = Field(
         description="执行步骤列表。注意依赖关系：期权(strategist)必须排在分析(analyst)之后。"
     )
-    symbol: str = Field(description="核心标的代码。如果是对比问题或无法提取单一标的，请留空或填'MULTI'", default="")
+    symbol: str = Field(description="核心标的代码。如果是对比问题或无法提取单一标的，请留空或填'黄金'", default="")
 
 
 def supervisor_node(state: AgentState, llm):
@@ -176,18 +177,18 @@ def supervisor_node(state: AgentState, llm):
 
     【可用员工】
     - analyst: 技术分析师 (看K线、定趋势),分析如何操作
-    - monitor: 资金监控员 (看股票和期货资金流、期货商持仓、查持仓量和成交量、查价格、查合约)
-    - researcher: 情报研究员 (看新闻、宏观、热点、地缘政治、货币政策、Polymarket上的概率分析、抖音热搜)
+    - monitor: 数据监控员 (看期货资金流、期货商持仓、查期货持仓量、查价格)
+    - researcher: 情报研究员 (看新闻、宏观、热点、地缘政治、货币政策、Polymarket上的概率分析)
     - strategist: 期权策略员 (给策略，**必须依赖 analyst**) 
-    - screener: 选股大师 (当用户问"推荐股票"、"什么股票好"、"选股"时使用)
+    - screener: 股票大师 (协助"推荐股票"、"选股"、查股票成交量、资金流)
     - chatter: 知识问答和闲聊 (例如解释一下IV，什么是牛市价差，"最近美联储什么时候开会")
     - generalist: 【王牌分析师】处理对比(A和B谁强)、多品种分析、画价差图或深度复杂问题。
     - macro_analyst: 宏观策略师 (分析美联储、美债、美元、通胀、CPI、非农、画利率图)
     - roaster: *毒舌分析师* (当用户要求"吐槽"、"挑战我"、"毒舌模式"时使用)。
 
     【调度规则 (严格遵守)】
-    1. **追求效率**: 只问资金流就只派 `monitor`；只问持仓量或价格就只派 `monitor`；只问新闻或热点就只派 `researcher`；只问技术分析就只派`analyst`。
-    2. **全套服务**: 如果用户问"全面分析"或"怎么做"，默认路径: ["analyst", "monitor", "researcher","strategist"]。
+    1. **追求效率**: 问股票成交量就只派 `screener`；只问期货持仓量或价格就只派 `monitor`；只问新闻或热点就只派 `researcher`；只问技术分析就只派`analyst`。
+    2. **全套服务**: 如果用户问"全面分析"或"详细分析"，默认路径: ["analyst", "monitor", "researcher","strategist"]。
     3. **单品种期权问题**: "500ETF适合价差还是裸买"、"推荐白银期权策略" -> 
        - 只要标的明确(500ETF)，且涉及期权交易，一律走流水线。
        - Plan: `['analyst', 'strategist']` (必须先分析再出策略)。
@@ -198,11 +199,11 @@ def supervisor_node(state: AgentState, llm):
        - 问 "现在宏观环境怎么样"、"美联储降息了吗" -> Plan: `['researcher', 'macro_analyst']` (先找新闻，再分析数据)。
        - 问 "黄金/白银/能买吗" -> Plan: `['analyst', 'researcher', 'macro_analyst', 'strategist']` (黄金对宏观极度敏感，必须加宏观分析)。
        - 问 "利率/美元走势" -> Plan: `['researcher', 'macro_analyst']`。
-    6. 如果客户要画图，
-       - plan 派 `['generalist']` 。
+    6. **客户提到股票**，但没有明确说明标的名字，需要选股时，只 Plan:['screener']
     7. **知识/百科/闲聊**: 问概念、问人名、问名词 -> 派 ['chatter']。
     8. 如果用户想分析行情但**没说名字** (如"帮我分析一下") -> plan=['chatter'] (让Chatter去问用户要代码)。
     9. 只问K线或技术面分析时，只要派analyst，不要再派其他人
+    10.如果客户要画图，派 `['generalist']` 。
     """
 
     # 🔥 [修改] 将历史对话也包含在 query 中
@@ -560,6 +561,7 @@ def monitor_node(state: AgentState, llm):
         get_market_snapshot,
         tool_analyze_broker_positions,
         get_futures_oi_ranking,
+        query_stock_volume,
         get_macro_indicator
     ]
 
@@ -603,10 +605,12 @@ def monitor_node(state: AgentState, llm):
     - 查期权成交量异常(放量/异动) -> get_option_volume_abnormal
     - 查期权持仓量异常(大单增仓) -> get_option_oi_abnormal
     - 查期权持仓量排名 -> get_option_oi_ranking
+    - 查期权合约价格 -> tool_query_specific_option,
     - 查成交量和持仓量 -> get_volume_oi
     - 查期货持仓量排名 -> get_futures_oi_ranking
     - 查标的价格 -> get_market_snapshot
     - 查宏观指标 -> get_macro_indicator(indicator_code='US10Y')  
+    
     
     {tool_instruction}
 
@@ -615,6 +619,7 @@ def monitor_node(state: AgentState, llm):
     2. **只陈述数据事实**，不要进行复杂的行情预测或给交易建议。
     3. 如果用户没有指定日期，**必须使用 {latest_trade_date}** 作为查询日期！
     4. 如果工具返回了 Markdown 表格，请原样输出。
+    5. 商品都有期权，禁止说商品没有场内期权。
     """
 
     # 3. 创建临时 Agent (ReAct 模式)
@@ -1075,7 +1080,6 @@ def chatter_node(state: AgentState, llm=None):
 
 
 # 🟣 =选股员 (Screener)
-# 职责：结合【行业资金风向】和【个股技术形态】进行选股
 def screener_node(state: AgentState, llm):
     # --- 1. 获取宏观资金风向 (Sector Flow) ---
     sector_flow_info = ""
@@ -1131,6 +1135,20 @@ def screener_node(state: AgentState, llm):
         "农业", "养殖", "纺织", "服装", "家电", "家具", "建筑", "装饰"
     ]
 
+    # 🔥 [新增] 成交量/量能类关键词 - 用于触发成交量专用快速通道
+
+    volume_keywords = [
+        "成交量异常", "成交量增加", "成交量减少", "成交量放大", "成交量萎缩", "成交金额异常",
+        "成交量选", "按成交量", "用成交量", "看成交量", "查成交量",
+        "成交量突然", "成交量前", "成交量排名", "成交量最大", "成交量TOP",
+        "放量", "缩量", "天量", "地量", "巨量", "爆量",
+        "量异常", "量能异常", "量能放大", "量价齐升", "量价背离",
+        "放量异动", "量异动", "缩量下跌", "放量上涨", "放量突破",
+        "换手率异常", "换手率最高", "换手率排名",
+        "资金抢筹", "主力流入", "主力抢筹", "主力埋伏",
+        "成交异常", "交易异常活跃", "异常活跃"
+    ]
+
     is_risk_query = any(kw in query for kw in risk_keywords)
 
     detected_pattern = None
@@ -1149,6 +1167,70 @@ def screener_node(state: AgentState, llm):
             detected_industry = industry
             break
 
+    is_volume_query = any(kw in query for kw in volume_keywords)
+
+    # === 🔥 [新增] 成交量选股快速通道 ===
+    # 当检测到成交量相关关键词时，直接调用 search_volume_anomalies，不依赖 LLM 选工具
+    # ⚠️ 必须排除已被"形态/行业/风险"通道命中的查询，避免误拦截
+    #    例如"放量突破的股票"应走形态通道，"半导体放量"应走行业通道
+    if is_volume_query and not detected_pattern and not detected_industry and not is_risk_query:
+        print(f"📊 成交量选股快速通道触发: {query}")
+        volume_result = ""
+        try:
+            volume_result = search_volume_anomalies.invoke({"days": 1, "min_score": 30, "limit": 15})
+        except Exception as e:
+            volume_result = f"成交量异动数据查询失败: {e}"
+
+        # 辅助拉取行业资金流向
+        sector_flow_for_vol = ""
+        try:
+            sector_flow_for_vol = tool_get_retail_money_flow.invoke({"days": 2})
+        except Exception as e:
+            sector_flow_for_vol = f"暂无行业资金流数据: {e}"
+
+        vol_screen_prompt = f"""
+                   你是一位资深选股专家。用户想找**成交量异常/放量/量能异动**的股票。
+
+                   【数据源 A：成交量异动股票（按异动评分排序）】
+                   {volume_result}
+
+                   【数据源 B：市场资金风向 (行业)】
+                   {sector_flow_for_vol}
+
+                   【用户原始需求】: "{query}"
+
+                   【你的任务】
+                   1. 从【数据源A】中展示成交量异动的股票，**不要编造数据**！
+                   2. 结合【数据源B】分析这些股票所属板块的资金流向是否支持。
+                   3. 区分分析：
+                      - 📈 **放量上涨**：可能是主力资金进场突破信号
+                      - 📉 **放量下跌**：可能是主力出货或恐慌抛售
+                      - ⚖️ **放量横盘**：可能是换手充分，关注后续方向
+                   4. 给出风险提示。
+
+                   【输出格式】
+                   📊 **成交量异动选股结果**
+
+                   1. **股票名称** (代码) - 异动评分：XX
+                      - 📊 量能情况：xxx
+                      - 💰 资金面：所属板块资金xxx
+                      - 💡 操作建议：xxx
+
+                   ⚠️ **风险提示**：放量不等于利好，需结合价格走势判断。
+                   """
+
+        response = llm.invoke(vol_screen_prompt)
+
+        codes = re.findall(r'[0-9]{6}\.[A-Z]{2}', response.content)
+        if not codes:
+            codes = re.findall(r'[0-9]{6}', response.content)
+        next_symbol = codes[0] if codes else state.get("symbol", "")
+
+        return {
+            "messages": [HumanMessage(content=f"【精选股票】\n{response.content}")],
+            "symbol": next_symbol
+        }
+
     # === 🔥 [新增] 判断是否需要进入 ReAct 模式 ===
     # 如果没有匹配到任何快速通道条件，说明可能是概念/主题类查询
     need_react_mode = (not is_risk_query and
@@ -1164,42 +1246,44 @@ def screener_node(state: AgentState, llm):
             search_web,  # 搜索概念股、热点信息
             search_investment_knowledge,  # 查知识库
             get_available_patterns,  # 查形态统计
-            tool_get_retail_money_flow,  # 资金流向
+            search_volume_anomalies,
+            query_stock_volume,
+            tool_get_retail_money_flow  # 资金流向
         ]
 
         current_date = datetime.now().strftime("%Y年%m月%d日")
 
         react_prompt = f"""
-            你是一位资深选股专家，擅长根据用户需求寻找相关股票。
+            你是一位资深选股专家，擅长通过概念主题、市场热点来挖掘投资机会。
 
             【当前日期】：{current_date}
             【用户需求】：{query}
 
-            【你的工作流程】
-            1. **理解需求**：分析用户想要什么类型的股票（概念股？行业股？主题股？）
+            【你的核心能力：概念/主题选股】
+            你主要处理的是"概念类"、"主题类"、"热点类"选股需求，例如：
+            - "AI概念股有哪些" → 先 search_web 查概念股名单，再用 search_top_stocks 验证技术面
+            - "低空经济相关的股票" → search_web 查相关个股，再用 search_top_stocks 交叉验证
+            - "最近有什么好股票" → tool_get_retail_money_flow 看资金风口 + search_top_stocks 看强势股
+            - "帮我选几只稳健的股票" → search_top_stocks(condition="综合评分") 选高分股
 
-            2. **信息收集**：
-               - 如果是概念/主题类（如"马斯克概念"、"AI概念"、"低空经济"）：
-                 → 先用 `search_web` 搜索"xxx概念股有哪些"或"xxx相关A股"，最多使用2次，必须遵守
-                 → 获取相关股票名单
+            【工具使用指南】
+            1. `search_web`：搜索概念股名单、热点信息、行业新闻（搜索关键词如"xxx概念股 龙头"）
+            2. `search_top_stocks`：按技术形态或综合评分筛选股票（condition 可填"综合评分"或具体形态名）
+            3. `tool_get_retail_money_flow`：查看行业资金流向，判断哪些板块有资金支持
+            4. `get_available_patterns`：查看今日市场有哪些K线形态可供筛选
+            5. `search_investment_knowledge`：查询内部知识库获取投资参考
+            6. `search_volume_anomalies`：查成交量异动股票（备用，成交量查询通常已被快速通道处理）
+            7. `query_stock_volume`：查单只股票的成交量详情
 
-            3. **技术验证**：
-               - 用 `search_top_stocks` 查询相关股票的技术面评分
-               - 用 `tool_get_retail_money_flow` 查看相关板块资金流向
-
-            4. **综合推荐**：
-               - 推荐 3-5 只技术面较好的相关股票
-               - 说明推荐理由（概念相关性 + 技术面 + 资金面）
-
-            【工具使用说明】
-            - `search_top_stocks`: 筛选股票，参数 condition(形态)、industry(行业)、limit(数量)
-            - `search_investment_knowledge`: 查询内部知识库
-            - `tool_get_retail_money_flow`: 查看行业资金流向
-            - `get_available_patterns`: 查看今日市场有哪些K线形态
+            【标准流程】
+            1. 理解用户想找什么类型的股票
+            2. 选择最合适的 1-2 个工具获取数据
+            3. 整理结果，说明推荐理由 + 风险提示
 
             【禁止事项】
             - 不要编造股票代码或名称
             - 如果搜索不到相关信息，诚实告知用户
+            - 不要重复调用同一个工具
             """
 
         screener_react_agent = create_react_agent(llm, react_tools, prompt=react_prompt)
@@ -1245,6 +1329,13 @@ def screener_node(state: AgentState, llm):
     except Exception as e:
         sector_flow_info = f"暂无行业资金流数据: {e}"
 
+    # ✅ 新增：拉取放量异动数据
+    volume_anomaly_info = ""
+    try:
+        volume_anomaly_info = search_volume_anomalies.invoke({"days": 1, "min_score": 50, "limit": 10})
+    except Exception as e:
+        volume_anomaly_info = f"暂无放量数据: {e}"
+
     # --- 2. 获取技术面强势股 (Technical Screener) ---
     raw_stocks = ""
     try:
@@ -1281,6 +1372,9 @@ def screener_node(state: AgentState, llm):
 
                 【数据源 B：风险股票池（技术面较弱）】
                 {raw_stocks}
+
+                【数据源 C：今日成交量异动股（按评分排序）】
+                {volume_anomaly_info}
 
                 【用户原始需求】: "{query}"
 
@@ -1584,14 +1678,14 @@ def finalizer_node(state: AgentState, llm):
 
                 【任务】：
                 请将上述零散报告整合成一份《深度投资决策书》，要求**排版精美、逻辑结构化**。
-                1. 技术面分析以K线为主，均线为辅。
+                1. 技术面分析以K线为主，均线为辅。如果没有数据，技术面这区块就省略。
                 2. 知识要参考{kb_context}，但要根据当下市场情况，自己理解后输出。
                 3. 如果记忆{mem_context}有客户的持仓或偏好，在报告里可以针对性的写。               
                 4. 所有价格数据（当前价、支撑位、压力位、均线值），必须使用来自【团队报告池】！
                 
                 【注意事项】：
                 1. 中国的股票没有期权，客户问股票时，不要给期权策略，除非是用ETF期权来对冲股票。
-                2. 商品期货都有期权！
+                2. 商品期货都有期权！禁止说商品没有场内期权。如果遇到数据矛盾，以strategist为主。
                 3. 如果某品种有利好消息但却下跌，要提醒利多不涨，可能反转，而如果有坏消息但却不跌，要提醒利空不跌，可能阶段底部到了。
                 4. 价格数据是每天中午11点半和下午5点后更新。
                 5. 2026年春节长假是2月16日才开始！
