@@ -37,6 +37,10 @@ def add_share_button(content_title: str, content_summary: str, content_html: str
         background: #0f172a;
         border-radius: 16px;
         overflow: hidden;
+        /* 🔥 关键：隐藏到屏幕外，只用于截图 */
+        position: fixed;
+        left: -9999px;
+        top: 0;
     }}
 
     .share-header {{
@@ -220,4 +224,4 @@ document.getElementById('{btn_id}').addEventListener('click', function() {{
 </html>
     """
 
-    st.components.v1.html(share_html, height=900, scrolling=True)
+    st.components.v1.html(share_html, height=100, scrolling=True)
