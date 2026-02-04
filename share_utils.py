@@ -224,4 +224,4 @@ document.getElementById('{btn_id}').addEventListener('click', function() {{
 </html>
     """
 
-    st.components.v1.html(share_html, height=100, scrolling=True)
+    st.components.v1.html(share_html, height=100, scrolling=False)
