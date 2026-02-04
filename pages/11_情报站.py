@@ -3,6 +3,8 @@ import streamlit as st
 from datetime import datetime, timedelta
 import subscription_service as sub_svc
 import streamlit.components.v1 as components
+from share_utils import add_share_button
+
 
 # ==========================================
 # 页面配置
@@ -320,7 +322,7 @@ st.markdown("""
         color: #64748b;
         font-size: 15px;
     }
-    
+
     /* ========== 空状态 ========== */
     .empty-state {
         background: rgba(30, 41, 59, 0.4);
@@ -344,7 +346,7 @@ st.markdown("""
         background-color: #0f172a !important; /* 深蓝黑背景 */
         border-right: 1px solid #1e293b;      /* 可选：右侧分割线 */
     }
-    
+
     /* 🔥🔥🔥 [新增] 强制侧边栏文字变白/灰 (覆盖默认黑色) 🔥🔥🔥 */
     [data-testid="stSidebar"] p, 
     [data-testid="stSidebar"] span, 
@@ -481,7 +483,7 @@ st.markdown("""
         font-size: 13px;
         transition: all 0.2s;
     }
-    
+
     /* 当 details 处于 open 状态时，文字变更为 收起 */
     details[open] .toggle-text::after {
         content: "收起";
@@ -494,17 +496,17 @@ st.markdown("""
         from { opacity: 0; transform: translateY(-10px); }
         to { opacity: 1; transform: translateY(0); }
     }
-    
+
     /* 6. 容器边框 (替代原来的 col 布局) */
     .native-card-container {
         border-bottom: 1px solid rgba(255,255,255,0.1);
         margin-bottom: 16px;
     }
-    
+
     /* =============================================
        🔥 [修复] 折叠框 (Expander) 标题高亮样式
        ============================================= */
-    
+
     /* 1. 强制折叠框标题栏 (summary) 的样式 */
     [data-testid="stExpander"] details > summary {
         color: #fbbf24 !important;      /* 强制亮金色字体 */
@@ -535,12 +537,12 @@ st.markdown("""
         background-color: rgba(251, 191, 36, 0.15) !important; /* 悬停背景变亮 */
         border-color: #fbbf24 !important;                      /* 边框变亮 */
     }
-    
+
     [data-testid="stExpander"] details > summary:hover p,
     [data-testid="stExpander"] details > summary:hover span {
         color: #ffffff !important;      /* 悬停时文字变白，提示可点击 */
     }
-    
+
     [data-testid="stExpander"] details > summary:hover svg {
         fill: #ffffff !important;       /* 悬停时箭头变白 */
     }
@@ -702,7 +704,6 @@ with st.sidebar:
     </div>
     """, unsafe_allow_html=True)
 
-
 # ==========================================
 # 📡 主内容区
 # ==========================================
@@ -852,7 +853,6 @@ else:
         # 检查权限
         access = sub_svc.check_subscription_access(user, content['channel_id'])
 
-
         if access['has_access']:
             # 有权限 - 显示内容卡片
             pub_time_str = format_time(content['publish_time'])
@@ -882,6 +882,16 @@ else:
                 # scrolling=True: 内容太长可以滚动
                 # 这样就是一个独立的网页沙箱，无论 HTML 多复杂都能完美显示！
                 components.html(content['content'], height=1000, scrolling=True)
+
+                # 🔥 新增：分享功能
+                add_share_button(
+                    content_title=content['title'],
+                    content_summary=content['summary'],
+                    content_html=content['content'],
+                    channel_icon=content['channel_icon'],
+                    pub_time=pub_time_str,
+                    content_id=content['id']
+                )
 
             # 加个间距
             st.markdown("<div style='margin-bottom: 20px;'></div>", unsafe_allow_html=True)
