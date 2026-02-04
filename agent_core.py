@@ -275,7 +275,7 @@ def generalist_node(state: AgentState, llm):
         tool_futures_correlation_check, tool_stock_correlation_check, calculate_hedging_beta,
         tool_get_retail_money_flow, draw_chart_tool, get_stock_valuation, tool_compare_stocks,
         get_futures_fund_flow, get_futures_fund_ranking, get_available_patterns, analyze_etf_option_sentiment,
-        get_etf_option_strikes,search_web,tool_analyze_broker_positions,
+        get_etf_option_strikes,tool_analyze_broker_positions,
         get_macro_indicator,get_macro_overview,analyze_yield_curve
     ]
 
@@ -296,27 +296,25 @@ def generalist_node(state: AgentState, llm):
         6. **概念/策略解释** -> search_investment_knowledge
         7. 相关性分析 -> tool_futures_correlation_check或tool_stock_correlation_check
         8. 对冲分析 -> calculate_hedging_beta
-        9. 搜寻辅助分析的信息 ->search_web
-        10.查某期货资金流动 -> get_futures_fund_flow
-        11.查全部期货资金沉淀排名 -> get_futures_fund_ranking
-        12.查商品龙虎榜/期货商持仓 -> search_broker_holdings_on_date  
-        13.查某期货商最近持仓变化情况 -> tool_analyze_position_change
-        14.查成交量和持仓量 -> get_volume_oi
-        15.查期货持仓量排名 -> get_futures_oi_ranking
-        16.查期权波动率-> get_commodity_iv_info
-        17.查期权合约价格-> tool_query_specific_option
-        18.查ETF期权有哪些合约-> get_etf_option_strikes
-        19.查宏观指标 -> get_macro_indicator
-        20.查宏观环境总览 -> get_macro_overview 
-        21.分析收益率曲线 -> analyze_yield_curve 
-        22.查单只股票的成交量详情 -> query_stock_volume
+        9. 查某期货资金流动 -> get_futures_fund_flow
+        10.查全部期货资金沉淀排名 -> get_futures_fund_ranking
+        11.查商品龙虎榜/期货商持仓 -> search_broker_holdings_on_date  
+        12.查某期货商最近持仓变化情况 -> tool_analyze_position_change
+        13.查成交量和持仓量 -> get_volume_oi
+        14.查期货持仓量排名 -> get_futures_oi_ranking
+        15.查期权波动率-> get_commodity_iv_info
+        16.查期权合约价格-> tool_query_specific_option
+        17.查ETF期权有哪些合约-> get_etf_option_strikes
+        18.查宏观指标 -> get_macro_indicator
+        19.查宏观环境总览 -> get_macro_overview 
+        20.分析收益率曲线 -> analyze_yield_curve 
+        21.查单只股票的成交量详情 -> query_stock_volume
 
         【行为准则】
         1. 先给结论，然后解释理由。
         2. 不要简单复述，要有深度洞察。
         3. 禁止空谈，必须用工具获取的数据说话。
         4. 不要编造数据，如果没查到数据就说不知道。
-        5. search_web工具尽量少用，除非其他工具都无法获得需要的数据
         """
 
     general_agent = create_react_agent(llm, tools, prompt=prompt)
@@ -449,7 +447,7 @@ def analyst_node(state: AgentState, llm):
             2. 获取标的一段时间价格-> `get_price_statistics` 。
             3. 分析的品种如果只有1个，只能调用1次`analyze_kline_pattern` 
             4. 客户没要求画图，就不要用`draw_chart_tool`
-            5. 获取股票名字和价格用 get_market_snapshot
+            5. 获取股票名字和价格用 get_market_snapshotz
 
             【任务】：
             1. 描述K线和技术面情况
@@ -1146,7 +1144,7 @@ def screener_node(state: AgentState, llm):
         "量异常", "量能异常", "量能放大", "量价齐升", "量价背离",
         "放量异动", "量异动", "缩量下跌", "放量上涨", "放量突破",
         "换手率异常", "换手率最高", "换手率排名",
-        "资金抢筹", "主力流入", "主力抢筹", "主力埋伏",
+        "资金抢筹", "主力流入", "主力抢筹", "主力埋伏","埋伏",
         "成交异常", "交易异常活跃", "异常活跃"
     ]
 
