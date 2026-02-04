@@ -58,7 +58,7 @@ def collect_fund_flow_data():
     today_str = datetime.now().strftime("%Y年%m月%d日")
 
     system_prompt = f"""
-你是一位**资金流向专家**，为《每日资金流晚报》采集数据。
+你是一位**资金流分析专家**，为《爱波塔-资金流晚报》采集数据。
 当前日期：{today_str}
 
 【核心任务】：追踪今日股市资金流向，发现异常信号和潜力机会。
@@ -154,7 +154,7 @@ def draft_fund_flow_report(raw_material):
     weekday = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"][datetime.now().weekday()]
 
     prompt = f"""
-你是【爱波塔资金流研究中心】主编，正在撰写《每日资金流晚报》。
+你是【爱波塔资金流研究中心】主编，正在撰写《爱波塔-资金流晚报》。
 
 【记者提交的素材】：
 {raw_material}
@@ -403,7 +403,7 @@ def draft_fund_flow_report(raw_material):
 
 ### 文风：
 - 幽默但专业
-- 有态度但不夸张
+- 写法要有个性
 - 给建议但加免责
 - 通俗易懂，避免术语堆砌
 
