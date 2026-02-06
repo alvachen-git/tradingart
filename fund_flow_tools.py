@@ -144,7 +144,7 @@ def get_all_sectors(sector_type='行业'):
 @tool
 def tool_get_retail_money_flow(days: int = 1):
     """
-    查询股票的行业资金流向。
+    查询股票的机构资金流向。
     用于回答“股票资金最近在哪些行业流动”、“量化资金去哪了”、“机构在买什么”等问题。
 
     Args:

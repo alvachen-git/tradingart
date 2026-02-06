@@ -22,22 +22,23 @@ engine = create_engine(DB_URL, pool_recycle=3600, pool_pre_ping=True)
 # =====================================================================
 SCORE_CONFIG = {
     # --- 环比量比 (今日/昨日) ---
-    'ratio_1d_weight': 40,       # 满分 40
-    'ratio_1d_cap': 10,         # 量比 ≥8 得满分
+    'ratio_1d_weight': 40,  # 满分 40
+    'ratio_1d_cap': 10,  # 量比 ≥8 得满分
 
     # --- 均量比 (今日/10日均) ---
-    'ratio_10d_weight': 30,      # 满分 30
-    'ratio_10d_cap': 6.0,        # 量比 ≥6 得满分
+    'ratio_10d_weight': 30,  # 满分 30
+    'ratio_10d_cap': 6.0,  # 量比 ≥6 得满分
 
     # --- 成交额 (log10 映射) ---
-    'amount_weight': 30,         # 满分 30
-    'amount_floor': 500_000,     # 50万元 → 0 分 (统一为"元"后的值)
-    'amount_cap': 500_000_000,   # 5亿元 → 满分 30
+    'amount_weight': 30,  # 满分 30
+    'amount_floor': 500_000,  # 50万元 → 0 分 (统一为"元"后的值)
+    'amount_cap': 500_000_000,  # 5亿元 → 满分 30
 
     # --- 过滤门槛 ---
-    'min_amount_yuan': 10_000_000,  # 日成交额 > 50万元
-    'min_score': 50,             # 总分 < 30 不入库
+    'min_amount_yuan': 10_000_000,  # 日成交额 > 100万元
+    'min_score': 50,  # 总分 < 30 不入库
 }
+
 
 # =====================================================================
 # 评分参考表 (方便理解分数含义)
@@ -87,7 +88,7 @@ def run_daily_fund_scan():
     cfg = SCORE_CONFIG
     print(f"🚀 开始执行资金流放量评分扫描 ({datetime.now().strftime('%Y-%m-%d %H:%M:%S')})")
     print(f"   评分权重: 环比={cfg['ratio_1d_weight']} 均量比={cfg['ratio_10d_weight']} 成交额={cfg['amount_weight']}")
-    print(f"   入库门槛: 成交额>{cfg['min_amount_yuan']/1e4:.0f}万元, 总分>={cfg['min_score']}")
+    print(f"   入库门槛: 成交额>{cfg['min_amount_yuan'] / 1e4:.0f}万元, 总分>={cfg['min_score']}")
 
     try:
         # 1. 确定扫描日期范围
@@ -140,13 +141,33 @@ def run_daily_fund_scan():
             else:
                 print(f"  ✅ A股 amount 已经是「元」")
 
+        # --- 港股单位处理 ---
+        # ⚠️ 注意：港股数据源(Tushare/AKShare)的 amount 单位需要确认
+        # 常见情况：
+        #   - Tushare pro: amount 单位是「千港元」→ 需要 ×1000
+        #   - AKShare: amount 单位已经是「港元」→ 不需要转换
+        #
+        # 🔧 请根据你的数据源调整下面的 HK_AMOUNT_MULTIPLIER：
+        #   - 如果数据源是「千港元」: HK_AMOUNT_MULTIPLIER = 1000
+        #   - 如果数据源已经是「港元」: HK_AMOUNT_MULTIPLIER = 1
+        #   - 如果数据源是「百港元」: HK_AMOUNT_MULTIPLIER = 100
+        HK_AMOUNT_MULTIPLIER = 1  # ← 根据实际数据源调整！
+
         hk_mask = df['stock_code'].str.endswith('.HK')
         if hk_mask.any():
-            hk_median = df.loc[hk_mask, 'amount'].median()
-            print(f"  📊 港股 amount 中位数: {hk_median:,.0f}")
-            if hk_median < 1_000_000:
-                print(f"  🔄 港股 amount 单位为「千元」，×1000 → 「元」")
-                df.loc[hk_mask, 'amount'] = df.loc[hk_mask, 'amount'] * 1000
+            hk_median_raw = df.loc[hk_mask, 'amount'].median()
+            hk_max_raw = df.loc[hk_mask, 'amount'].max()
+            print(f"  📊 港股 amount 原始值: 中位数={hk_median_raw:,.0f}, 最大={hk_max_raw:,.0f}")
+
+            if HK_AMOUNT_MULTIPLIER != 1:
+                print(f"  🔄 港股 amount ×{HK_AMOUNT_MULTIPLIER} → 「港元」")
+                df.loc[hk_mask, 'amount'] = df.loc[hk_mask, 'amount'] * HK_AMOUNT_MULTIPLIER
+            else:
+                print(f"  ✅ 港股 amount 已经是「港元」，无需转换")
+
+            # 转换后验证
+            hk_median_after = df.loc[hk_mask, 'amount'].median()
+            print(f"  📊 港股 amount 转换后中位数: {hk_median_after:,.0f} 港元 ({hk_median_after / 1e8:.2f}亿)")
 
         print(f"  📊 统一后全市场 amount 中位数: {df['amount'].median():,.0f} 元")
 
@@ -190,12 +211,12 @@ def run_daily_fund_scan():
         has_ratio_10d = recent_df['vol_ratio_10d'].notna()
 
         base_filter = (
-            (recent_df['pct_chg'] > 0) &                        # 只看上涨
-            (recent_df['amount'] > cfg['min_amount_yuan']) &     # 成交额 > 50万元
-            (                                                     # 至少一个量比维度有数据且放量
-                (has_ratio_1d & (recent_df['vol_ratio_1d'] > 1.0)) |
-                (has_ratio_10d & (recent_df['vol_ratio_10d'] > 1.0))
-            )
+                (recent_df['pct_chg'] > 0) &  # 只看上涨
+                (recent_df['amount'] > cfg['min_amount_yuan']) &  # 成交额 > 50万元
+                (  # 至少一个量比维度有数据且放量
+                        (has_ratio_1d & (recent_df['vol_ratio_1d'] > 1.0)) |
+                        (has_ratio_10d & (recent_df['vol_ratio_10d'] > 1.0))
+                )
         )
         candidates = recent_df[base_filter].copy()
 
@@ -226,7 +247,7 @@ def run_daily_fund_scan():
         ).round(1)
 
         candidates['total_score'] = (
-            candidates['score_1d'] + candidates['score_10d'] + candidates['score_amount']
+                candidates['score_1d'] + candidates['score_10d'] + candidates['score_amount']
         ).round(1)
 
         # 8. 按分数过滤

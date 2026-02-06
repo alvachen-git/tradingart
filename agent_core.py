@@ -25,7 +25,7 @@ from plot_tools import draw_chart_tool,draw_macro_compare_chart
 from futures_fund_flow_tools import get_futures_fund_flow, get_futures_fund_ranking
 from volume_oi_tools import get_volume_oi, get_futures_oi_ranking, get_option_oi_ranking, get_option_volume_abnormal, get_option_oi_abnormal, analyze_etf_option_sentiment, get_etf_option_strikes
 from market_tools import get_market_snapshot, get_price_statistics,tool_query_specific_option,get_historical_price,get_trending_hotspots,get_today_hotlist,analyze_keyword_trend,get_finance_related_trends,search_hotlist_history
-from data_engine import get_commodity_iv_info, check_option_expiry_status,search_broker_holdings_on_date,tool_analyze_position_change,tool_compare_stocks,get_stock_valuation,get_latest_data_date,tool_analyze_broker_positions
+from data_engine import get_commodity_iv_info, check_option_expiry_status,search_broker_holdings_on_date,tool_analyze_position_change,tool_compare_stocks,get_stock_valuation,get_latest_data_date,tool_analyze_broker_positions,get_iv_range_stats
 from search_tools import search_web
 from market_correlation import tool_stock_hedging_analysis, tool_futures_correlation_check,tool_stock_correlation_check
 from beta_tool import calculate_hedging_beta
@@ -177,7 +177,7 @@ def supervisor_node(state: AgentState, llm):
 
     【可用员工】
     - analyst: 技术分析师 (看K线、定趋势),分析如何操作
-    - monitor: 数据监控员 (看期货资金流、期货商持仓、查期货持仓量、查价格)
+    - monitor: 数据监控员 (看期货资金流、期货商持仓、查期货持仓量、查价格、查波动率历史数据)
     - researcher: 情报研究员 (看新闻、宏观、热点、地缘政治、货币政策、Polymarket上的概率分析)
     - strategist: 期权策略员 (给策略，**必须依赖 analyst**) 
     - screener: 股票大师 (协助"推荐股票"、"选股"、查股票成交量、资金流)
@@ -187,7 +187,7 @@ def supervisor_node(state: AgentState, llm):
     - roaster: *毒舌分析师* (当用户要求"吐槽"、"挑战我"、"毒舌模式"时使用)。
 
     【调度规则 (严格遵守)】
-    1. **追求效率**: 问股票成交量就只派 `screener`；只问期货持仓量或价格就只派 `monitor`；只问新闻或热点就只派 `researcher`；只问技术分析就只派`analyst`。
+    1. **追求效率**: 问股票成交量就只派 `screener`；只问期货持仓量或价格就只派 `monitor`；只问新闻或热点就只派 `researcher`；只问技术分析就只派`analyst`。只问波动率就只派`monitor`。
     2. **全套服务**: 如果用户问"全面分析"或"详细分析"，默认路径: ["analyst", "monitor", "researcher","strategist"]。
     3. **单品种期权问题**: "500ETF适合价差还是裸买"、"推荐白银期权策略" -> 
        - 只要标的明确(500ETF)，且涉及期权交易，一律走流水线。
@@ -561,7 +561,8 @@ def monitor_node(state: AgentState, llm):
         tool_analyze_broker_positions,
         get_futures_oi_ranking,
         query_stock_volume,
-        get_macro_indicator
+        get_macro_indicator,
+        get_iv_range_stats
     ]
 
     # 判断是否为 ETF (51/159开头) 或 股票
@@ -610,6 +611,7 @@ def monitor_node(state: AgentState, llm):
     - 查期货持仓量排名 -> get_futures_oi_ranking
     - 查标的价格 -> get_market_snapshot
     - 查宏观指标 -> get_macro_indicator(indicator_code='US10Y')  
+    - 查期权波动率一段时间的数据 -> get_iv_range_stats
     
     
     {tool_instruction}
@@ -691,6 +693,7 @@ def strategist_node(state: AgentState, llm):
         get_market_snapshot,  # 标的快照/现价
         # 辅助工具
         search_investment_knowledge,  # 知识库检索
+        get_iv_range_stats
     ]
 
     # === 🔥 ReAct Prompt - 引导期权策略推理 ===
@@ -707,6 +710,7 @@ def strategist_node(state: AgentState, llm):
         【工作流程】
         **第一步：获取标的价格和波动率**
         - 用 `get_market_snapshot` 获取现价，用`get_commodity_iv_info` 看IV，用`check_option_expiry_status` 看到期日。
+        - 用 get_iv_range_stats可以查一段时间的波动率。
               
         **第二步：设计策略**
         - **期权策略**：根据技术面趋势+IV+距离到期日+客户风险偏好来选择策略，可以查知识库辅助`search_investment_knowledge`。
