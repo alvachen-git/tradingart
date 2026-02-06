@@ -88,6 +88,462 @@ st.markdown("""
 """, unsafe_allow_html=True)
 st.markdown("<style>.stSelectbox {margin-bottom: 20px;}</style>", unsafe_allow_html=True)
 
+# 🔥【PC端样式修复】解决Edge浏览器白底看不到文字的问题
+st.markdown("""
+<style>
+    /* ===========================
+       PC端样式修复 (Edge浏览器兼容)
+       =========================== */
+    /* PC端全局样式 */
+    body, p, span, div {
+        color: #1f2937 !important;
+    }
+
+    /* 1. 全局文字颜色强制设定 */
+    body {
+        color: #1f2937 !important;
+    }
+
+    p, span, div, label {
+        color: #374151 !important;
+    }
+
+    /* 2. 所有标题颜色 */
+    h1, h2, h3, h4, h5, h6 {
+        color: #111827 !important;
+        font-weight: 600 !important;
+    }
+
+    /* 3. Streamlit Metric 组件修复 */
+    [data-testid="stMetric"] {
+        background-color: #ffffff !important;
+        border: 1px solid #e5e7eb !important;
+        border-radius: 8px !important;
+        padding: 12px 16px !important;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.1) !important;
+    }
+
+    [data-testid="stMetricLabel"] {
+        color: #6b7280 !important;
+        font-size: 14px !important;
+        font-weight: 500 !important;
+    }
+
+    [data-testid="stMetricValue"] {
+        color: #111827 !important;
+        font-size: 28px !important;
+        font-weight: 600 !important;
+    }
+
+    [data-testid="stMetricDelta"] {
+        font-size: 14px !important;
+        font-weight: 500 !important;
+    }
+
+    /* 4. Markdown容器文字 */
+    [data-testid="stMarkdownContainer"] {
+        color: #1f2937 !important;
+    }
+
+    [data-testid="stMarkdownContainer"] p {
+        color: #374151 !important;
+    }
+
+    [data-testid="stMarkdownContainer"] strong {
+        color: #111827 !important;
+        font-weight: 600 !important;
+    }
+
+    [data-testid="stMarkdownContainer"] li {
+        color: #374151 !important;
+    }
+
+    /* 5. 下拉框和选择器 */
+    div[data-baseweb="select"] {
+        background-color: #ffffff !important;
+    }
+
+    div[data-baseweb="select"] span {
+        color: #1f2937 !important;
+    }
+
+    div[data-baseweb="select"] input {
+        color: #1f2937 !important;
+    }
+    
+
+    /* 7. 按钮文字 */
+    button {
+        color: #ffffff !important;
+        font-weight: 500 !important;
+    }
+
+    button[kind="secondary"] {
+        color: #1f2937 !important;
+        background-color: #ffffff !important;
+        border: 1px solid #d1d5db !important;
+    }
+
+    /* 8. Info/Warning/Success/Error 提示框 */
+    [data-testid="stAlert"] {
+        background-color: #f3f4f6 !important;
+        border-left: 4px solid #3b82f6 !important;
+        color: #1f2937 !important;
+    }
+
+    [data-testid="stAlert"] p {
+        color: #1f2937 !important;
+    }
+
+    [data-testid="stAlert"] div {
+        color: #1f2937 !important;
+    }
+
+    /* 9. 表格样式 */
+    [data-testid="stTable"] {
+        color: #1f2937 !important;
+    }
+
+    [data-testid="stDataFrame"] {
+        color: #1f2937 !important;
+    }
+
+    table {
+        color: #1f2937 !important;
+    }
+
+    th {
+        background-color: #f3f4f6 !important;
+        color: #111827 !important;
+        font-weight: 600 !important;
+    }
+
+    td {
+        color: #374151 !important;
+    }
+
+    /* 10. 文本输入框 */
+    input, textarea, select {
+        color: #1f2937 !important;
+        background-color: #ffffff !important;
+        border: 1px solid #d1d5db !important;
+    }
+
+    input::placeholder {
+        color: #9ca3af !important;
+    }
+
+    /* 11. 标签和标题 */
+    label {
+        color: #374151 !important;
+        font-weight: 500 !important;
+    }
+
+    /* 12. 链接 */
+    a {
+        color: #2563eb !important;
+    }
+
+    a:hover {
+        color: #1d4ed8 !important;
+    }
+
+    /* 13. 代码块 */
+    code {
+        color: #111827 !important;
+        background-color: #f3f4f6 !important;
+        padding: 2px 6px !important;
+        border-radius: 4px !important;
+    }
+
+    pre {
+        background-color: #f3f4f6 !important;
+        color: #111827 !important;
+    }
+
+    /* 14. Expander组件 */
+    [data-testid="stExpander"] {
+        background-color: #ffffff !important;
+        border: 1px solid #e5e7eb !important;
+    }
+
+    [data-testid="stExpander"] summary {
+        color: #111827 !important;
+        font-weight: 500 !important;
+    }
+
+    /* 15. 确保主容器背景色 */
+    .main {
+        background-color: #ffffff !important;
+    }
+
+    [data-testid="stAppViewContainer"] {
+        background-color: #ffffff !important;
+    }
+
+    /* 16. 修复可能的透明背景问题 */
+    .element-container {
+        background-color: transparent !important;
+    }
+
+    /* 17. 顶部状态栏 */
+    header[data-testid="stHeader"] {
+        background-color: #ffffff !important;
+    }
+
+    /* 18. Tabs组件 */
+    [data-testid="stTabs"] button {
+        color: #6b7280 !important;
+    }
+
+    [data-testid="stTabs"] button[aria-selected="true"] {
+        color: #111827 !important;
+        font-weight: 600 !important;
+    }
+
+    /* 19. 确保所有子元素继承颜色 */
+    * {
+        color: inherit;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+st.markdown("""
+<style>
+    /* ========================================
+       深色侧边栏样式 (与Home页保持一致)
+       ======================================== */
+       
+    /* 主内容区背景色修复 */
+    .stApp {
+        background-color: #f8f9fa !important;
+    }
+    
+    [data-testid="stAppViewContainer"] {
+        background-color: #f8f9fa !important;
+    }
+    
+    .main {
+        background-color: #f8f9fa !important;
+    }
+    
+    [data-testid="stMainBlockContainer"] {
+        background-color: #f8f9fa !important;
+    }
+    
+    /* 确保卡片保持白色对比 */
+    [data-testid="stMetric"] {
+        background-color: #ffffff !important;
+    }
+    
+    [data-testid="stPlotlyChart"] {
+        background-color: #ffffff !important;
+        padding: 16px !important;
+        border-radius: 8px !important;
+    }
+
+    /* 1. 侧边栏整体深色背景 */
+    [data-testid="stSidebar"] {
+        background-color: #0f172a !important; /* 深蓝黑色，与Home页一致 */
+    }
+
+    /* 2. 侧边栏内所有文字变亮色 */
+    [data-testid="stSidebar"] p,
+    [data-testid="stSidebar"] span,
+    [data-testid="stSidebar"] div,
+    [data-testid="stSidebar"] label {
+        color: #cbd5e1 !important; /* 亮灰蓝色文字 */
+    }
+
+    /* 3. 侧边栏标题（h1-h6）样式 */
+    [data-testid="stSidebar"] h1,
+    [data-testid="stSidebar"] h2,
+    [data-testid="stSidebar"] h3,
+    [data-testid="stSidebar"] h4 {
+        color: #f1f5f9 !important; /* 更亮的白色 */
+        font-weight: 600 !important;
+    }
+
+    /* 4. 下拉选择框样式 */
+    [data-testid="stSidebar"] div[data-baseweb="select"] {
+        background-color: #1e293b !important; /* 稍亮的深色背景 */
+    }
+
+    [data-testid="stSidebar"] div[data-baseweb="select"] span {
+        color: #e2e8f0 !important; /* 亮色文字 */
+    }
+
+    [data-testid="stSidebar"] div[data-baseweb="select"] svg {
+        fill: #cbd5e1 !important; /* 下拉箭头亮色 */
+    }
+
+    /* 5. 输入框样式 */
+    [data-testid="stSidebar"] input {
+        background-color: #1e293b !important;
+        color: #e2e8f0 !important;
+        border: 1px solid #334155 !important;
+    }
+
+    [data-testid="stSidebar"] input::placeholder {
+        color: #64748b !important;
+    }
+
+    /* 6. 按钮样式 */
+    [data-testid="stSidebar"] button {
+        background-color: #1e293b !important;
+        color: #e2e8f0 !important;
+        border: 1px solid #334155 !important;
+        transition: all 0.2s ease-in-out !important;
+    }
+
+    [data-testid="stSidebar"] button:hover {
+        background-color: #334155 !important;
+        border-color: #475569 !important;
+        color: #ffffff !important;
+    }
+
+    /* 7. 单选按钮和复选框 */
+    [data-testid="stSidebar"] [data-baseweb="radio"] label,
+    [data-testid="stSidebar"] [data-baseweb="checkbox"] label {
+        color: #cbd5e1 !important;
+    }
+
+    /* 8. 滑块（Slider）样式 */
+    [data-testid="stSidebar"] [data-baseweb="slider"] {
+        color: #cbd5e1 !important;
+    }
+
+    /* 9. Expander（展开器）样式 */
+    [data-testid="stSidebar"] [data-testid="stExpander"] {
+        background-color: #1e293b !important;
+        border: 1px solid #334155 !important;
+    }
+
+    [data-testid="stSidebar"] [data-testid="stExpander"] summary {
+        color: #e2e8f0 !important;
+    }
+
+    /* 10. 分隔线样式 */
+    [data-testid="stSidebar"] hr {
+        border-color: #334155 !important;
+    }
+
+    /* 11. 侧边栏折叠按钮样式 */
+    button[data-testid="stSidebarCollapsedControl"] {
+        background-color: #3b82f6 !important; /* 亮蓝色 */
+        border: 2px solid rgba(255, 255, 255, 0.6) !important;
+        border-radius: 12px !important;
+        width: 40px !important;
+        height: 40px !important;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.5) !important;
+        position: fixed !important;
+        left: 15px !important;
+        top: 15px !important;
+        z-index: 999999 !important;
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        opacity: 1 !important;
+        transition: transform 0.2s ease !important;
+    }
+
+    button[data-testid="stSidebarCollapsedControl"]:hover {
+        background-color: #2563eb !important;
+        transform: scale(1.1) !important;
+        border-color: #ffffff !important;
+    }
+
+    button[data-testid="stSidebarCollapsedControl"] svg,
+    button[data-testid="stSidebarCollapsedControl"] i {
+        fill: #ffffff !important;
+        color: #ffffff !important;
+        stroke: #ffffff !important;
+        width: 20px !important;
+        height: 20px !important;
+    }
+
+    /* 12. 侧边栏中的Info/Warning/Success框 */
+    [data-testid="stSidebar"] [data-testid="stAlert"] {
+        background-color: #1e293b !important;
+        border-left: 4px solid #3b82f6 !important;
+        color: #e2e8f0 !important;
+    }
+
+    [data-testid="stSidebar"] [data-testid="stAlert"] p {
+        color: #cbd5e1 !important;
+    }
+
+    /* 13. 侧边栏中的Markdown容器 */
+    [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] {
+        color: #cbd5e1 !important;
+    }
+
+    [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] strong {
+        color: #f1f5f9 !important;
+    }
+
+    [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] a {
+        color: #60a5fa !important;
+    }
+
+    /* 14. 侧边栏中的代码块 */
+    [data-testid="stSidebar"] code {
+        background-color: #1e3a5f !important;
+        color: #ffd700 !important;
+        border: 1px solid #4a90e2 !important;
+        padding: 2px 6px !important;
+        border-radius: 4px !important;
+    }
+
+    /* 15. 联系卡片样式（如果有的话）*/
+    [data-testid="stSidebar"] .contact-card {
+        background-color: #1e293b !important;
+        border: 1px solid #334155 !important;
+        border-radius: 8px !important;
+        padding: 16px !important;
+    }
+
+    [data-testid="stSidebar"] .contact-title {
+        color: #f1f5f9 !important;
+    }
+
+    [data-testid="stSidebar"] .contact-item {
+        color: #94a3b8 !important;
+    }
+
+    [data-testid="stSidebar"] .wechat-highlight {
+        color: #00e676 !important; /* 微信绿 */
+    }
+
+    /* 16. 确保侧边栏顶部区域也是深色 */
+    [data-testid="stSidebarNav"] {
+        background-color: #0f172a !important;
+    }
+
+    /* 17. 侧边栏中的选择框下拉菜单 */
+    [data-testid="stSidebar"] ul[role="listbox"] {
+        background-color: #1e293b !important;
+        border: 1px solid #334155 !important;
+    }
+
+    [data-testid="stSidebar"] ul[role="listbox"] li {
+        color: #e2e8f0 !important;
+    }
+
+    [data-testid="stSidebar"] ul[role="listbox"] li:hover {
+        background-color: #334155 !important;
+    }
+
+    /* 18. 状态指示器 */
+    [data-testid="stSidebar"] .stMetricValue {
+        color: #f1f5f9 !important;
+    }
+
+    [data-testid="stSidebar"] .stMetricLabel {
+        color: #94a3b8 !important;
+    }
+</style>
+""", unsafe_allow_html=True)
 
 # 2. 侧边栏逻辑
 with st.sidebar:
