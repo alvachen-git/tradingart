@@ -63,7 +63,64 @@ ETF_MAP = {
     '科创50': ('588000.SH', '科创50ETF'), '科创板': ('588000.SH', '科创50ETF'),
 }
 
+CODE_TO_NAME_MAP = {
+    # 广期所
+    "LC": "碳酸锂", "SI": "工业硅", "LH": "生猪", "PS": "多晶硅",
+    # 上期所
+    "CU": "沪铜", "AL": "沪铝", "ZN": "沪锌", "PB": "沪铅", "SN": "沪锡", "NI": "沪镍",
+    "AU": "黄金", "AG": "白银", "RU": "橡胶", "RB": "螺纹钢", "HC": "热轧卷板",
+    "FU": "燃料油", "BU": "沥青", "SC": "原油", "LU": "低硫燃料油", "NR": "20号胶",
+    "SP": "纸浆", "SS": "不锈钢", "BR": "丁二烯橡胶", "AO": "氧化铝",
+    # 大商所
+    "M": "豆粕", "Y": "豆油", "P": "棕榈油", "C": "玉米", "I": "铁矿石",
+    "J": "焦炭", "JM": "焦煤", "A": "黄大豆1号", "B": "黄大豆2号",
+    "V": "PVC", "PP": "聚丙烯", "L": "LLDPE", "EB": "苯乙烯", "EG": "乙二醇",
+    "PG": "液化石油气", "RR": "粳米", "JD": "鸡蛋", "CS": "玉米淀粉",
+    # 郑商所
+    "SR": "白糖", "CF": "棉花", "TA": "PTA", "MA": "甲醇", "RM": "菜粕",
+    "OI": "菜籽油", "FG": "玻璃", "ZC": "动力煤", "SF": "硅铁", "SM": "锰硅",
+    "AP": "苹果", "CJ": "红枣", "UR": "尿素", "SA": "纯碱", "PK": "花生",
+}
 
+
+def parse_commodity_contract(ts_code: str) -> dict:
+    """解析商品期权合约代码，提取品种名称"""
+    ts_upper = ts_code.upper()
+
+    match = re.match(r'^([A-Z]{1,2})', ts_upper)
+    if not match:
+        return {'code': '', 'name': '未知品种', 'option_type_cn': '', 'full_name': '未知品种'}
+
+    symbol_code = match.group(1)
+    commodity_name = CODE_TO_NAME_MAP.get(symbol_code, symbol_code)
+
+    # 提取年月
+    year_month_match = re.search(r'(\d{4})', ts_code)
+    year_month = year_month_match.group(1) if year_month_match else ''
+
+    # 提取行权价
+    strike_match = re.search(r'[-](\d+)[.\w]*$', ts_code)
+    if not strike_match:
+        strike_match = re.search(r'[CP](\d+)', ts_code, re.IGNORECASE)
+    strike = strike_match.group(1) if strike_match else ''
+
+    # 期权类型
+    if re.search(r'-P-|\dP\d', ts_upper):
+        option_type_cn = '认沽'
+    elif re.search(r'-C-|\dC\d', ts_upper):
+        option_type_cn = '认购'
+    else:
+        option_type_cn = '未知'
+
+    # ✅ 新增：完整中文名称
+    full_name = f"{commodity_name}{year_month}{option_type_cn}{strike}"
+
+    return {
+        'code': symbol_code,
+        'name': commodity_name,
+        'option_type_cn': option_type_cn,
+        'full_name': full_name  # ✅ 关键新增字段
+    }
 # ==========================================
 #  辅助函数
 # ==========================================
@@ -234,9 +291,10 @@ def get_option_oi_ranking(query: str):
 
             result = f"📊 {com_name}期权持仓排名({dir_name}) {df.iloc[0]['trade_date']}\n"
             for i, r in df.iterrows():
-                cp = "购" if 'C' in r['ts_code'] else "沽"
+                parsed = parse_commodity_contract(r['ts_code'])
                 mark = "🥇" if i == 0 else "🥈" if i == 1 else "🥉" if i == 2 else f"{i + 1}."
-                result += f"{mark} {r['ts_code']}({cp}): {fmt_vol(r['oi'])}手\n"
+                # ✅ 新格式
+                result += f"{mark} {r['ts_code']}（{parsed['full_name']}）: {fmt_vol(r['oi'])}手\n"
             return result
 
         return "⚠️ 请指定ETF(如50ETF)或商品(如豆粕)期权"
@@ -312,9 +370,10 @@ def get_option_volume_abnormal(query: str = "全部"):
 
         result = f"🔥 {name}期权成交量异常 ({latest})\n"
         for _, r in df.iterrows():
-            cp = "购" if 'C' in r['ts_code'] else "沽"
+            parsed = parse_commodity_contract(r['ts_code'])
             alert = "🔴" if r['ratio'] >= 5 else "🟠" if r['ratio'] >= 3 else "🟡"
-            result += f"{alert} {r['ts_code']}({cp}): {fmt_vol(r['prev_vol'])}→{fmt_vol(r['today_vol'])}手 **{r['ratio']}倍**\n"
+            # ✅ 新格式
+            result += f"{alert} {r['ts_code']}（{parsed['full_name']}）: {fmt_vol(r['prev_vol'])}→{fmt_vol(r['today_vol'])}手 **{r['ratio']}倍**\n"
         return result
     except Exception as e:
         return f"❌ 错误: {e}"
@@ -387,9 +446,52 @@ def get_option_oi_abnormal(query: str = "全部"):
 
         result = f"🔥 {name}期权持仓异常 ({prev}→{latest})\n"
         for _, r in df.iterrows():
-            cp = "购" if 'C' in r['ts_code'] else "沽"
+            ts_code = r['ts_code']
             alert = "🔴" if r['pct'] >= 100 else "🟠" if r['pct'] >= 50 else "🟡"
-            result += f"{alert} {r['ts_code']}({cp}): {fmt_vol(r['prev_oi'])}→{fmt_vol(r['today_oi'])}手 **+{r['pct']}%**\n"
+
+            # ✅ 硬编码：直接构造完整说明
+            if ts_code.startswith('LC'):
+                # LC = 碳酸锂
+                year_month = ts_code[2:6]  # 2603
+                strike = ts_code.split('-')[2].split('.')[0]  # 140000
+                option_type = '认购' if '-C-' in ts_code else '认沽'
+                full_desc = f"碳酸锂{year_month}{option_type}{strike}"
+
+            elif ts_code.startswith('AG'):
+                # AG = 白银
+                year_month = ts_code[2:6]
+                if 'C' in ts_code[6:]:
+                    strike = ts_code.split('C')[1].split('.')[0]
+                    option_type = '认购'
+                else:
+                    strike = ts_code.split('P')[1].split('.')[0]
+                    option_type = '认沽'
+                full_desc = f"白银{year_month}{option_type}{strike}"
+
+            elif ts_code.startswith('SI'):
+                # SI = 工业硅
+                year_month = ts_code[2:6]
+                strike = ts_code.split('-')[2].split('.')[0]
+                option_type = '认购' if '-C-' in ts_code else '认沽'
+                full_desc = f"工业硅{year_month}{option_type}{strike}"
+
+            elif ts_code.startswith('AL'):
+                # AL = 沪铝
+                year_month = ts_code[2:6]
+                if '-C-' in ts_code:
+                    strike = ts_code.split('-')[2].split('.')[0]
+                    option_type = '认购'
+                else:
+                    strike = ts_code.split('-')[2].split('.')[0] if '-P-' in ts_code else ''
+                    option_type = '认沽'
+                full_desc = f"沪铝{year_month}{option_type}{strike}"
+
+            else:
+                # 其他品种
+                full_desc = f"{ts_code}合约"
+
+            result += f"{alert} {ts_code}（{full_desc}）: {fmt_vol(r['prev_oi'])}→{fmt_vol(r['today_oi'])}手 **+{r['pct']}%**\n"
+
         return result
     except Exception as e:
         return f"❌ 错误: {e}"
