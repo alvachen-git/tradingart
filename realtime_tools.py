@@ -2,6 +2,8 @@ import akshare as ak
 import pandas as pd
 import streamlit as st
 from langchain_core.tools import tool
+import symbol_map
+import requests
 import datetime
 import re
 
@@ -11,18 +13,37 @@ import re
 # ==========================================
 def _get_active_proxies(symbol: str):
     """
-    生成替身列表。如果查不到 IH2512，就查 IH2502, IH2503...
+    🔥 [修复版 - 纯标准库] 动态生成替身列表
     """
-    # 提取品种字母，如 "IH", "rb"
+    import datetime
+    import calendar
+
     alpha = "".join(filter(str.isalpha, symbol))
 
-    # 真实世界当前活跃的月份后缀 (根据当前实际时间调整)
-    # 假设现在是 2025年初，活跃合约通常是 2502-2512
-    active_suffixes = [
-        "2601", "2602", "2605", "2609"
-    ]
+    now = datetime.datetime.now()
+    active_suffixes = []
+
+    year = now.year
+    month = now.month
+
+    for i in range(6):  # 生成6个月
+        # 计算未来月份
+        future_month = month + i
+        future_year = year
+
+        # 处理跨年
+        while future_month > 12:
+            future_month -= 12
+            future_year += 1
+
+        # 格式化 YYMM
+        suffix = f"{future_year % 100:02d}{future_month:02d}"
+        active_suffixes.append(suffix)
 
     proxies = [f"{alpha}{suffix}" for suffix in active_suffixes]
+
+    print(f"[DEBUG] {symbol} 的替身列表: {proxies}")
+
     return proxies
 
 
@@ -148,3 +169,122 @@ def get_kline_analysis_tool(symbol: str):
     end = df.iloc[-1]['close']
     trend = "上涨" if end > start else "下跌"
     return f"根据实时数据，{symbol} 近期从 {start} 到 {end}，整体趋势{trend}。"
+
+
+# realtime_tools.py (追加到文件末尾)
+
+def get_realtime_prices_batch(symbol_list: list):
+    """
+    🔥 [新增] 批量获取实时价格 (高性能版)
+    输入: ['白银', 'rb2505', 'IF2506']
+    输出: {
+        '白银': {'price': 7100.0, 'name': '白银2606', 'code': 'AG2606'},
+        'rb2505': {'price': 3600.0, 'name': '螺纹2505', 'code': 'RB2505'},
+        ...
+    }
+    """
+    # 1. 预处理：为每个输入生成“候选合约列表”
+    # 比如输入 "白银"，生成 ["nf_ag2606", "nf_ag2608", "nf_ag2612"...]
+    task_map = {}  # { '白银': ['nf_ag2606', 'nf_ag2608'] }
+    all_sina_codes = set()
+
+    for symbol in set(symbol_list):  # 去重处理
+        if not symbol: continue
+
+        # A. 解析代码
+        target_code = symbol
+        if not any(char.isdigit() for char in symbol):
+            res = symbol_map.resolve_symbol(symbol)
+            if res and res[0]:
+                target_code = res[0]
+            else:
+                target_code = symbol.upper()
+
+        # B. 生成候选列表 (复用之前的替身逻辑)
+        clean_code = target_code.replace('nf_', '').replace('CFF_RE_', '')
+        codes_to_try = []
+
+        # 如果自带数字 (如 AG2606)，优先查它
+        if any(char.isdigit() for char in clean_code):
+            codes_to_try.append(clean_code)
+
+        # 无论有没有数字，都生成一批活跃替身 (防止主力换月导致旧代码失效)
+        proxies = _get_active_proxies(clean_code)
+        for p in proxies:
+            if p not in codes_to_try: codes_to_try.append(p)
+
+        # C. 转换为新浪格式
+        sina_codes = []
+        for c in codes_to_try:
+            if c.upper().startswith(('IH', 'IF', 'IC', 'IM', 'T', 'TF', 'TS')):
+                sina_codes.append(f"CFF_RE_{c.upper()}")
+            else:
+                sina_codes.append(f"nf_{c.lower()}")
+
+        task_map[symbol] = sina_codes
+        all_sina_codes.update(sina_codes)
+
+    # 2. 批量请求 (分批处理，防止 URL 过长)
+    # 新浪接口通常支持一次查几十个，我们设定每批 50 个
+    batch_size = 50
+    all_codes_list = list(all_sina_codes)
+    price_cache = {}  # { 'nf_ag2606': {'price': 7100, 'name': '白银'} }
+
+    for i in range(0, len(all_codes_list), batch_size):
+        chunk = all_codes_list[i:i + batch_size]
+        url = f"http://hq.sinajs.cn/list={','.join(chunk)}"
+
+        try:
+            resp = requests.get(url, timeout=2)
+            # 解析返回数据: var hq_str_nf_ag2606="白银2606,5800...";
+            lines = resp.text.split(';')
+            for line in lines:
+                if '="' not in line: continue
+
+                # 提取 code: var hq_str_nf_ag2606 -> nf_ag2606
+                code_part = line.split('=')[0]
+                sina_code = code_part.split('hq_str_')[-1]
+
+                # 提取数据
+                content = line.split('="')[1].strip('"')
+                if len(content) < 5: continue  # 空数据
+
+                parts = content.split(',')
+                name = parts[0]
+                price = 0.0
+
+                # 金融期货 vs 商品期货
+                if "CFF_RE_" in sina_code:
+                    price = float(parts[3]) if len(parts) > 3 else 0.0
+                else:
+                    price = float(parts[8]) if len(parts) > 8 else 0.0
+                    if price == 0 and len(parts) > 6: price = float(parts[6])  # 兜底买一价
+
+                if price > 0:
+                    price_cache[sina_code] = {'price': price, 'name': name}
+
+        except Exception as e:
+            print(f"批量请求失败: {e}")
+
+    # 3. 匹配回原始输入
+    final_results = {}
+    for symbol, candidates in task_map.items():
+        found = False
+        # 遍历该品种的所有候选合约，找到第一个有数据的
+        for c in candidates:
+            if c in price_cache:
+                data = price_cache[c]
+                # 构造返回结构
+                real_code = c.replace('nf_', '').replace('CFF_RE_', '').upper()
+                final_results[symbol] = {
+                    'price': data['price'],
+                    'name': data['name'],
+                    'code': real_code
+                }
+                found = True
+                break  # 找到了主力就不找了
+
+        if not found:
+            final_results[symbol] = None
+
+    return final_results
