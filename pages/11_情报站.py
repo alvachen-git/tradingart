@@ -1,4 +1,5 @@
 import re
+import time
 import streamlit as st
 from datetime import datetime, timedelta
 import subscription_service as sub_svc
@@ -914,5 +915,30 @@ else:
 
             col1, col2, col3 = st.columns([1, 2, 1])
             with col2:
-                if st.button("🔓 立即订阅", key=f"lock_{content['id']}", type="primary", use_container_width=True):
-                    st.info("请联系客服开通订阅：微信 trader-sec")
+                # 🔥🔥🔥 【修复】针对“复盘晚报”实现点击即订阅 🔥🔥🔥
+
+                # 检查是否是复盘晚报 (或者其他你定义的免费频道)
+                # 注意：这里需要确保 content 字典里有 'channel_name' 字段
+                current_content_channel = content.get('channel_name')
+
+                # 2. 判断是否为免费频道 (复盘晚报)
+                is_free_channel = current_content_channel == '复盘晚报'
+
+                if is_free_channel:
+                    # 场景 1: 免费/自助频道 -> 显示绿色/亮色按钮直接开通
+                    if st.button("🔓 免费订阅", key=f"lock_{content['id']}", type="primary", use_container_width=True):
+                        # 调用订阅服务
+                        success, msg = sub_svc.add_subscription(user, content['channel_id'], days=100)
+
+                        if success:
+                            st.balloons()  # 撒花
+                            st.toast("✅ 订阅成功！正在刷新...", icon="🎉")
+                            time.sleep(1)
+                            st.rerun()  # 立即刷新页面
+                        else:
+                            st.error(f"订阅失败: {msg}")
+
+                else:
+                    # 场景 2: 其他付费频道 -> 引导联系客服
+                    if st.button("🔓 立即订阅", key=f"lock_{content['id']}", type="primary", use_container_width=True):
+                        st.info("此频道为高级服务，请联系客服开通：微信 trader-sec")
