@@ -2267,3 +2267,200 @@ def update_newsletter_subscription(username, is_subscribed):
     except Exception as e:
         print(f"Update subscription error: {e}")
         return False
+
+
+@tool
+def get_iv_range_stats(symbol: str, start_date: str = None, end_date: str = None, days: int = 365):
+    """
+    查询期权IV在指定时间区间的统计数据（最高、最低、平均值）。
+
+    使用场景：
+    - "创业板期权过去一年的IV波动区间是多少"
+    - "白银期权在2025年2月到2026年2月的IV范围"
+    - "查询豆粕期权最近半年的IV高低点"
+
+    参数:
+        symbol: 品种名称或代码，如 '创业板ETF'、'159915'、'白银'、'AG'、'豆粕'、'M'
+        start_date: 起始日期 'YYYY-MM-DD' 或 'YYYYMMDD'，不传则自动计算
+        end_date: 结束日期 'YYYY-MM-DD' 或 'YYYYMMDD'，不传则为当前日期
+        days: 当不传start_date时，向前查询的天数，默认365天
+
+    返回:
+        str: IV区间统计报告（最高值、最低值、平均值、当前值）
+    """
+
+    if engine is None:
+        return "❌ 数据库连接失败"
+
+    try:
+        # 1. 处理日期参数
+        if end_date is None:
+            end_date = datetime.now().strftime('%Y%m%d')
+        else:
+            end_date = end_date.replace('-', '').replace('/', '')
+
+        if start_date is None:
+            start_dt = datetime.now() - timedelta(days=days)
+            start_date = start_dt.strftime('%Y%m%d')
+        else:
+            start_date = start_date.replace('-', '').replace('/', '')
+
+        # 2. 识别品种类型（复用 get_commodity_iv_info 中的 ETF_MAP）
+        ETF_MAP = {
+            '50ETF': '510050.SH', '上证50ETF': '510050.SH', '上证50': '510050.SH',
+            '300ETF': '510300.SH', '沪深300ETF': '510300.SH', '沪深300': '510300.SH',
+            '500ETF': '510500.SH', '中证500ETF': '510500.SH', '中证500': '510500.SH',
+            '创业板ETF': '159915.SZ', '创业板': '159915.SZ', 'CYB': '159915.SZ',
+            '科创50ETF': '588000.SH', '科创板': '588000.SH', '科创50': '588000.SH',
+            '深100ETF': '159901.SZ', '深100': '159901.SZ'
+        }
+
+        etf_code = None
+        etf_name = None
+        commodity_code = None
+        commodity_name = None
+
+        # ETF识别（复用逻辑）
+        query_upper = symbol.upper()
+        matches = []
+
+        for name, code in ETF_MAP.items():
+            if name.upper() in query_upper:
+                matches.append({'name': name, 'code': code, 'len': len(name)})
+                continue
+            short_name = name.upper().replace('ETF', '')
+            if len(short_name) > 0 and short_name in query_upper:
+                matches.append({'name': name, 'code': code, 'len': len(short_name)})
+
+        if matches:
+            best_match = sorted(matches, key=lambda x: x['len'], reverse=True)[0]
+            etf_code = best_match['code']
+            etf_name = best_match['name']
+
+        # 也支持直接输入代码
+        if not etf_code:
+            match_code = re.search(r'(510\d{3}|159\d{3}|588\d{3})', symbol)
+            if match_code:
+                raw_code = match_code.group(1)
+                etf_code = f"{raw_code}.SZ" if raw_code.startswith('159') else f"{raw_code}.SH"
+                etf_name = f"{raw_code}ETF"
+
+        # 如果不是ETF，按商品处理（复用PRODUCT_MAP）
+        if not etf_code:
+            clean_query = re.sub(r'[^a-zA-Z]', '', symbol).upper()
+
+            if clean_query in PRODUCT_MAP:
+                commodity_code = clean_query
+                commodity_name = PRODUCT_MAP[clean_query]
+            else:
+                for code, name in PRODUCT_MAP.items():
+                    if name in symbol:
+                        commodity_code = code
+                        commodity_name = name
+                        break
+
+        # 3. 查询数据库
+        if etf_code:
+            # ETF期权查询
+            print(f"[*] 查询ETF IV区间: {etf_name} ({etf_code}), {start_date} - {end_date}")
+
+            sql = f"""
+                SELECT trade_date, iv 
+                FROM etf_iv_history 
+                WHERE etf_code = '{etf_code}' 
+                  AND REPLACE(trade_date, '-', '') >= '{start_date}'
+                  AND REPLACE(trade_date, '-', '') <= '{end_date}'
+                ORDER BY trade_date DESC
+            """
+            df = pd.read_sql(sql, engine)
+            display_name = f"{etf_name} ({etf_code})"
+
+        elif commodity_code:
+            # 商品期权查询
+            print(f"[*] 查询商品 IV区间: {commodity_name} ({commodity_code}), {start_date} - {end_date}")
+
+            sql = f"""
+                SELECT trade_date, iv 
+                FROM commodity_iv_history 
+                WHERE commodity_code = '{commodity_code}' 
+                  AND trade_date >= '{start_date}'
+                  AND trade_date <= '{end_date}'
+                ORDER BY trade_date DESC
+            """
+            df = pd.read_sql(sql, engine)
+            display_name = f"{commodity_name} ({commodity_code})"
+
+        else:
+            return f"❌ 无法识别品种【{symbol}】，请使用正确的名称或代码。\n支持的格式：创业板ETF、159915、白银、AG等"
+
+        # 4. 检查数据
+        if df.empty:
+            return f"""
+⚠️ 未查询到【{display_name}】在 {start_date} 至 {end_date} 期间的IV数据。
+
+可能原因：
+1. 该时间段内无交易数据
+2. 数据库表 {'etf_iv_history' if etf_code else 'commodity_iv_history'} 中暂无该品种数据
+3. 请检查数据采集脚本是否正常运行
+"""
+
+        # 5. 计算统计数据
+        max_iv = df['iv'].max()
+        min_iv = df['iv'].min()
+        avg_iv = df['iv'].mean()
+        median_iv = df['iv'].median()
+        current_iv = df.iloc[0]['iv']  # 最新的IV
+        latest_date = df.iloc[0]['trade_date']
+
+        # 计算标准差
+        std_iv = df['iv'].std()
+
+        # 当前IV在历史中的位置
+        if max_iv != min_iv:
+            iv_percentile = ((current_iv - min_iv) / (max_iv - min_iv)) * 100
+        else:
+            iv_percentile = 50
+
+        # 6. 生成报告
+        report = f"""
+📊 **{display_name} IV区间统计报告**
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📅 **统计区间**: {start_date[:4]}-{start_date[4:6]}-{start_date[6:]} 至 {end_date[:4]}-{end_date[4:6]}-{end_date[6:]}
+📈 **数据天数**: {len(df)} 个交易日
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+## 📉 IV统计数据
+
+- **最高IV**: {max_iv:.2f}%
+- **最低IV**: {min_iv:.2f}%
+- **平均IV**: {avg_iv:.2f}%
+- **中位数IV**: {median_iv:.2f}%
+- **标准差**: {std_iv:.2f}%
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+## 🎯 当前IV水平
+
+- **最新日期**: {str(latest_date).replace('-', '')}
+- **当前IV**: {current_iv:.2f}%
+- **历史分位**: {iv_percentile:.1f}%
+
+"""
+
+        # 评级
+        if iv_percentile < 10:
+            report += "📌 **评级**: 🔥 **极低水平** - IV处于历史底部，期权便宜\n"
+        elif iv_percentile < 30:
+            report += "📌 **评级**: ✅ **偏低** - IV低于历史均值，适合买入期权\n"
+        elif iv_percentile < 70:
+            report += "📌 **评级**: 🔄 **正常区间** - IV处于历史中枢\n"
+        elif iv_percentile < 90:
+            report += "📌 **评级**: ⚠️ **偏高** - IV高于历史均值，期权较贵\n"
+        else:
+            report += "📌 **评级**: 🔴 **极高水平** - IV处于历史顶部，市场波动预期强烈\n"
+
+        report += "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+
+        return report
+
+    except Exception as e:
+        return f"❌ 查询IV区间统计时出错: {str(e)}"
