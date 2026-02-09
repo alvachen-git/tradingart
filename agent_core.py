@@ -25,12 +25,13 @@ from plot_tools import draw_chart_tool,draw_macro_compare_chart
 from futures_fund_flow_tools import get_futures_fund_flow, get_futures_fund_ranking
 from volume_oi_tools import get_volume_oi, get_futures_oi_ranking, get_option_oi_ranking, get_option_volume_abnormal, get_option_oi_abnormal, analyze_etf_option_sentiment, get_etf_option_strikes
 from market_tools import get_market_snapshot, get_price_statistics,tool_query_specific_option,get_historical_price,get_trending_hotspots,get_today_hotlist,analyze_keyword_trend,get_finance_related_trends,search_hotlist_history
-from data_engine import get_commodity_iv_info, check_option_expiry_status,search_broker_holdings_on_date,tool_analyze_position_change,tool_compare_stocks,get_stock_valuation,get_latest_data_date,tool_analyze_broker_positions,get_iv_range_stats
+from data_engine import get_commodity_iv_info, check_option_expiry_status,search_broker_holdings_on_date,tool_analyze_position_change,tool_compare_stocks,get_stock_valuation,get_latest_data_date,tool_analyze_broker_positions
 from search_tools import search_web
 from market_correlation import tool_stock_hedging_analysis, tool_futures_correlation_check,tool_stock_correlation_check
 from beta_tool import calculate_hedging_beta
 from knowledge_tools import search_investment_knowledge
 from stock_volume_tools import query_stock_volume, search_volume_anomalies
+from backtest_tools import run_option_backtest
 
 # ==========================================
 # 1. 定义共享记忆 (The State)
@@ -177,7 +178,7 @@ def supervisor_node(state: AgentState, llm):
 
     【可用员工】
     - analyst: 技术分析师 (看K线、定趋势),分析如何操作
-    - monitor: 数据监控员 (看期货资金流、期货商持仓、查期货持仓量、查价格、查波动率历史数据)
+    - monitor: 数据监控员 (看期货资金流、期货商持仓、查期货持仓量、查价格)
     - researcher: 情报研究员 (看新闻、宏观、热点、地缘政治、货币政策、Polymarket上的概率分析)
     - strategist: 期权策略员 (给策略，**必须依赖 analyst**) 
     - screener: 股票大师 (协助"推荐股票"、"选股"、查股票成交量、资金流)
@@ -187,7 +188,7 @@ def supervisor_node(state: AgentState, llm):
     - roaster: *毒舌分析师* (当用户要求"吐槽"、"挑战我"、"毒舌模式"时使用)。
 
     【调度规则 (严格遵守)】
-    1. **追求效率**: 问股票成交量就只派 `screener`；只问期货持仓量或价格就只派 `monitor`；只问新闻或热点就只派 `researcher`；只问技术分析就只派`analyst`。只问波动率就只派`monitor`。
+    1. **追求效率**: 问股票成交量就只派 `screener`；只问期货持仓量或价格就只派 `monitor`；只问新闻或热点就只派 `researcher`；只问技术分析就只派`analyst`。
     2. **全套服务**: 如果用户问"全面分析"或"详细分析"，默认路径: ["analyst", "monitor", "researcher","strategist"]。
     3. **单品种期权问题**: "500ETF适合价差还是裸买"、"推荐白银期权策略" -> 
        - 只要标的明确(500ETF)，且涉及期权交易，一律走流水线。
@@ -231,6 +232,10 @@ def supervisor_node(state: AgentState, llm):
         }
 
     final_plan = result.plan
+
+    # 回测问题 -> 直接交给通才处理，避免无关节点
+    if "回测" in query or "策略回测" in query:
+        final_plan = ["generalist"]
     final_symbol = str(result.symbol).strip()
 
     # 简单的正则判断是否为 A 股个股代码 (6开头沪市主板/科创, 0开头深市, 3开头创业板, 8/4开头北交所)
@@ -275,7 +280,7 @@ def generalist_node(state: AgentState, llm):
         tool_futures_correlation_check, tool_stock_correlation_check, calculate_hedging_beta,
         tool_get_retail_money_flow, draw_chart_tool, get_stock_valuation, tool_compare_stocks,
         get_futures_fund_flow, get_futures_fund_ranking, get_available_patterns, analyze_etf_option_sentiment,
-        get_etf_option_strikes,tool_analyze_broker_positions,
+        get_etf_option_strikes,tool_analyze_broker_positions, run_option_backtest,
         get_macro_indicator,get_macro_overview,analyze_yield_curve
     ]
 
@@ -309,6 +314,7 @@ def generalist_node(state: AgentState, llm):
         19.查宏观环境总览 -> get_macro_overview 
         20.分析收益率曲线 -> analyze_yield_curve 
         21.查单只股票的成交量详情 -> query_stock_volume
+        22.期权策略回测 -> run_option_backtest
 
         【行为准则】
         1. 先给结论，然后解释理由。
@@ -561,8 +567,7 @@ def monitor_node(state: AgentState, llm):
         tool_analyze_broker_positions,
         get_futures_oi_ranking,
         query_stock_volume,
-        get_macro_indicator,
-        get_iv_range_stats
+        get_macro_indicator
     ]
 
     # 判断是否为 ETF (51/159开头) 或 股票
@@ -586,7 +591,6 @@ def monitor_node(state: AgentState, llm):
         2. 查某品种一段时间各期货商的持仓变化 -> tool_analyze_position_change(symbol='品种名', start_date, end_date)
         3. 查期货资金流 -> get_futures_fund_flow(symbol='品种名')
         4. 如果工具返回"未找到数据"，如实告知用户，不要编造假数据！
-        5. LC是碳酸锂的合约代码
                 """
     # 2. 定义 Prompt
     # 告诉他只做数据搬运工，不要给建议
@@ -611,7 +615,6 @@ def monitor_node(state: AgentState, llm):
     - 查期货持仓量排名 -> get_futures_oi_ranking
     - 查标的价格 -> get_market_snapshot
     - 查宏观指标 -> get_macro_indicator(indicator_code='US10Y')  
-    - 查期权波动率一段时间的数据 -> get_iv_range_stats
     
     
     {tool_instruction}
@@ -693,7 +696,7 @@ def strategist_node(state: AgentState, llm):
         get_market_snapshot,  # 标的快照/现价
         # 辅助工具
         search_investment_knowledge,  # 知识库检索
-        get_iv_range_stats
+        run_option_backtest,  # 期权回测
     ]
 
     # === 🔥 ReAct Prompt - 引导期权策略推理 ===
@@ -710,7 +713,6 @@ def strategist_node(state: AgentState, llm):
         【工作流程】
         **第一步：获取标的价格和波动率**
         - 用 `get_market_snapshot` 获取现价，用`get_commodity_iv_info` 看IV，用`check_option_expiry_status` 看到期日。
-        - 用 get_iv_range_stats可以查一段时间的波动率。
               
         **第二步：设计策略**
         - **期权策略**：根据技术面趋势+IV+距离到期日+客户风险偏好来选择策略，可以查知识库辅助`search_investment_knowledge`。
@@ -724,6 +726,7 @@ def strategist_node(state: AgentState, llm):
         - **查询合约**：用 `tool_query_specific_option` 查具体期权价格（格式："标的 行权价 认购/认沽"），权利金价格也要乘上合约乘数。
         - 只有当工具返回了有效的价格数据时，才能推荐该合约。
         - 如果工具返回“未找到”，请尝试调整行权价再次查询，或者诚实告知用户该档位无合约。
+        - 如果客户问“回测/策略表现”，可用 `run_option_backtest` 给出回测结果。
 
         【风险偏好适配】：
            - 【保守型】：只推荐风险有限的策略（牛市价差、熊市价差、比率价差），禁止裸卖
@@ -1639,9 +1642,11 @@ def finalizer_node(state: AgentState, llm):
                 【输出要求】：
                 1. **直接回答用户的问题**，不要跑题！用户问持仓就答持仓，问排名就答排名。
                 2. **突出数据本身**：用表格或列表清晰展示数据。
-                3. 数据不要编造和修改。
-                4. 如果发生数据缺失或语法错误，不要把错误写出来。
-                5. 数据是每天下午5点后更新。
+                3. **简短点评**：可以加 1-2 句对数据的解读（如"XX 在大幅增仓，可能看多"），但不要扯到技术面K线分析。
+                4. 数据不要编造和修改。
+                5. 不要写成投资报告，文字要简洁有力。
+                6. 如果发生数据缺失或语法错误，不要把错误写出来。
+                7. 数据是每天下午5点后更新。
 
 
                 【格式示例】：
@@ -1652,6 +1657,7 @@ def finalizer_node(state: AgentState, llm):
                 | 1 | 螺纹钢 | -33,272 | 空头 |
                 | ... | ... | ... | ... |
 
+                💡 **简评**：东证在黑色系整体偏空，螺纹空单最重...
                 """
         else:
             # === 综合分析模式：完整报告 ===

@@ -1,4 +1,8 @@
 import streamlit as st
+
+# 临时屏蔽该页面，避免因依赖缺失导致应用无法启动
+st.info("该页面已暂时停用，如需启用请联系管理员。")
+st.stop()
 import streamlit.components.v1 as components
 import pandas as pd
 import json
