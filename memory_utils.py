@@ -11,7 +11,7 @@ if not os.getenv("DASHSCOPE_API_KEY"):
     print("⚠️ 警告: 未检测到 DASHSCOPE_API_KEY，记忆功能将无法使用")
 
 embeddings = DashScopeEmbeddings(
-    model="text-embedding-v1",
+    model="text-embedding-v3",
     dashscope_api_key=os.getenv("DASHSCOPE_API_KEY")
 )
 
