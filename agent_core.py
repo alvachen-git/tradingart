@@ -950,7 +950,7 @@ def macro_analyst_node(state: AgentState, llm):
     try:
         result = macro_agent.invoke(
             {"messages": [HumanMessage(content=f"请分析当前的宏观流动性环境。用户问题：{user_q}")]},
-            {"recursion_limit": 20}
+            {"recursion_limit": 10}
         )
         last_response = result["messages"][-1].content
 
@@ -1531,7 +1531,28 @@ def finalizer_node(state: AgentState, llm):
 
     # 过滤出 AI 的回复 (HumanMessage 在这里是 Worker 的输出载体)
     # 且排除掉可能是空的或者无关的
-    worker_msgs = [m for m in all_messages if isinstance(m, HumanMessage) and len(m.content) > 10]
+    # 🔥 [修复] 只收集有标签的 worker 输出，排除用户原始消息
+    WORKER_TAGS = [
+        "【技术分析】", "【数据监控】", "【期权策略】", "【情报与舆情】",
+        "【宏观策略】", "【知识问答】", "【精选股票】", "【毒舌点评】",
+        "【王牌分析】", "【闲聊】", "【风控修正】"
+    ]
+
+    worker_msgs = [
+        m for m in all_messages
+        if isinstance(m, HumanMessage)
+           and len(m.content) > 10
+           and any(tag in m.content for tag in WORKER_TAGS)
+    ]
+
+    # 🔥 [新增] 如果没有有效的 worker 输出，返回友好提示
+    if not worker_msgs:
+        symbol = state.get("symbol", "未知标的")
+        return {
+            "messages": [HumanMessage(
+                content=f"⚠️ 抱歉，AI 团队未能生成关于 **{symbol}** 的有效分析报告。\n\n可能原因：\n- 标的代码不正确或不在支持范围内\n- 数据源暂时无法访问\n\n请检查代码后重试。")],
+            "chart_img": ""
+        }
 
     # 获取知识库内容
 
