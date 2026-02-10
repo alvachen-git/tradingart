@@ -638,6 +638,7 @@ if should_auto_login and cookies:
         if auth.check_token(str(c_user), c_token):
             st.session_state['is_logged_in'] = True
             st.session_state['user_id'] = str(c_user)
+            st.session_state['token'] = c_token
 
             # 🔥 [新增] 自动登录后，尝试从 Redis 恢复待处理任务
             from task_manager import TaskManager
@@ -669,6 +670,14 @@ if should_auto_login and cookies:
             time.sleep(0.3)
             st.rerun()
 
+        else:
+            # 🔥 新增：Token 失效时清除 Cookie
+            try:
+                cookie_manager.delete("username", key="auto_clean_user")
+                cookie_manager.delete("token", key="auto_clean_token")
+            except:
+                pass
+
 # 【关键修复 2】如果已经是登出后的重跑，现在可以重置标记了
 # 这样下次用户刷新页面(F5)时，如果 Cookie 还在(虽然应该删了)，还能尝试登录，或者单纯重置状态
 if st.session_state.get('just_logged_out', False):
@@ -679,6 +688,7 @@ if 'is_logged_in' not in st.session_state:
     st.session_state['is_logged_in'] = False
     st.session_state['user_id'] = None
     st.session_state['username'] = None
+    st.session_state['token'] = None
 
 
 
@@ -1254,9 +1264,10 @@ with st.sidebar:
                     if success:
                         st.session_state['is_logged_in'] = True
                         st.session_state['user_id'] = real_username  # 🔥 使用真正的用户名
+                        st.session_state['token'] = token
 
                         # 写入 Cookie（也用真正的用户名）
-                        expires = datetime.now() + timedelta(days=7)
+                        expires = datetime.now() + timedelta(days=30)
                         cookie_manager.set("username", real_username, expires_at=expires, key="set_user_cookie")
                         cookie_manager.set("token", token, expires_at=expires, key="set_token_cookie")
 
@@ -1334,8 +1345,9 @@ with st.sidebar:
                             if login_success:
                                 st.session_state['is_logged_in'] = True
                                 st.session_state['user_id'] = real_username
+                                st.session_state['token'] = token
 
-                                expires = datetime.now() + timedelta(days=7)
+                                expires = datetime.now() + timedelta(days=30)
                                 cookie_manager.set("username", real_username, expires_at=expires, key="reg_set_user")
                                 cookie_manager.set("token", token, expires_at=expires, key="reg_set_token")
 

@@ -188,7 +188,7 @@ def supervisor_node(state: AgentState, llm):
     - roaster: *毒舌分析师* (当用户要求"吐槽"、"挑战我"、"毒舌模式"时使用)。
 
     【调度规则 (严格遵守)】
-    1. **追求效率**: 问股票成交量就只派 `screener`；只问期货持仓量或价格就只派 `monitor`；只问新闻或热点就只派 `researcher`；只问技术分析就只派`analyst`。
+    1. **追求效率**: 问股票成交量就只派 `screener`；只问期货持仓量或价格就只派 `monitor`；只问新闻或热点就只派 `researcher`；只问技术分析就只派`analyst`；只问行情分析就只派`analyst`。
     2. **全套服务**: 如果用户问"全面分析"或"详细分析"，默认路径: ["analyst", "monitor", "researcher","strategist"]。
     3. **单品种期权问题**: "500ETF适合价差还是裸买"、"推荐白银期权策略" -> 
        - 只要标的明确(500ETF)，且涉及期权交易，一律走流水线。
