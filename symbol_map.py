@@ -2327,7 +2327,7 @@ def resolve_symbol(query):
 
     # 模糊匹配 (名称包含)
     for name, code in market_map.items():
-        if query in name:
+        if query in name.upper():  # 添加 .upper() 确保大小写不敏感
             return code, 'stock'
 
     # 4. 匹配纯数字代码 (股票/ETF)
@@ -2370,6 +2370,6 @@ if __name__ == "__main__":
     print(f"上证指数 -> {resolve_symbol('上证指数')}")  # ('000001.SH', 'index')
     print(f"mo -> {resolve_symbol('mo')}")  # ('000300.SH', 'index')
     print(f"沪深300 -> {resolve_symbol('沪深300')}")  # ('IF', 'future') - 保持原有期货习惯
-    print(f"宁德时代 -> {resolve_symbol('宁德时代')}")  # ('000001.SH', 'index')
+    print(f"三七互娱 -> {resolve_symbol('三七互娱')}")  # ('000001.SH', 'index')
     print(f"600519 -> {resolve_symbol('600519')}")  # ('600519.SH', 'stock')
     print(f"00700 -> {resolve_symbol('00700')}")  # ('rb', 'future')
