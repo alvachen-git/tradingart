@@ -2,6 +2,7 @@ import pandas as pd
 import numpy as np
 from scipy import stats
 import re
+from symbol_match import sql_prefix_condition
 import os
 from sqlalchemy import create_engine, text
 from kline_tools import analyze_kline_pattern
@@ -26,6 +27,8 @@ if ts_token:
 
 # 1. 初始化
 load_dotenv(override=True)
+
+
 
 # --- 【安全修正】从环境变量读取数据库配置 ---
 DB_USER = os.getenv("DB_USER")
@@ -1225,7 +1228,8 @@ def _query_commodity_iv(query, need_rank, limit_days):
         sql_main = f"""
             SELECT ts_code, close_price, REPLACE(trade_date, '-', '') as trade_date 
             FROM futures_price 
-            WHERE ts_code LIKE '{search_code}%%' AND ts_code NOT LIKE '%%TAS%%'
+            WHERE {sql_prefix_condition(search_code)}
+              AND ts_code NOT LIKE '%%TAS%%'
               AND trade_date = (SELECT MAX(trade_date) FROM futures_price)
             ORDER BY oi DESC LIMIT 1
         """
@@ -1475,7 +1479,7 @@ def check_option_expiry_status(query: str):
                 sql_d = f"""
                     SELECT maturity_date 
                     FROM commodity_option_basic 
-                    WHERE ts_code LIKE '{target_key}%%' AND ts_code NOT LIKE '%%TAS%%'
+                    WHERE {sql_prefix_condition(target_key)} AND ts_code NOT LIKE '%%TAS%%'
                     ORDER BY maturity_date ASC 
                     LIMIT 1
                 """
@@ -1486,8 +1490,7 @@ def check_option_expiry_status(query: str):
                     sql_fallback = f"""
                                     SELECT ts_code, maturity_date 
                                     FROM commodity_option_basic 
-                                    WHERE ts_code LIKE '{product_code}%%' 
-                                       OR ts_code LIKE '{product_code.lower()}%%'
+                                    WHERE {sql_prefix_condition(product_code)}
                                     ORDER BY maturity_date ASC 
                                     LIMIT 10
                                 """
@@ -1521,7 +1524,7 @@ def check_option_expiry_status(query: str):
                 sql_opt = f"""
                     SELECT ts_code, maturity_date 
                     FROM commodity_option_basic 
-                    WHERE (ts_code LIKE '{product_code}%%' OR ts_code LIKE '{product_code.lower()}%%')
+                    WHERE {sql_prefix_condition(product_code)}
                       AND ts_code NOT LIKE '%%TAS%%'
                       AND maturity_date >= '{today_str}'
                     ORDER BY maturity_date ASC 
@@ -1546,7 +1549,7 @@ def check_option_expiry_status(query: str):
                     sql_fallback = f"""
                         SELECT ts_code, maturity_date 
                         FROM commodity_option_basic 
-                        WHERE ts_code LIKE '{product_code}%%' AND ts_code NOT LIKE '%%TAS%%'
+                        WHERE {sql_prefix_condition(product_code)} AND ts_code NOT LIKE '%%TAS%%'
                           AND maturity_date >= '{today_str}'
                         ORDER BY maturity_date ASC 
                         LIMIT 1000
@@ -1713,7 +1716,7 @@ def search_broker_holdings_on_date(broker_name: str, date: str, symbol: str = No
                     (long_vol + short_vol) as 总持仓
                 FROM futures_holding 
                 WHERE REPLACE(trade_date, '-', '') = '{date}'
-                  AND ts_code LIKE '{code_prefix}%%' AND ts_code NOT LIKE '%%TAS%%'
+                  AND {sql_prefix_condition(code_prefix)} AND ts_code NOT LIKE '%%TAS%%'
                 ORDER BY 总持仓 DESC
                 LIMIT 6
             """
@@ -1736,7 +1739,7 @@ def search_broker_holdings_on_date(broker_name: str, date: str, symbol: str = No
             if symbol:
                 from data_engine import CN_TO_CODE
                 code_prefix = CN_TO_CODE.get(symbol, symbol).upper()
-                sql += f" AND ts_code LIKE '{code_prefix}%%' AND ts_code NOT LIKE '%%TAS%%'"
+                sql += f" AND {sql_prefix_condition(code_prefix)} AND ts_code NOT LIKE '%%TAS%%'"
 
             # 按净持仓绝对值排序
             sql += " ORDER BY ABS(net_vol) DESC LIMIT 20"
@@ -1822,7 +1825,7 @@ def tool_analyze_position_change(symbol: str, start_date: str, end_date: str, so
                 REPLACE(trade_date, '-', '') as t_date
             FROM futures_holding 
             WHERE REPLACE(trade_date, '-', '') IN ('{d1}', '{d2}')
-              AND ts_code LIKE '{code_prefix}%%' AND ts_code NOT LIKE '%%TAS%%'
+              AND {sql_prefix_condition(code_prefix)} AND ts_code NOT LIKE '%%TAS%%'
         """
         df = pd.read_sql(sql, engine)
 

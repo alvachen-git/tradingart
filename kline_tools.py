@@ -6,6 +6,7 @@ from sqlalchemy import create_engine, text
 from dotenv import load_dotenv
 from langchain_core.tools import tool
 import symbol_map
+from symbol_match import strict_futures_prefix_pattern
 
 # --- 1. 独立初始化 ---
 load_dotenv(override=True)
@@ -148,18 +149,19 @@ def analyze_kline_pattern(query: str, trade_date: str = None):
                 sql = f"""
                     SELECT trade_date, open_price, high_price, low_price, close_price 
                     FROM futures_price
-                    WHERE ts_code LIKE '{symbol}%%' AND ts_code NOT LIKE '%%TAS%%'
+                    WHERE UPPER(ts_code) LIKE '{symbol.upper()}%%' AND ts_code NOT LIKE '%%TAS%%'
                     {date_condition}
                     ORDER BY trade_date DESC LIMIT 60
                 """
             else:
                 # 用户只输入品种（如 白银），查询主力合约
                 clean_symbol = ''.join([i for i in symbol if not i.isdigit()])
+                pattern = strict_futures_prefix_pattern(clean_symbol)
 
                 # 步骤1：找出主力合约（持仓量最大的）
                 sql_main = f"""
                         SELECT ts_code FROM futures_price 
-                        WHERE ts_code LIKE '{clean_symbol}%%' 
+                        WHERE UPPER(ts_code) REGEXP '{pattern}' 
                           AND ts_code NOT LIKE '%%TAS%%'
                           AND ts_code REGEXP '[0-9]{{4}}$'
                         ORDER BY trade_date DESC, oi DESC 

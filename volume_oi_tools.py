@@ -8,9 +8,8 @@ import os
 from sqlalchemy import create_engine, text
 from dotenv import load_dotenv
 from langchain_core.tools import tool
-from pydantic import BaseModel, Field
 import symbol_map
-import traceback
+from symbol_match import sql_prefix_condition
 import re
 
 # 初始化
@@ -35,6 +34,8 @@ def get_db_engine():
 
 
 engine = get_db_engine()
+
+
 
 # ==========================================
 #  全局映射表（只定义一次）
@@ -282,7 +283,7 @@ def get_option_oi_ranking(query: str):
             dir_filter = f"AND ts_code LIKE '%{direction}%'" if direction else ""
             sql = text(f"""
                 SELECT t1.ts_code,t1.trade_date,t1.vol,t1.oi FROM commodity_opt_daily t1
-                INNER JOIN (SELECT ts_code,MAX(trade_date) md FROM commodity_opt_daily WHERE ts_code LIKE '{prefix}%' GROUP BY ts_code) t2 
+                INNER JOIN (SELECT ts_code,MAX(trade_date) md FROM commodity_opt_daily WHERE {sql_prefix_condition(prefix)} GROUP BY ts_code) t2 
                 ON t1.ts_code=t2.ts_code AND t1.trade_date=t2.md
                 WHERE t1.oi>0 {dir_filter} ORDER BY t1.oi DESC LIMIT 5
             """)
@@ -344,7 +345,7 @@ def get_option_volume_abnormal(query: str = "全部"):
                 SELECT t1.ts_code,t1.vol today_vol,t2.vol prev_vol,ROUND(t1.vol/t2.vol,1) ratio
                 FROM commodity_opt_daily t1
                 INNER JOIN commodity_opt_daily t2 ON t1.ts_code=t2.ts_code AND t2.trade_date=:p
-                WHERE t1.trade_date=:l AND t2.vol>200 AND t1.vol>t2.vol*2 AND t1.ts_code LIKE '{prefix}%'
+                WHERE t1.trade_date=:l AND t2.vol>200 AND t1.vol>t2.vol*2 AND {sql_prefix_condition(prefix, "t1.ts_code")}
                 ORDER BY ratio DESC LIMIT 5
             """)
             df = pd.read_sql(sql, engine, params={"l": latest, "p": prev})
@@ -420,7 +421,7 @@ def get_option_oi_abnormal(query: str = "全部"):
                 SELECT t1.ts_code,t1.oi today_oi,t2.oi prev_oi,(t1.oi-t2.oi) chg,ROUND((t1.oi-t2.oi)/t2.oi*100,1) pct
                 FROM commodity_opt_daily t1
                 INNER JOIN commodity_opt_daily t2 ON t1.ts_code=t2.ts_code AND t2.trade_date=:p
-                WHERE t1.trade_date=:l AND t2.oi>100 AND t1.oi>t2.oi*1.5 AND t1.ts_code LIKE '{prefix}%'
+                WHERE t1.trade_date=:l AND t2.oi>100 AND t1.oi>t2.oi*1.5 AND {sql_prefix_condition(prefix, "t1.ts_code")}
                 ORDER BY pct DESC LIMIT 5
             """)
             df = pd.read_sql(sql, engine, params={"l": latest, "p": prev})

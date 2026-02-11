@@ -9,6 +9,7 @@ import symbol_map
 import traceback
 from datetime import datetime
 import streamlit as st
+from symbol_match import strict_futures_prefix_pattern
 
 # 1. 初始化環境
 load_dotenv(override=True)
@@ -217,8 +218,24 @@ def get_market_snapshot(query: str):
             df = pd.read_sql(sql, engine, params={"code": target_code})
 
         else:
-            sql = text("SELECT * FROM futures_price WHERE ts_code LIKE :code AND ts_code NOT LIKE '%TAS%' ORDER BY trade_date DESC LIMIT 1")
-            df = pd.read_sql(sql, engine, params={"code": f"{target_code}%"})
+            # Futures: avoid prefix collisions (e.g., A vs AU)
+            if len(target_code) == 1:
+                # Match A0 / A2405 / A-2405 / A2405.DCE (case-insensitive)
+                sql = text(
+                    """
+                    SELECT * FROM futures_price
+                    WHERE UPPER(ts_code) REGEXP :pattern
+                      AND UPPER(ts_code) NOT LIKE '%TAS%'
+                    ORDER BY trade_date DESC LIMIT 1
+                    """
+                )
+                pattern = strict_futures_prefix_pattern(target_code)
+                df = pd.read_sql(sql, engine, params={"pattern": pattern})
+            else:
+                sql = text(
+                    "SELECT * FROM futures_price WHERE UPPER(ts_code) LIKE :code AND UPPER(ts_code) NOT LIKE '%TAS%' ORDER BY trade_date DESC LIMIT 1"
+                )
+                df = pd.read_sql(sql, engine, params={"code": f"{target_code}%"})
 
         if df.empty: return f"暫無 {query} 最新數據"
 
