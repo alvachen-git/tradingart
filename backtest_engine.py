@@ -219,7 +219,10 @@ def _calc_short_margin(
     else:
         otm = max(S - K, 0) * multiplier
         base = max(S * multiplier * margin_rate - otm, K * multiplier * margin_rate)
-    return base * lots + premium_total
+    margin = base * lots + premium_total
+    # Floor: at least 8% of notional
+    floor = S * multiplier * 0.08 * lots
+    return max(margin, floor)
 
 def get_etf_underlyings():
     if engine is None:
@@ -267,6 +270,36 @@ def get_etf_strikes_for_expiry(underlying: str, trade_date: str, expiry: str):
         return {"C": [], "P": []}
     df["call_put"] = df["call_put"].apply(_normalize_call_put)
     df["exercise_price"] = pd.to_numeric(df["exercise_price"], errors="coerce")
+    df = df[df["exercise_price"].apply(_is_standard_strike)]
+    strikes = {"C": [], "P": []}
+    for cp in ["C", "P"]:
+        strikes[cp] = sorted(df[df["call_put"] == cp]["exercise_price"].dropna().unique().tolist())
+    return strikes
+
+
+def get_etf_strikes_for_range(underlying: str, start_date: str, end_date: str):
+    if engine is None:
+        return {"C": [], "P": []}
+    sql = text(
+        """
+        SELECT DISTINCT b.exercise_price, b.call_put
+        FROM option_daily d
+        INNER JOIN option_basic b ON d.ts_code = b.ts_code
+        WHERE b.underlying = :underlying
+          AND d.trade_date BETWEEN :start_date AND :end_date
+        """
+    )
+    df = pd.read_sql(
+        sql,
+        engine,
+        params={"underlying": underlying, "start_date": start_date, "end_date": end_date},
+    )
+    if df.empty:
+        return {"C": [], "P": []}
+    df["call_put"] = df["call_put"].apply(_normalize_call_put)
+    df["exercise_price"] = pd.to_numeric(df["exercise_price"], errors="coerce")
+    df = df.dropna(subset=["call_put", "exercise_price"])
+    df = df[df["exercise_price"].apply(_is_standard_strike)]
     strikes = {"C": [], "P": []}
     for cp in ["C", "P"]:
         strikes[cp] = sorted(df[df["call_put"] == cp]["exercise_price"].dropna().unique().tolist())
@@ -392,6 +425,32 @@ def _normalize_call_put(val: str) -> str:
     if "认沽" in v:
         return "P"
     return v
+
+
+def _is_standard_strike(val: float) -> bool:
+    if val is None or (isinstance(val, float) and np.isnan(val)):
+        return False
+    try:
+        x = float(val)
+    except Exception:
+        return False
+    r = round(x, 2)
+    if abs(r - x) > 1e-6:
+        return False
+    return int(round(r * 100)) % 5 == 0
+
+
+def _is_effective_standard(val: float, target_strike: float | None) -> bool:
+    if target_strike is None:
+        return _is_standard_strike(val)
+    try:
+        v = float(val)
+        t = float(target_strike)
+    except Exception:
+        return False
+    if abs(v - t) < 1e-6:
+        return True
+    return _is_standard_strike(v)
 
 
 def run_etf_roll_backtest(
@@ -525,20 +584,197 @@ def run_etf_roll_backtest(
     call_put_map = {r["ts_code"]: r["call_put"] for _, r in df.iterrows()}
     underlying_prices = _fetch_underlying_prices(underlying, start_date, end_date)
 
-    def _select_contract(df_exp, call_put, target_strike=None):
+    def _select_contract(
+        df_exp,
+        call_put,
+        target_strike=None,
+        standard_only=True,
+        direction_filter=None,
+        tolerance_steps: int | None = None,
+    ):
         df_cp = df_exp[df_exp["call_put"] == call_put].copy()
         if df_cp.empty:
             return None
         if target_strike is None:
+            if standard_only:
+                df_cp = df_cp[df_cp["exercise_price"].apply(_is_standard_strike)]
+            if df_cp.empty:
+                return None
             return df_cp.sort_values("oi", ascending=False).iloc[0]
+        if standard_only:
+            df_cp = df_cp[df_cp["exercise_price"].apply(lambda x: _is_effective_standard(x, target_strike))]
+        if df_cp.empty:
+            return None
+        if direction_filter == "gte":
+            df_cp = df_cp[df_cp["exercise_price"] >= target_strike]
+            if df_cp.empty:
+                return None
+        elif direction_filter == "lte":
+            df_cp = df_cp[df_cp["exercise_price"] <= target_strike]
+            if df_cp.empty:
+                return None
         df_cp["diff"] = (df_cp["exercise_price"] - target_strike).abs()
+        if tolerance_steps is not None and tolerance_steps >= 0:
+            uniq = sorted(df_cp["exercise_price"].dropna().unique().tolist())
+            tick = None
+            for i in range(1, len(uniq)):
+                d = uniq[i] - uniq[i - 1]
+                if d > 1e-6:
+                    tick = d
+                    break
+            if tick is not None:
+                max_diff = tick * tolerance_steps
+                df_tol = df_cp[df_cp["diff"] <= max_diff]
+                if not df_tol.empty:
+                    df_cp = df_tol
         df_cp = df_cp.sort_values(["diff", "oi"], ascending=[True, False])
         return df_cp.iloc[0]
 
-    def _select_contract_exact(df_exp, call_put, target_strike):
+    def _select_by_otm(df_exp, call_put, S, target_otm, prefer_standard=True):
+        if df_exp is None or df_exp.empty or S is None:
+            return None
         df_cp = df_exp[df_exp["call_put"] == call_put].copy()
         if df_cp.empty:
             return None
+        df_cp["exercise_price"] = pd.to_numeric(df_cp["exercise_price"], errors="coerce")
+        df_cp = df_cp.dropna(subset=["exercise_price"])
+        if df_cp.empty:
+            return None
+        # Direction preference: call K >= S, put K <= S
+        if call_put == "C":
+            df_dir = df_cp[df_cp["exercise_price"] >= S]
+        else:
+            df_dir = df_cp[df_cp["exercise_price"] <= S]
+        if df_dir.empty:
+            df_dir = df_cp
+        # Prefer standard strikes if available
+        if prefer_standard:
+            df_std = df_dir[df_dir["exercise_price"].apply(_is_standard_strike)]
+            if not df_std.empty:
+                df_dir = df_std
+        # Compute OTM percentage
+        if call_put == "C":
+            df_dir["otm_pct"] = df_dir["exercise_price"] / S - 1.0
+        else:
+            df_dir["otm_pct"] = 1.0 - df_dir["exercise_price"] / S
+        df_dir["otm_diff"] = (df_dir["otm_pct"] - target_otm).abs()
+        df_dir = df_dir.sort_values(["otm_diff", "oi"], ascending=[True, False])
+        return df_dir.iloc[0]
+
+    def _next_strike(df_exp, call_put, base_strike, direction="up", prefer_standard=True):
+        if df_exp is None or df_exp.empty or base_strike is None:
+            return None
+        df_cp = df_exp[df_exp["call_put"] == call_put].copy()
+        if df_cp.empty:
+            return None
+        df_cp["exercise_price"] = pd.to_numeric(df_cp["exercise_price"], errors="coerce")
+        df_cp = df_cp.dropna(subset=["exercise_price"])
+        if df_cp.empty:
+            return None
+        if prefer_standard:
+            df_std = df_cp[df_cp["exercise_price"].apply(_is_standard_strike)]
+            if not df_std.empty:
+                df_cp = df_std
+        uniq = sorted(df_cp["exercise_price"].unique().tolist())
+        if direction == "up":
+            cands = [x for x in uniq if x > base_strike + 1e-9]
+            if not cands:
+                return None
+            target = cands[0]
+        else:
+            cands = [x for x in uniq if x < base_strike - 1e-9]
+            if not cands:
+                return None
+            target = cands[-1]
+        df_pick = df_cp[df_cp["exercise_price"] == target]
+        if df_pick.empty:
+            return None
+        return df_pick.sort_values("oi", ascending=False).iloc[0]
+
+    def _select_contract_debug(
+        df_exp,
+        call_put,
+        target_strike,
+        standard_only=True,
+        direction_filter=None,
+        tolerance_steps: int | None = None,
+    ):
+        info = {
+            "target": target_strike,
+            "cnt_all": 0,
+            "cnt_std": 0,
+            "cnt_dir": 0,
+            "min_all": None,
+            "max_all": None,
+            "min_std": None,
+            "max_std": None,
+            "min_dir": None,
+            "max_dir": None,
+            "selected_strike": None,
+            "selected_ts": None,
+        }
+        if df_exp is None or df_exp.empty:
+            return None, info
+        df_cp = df_exp[df_exp["call_put"] == call_put].copy()
+        if df_cp.empty:
+            return None, info
+        df_cp["exercise_price"] = pd.to_numeric(df_cp["exercise_price"], errors="coerce")
+        df_cp = df_cp.dropna(subset=["exercise_price"])
+        if df_cp.empty:
+            return None, info
+        info["cnt_all"] = int(df_cp.shape[0])
+        info["min_all"] = float(df_cp["exercise_price"].min())
+        info["max_all"] = float(df_cp["exercise_price"].max())
+        df_std = df_cp
+        if standard_only:
+            df_std = df_cp[df_cp["exercise_price"].apply(lambda x: _is_effective_standard(x, target_strike))]
+        if df_std.empty:
+            info["cnt_std"] = 0
+            return None, info
+        info["cnt_std"] = int(df_std.shape[0])
+        info["min_std"] = float(df_std["exercise_price"].min())
+        info["max_std"] = float(df_std["exercise_price"].max())
+        df_dir = df_std
+        if direction_filter == "gte":
+            df_dir = df_std[df_std["exercise_price"] >= target_strike]
+            if df_dir.empty:
+                info["cnt_dir"] = 0
+                return None, info
+        elif direction_filter == "lte":
+            df_dir = df_std[df_std["exercise_price"] <= target_strike]
+            if df_dir.empty:
+                info["cnt_dir"] = 0
+                return None, info
+        info["cnt_dir"] = int(df_dir.shape[0])
+        info["min_dir"] = float(df_dir["exercise_price"].min())
+        info["max_dir"] = float(df_dir["exercise_price"].max())
+        df_dir = df_dir.copy()
+        df_dir["diff"] = (df_dir["exercise_price"] - target_strike).abs()
+        if tolerance_steps is not None and tolerance_steps >= 0:
+            uniq = sorted(df_dir["exercise_price"].dropna().unique().tolist())
+            tick = None
+            for i in range(1, len(uniq)):
+                d = uniq[i] - uniq[i - 1]
+                if d > 1e-6:
+                    tick = d
+                    break
+            if tick is not None:
+                max_diff = tick * tolerance_steps
+                df_tol = df_dir[df_dir["diff"] <= max_diff]
+                if not df_tol.empty:
+                    df_dir = df_tol
+        df_dir = df_dir.sort_values(["diff", "oi"], ascending=[True, False])
+        pick = df_dir.iloc[0]
+        info["selected_strike"] = float(pick["exercise_price"])
+        info["selected_ts"] = pick["ts_code"]
+        return pick, info
+
+    def _select_contract_exact(df_exp, call_put, target_strike, standard_only=True):
+        df_cp = df_exp[df_exp["call_put"] == call_put].copy()
+        if df_cp.empty:
+            return None
+        if standard_only:
+            df_cp = df_cp[df_cp["exercise_price"].apply(lambda x: _is_effective_standard(x, target_strike))]
         df_cp = df_cp[df_cp["exercise_price"] == target_strike]
         if df_cp.empty:
             return None
@@ -556,8 +792,32 @@ def run_etf_roll_backtest(
         return S
 
     calendar_diag_rows = []
+    pick_diag_rows = []
 
-    def pick_contracts(date_str: str, min_expiry: str = None):
+    def _strike_stats(df_exp: pd.DataFrame) -> dict:
+        stats = {
+            "call_min": None,
+            "call_max": None,
+            "put_min": None,
+            "put_max": None,
+            "call_cnt": 0,
+            "put_cnt": 0,
+        }
+        if df_exp is None or df_exp.empty:
+            return stats
+        df_c = df_exp[df_exp["call_put"] == "C"]
+        df_p = df_exp[df_exp["call_put"] == "P"]
+        if not df_c.empty:
+            stats["call_cnt"] = int(df_c.shape[0])
+            stats["call_min"] = float(df_c["exercise_price"].min())
+            stats["call_max"] = float(df_c["exercise_price"].max())
+        if not df_p.empty:
+            stats["put_cnt"] = int(df_p.shape[0])
+            stats["put_min"] = float(df_p["exercise_price"].min())
+            stats["put_max"] = float(df_p["exercise_price"].max())
+        return stats
+
+    def pick_contracts(date_str: str, min_expiry: str = None, standard_only: bool = True, reason: str = "entry"):
         df_today = df[df["trade_date"] == date_str]
         if df_today.empty:
             return None, None
@@ -588,23 +848,108 @@ def run_etf_roll_backtest(
         if S is None:
             return None, None
 
+        target_otm = 0.0
+        if strike_mode == "OTM5":
+            target_otm = 0.05
+        elif strike_mode == "OTM10":
+            target_otm = 0.10
+
         if strategy in {"double_sell", "double_buy"}:
             call_strike = _pick_strike(S, "C", strike_mode, "call_strike")
             put_strike = _pick_strike(S, "P", strike_mode, "put_strike")
+            call = None
+            put = None
+            expiry_used = None
+            df_exp_used = None
+            call_dbg = {}
+            put_dbg = {}
             if strike_mode == "MANUAL":
-                call = _select_contract_exact(df_exp, "C", call_strike)
-                put = _select_contract_exact(df_exp, "P", put_strike)
+                call = _select_contract_exact(df_exp, "C", call_strike, standard_only=standard_only)
+                put = _select_contract_exact(df_exp, "P", put_strike, standard_only=standard_only)
+                if call is None:
+                    call, call_dbg = _select_contract_debug(
+                        df_exp,
+                        "C",
+                        call_strike,
+                        standard_only=standard_only,
+                        direction_filter="gte",
+                        tolerance_steps=tolerance_steps if standard_only else None,
+                    )
+                else:
+                    call_dbg = {"selected_strike": strike_map.get(call["ts_code"]), "selected_ts": call["ts_code"]}
+                if put is None:
+                    put, put_dbg = _select_contract_debug(
+                        df_exp,
+                        "P",
+                        put_strike,
+                        standard_only=standard_only,
+                        direction_filter="lte",
+                        tolerance_steps=tolerance_steps if standard_only else None,
+                    )
+                else:
+                    put_dbg = {"selected_strike": strike_map.get(put["ts_code"]), "selected_ts": put["ts_code"]}
+                expiry_used = expiry
+                df_exp_used = df_exp
             else:
-                call = _select_contract(df_exp, "C", call_strike)
-                put = _select_contract(df_exp, "P", put_strike)
-            if call is None or put is None:
+                df_exp = df_valid[df_valid["delist_date"] == expiry]
+                call = _select_by_otm(df_exp, "C", S, target_otm, prefer_standard=True)
+                put = _select_by_otm(df_exp, "P", S, target_otm, prefer_standard=True)
+                if call is None or put is None:
+                    call = _select_by_otm(df_exp, "C", S, target_otm, prefer_standard=False)
+                    put = _select_by_otm(df_exp, "P", S, target_otm, prefer_standard=False)
+                if call is not None and put is not None:
+                    expiry_used = expiry
+                    df_exp_used = df_exp
+                    call_dbg = {"selected_strike": strike_map.get(call["ts_code"]), "selected_ts": call["ts_code"]}
+                    put_dbg = {"selected_strike": strike_map.get(put["ts_code"]), "selected_ts": put["ts_code"]}
+            if call is None or put is None or expiry_used is None:
                 return None, None
+            stats = _strike_stats(df_exp_used)
             direction = "short" if strategy == "double_sell" else "long"
             contracts = [
                 {"ts_code": call["ts_code"], "direction": direction, "lots": lots},
                 {"ts_code": put["ts_code"], "direction": direction, "lots": lots},
             ]
-            return expiry, contracts
+            call_strike_pick = strike_map.get(call["ts_code"])
+            put_strike_pick = strike_map.get(put["ts_code"])
+            pick_diag_rows.append(
+                {
+                    "date": date_str,
+                    "reason": reason,
+                    "strategy": strategy,
+                    "S": S,
+                    "target_call": call_strike,
+                    "target_put": put_strike,
+                    "picked_call": call_strike_pick,
+                    "picked_put": put_strike_pick,
+                    "call_ts": call["ts_code"],
+                    "put_ts": put["ts_code"],
+                    "expiry": expiry_used,
+                    "expiries": ",".join([str(x) for x in expiries[:6]]),
+                    "standard_only": standard_only,
+                    "call_min": stats["call_min"],
+                    "call_max": stats["call_max"],
+                    "put_min": stats["put_min"],
+                    "put_max": stats["put_max"],
+                    "call_cnt": stats["call_cnt"],
+                    "put_cnt": stats["put_cnt"],
+                    "call_cnt_all": call_dbg.get("cnt_all") if isinstance(call_dbg, dict) else None,
+                    "call_cnt_std": call_dbg.get("cnt_std") if isinstance(call_dbg, dict) else None,
+                    "call_cnt_dir": call_dbg.get("cnt_dir") if isinstance(call_dbg, dict) else None,
+                    "call_min_std": call_dbg.get("min_std") if isinstance(call_dbg, dict) else None,
+                    "call_max_std": call_dbg.get("max_std") if isinstance(call_dbg, dict) else None,
+                    "call_min_dir": call_dbg.get("min_dir") if isinstance(call_dbg, dict) else None,
+                    "call_max_dir": call_dbg.get("max_dir") if isinstance(call_dbg, dict) else None,
+                    "put_cnt_all": put_dbg.get("cnt_all") if isinstance(put_dbg, dict) else None,
+                    "put_cnt_std": put_dbg.get("cnt_std") if isinstance(put_dbg, dict) else None,
+                    "put_cnt_dir": put_dbg.get("cnt_dir") if isinstance(put_dbg, dict) else None,
+                    "put_min_std": put_dbg.get("min_std") if isinstance(put_dbg, dict) else None,
+                    "put_max_std": put_dbg.get("max_std") if isinstance(put_dbg, dict) else None,
+                    "put_min_dir": put_dbg.get("min_dir") if isinstance(put_dbg, dict) else None,
+                    "put_max_dir": put_dbg.get("max_dir") if isinstance(put_dbg, dict) else None,
+                }
+            )
+            return expiry_used, contracts
 
         if strategy in {"single_call", "single_put", "single_sell_call", "single_sell_put"}:
             if strategy in {"single_call", "single_sell_call"}:
@@ -614,13 +959,33 @@ def run_etf_roll_backtest(
             mode = strike_mode
             strike = _pick_strike(S, cp, mode, "single_strike")
             if strike_mode == "MANUAL":
-                pick = _select_contract_exact(df_exp, cp, strike)
+                pick = _select_contract_exact(df_exp, cp, strike, standard_only=standard_only)
+                if pick is None:
+                    pick = _select_by_otm(df_exp, cp, S, target_otm, prefer_standard=True)
             else:
-                pick = _select_contract(df_exp, cp, strike)
+                pick = _select_by_otm(df_exp, cp, S, target_otm, prefer_standard=True)
+                if pick is None:
+                    pick = _select_by_otm(df_exp, cp, S, target_otm, prefer_standard=False)
             if pick is None:
                 return None, None
             direction = "short" if strategy in {"single_sell_call", "single_sell_put"} else "long"
             contracts = [{"ts_code": pick["ts_code"], "direction": direction, "lots": lots}]
+            pick_diag_rows.append(
+                {
+                    "date": date_str,
+                    "reason": reason,
+                    "strategy": strategy,
+                    "S": S,
+                    "target_call": strike if cp == "C" else None,
+                    "target_put": strike if cp == "P" else None,
+                    "picked_call": strike_map.get(pick["ts_code"]) if cp == "C" else None,
+                    "picked_put": strike_map.get(pick["ts_code"]) if cp == "P" else None,
+                    "call_ts": pick["ts_code"] if cp == "C" else None,
+                    "put_ts": pick["ts_code"] if cp == "P" else None,
+                    "expiry": expiry,
+                    "standard_only": standard_only,
+                }
+            )
             return expiry, contracts
 
         if strategy in {"bull_spread", "bear_spread"}:
@@ -628,37 +993,85 @@ def run_etf_roll_backtest(
                 if strike_mode == "MANUAL":
                     low = _pick_strike(S, "C", strike_mode, "low_strike")
                     high = _pick_strike(S, "C", strike_mode, "high_strike")
-                    buy_leg = _select_contract_exact(df_exp, "C", low)
-                    sell_leg = _select_contract_exact(df_exp, "C", high)
+                    buy_leg = _select_contract_exact(df_exp, "C", low, standard_only=standard_only)
+                    sell_leg = _select_contract_exact(df_exp, "C", high, standard_only=standard_only)
+                    if buy_leg is None:
+                        buy_leg = _select_by_otm(df_exp, "C", S, target_otm, prefer_standard=True)
+                    if sell_leg is None:
+                        base_strike = buy_leg["exercise_price"] if buy_leg is not None else None
+                        sell_leg = _next_strike(df_exp, "C", base_strike, direction="up", prefer_standard=True)
                 else:
-                    low = S
-                    high = S * 1.10
-                    buy_leg = _select_contract(df_exp, "C", low)
-                    sell_leg = _select_contract(df_exp, "C", high)
+                    buy_leg = _select_by_otm(df_exp, "C", S, target_otm, prefer_standard=True)
+                    base_strike = buy_leg["exercise_price"] if buy_leg is not None else None
+                    sell_leg = _next_strike(df_exp, "C", base_strike, direction="up", prefer_standard=True)
+                    if buy_leg is None or sell_leg is None:
+                        buy_leg = _select_by_otm(df_exp, "C", S, target_otm, prefer_standard=False)
+                        base_strike = buy_leg["exercise_price"] if buy_leg is not None else None
+                        sell_leg = _next_strike(df_exp, "C", base_strike, direction="up", prefer_standard=False)
                 if buy_leg is None or sell_leg is None:
                     return None, None
                 contracts = [
                     {"ts_code": buy_leg["ts_code"], "direction": "long", "lots": lots},
                     {"ts_code": sell_leg["ts_code"], "direction": "short", "lots": lots},
                 ]
+                pick_diag_rows.append(
+                    {
+                        "date": date_str,
+                        "reason": reason,
+                        "strategy": strategy,
+                        "S": S,
+                    "target_call": S * (1.0 + target_otm) if strike_mode in {"OTM5", "OTM10"} else S,
+                    "target_put": None,
+                    "picked_call": strike_map.get(buy_leg["ts_code"]),
+                    "picked_put": None,
+                    "call_ts": buy_leg["ts_code"],
+                    "put_ts": None,
+                    "expiry": expiry,
+                    "standard_only": standard_only,
+                }
+            )
                 return expiry, contracts
             else:
                 if strike_mode == "MANUAL":
                     high = _pick_strike(S, "P", strike_mode, "high_strike")
                     low = _pick_strike(S, "P", strike_mode, "low_strike")
-                    buy_leg = _select_contract_exact(df_exp, "P", high)
-                    sell_leg = _select_contract_exact(df_exp, "P", low)
+                    buy_leg = _select_contract_exact(df_exp, "P", high, standard_only=standard_only)
+                    sell_leg = _select_contract_exact(df_exp, "P", low, standard_only=standard_only)
+                    if buy_leg is None:
+                        buy_leg = _select_by_otm(df_exp, "P", S, target_otm, prefer_standard=True)
+                    if sell_leg is None:
+                        base_strike = buy_leg["exercise_price"] if buy_leg is not None else None
+                        sell_leg = _next_strike(df_exp, "P", base_strike, direction="down", prefer_standard=True)
                 else:
-                    high = S
-                    low = S * 0.90
-                    buy_leg = _select_contract(df_exp, "P", high)
-                    sell_leg = _select_contract(df_exp, "P", low)
+                    buy_leg = _select_by_otm(df_exp, "P", S, target_otm, prefer_standard=True)
+                    base_strike = buy_leg["exercise_price"] if buy_leg is not None else None
+                    sell_leg = _next_strike(df_exp, "P", base_strike, direction="down", prefer_standard=True)
+                    if buy_leg is None or sell_leg is None:
+                        buy_leg = _select_by_otm(df_exp, "P", S, target_otm, prefer_standard=False)
+                        base_strike = buy_leg["exercise_price"] if buy_leg is not None else None
+                        sell_leg = _next_strike(df_exp, "P", base_strike, direction="down", prefer_standard=False)
                 if buy_leg is None or sell_leg is None:
                     return None, None
                 contracts = [
                     {"ts_code": buy_leg["ts_code"], "direction": "long", "lots": lots},
                     {"ts_code": sell_leg["ts_code"], "direction": "short", "lots": lots},
                 ]
+                pick_diag_rows.append(
+                    {
+                        "date": date_str,
+                        "reason": reason,
+                        "strategy": strategy,
+                        "S": S,
+                    "target_call": None,
+                    "target_put": S * (1.0 - target_otm) if strike_mode in {"OTM5", "OTM10"} else S,
+                    "picked_call": None,
+                    "picked_put": strike_map.get(buy_leg["ts_code"]),
+                    "call_ts": None,
+                    "put_ts": buy_leg["ts_code"],
+                    "expiry": expiry,
+                    "standard_only": standard_only,
+                }
+            )
                 return expiry, contracts
 
         if strategy == "calendar_spread":
@@ -690,11 +1103,19 @@ def run_etf_roll_backtest(
             )
             strike = _pick_strike(S, cp, strike_mode, "calendar_strike")
             if strike_mode == "MANUAL":
-                near_leg = _select_contract_exact(df_exp, cp, strike)
-                far_leg = _select_contract_exact(df_far, cp, strike)
+                near_leg = _select_contract_exact(df_exp, cp, strike, standard_only=standard_only)
+                far_leg = _select_contract_exact(df_far, cp, strike, standard_only=standard_only)
+                if near_leg is None:
+                    near_leg = _select_by_otm(df_exp, cp, S, target_otm, prefer_standard=True)
+                if far_leg is None:
+                    far_leg = _select_by_otm(df_far, cp, S, target_otm, prefer_standard=True)
             else:
-                near_leg = _select_contract(df_exp, cp, strike)
-                far_leg = _select_contract(df_far, cp, strike)
+                near_leg = _select_by_otm(df_exp, cp, S, target_otm, prefer_standard=True)
+                far_leg = _select_by_otm(df_far, cp, S, target_otm, prefer_standard=True)
+                if near_leg is None:
+                    near_leg = _select_by_otm(df_exp, cp, S, target_otm, prefer_standard=False)
+                if far_leg is None:
+                    far_leg = _select_by_otm(df_far, cp, S, target_otm, prefer_standard=False)
             if near_leg is None or far_leg is None:
                 return None, None
             if "卖近买远" in cal_label:
@@ -707,6 +1128,22 @@ def run_etf_roll_backtest(
                 {"ts_code": near_leg["ts_code"], "direction": near_dir, "lots": lots},
                 {"ts_code": far_leg["ts_code"], "direction": far_dir, "lots": lots},
             ]
+            pick_diag_rows.append(
+                {
+                    "date": date_str,
+                    "reason": reason,
+                    "strategy": strategy,
+                    "S": S,
+                    "target_call": strike if cp == "C" else None,
+                    "target_put": strike if cp == "P" else None,
+                    "picked_call": strike_map.get(near_leg["ts_code"]) if cp == "C" else None,
+                    "picked_put": strike_map.get(near_leg["ts_code"]) if cp == "P" else None,
+                    "call_ts": near_leg["ts_code"] if cp == "C" else None,
+                    "put_ts": near_leg["ts_code"] if cp == "P" else None,
+                    "expiry": expiry,
+                    "standard_only": standard_only,
+                }
+            )
             return expiry, contracts
 
         return None, None
@@ -724,10 +1161,12 @@ def run_etf_roll_backtest(
     current_contracts = None
     entry_date = None
     entry_prices = {}
+    locked_strikes = None
     leg_cum_pnl = {}
     fee_open_total = 0.0
     fee_total = 0.0
     premium_paid_total = 0.0
+    spread_margin_entry = None
 
     prev_date = None
     last_S = None
@@ -736,7 +1175,9 @@ def run_etf_roll_backtest(
     for date_str in dates:
         # 首次建仓
         if current_contracts is None:
-            current_expiry, current_contracts = pick_contracts(date_str)
+            current_expiry, current_contracts = pick_contracts(date_str, standard_only=True, reason="entry")
+            if current_contracts is None:
+                current_expiry, current_contracts = pick_contracts(date_str, standard_only=False, reason="entry")
             if current_contracts is None:
                 pnl_series.append((date_str, None))
                 no_contract_dates.append(date_str)
@@ -750,6 +1191,23 @@ def run_etf_roll_backtest(
                 no_contract_dates.append(date_str)
                 prev_date = date_str
                 continue
+            # Spread margin (debit spread: max loss = net debit)
+            spread_margin_entry = None
+            if strategy in {"bull_spread", "bear_spread"}:
+                net_debit = 0.0
+                for c in current_contracts:
+                    ep = entry_prices.get(c["ts_code"])
+                    if ep is None:
+                        net_debit = None
+                        break
+                    if c["direction"] == "long":
+                        net_debit += ep * multiplier * c["lots"]
+                    else:
+                        net_debit -= ep * multiplier * c["lots"]
+                if net_debit is not None:
+                    spread_margin_entry = max(net_debit, 0.0)
+            if strike_mode == "MANUAL":
+                locked_strikes = {c["ts_code"]: strike_map.get(c["ts_code"]) for c in current_contracts}
             leg_cum_pnl = {c["ts_code"]: 0.0 for c in current_contracts}
             fee_open_total = 0.0
             for c in current_contracts:
@@ -761,6 +1219,12 @@ def run_etf_roll_backtest(
                     ep = entry_prices.get(c["ts_code"])
                     if ep is not None:
                         premium_paid_total += ep * multiplier * c["lots"]
+            if strategy in {"bull_spread", "bear_spread"} and spread_margin_entry is not None:
+                S_entry = underlying_prices.get(entry_date)
+                if S_entry is None:
+                    S_entry = last_S
+                floor = S_entry * multiplier * 0.08 * lots if S_entry is not None else 0.0
+                spread_margin_entry = max(spread_margin_entry, floor)
 
         # 若当日无持仓（严格锁定导致空仓）
         if current_contracts is None:
@@ -811,18 +1275,21 @@ def run_etf_roll_backtest(
         S = last_S
         if S is not None and current_contracts:
             margin_day = 0.0
-            for c in current_contracts:
-                if c["direction"] != "short":
-                    continue
-                ts = c["ts_code"]
-                lots = c["lots"]
-                K = strike_map.get(ts)
-                ep = entry_prices.get(ts)
-                if K is None or ep is None:
-                    continue
-                cp = call_put_map.get(ts)
-                premium = ep * multiplier * lots
-                margin_day += _calc_short_margin(S, K, cp, multiplier, margin_rate, premium, lots)
+            if strategy in {"bull_spread", "bear_spread"} and spread_margin_entry is not None:
+                margin_day = spread_margin_entry
+            else:
+                for c in current_contracts:
+                    if c["direction"] != "short":
+                        continue
+                    ts = c["ts_code"]
+                    lots = c["lots"]
+                    K = strike_map.get(ts)
+                    ep = entry_prices.get(ts)
+                    if K is None or ep is None:
+                        continue
+                    cp = call_put_map.get(ts)
+                    premium = ep * multiplier * lots
+                    margin_day += _calc_short_margin(S, K, cp, multiplier, margin_rate, premium, lots)
             if margin_day > 0:
                 margin_series.append(margin_day)
 
@@ -882,17 +1349,20 @@ def run_etf_roll_backtest(
             # 记录卖方保证金（按入场日估算）
             margin_at_entry = 0.0
             S_entry = underlying_prices.get(entry_date)
-            if S_entry is not None:
-                for c in current_contracts:
-                    if c["direction"] != "short":
-                        continue
-                    K = strike_map.get(c["ts_code"])
-                    ep = entry_prices.get(c["ts_code"])
-                    if K is None or ep is None:
-                        continue
-                    cp = call_put_map.get(c["ts_code"])
-                    premium = ep * multiplier * c["lots"]
-                    margin_at_entry += _calc_short_margin(S_entry, K, cp, multiplier, margin_rate, premium, c["lots"])
+            if strategy in {"bull_spread", "bear_spread"} and spread_margin_entry is not None:
+                margin_at_entry = spread_margin_entry
+            else:
+                if S_entry is not None:
+                    for c in current_contracts:
+                        if c["direction"] != "short":
+                            continue
+                        K = strike_map.get(c["ts_code"])
+                        ep = entry_prices.get(c["ts_code"])
+                        if K is None or ep is None:
+                            continue
+                        cp = call_put_map.get(c["ts_code"])
+                        premium = ep * multiplier * c["lots"]
+                        margin_at_entry += _calc_short_margin(S_entry, K, cp, multiplier, margin_rate, premium, c["lots"])
 
             trades.append(
                 {
@@ -906,9 +1376,46 @@ def run_etf_roll_backtest(
                     "underlying_price": S_entry,
                 }
             )
+            if strategy in {"bull_spread", "bear_spread"}:
+                long_leg = next((c for c in current_contracts if c["direction"] == "long"), None)
+                short_leg = next((c for c in current_contracts if c["direction"] == "short"), None)
+                if long_leg and short_leg:
+                    long_ts = long_leg["ts_code"]
+                    short_ts = short_leg["ts_code"]
+                    long_ep = entry_prices.get(long_ts)
+                    short_ep = entry_prices.get(short_ts)
+                    k_long = strike_map.get(long_ts)
+                    k_short = strike_map.get(short_ts)
+                    spread_width = None
+                    net_debit = None
+                    max_loss = None
+                    if k_long is not None and k_short is not None:
+                        spread_width = abs(k_short - k_long) * multiplier * long_leg["lots"]
+                    if long_ep is not None and short_ep is not None:
+                        net_debit = (long_ep - short_ep) * multiplier * long_leg["lots"]
+                        if spread_width is not None:
+                            if net_debit >= 0:
+                                max_loss = net_debit
+                            else:
+                                max_loss = spread_width + net_debit
+                    trades[-1].update(
+                        {
+                            "long_entry": long_ep,
+                            "short_entry": short_ep,
+                            "net_debit": net_debit,
+                            "spread_width": spread_width,
+                            "max_loss": max_loss,
+                        }
+                    )
 
             # 当日换月开新仓（如果当日有可用新合约）
-            current_expiry, current_contracts = pick_contracts(date_str, min_expiry=current_expiry)
+            current_expiry, current_contracts = pick_contracts(
+                date_str, min_expiry=current_expiry, standard_only=True, reason="roll"
+            )
+            if current_contracts is None:
+                current_expiry, current_contracts = pick_contracts(
+                    date_str, min_expiry=current_expiry, standard_only=False, reason="roll"
+                )
             if current_contracts is None:
                 pnl_series.append((date_str, None))
                 no_contract_dates.append(date_str)
@@ -930,6 +1437,27 @@ def run_etf_roll_backtest(
                 no_contract_dates.append(date_str)
                 prev_date = date_str
                 continue
+            spread_margin_entry = None
+            if strategy in {"bull_spread", "bear_spread"}:
+                net_debit = 0.0
+                for c in current_contracts:
+                    ep = entry_prices.get(c["ts_code"])
+                    if ep is None:
+                        net_debit = None
+                        break
+                    if c["direction"] == "long":
+                        net_debit += ep * multiplier * c["lots"]
+                    else:
+                        net_debit -= ep * multiplier * c["lots"]
+                if net_debit is not None:
+                    spread_margin_entry = max(net_debit, 0.0)
+                    S_entry = underlying_prices.get(entry_date)
+                    if S_entry is None:
+                        S_entry = last_S
+                    floor = S_entry * multiplier * 0.08 * lots if S_entry is not None else 0.0
+                    spread_margin_entry = max(spread_margin_entry, floor)
+            if strike_mode == "MANUAL":
+                locked_strikes = {c["ts_code"]: strike_map.get(c["ts_code"]) for c in current_contracts}
             leg_cum_pnl = {c["ts_code"]: 0.0 for c in current_contracts}
             fee_open_total = 0.0
             for c in current_contracts:
@@ -946,7 +1474,7 @@ def run_etf_roll_backtest(
         prev_date = date_str
 
     equity = pd.DataFrame(pnl_series, columns=["date", "pnl"])
-    pnl_values = equity["pnl"]
+    pnl_values = equity["pnl"].dropna()
     total_return = float(pnl_values.iloc[-1]) if not pnl_values.empty else 0.0
     n_days = len(pnl_values)
     cal_days = 0
@@ -956,10 +1484,15 @@ def run_etf_roll_backtest(
         cal_days = n_days
     ann_return = float(total_return / cal_days * 365) if cal_days > 0 else 0.0
     max_dd = 0.0
+    max_dd_pct = None
     if not pnl_values.empty:
         peak = pnl_values.cummax()
         dd = pnl_values - peak
         max_dd = float(dd.min())
+        with np.errstate(divide="ignore", invalid="ignore"):
+            dd_pct = dd / peak
+        if not dd_pct.empty and np.isfinite(dd_pct).any():
+            max_dd_pct = float(dd_pct.min())
     win_rate = float((pd.Series([t.get("net_pnl", 0.0) for t in trades]) > 0).mean()) if trades else 0.0
     avg_ret = float(pd.Series([t.get("net_pnl", 0.0) for t in trades]).mean()) if trades else 0.0
     avg_margin = float(np.mean(margin_series)) if margin_series else 0.0
@@ -990,12 +1523,15 @@ def run_etf_roll_backtest(
             # 持仓保证金（卖方按最新标的估算，买方为0）
             pos_margin = 0.0
             S_pos = underlying_prices.get(prev_date)
-            if c["direction"] == "short":
-                if S_pos is not None:
-                    K = strike_map.get(ts)
-                    if K is not None:
-                        premium = ep * multiplier * lots
-                        pos_margin = _calc_short_margin(S_pos, K, cp, multiplier, margin_rate, premium, lots)
+            if strategy in {"bull_spread", "bear_spread"} and spread_margin_entry is not None:
+                pos_margin = spread_margin_entry
+            else:
+                if c["direction"] == "short":
+                    if S_pos is not None:
+                        K = strike_map.get(ts)
+                        if K is not None:
+                            premium = ep * multiplier * lots
+                            pos_margin = _calc_short_margin(S_pos, K, cp, multiplier, margin_rate, premium, lots)
 
             open_positions.append(
                 {
@@ -1026,6 +1562,7 @@ def run_etf_roll_backtest(
         "total_pnl": realized_pnl + unrealized_pnl - fee_total,
         "annualized_pnl": ann_return,
         "max_drawdown": max_dd,
+        "max_drawdown_pct": max_dd_pct,
         "win_rate": win_rate,
         "avg_return": avg_ret,
         "fee_per_lot": fee_per_lot,
@@ -1045,5 +1582,6 @@ def run_etf_roll_backtest(
         "missing_dates": missing_dates,
         "no_contract_dates": no_contract_dates,
         "calendar_diag": pd.DataFrame(calendar_diag_rows) if calendar_diag_rows else pd.DataFrame(),
+        "pick_diag": pd.DataFrame(pick_diag_rows) if pick_diag_rows else pd.DataFrame(),
         "missing_detail": pd.DataFrame(missing_detail) if missing_detail else pd.DataFrame(),
     }

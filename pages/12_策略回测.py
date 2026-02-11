@@ -4,7 +4,7 @@ import pandas as pd
 from datetime import datetime, timedelta
 from sqlalchemy import text
 
-from backtest_engine import engine, run_etf_roll_backtest, get_etf_underlyings, get_etf_expiries, get_etf_strikes_for_expiry, get_etf_first_trade_date
+from backtest_engine import engine, run_etf_roll_backtest, get_etf_underlyings, get_etf_expiries, get_etf_strikes_for_expiry, get_etf_first_trade_date, get_etf_strikes_for_range
 
 
 st.set_page_config(page_title="策略回测", layout="wide")
@@ -248,8 +248,8 @@ else:
     trade_date = get_etf_first_trade_date(symbol, start_str, end_str) or start_str
     expiries = get_etf_expiries(symbol, trade_date)
     expiry = expiries[0] if expiries else None
-    strikes = {"C": [], "P": []}
-    if expiry:
+    strikes = get_etf_strikes_for_range(symbol, start_str, end_str)
+    if not strikes["C"] and not strikes["P"] and expiry:
         strikes = get_etf_strikes_for_expiry(symbol, trade_date, expiry)
 
     if strike_mode == "手动选择":
@@ -362,7 +362,7 @@ else:
                     f"""<div class='ta-card'>
                     <div class='ta-metric'>最大回撤(元)</div>
                     <div class='ta-value'>{summary['max_drawdown']:.2f}</div>
-                    <div class='ta-subtle'>平均保证金 {summary.get('avg_margin', 0.0):.2f}</div>
+                    <div class='ta-subtle'>最大回撤率 {summary.get('max_drawdown_pct', 0.0):.2%}</div>
                     </div>""",
                     unsafe_allow_html=True,
                 )
@@ -370,7 +370,7 @@ else:
                     f"""<div class='ta-card'>
                     <div class='ta-metric'>交易次数</div>
                     <div class='ta-value'>{summary['trades']}</div>
-                    <div class='ta-subtle'>胜率 {summary['win_rate']:.2%}</div>
+                    <div class='ta-subtle'>平均保证金 {summary.get('avg_margin', 0.0):.2f}</div>
                     </div>""",
                     unsafe_allow_html=True,
                 )
@@ -380,7 +380,7 @@ else:
                     <div class='ta-metric'>策略概览</div>
                     <div class='ta-overview'><strong>标的</strong> {summary['symbol']} ｜ <strong>策略</strong> {strategy} ｜ 
                     <strong>已实现</strong> {summary.get('realized_pnl', 0.0):.2f} ｜ <strong>未实现</strong> {summary.get('unrealized_pnl', 0.0):.2f} ｜ 
-                    <strong>年化盈亏</strong> {summary['annualized_pnl']:.2f} ｜ <strong>累计权利金</strong> {summary.get('premium_paid_total', 0.0):.2f} ｜ 
+                    <strong>年化盈亏</strong> {summary['annualized_pnl']:.2f} ｜ <strong>胜率</strong> {summary['win_rate']:.2%} ｜ <strong>累计权利金</strong> {summary.get('premium_paid_total', 0.0):.2f} ｜ 
                     <strong>平均单笔</strong> {summary['avg_return']:.2f}</div>
                     </div>""",
                     unsafe_allow_html=True,
@@ -444,6 +444,11 @@ else:
                             "net_pnl": "净盈亏",
                             "margin": "保证金",
                             "underlying_price": "当日标的价格",
+                            "long_entry": "买腿开仓价",
+                            "short_entry": "卖腿开仓价",
+                            "net_debit": "净借记",
+                            "spread_width": "价差宽度",
+                            "max_loss": "最大亏损",
                         }
                     )
                     st.dataframe(trades_df, use_container_width=True)
@@ -484,18 +489,41 @@ else:
                     )
                     st.dataframe(diag_df, use_container_width=True)
                     st.markdown('</div>', unsafe_allow_html=True)
-                if "missing_detail" in result and not result["missing_detail"].empty:
+                if "pick_diag" in result and not result["pick_diag"].empty:
                     st.markdown('<div class="ta-table-wrap ta-fade-in">', unsafe_allow_html=True)
-                    st.markdown('<div class="ta-section-title">缺行情明细</div>', unsafe_allow_html=True)
-                    miss_df = result["missing_detail"].copy()
-                    miss_df = miss_df.rename(
+                    st.markdown('<div class="ta-section-title">合约选择诊断</div>', unsafe_allow_html=True)
+                    pick_df = result["pick_diag"].copy()
+                    base_cols = [
+                        "date",
+                        "reason",
+                        "strategy",
+                        "S",
+                        "target_call",
+                        "target_put",
+                        "picked_call",
+                        "picked_put",
+                        "expiry",
+                    ]
+                    if "expiries" in pick_df.columns:
+                        base_cols.append("expiries")
+                    pick_df = pick_df[base_cols]
+                    pick_df["call_otm_pct"] = (pick_df["picked_call"] / pick_df["S"] - 1.0) * 100
+                    pick_df["put_otm_pct"] = (1.0 - pick_df["picked_put"] / pick_df["S"]) * 100
+                    pick_df = pick_df.rename(
                         columns={
                             "date": "交易日",
-                            "ts_code": "合约代码",
-                            "p0": "前一日收盘",
-                            "p1": "当日收盘",
-                            "entry_price": "开仓价",
+                            "reason": "类型",
+                            "strategy": "策略",
+                            "S": "标的价格",
+                            "target_call": "目标认购行权价",
+                            "target_put": "目标认沽行权价",
+                            "picked_call": "实际认购行权价",
+                            "picked_put": "实际认沽行权价",
+                            "expiry": "到期日",
+                            "expiries": "可选到期日",
+                            "call_otm_pct": "认购虚值%",
+                            "put_otm_pct": "认沽虚值%",
                         }
                     )
-                    st.dataframe(miss_df, use_container_width=True)
+                    st.dataframe(pick_df, use_container_width=True)
                     st.markdown('</div>', unsafe_allow_html=True)
