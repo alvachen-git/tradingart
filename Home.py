@@ -1616,21 +1616,67 @@ if "pending_task" in st.session_state and st.session_state.pending_task:
 
             if current_status in ["pending", "processing"]:
                 progress_msg = task_status.get("progress", "正在处理...")
-                status_placeholder.info(f"🚀 {progress_msg}")
+                status_placeholder.markdown(f"""
+                <style>
+                .thinking-wrap {{
+                    background: linear-gradient(135deg, rgba(15, 23, 42, 0.92), rgba(30, 58, 138, 0.92));
+                    border: 1px solid rgba(148, 163, 184, 0.28);
+                    border-radius: 12px;
+                    padding: 14px 16px;
+                    color: #e2e8f0;
+                    margin-bottom: 8px;
+                }}
+                .thinking-title {{
+                    font-weight: 700;
+                    font-size: 16px;
+                    display: flex;
+                    align-items: center;
+                    gap: 8px;
+                }}
+                .thinking-sub {{
+                    margin-top: 6px;
+                    font-size: 13px;
+                    color: #cbd5e1;
+                }}
+                .thinking-dots {{
+                    display: inline-flex;
+                    gap: 4px;
+                    margin-left: 2px;
+                }}
+                .thinking-dot {{
+                    width: 6px;
+                    height: 6px;
+                    border-radius: 999px;
+                    background: #93c5fd;
+                    opacity: 0.35;
+                    animation: dotPulse 1.2s infinite ease-in-out;
+                }}
+                .thinking-dot:nth-child(2) {{ animation-delay: 0.2s; }}
+                .thinking-dot:nth-child(3) {{ animation-delay: 0.4s; }}
+                @keyframes dotPulse {{
+                    0%, 80%, 100% {{ transform: scale(0.8); opacity: 0.35; }}
+                    40% {{ transform: scale(1.2); opacity: 1; }}
+                }}
+                </style>
+                <div class="thinking-wrap">
+                    <div class="thinking-title">
+                        🚀 团队正在协作分析
+                        <span class="thinking-dots">
+                            <span class="thinking-dot"></span>
+                            <span class="thinking-dot"></span>
+                            <span class="thinking-dot"></span>
+                        </span>
+                    </div>
+                    <div class="thinking-sub">{progress_msg}</div>
+                </div>
+                """, unsafe_allow_html=True)
 
                 with content_placeholder.container():
-                    st.caption("任务正在后台执行。你可以手动刷新状态，或停止等待以解除页面持续运行。")
-                    c1, c2 = st.columns(2)
-                    with c1:
-                        if st.button("🔄 刷新任务状态", key=f"btn_refresh_task_{task_id}"):
-                            st.rerun()
-                    with c2:
-                        if st.button("🛑 停止等待", key=f"btn_cancel_waiting_{task_id}"):
-                            if "pending_task" in st.session_state:
-                                del st.session_state.pending_task
-                            if current_user != "访客":
-                                task_manager.clear_user_pending_task(current_user)
-                            st.rerun()
+                    st.caption("正在后台持续处理，完成后会自动返回结果。")
+
+                # 自动轮询任务状态，避免用户手动点击刷新
+                time.sleep(1.5)
+                st.rerun()
 
             elif current_status == "success":
                 # 任务完成，显示结果
