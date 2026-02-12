@@ -102,8 +102,14 @@ def show_announcement():
 
 def check_and_show_announcement():
     """检查是否需要显示公告 - 使用 session_state 中的 cookie 数据"""
-    # 🔥 关键：如果本次会话已经显示过，直接跳过
+    # 🔥 关键1：如果本次会话已经显示过，直接跳过
     if st.session_state.get('announcement_displayed', False):
+        return
+
+    # 🔥 关键2：如果刚刚手动登录，跳过这次显示，等下次用户刷新或操作时再显示
+    # 避免登录后立即弹窗打扰用户，也避免闪现问题
+    if st.session_state.get('just_manual_logged_in', False):
+        st.session_state['just_manual_logged_in'] = False  # 重置标记
         return
 
     try:
@@ -1356,6 +1362,9 @@ with st.sidebar:
                         st.session_state['user_id'] = real_username  # 🔥 使用真正的用户名
                         st.session_state['token'] = token
 
+                        # 🔥 [关键修复] 标记这是手动登录，下次 rerun 后才显示公告
+                        st.session_state['just_manual_logged_in'] = True
+
                         # 写入 Cookie（也用真正的用户名）
                         expires = datetime.now() + timedelta(days=30)
                         cookie_manager.set("username", real_username, expires_at=expires, key="set_user_cookie")
@@ -1436,6 +1445,9 @@ with st.sidebar:
                                 st.session_state['is_logged_in'] = True
                                 st.session_state['user_id'] = real_username
                                 st.session_state['token'] = token
+
+                                # 🔥 [关键修复] 注册后自动登录，也需要标记避免公告闪现
+                                st.session_state['just_manual_logged_in'] = True
 
                                 expires = datetime.now() + timedelta(days=30)
                                 cookie_manager.set("username", real_username, expires_at=expires, key="reg_set_user")
