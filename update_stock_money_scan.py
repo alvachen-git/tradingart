@@ -4,6 +4,9 @@ from datetime import datetime, timedelta
 from sqlalchemy import create_engine, text
 import os
 import traceback
+import gc
+import resource
+import sys
 from dotenv import load_dotenv
 
 # 加载配置
@@ -38,6 +41,44 @@ SCORE_CONFIG = {
     'min_amount_yuan': 10_000_000,  # 日成交额 > 100万元
     'min_score': 50,  # 总分 < 30 不入库
 }
+
+PERF_CONFIG = {
+    # 保留 60 天历史，保障节假日场景下 10 日均量可用
+    'lookback_days': 60,
+    # 入库分批，降低峰值内存并提升写入稳定性
+    'sql_chunksize': 1000,
+}
+
+
+def _read_current_rss_mb():
+    """读取当前进程 RSS（MB），Linux 优先使用 /proc。"""
+    try:
+        with open('/proc/self/status', 'r', encoding='utf-8') as f:
+            for line in f:
+                if line.startswith('VmRSS:'):
+                    kb = int(line.split()[1])
+                    return kb / 1024.0
+    except Exception:
+        return None
+    return None
+
+
+def _read_peak_rss_mb():
+    """读取进程历史峰值 RSS（MB）。"""
+    ru_maxrss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    # macOS 为 bytes，其它常见 Unix/Linux 为 KB
+    if sys.platform == 'darwin':
+        return ru_maxrss / (1024.0 * 1024.0)
+    return ru_maxrss / 1024.0
+
+
+def log_mem(stage):
+    cur = _read_current_rss_mb()
+    peak = _read_peak_rss_mb()
+    if cur is None:
+        print(f"  🧠 内存[{stage}] peak_rss={peak:.1f} MB")
+    else:
+        print(f"  🧠 内存[{stage}] rss={cur:.1f} MB | peak_rss={peak:.1f} MB")
 
 
 # =====================================================================
@@ -86,30 +127,40 @@ def score_amount_vec(amount_series, weight, floor, cap):
 
 def run_daily_fund_scan():
     cfg = SCORE_CONFIG
+    perf_cfg = PERF_CONFIG
     print(f"🚀 开始执行资金流放量评分扫描 ({datetime.now().strftime('%Y-%m-%d %H:%M:%S')})")
     print(f"   评分权重: 环比={cfg['ratio_1d_weight']} 均量比={cfg['ratio_10d_weight']} 成交额={cfg['amount_weight']}")
     print(f"   入库门槛: 成交额>{cfg['min_amount_yuan'] / 1e4:.0f}万元, 总分>={cfg['min_score']}")
+    log_mem("启动")
 
     try:
         # 1. 确定扫描日期范围
-        scan_start_date = (datetime.now() - timedelta(days=5)).strftime("%Y-%m-%d")
+        scan_start_date = datetime.now() - timedelta(days=5)
 
         # 2. 拉取全市场数据 (60 天，保证均线计算有足够数据)
         print("\n  📥 正在从数据库拉取股价数据...")
         sql = """
               SELECT trade_date, ts_code, name, close_price, vol, amount, pct_chg
               FROM stock_price
-              WHERE trade_date >= DATE_SUB(CURDATE(), INTERVAL 60 DAY)
+              WHERE trade_date >= DATE_SUB(CURDATE(), INTERVAL :lookback_days DAY)
               """
 
         with engine.connect() as conn:
             try:
-                df = pd.read_sql(sql, conn)
+                df = pd.read_sql(
+                    text(sql),
+                    conn,
+                    params={"lookback_days": perf_cfg['lookback_days']},
+                )
             except Exception as e:
                 if "Unknown column 'vol'" in str(e):
                     print("  ⚠️ 字段 vol 不存在，尝试使用 volume...")
                     sql = sql.replace("vol,", "volume,")
-                    df = pd.read_sql(sql, conn)
+                    df = pd.read_sql(
+                        text(sql),
+                        conn,
+                        params={"lookback_days": perf_cfg['lookback_days']},
+                    )
                 else:
                     raise e
 
@@ -118,16 +169,26 @@ def run_daily_fund_scan():
             return
 
         print(f"  ✅ 获取 {len(df)} 条记录")
+        log_mem("SQL读取后")
 
         # 3. 数据清洗
-        df = df.rename(columns={
+        df.rename(columns={
             'ts_code': 'stock_code',
             'name': 'stock_name',
             'close_price': 'close',
             'vol': 'volume'
-        })
+        }, inplace=True)
 
-        df = df.sort_values(['stock_code', 'trade_date'], ascending=[True, True]).reset_index(drop=True)
+        df['trade_date'] = pd.to_datetime(df['trade_date'], errors='coerce')
+        df.dropna(subset=['trade_date', 'stock_code', 'amount', 'pct_chg'], inplace=True)
+
+        # 以 category 压缩字符串列内存占用
+        df['stock_code'] = df['stock_code'].astype('category')
+        df['stock_name'] = df['stock_name'].astype('category')
+
+        df.sort_values(['stock_code', 'trade_date'], ascending=[True, True], inplace=True)
+        df.reset_index(drop=True, inplace=True)
+        log_mem("清洗排序后")
 
         # --- 统一 amount 单位为「元」---
         # A 股 (Tushare): amount 单位是「千元」，需要 ×1000
@@ -170,6 +231,7 @@ def run_daily_fund_scan():
             print(f"  📊 港股 amount 转换后中位数: {hk_median_after:,.0f} 港元 ({hk_median_after / 1e8:.2f}亿)")
 
         print(f"  📊 统一后全市场 amount 中位数: {df['amount'].median():,.0f} 元")
+        log_mem("单位处理后")
 
         # 4. 核心指标计算
         print("\n  ⚙️ 计算量比指标...")
@@ -195,9 +257,10 @@ def run_daily_fund_scan():
         )
 
         df.replace([np.inf, -np.inf], np.nan, inplace=True)
+        log_mem("指标计算后")
 
         # 5. 筛选最近 N 天
-        recent_df = df[df['trade_date'].astype(str) >= scan_start_date].copy()
+        recent_df = df.loc[df['trade_date'] >= pd.Timestamp(scan_start_date)]
 
         valid_ratio = recent_df['vol_ratio_10d'].dropna()
         print(f"  🔍 数据分布 (vol_ratio_10d): "
@@ -218,7 +281,14 @@ def run_daily_fund_scan():
                         (has_ratio_10d & (recent_df['vol_ratio_10d'] > 1.0))
                 )
         )
-        candidates = recent_df[base_filter].copy()
+        candidate_cols = [
+            'trade_date', 'stock_code', 'stock_name',
+            'close', 'pct_chg', 'amount', 'vol_ratio_1d', 'vol_ratio_10d'
+        ]
+        candidates = recent_df.loc[base_filter, candidate_cols].copy()
+        del recent_df, df
+        gc.collect()
+        log_mem("候选集过滤后")
 
         if candidates.empty:
             print("  📭 无符合基础条件的股票 (上涨+放量+成交额>50万)。")
@@ -249,6 +319,7 @@ def run_daily_fund_scan():
         candidates['total_score'] = (
                 candidates['score_1d'] + candidates['score_10d'] + candidates['score_amount']
         ).round(1)
+        log_mem("评分完成后")
 
         # 8. 按分数过滤
         scored_df = candidates[candidates['total_score'] >= cfg['min_score']].copy()
@@ -264,30 +335,27 @@ def run_daily_fund_scan():
         scored_df = scored_df.sort_values('total_score', ascending=False)
 
         # 9. 打标签
-        def get_label(row):
-            labels = []
-            r1d = row['vol_ratio_1d'] if pd.notna(row['vol_ratio_1d']) else 1.0
-            r10d = row['vol_ratio_10d'] if pd.notna(row['vol_ratio_10d']) else 1.0
-
-            if r1d > 5.0:
-                labels.append("极端爆量")
-            elif r1d > 3.0:
-                labels.append("突发放量")
-            elif r1d > 2.0:
-                labels.append("显著放量")
-            elif r1d > 1.5:
-                labels.append("温和放量")
-
-            if r10d > 3.0:
-                labels.append("持续抢筹")
-            elif r10d > 2.0:
-                labels.append("资金关注")
-            elif r10d > 1.5:
-                labels.append("量能回升")
-
-            return "+".join(labels) if labels else "小幅放量"
-
-        scored_df['abnormal_type'] = scored_df.apply(get_label, axis=1)
+        r1d = scored_df['vol_ratio_1d'].fillna(1.0)
+        r10d = scored_df['vol_ratio_10d'].fillna(1.0)
+        label_1d = np.select(
+            [r1d > 5.0, r1d > 3.0, r1d > 2.0, r1d > 1.5],
+            ["极端爆量", "突发放量", "显著放量", "温和放量"],
+            default=""
+        )
+        label_10d = np.select(
+            [r10d > 3.0, r10d > 2.0, r10d > 1.5],
+            ["持续抢筹", "资金关注", "量能回升"],
+            default=""
+        )
+        scored_df['abnormal_type'] = np.where(
+            (label_1d != "") & (label_10d != ""),
+            label_1d + "+" + label_10d,
+            np.where(
+                label_1d != "",
+                label_1d,
+                np.where(label_10d != "", label_10d, "小幅放量")
+            )
+        )
 
         # 10. 入库准备
         save_df = scored_df[[
@@ -300,6 +368,9 @@ def run_daily_fund_scan():
 
         save_df = save_df.fillna(0)
         save_df['trade_date'] = pd.to_datetime(save_df['trade_date']).dt.strftime('%Y-%m-%d')
+        save_df['stock_code'] = save_df['stock_code'].astype(str)
+        save_df['stock_name'] = save_df['stock_name'].astype(str)
+        log_mem("入库准备后")
 
         # 汇总统计
         print(f"\n  🔍 筛选出 {len(save_df)} 条 (score ≥ {cfg['min_score']}):")
@@ -325,22 +396,28 @@ def run_daily_fund_scan():
 
         # 11. 安全写入
         print(f"\n  💾 开始写入数据库...")
-        target_dates = save_df['trade_date'].unique().tolist()
-
         with engine.connect() as conn:
             trans = conn.begin()
             try:
-                for t_date in target_dates:
+                for t_date, daily_data in save_df.groupby('trade_date', sort=False):
                     delete_sql = text("DELETE FROM stock_fund_flow_abnormal WHERE trade_date = :d")
                     conn.execute(delete_sql, {"d": t_date})
 
-                    daily_data = save_df[save_df['trade_date'] == t_date]
                     if not daily_data.empty:
-                        daily_data.to_sql('stock_fund_flow_abnormal', conn, if_exists='append', index=False)
+                        daily_data.to_sql(
+                            'stock_fund_flow_abnormal',
+                            conn,
+                            if_exists='append',
+                            index=False,
+                            chunksize=perf_cfg['sql_chunksize'],
+                            method='multi'
+                        )
                         print(f"    ✓ {t_date}: 写入 {len(daily_data)} 条")
+                        log_mem(f"写入完成 {t_date}")
 
                 trans.commit()
                 print("  ✅ 全部写入完成!")
+                log_mem("任务结束")
 
             except Exception as sql_err:
                 trans.rollback()
