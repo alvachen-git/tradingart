@@ -1605,7 +1605,7 @@ if "pending_task" in st.session_state and st.session_state.pending_task:
 
     # 检查任务是否超时（30分钟）
     if time.time() - task_start < 1800:
-        with st.chat_message("assistant", avatar="🤖"):
+        with st.container():
             status_placeholder = st.empty()
             content_placeholder = st.empty()
 
