@@ -235,7 +235,7 @@ def run_daily_fund_scan():
 
         # 4. 核心指标计算
         print("\n  ⚙️ 计算量比指标...")
-        grouped = df.groupby('stock_code')
+        grouped = df.groupby('stock_code', observed=False)
 
         df['prev_amount'] = grouped['amount'].shift(1)
 
@@ -366,10 +366,16 @@ def run_daily_fund_scan():
             'abnormal_type'
         ]].rename(columns={'close': 'close_price'})
 
-        save_df = save_df.fillna(0)
         save_df['trade_date'] = pd.to_datetime(save_df['trade_date']).dt.strftime('%Y-%m-%d')
         save_df['stock_code'] = save_df['stock_code'].astype(str)
         save_df['stock_name'] = save_df['stock_name'].astype(str)
+        num_cols = [
+            'close_price', 'pct_chg', 'amount',
+            'vol_ratio_1d', 'vol_ratio_10d',
+            'score_1d', 'score_10d', 'score_amount', 'total_score'
+        ]
+        save_df[num_cols] = save_df[num_cols].fillna(0)
+        save_df['abnormal_type'] = save_df['abnormal_type'].fillna("小幅放量")
         log_mem("入库准备后")
 
         # 汇总统计
