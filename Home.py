@@ -1,4 +1,5 @@
 import streamlit as st
+import hashlib
 from task_manager import TaskManager
 import time
 import pandas as pd
@@ -41,6 +42,86 @@ load_dotenv(override=True)
 for key in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"]:
     if key in os.environ:
         del os.environ[key]
+
+# ==================== 公告配置区 ====================
+ANNOUNCEMENT_CONTENT = {
+    "title": "🎉 最新动态",
+    "sections": [
+        {
+            "title": "🚀 功能介绍",
+            "items": [
+                "✨ 左侧栏的情报站里有复盘晚报，免费订阅",
+                "✨ 历史对话记录都可以在个人资料页查看",
+            ]
+        },
+        {
+            "title": "📢 近期活动",
+            "items": [
+                "💎 期权重剑班3月8日，详情可咨询客服，微信号trader-sec",
+                "🎁 秘密....."
+            ]
+        }
+    ],
+    "update_date": "2025-02-12"
+}
+
+
+# ==================== 公告工具函数 ====================
+
+def get_announcement_hash():
+    """根据公告内容生成唯一hash"""
+    content_str = str(ANNOUNCEMENT_CONTENT)
+    return hashlib.md5(content_str.encode()).hexdigest()[:8]
+
+
+@st.dialog(ANNOUNCEMENT_CONTENT["title"], width="large")
+def show_announcement():
+    """显示公告弹窗"""
+    for section in ANNOUNCEMENT_CONTENT["sections"]:
+        st.markdown(f"### {section['title']}")
+        for item in section["items"]:
+            st.write(f"- {item}")
+        st.write("")
+
+    st.caption(f"📅 更新时间：{ANNOUNCEMENT_CONTENT['update_date']}")
+
+    col1, col2, col3 = st.columns([1, 1, 1])
+    with col2:
+        if st.button("我知道了", type="primary", use_container_width=True):
+            current_hash = get_announcement_hash()
+            # ✅ 使用独立的 CookieManager（带唯一 key）
+            cm = stx.CookieManager(key="announcement_cookie_setter")
+            cm.set(
+                "announcement_read",
+                current_hash,
+                expires_at=datetime.now() + timedelta(days=365)
+            )
+            st.session_state.announcement_displayed = True
+            st.rerun()
+
+
+def check_and_show_announcement():
+    """检查是否需要显示公告 - 使用 session_state 中的 cookie 数据"""
+    # 🔥 关键：如果本次会话已经显示过，直接跳过
+    if st.session_state.get('announcement_displayed', False):
+        return
+
+    try:
+        current_hash = get_announcement_hash()
+
+        # 🔥 使用之前在初始化时读取的 cookie 状态（避免 rerun 冲突）
+        read_hash = st.session_state.get('announcement_read_hash', None)
+
+        # 如果 cookie 中没有记录，或者版本不匹配，则显示
+        if read_hash != current_hash:
+            st.session_state.announcement_displayed = True
+            show_announcement()
+    except Exception as e:
+        print(f"公告检查失败: {e}")
+        # 如果出错，仍然显示公告（确保用户能看到）
+        if not st.session_state.get('announcement_displayed', False):
+            st.session_state.announcement_displayed = True
+            show_announcement()
 
 # ==========================================
 #  1. 页面配置 (必须在第一行) [修改点：改为 centered 布局]
@@ -613,11 +694,20 @@ def native_share_button(user_content, ai_content, key):
 # ==========================================
 #  3. Auth & State 初始化 (保持不变)
 # ==========================================
-def get_manager(): return stx.CookieManager(key="master_cookie_manager")
-
-
-cookie_manager = get_manager()
+cookie_manager = stx.CookieManager(key="main_cookie_manager")
 cookies = cookie_manager.get_all() or {}
+
+# 🔥 [关键修复] 在任何 rerun 之前，先读取公告状态并保存到 session_state
+# 这样即使后面触发 rerun，公告状态也不会丢失
+if 'announcement_cookie_loaded' not in st.session_state:
+    try:
+        cm = stx.CookieManager(key="early_announcement_reader")
+        announcement_cookies = cm.get_all() or {}
+        st.session_state.announcement_read_hash = announcement_cookies.get("announcement_read", None)
+        st.session_state.announcement_cookie_loaded = True
+    except:
+        st.session_state.announcement_read_hash = None
+        st.session_state.announcement_cookie_loaded = True
 
 # 初始化待处理任务状态
 if "pending_task" not in st.session_state:
@@ -1492,6 +1582,9 @@ with st.sidebar:
         期权波动率分析 | 持仓对冲建议 |
         期权知识学习
         """)
+# 只在用户登录后显示公告
+if st.session_state.get('is_logged_in', False):
+    check_and_show_announcement()
 
 # B. 处理卡片点击产生的 Pending Prompt [修改点：处理快捷指令]
 if "pending_prompt" in st.session_state:
