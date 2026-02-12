@@ -7,6 +7,7 @@ import plotly.express as px
 import os
 import sys
 from macro_data import get_dashboard_metrics
+from ui_components import inject_sidebar_toggle_style
 st.set_page_config(page_title="宏观全景", layout="wide")
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -43,51 +44,6 @@ st.markdown("""
         background-color: transparent !important;
         border-bottom: none !important;
         pointer-events: none;
-    }
-
-    /* 2. 让按钮区域可点击 */
-    header[data-testid="stHeader"] button,
-    [data-testid="stSidebarCollapsedControl"] {
-        pointer-events: auto !important;
-    }
-
-    /* 3. 【核心修复】左上角展开箭头的交互样式 */
-
-    /* === 默认状态 === */
-    [data-testid="stSidebarCollapsedControl"] {
-        background-color: rgba(255, 255, 255, 0.1) !important; /* 微弱背景 */
-        border: 1px solid rgba(255, 255, 255, 0.3) !important; /* 可见边框 */
-        border-radius: 8px !important;
-        color: #ffffff !important;
-        transition: all 0.3s ease !important; /* 添加平滑过渡动画 */
-        z-index: 999999 !important;
-    }
-    /* 默认尝试让箭头变白 */
-    [data-testid="stSidebarCollapsedControl"] svg {
-        fill: #ffffff !important;
-        color: #ffffff !important;
-    }
-
-    /* === 鼠标悬停状态 (Hover) === */
-    /* 当鼠标移上去时，背景变白，箭头变黑 */
-    [data-testid="stSidebarCollapsedControl"]:hover {
-        background-color: #ffffff !important; /* 背景亮白 */
-        box-shadow: 0 0 15px rgba(255,255,255, 0.8) !important; /* 发光效果 */
-        border-color: #ffffff !important;
-        transform: scale(1.1); /* 微微放大 */
-    }
-
-    /* 悬停时强制箭头变黑 (利用滤镜反转，或者直接改 fill) */
-    [data-testid="stSidebarCollapsedControl"]:hover svg {
-        fill: #000000 !important; 
-        color: #000000 !important;
-        filter: brightness(0) !important; /* 强制变全黑 */
-    }
-
-    /* 右上角的菜单按钮也加同样的特效 */
-    header[data-testid="stHeader"] button[data-testid="baseButton-headerNoPadding"]:hover {
-        background-color: rgba(255,255,255,0.2) !important;
-        border-radius: 50%;
     }
 
     /* 隐藏装饰条 */
@@ -135,6 +91,7 @@ st.markdown("""
     @media (max-width: 640px) { .sniper-value { font-size: 28px; } .status-bar { font-size: 18px; margin-left: -1rem; margin-right: -1rem; } }
 </style>
 """, unsafe_allow_html=True)
+inject_sidebar_toggle_style(mode="high_contrast")
 
 # --- 数据获取 ---
 metrics = get_dashboard_metrics()

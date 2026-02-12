@@ -3,6 +3,7 @@ import pandas as pd
 import data_engine as de
 from st_aggrid import AgGrid, GridOptionsBuilder, JsCode, ColumnsAutoSizeMode
 import time
+from ui_components import inject_sidebar_toggle_style
 
 # ============================================================
 # 页面配置
@@ -200,32 +201,6 @@ st.markdown("""
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
 
-    /* === 侧边栏折叠按钮 === */
-    header[data-testid="stHeader"] {
-        background-color: transparent !important;
-        visibility: visible !important;
-    }
-    button[data-testid="collapsedControl"], 
-    [data-testid="stSidebarCollapsedControl"] {
-        visibility: visible !important;
-        display: block !important;
-        color: #ffffff !important;
-        z-index: 100000 !important;
-        position: fixed !important;
-        top: 15px !important;
-        left: 15px !important;
-        background-color: rgba(255, 255, 255, 0.05);
-        border-radius: 50%;
-        width: 36px;
-        height: 36px;
-        transition: all 0.3s ease;
-    }
-    button[data-testid="collapsedControl"]:hover,
-    [data-testid="stSidebarCollapsedControl"]:hover {
-        background-color: rgba(59, 130, 246, 0.3) !important;
-        box-shadow: 0 0 15px rgba(59, 130, 246, 0.5);
-    }
-
     /* === 深色主题 === */
     .stApp {
         background: linear-gradient(135deg, #0a0f1a 0%, #0d1526 50%, #0a1628 100%);
@@ -341,6 +316,7 @@ st.markdown("""
     }
 </style>
 """, unsafe_allow_html=True)
+inject_sidebar_toggle_style(mode="high_contrast")
 
 # ============================================================
 # 页面标题区域

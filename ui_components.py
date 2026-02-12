@@ -1,6 +1,155 @@
 import streamlit as st
 
 
+def inject_sidebar_toggle_style(mode: str = "high_contrast") -> None:
+    """
+    注入全站统一的侧边栏折叠/展开按钮样式。
+    默认高对比模式，兼容不同 Streamlit 版本的 testid。
+    """
+    if mode != "high_contrast":
+        raise ValueError(f"Unsupported sidebar toggle style mode: {mode}")
+
+    st.markdown(
+        """
+        <style>
+        header[data-testid="stHeader"] {
+            background-color: transparent !important;
+        }
+
+        button[data-testid="stExpandSidebarButton"],
+        [data-testid="stSidebarHeader"] button[data-testid="stBaseButton-headerNoPadding"],
+        button[data-testid="collapsedControl"],
+        button[data-testid="stSidebarCollapsedControl"],
+        [data-testid="stSidebarCollapsedControl"],
+        [data-testid="stSidebarCollapsedControl"] > button {
+            pointer-events: auto !important;
+        }
+
+        button[data-testid="stExpandSidebarButton"],
+        [data-testid="stSidebarHeader"] button[data-testid="stBaseButton-headerNoPadding"],
+        button[data-testid="collapsedControl"],
+        button[data-testid="stSidebarCollapsedControl"],
+        [data-testid="stSidebarCollapsedControl"],
+        [data-testid="stSidebarCollapsedControl"] > button {
+            visibility: visible !important;
+            display: flex !important;
+            align-items: center !important;
+            justify-content: center !important;
+            width: 40px !important;
+            height: 40px !important;
+            min-width: 40px !important;
+            min-height: 40px !important;
+            background-color: #2563eb !important;
+            border: 2px solid rgba(255, 255, 255, 0.85) !important;
+            border-radius: 12px !important;
+            box-shadow: 0 6px 16px rgba(2, 6, 23, 0.55) !important;
+            opacity: 1 !important;
+            transition: transform 0.18s ease, background-color 0.18s ease, box-shadow 0.18s ease !important;
+        }
+
+        button[data-testid="stExpandSidebarButton"] {
+            position: fixed !important;
+            top: 15px !important;
+            left: 15px !important;
+            z-index: 999997 !important;
+        }
+
+        button[data-testid="collapsedControl"]:hover,
+        button[data-testid="stSidebarCollapsedControl"]:hover,
+        button[data-testid="stExpandSidebarButton"]:hover,
+        [data-testid="stSidebarHeader"] button[data-testid="stBaseButton-headerNoPadding"]:hover,
+        [data-testid="stSidebarCollapsedControl"]:hover,
+        [data-testid="stSidebarCollapsedControl"] > button:hover {
+            background-color: #1d4ed8 !important;
+            border-color: #ffffff !important;
+            transform: scale(1.08) !important;
+            box-shadow: 0 0 0 3px rgba(147, 197, 253, 0.35), 0 12px 28px rgba(2, 6, 23, 0.65) !important;
+        }
+
+        button[data-testid="collapsedControl"]:active,
+        button[data-testid="stSidebarCollapsedControl"]:active,
+        button[data-testid="stExpandSidebarButton"]:active,
+        [data-testid="stSidebarHeader"] button[data-testid="stBaseButton-headerNoPadding"]:active,
+        [data-testid="stSidebarCollapsedControl"]:active,
+        [data-testid="stSidebarCollapsedControl"] > button:active {
+            transform: scale(1.02) !important;
+        }
+
+        button[data-testid="collapsedControl"]:focus-visible,
+        button[data-testid="stSidebarCollapsedControl"]:focus-visible,
+        button[data-testid="stExpandSidebarButton"]:focus-visible,
+        [data-testid="stSidebarHeader"] button[data-testid="stBaseButton-headerNoPadding"]:focus-visible,
+        [data-testid="stSidebarCollapsedControl"]:focus-visible,
+        [data-testid="stSidebarCollapsedControl"] > button:focus-visible {
+            outline: 2px solid #dbeafe !important;
+            outline-offset: 2px !important;
+            box-shadow: 0 0 0 4px rgba(96, 165, 250, 0.55), 0 10px 24px rgba(2, 6, 23, 0.6) !important;
+        }
+
+        button[data-testid="stExpandSidebarButton"] span,
+        button[data-testid="stExpandSidebarButton"] p,
+        button[data-testid="stExpandSidebarButton"] svg,
+        button[data-testid="stExpandSidebarButton"] i,
+        [data-testid="stSidebarHeader"] button[data-testid="stBaseButton-headerNoPadding"] span,
+        [data-testid="stSidebarHeader"] button[data-testid="stBaseButton-headerNoPadding"] p,
+        [data-testid="stSidebarHeader"] button[data-testid="stBaseButton-headerNoPadding"] svg,
+        [data-testid="stSidebarHeader"] button[data-testid="stBaseButton-headerNoPadding"] i,
+        button[data-testid="collapsedControl"] span,
+        button[data-testid="stSidebarCollapsedControl"] span,
+        [data-testid="stSidebarCollapsedControl"] span,
+        button[data-testid="collapsedControl"] p,
+        button[data-testid="stSidebarCollapsedControl"] p,
+        [data-testid="stSidebarCollapsedControl"] p,
+        button[data-testid="collapsedControl"] svg,
+        button[data-testid="stSidebarCollapsedControl"] svg,
+        [data-testid="stSidebarCollapsedControl"] svg,
+        button[data-testid="collapsedControl"] i,
+        button[data-testid="stSidebarCollapsedControl"] i,
+        [data-testid="stSidebarCollapsedControl"] i,
+        [data-testid="stSidebarCollapsedControl"] > button span,
+        [data-testid="stSidebarCollapsedControl"] > button p,
+        [data-testid="stSidebarCollapsedControl"] > button svg,
+        [data-testid="stSidebarCollapsedControl"] > button i,
+        button[data-testid="stExpandSidebarButton"] *,
+        [data-testid="stSidebarHeader"] button[data-testid="stBaseButton-headerNoPadding"] *,
+        button[data-testid="collapsedControl"] * ,
+        button[data-testid="stSidebarCollapsedControl"] *,
+        [data-testid="stSidebarCollapsedControl"] > button *,
+        [data-testid="stSidebarCollapsedControl"] * {
+            fill: #ffffff !important;
+            color: #ffffff !important;
+            stroke: #ffffff !important;
+            width: 20px !important;
+            height: 20px !important;
+            opacity: 1 !important;
+            font-weight: 800 !important;
+            text-shadow: 0 1px 2px rgba(0, 0, 0, 0.45) !important;
+        }
+
+        @media (max-width: 768px) {
+            button[data-testid="stExpandSidebarButton"],
+            [data-testid="stSidebarHeader"] button[data-testid="stBaseButton-headerNoPadding"],
+            button[data-testid="collapsedControl"],
+            button[data-testid="stSidebarCollapsedControl"],
+            [data-testid="stSidebarCollapsedControl"],
+            [data-testid="stSidebarCollapsedControl"] > button {
+                width: 36px !important;
+                height: 36px !important;
+                min-width: 36px !important;
+                min-height: 36px !important;
+            }
+
+            button[data-testid="stExpandSidebarButton"] {
+                top: 12px !important;
+                left: 12px !important;
+            }
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def card_html(symbol, name, direction, net_vol, main_player):
     """
     生成一个 QuantLab 风格的玻璃卡片

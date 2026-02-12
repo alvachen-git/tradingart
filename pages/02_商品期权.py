@@ -10,6 +10,7 @@ import re
 import data_engine as de
 from sqlalchemy import text
 import datetime as dt
+from ui_components import inject_sidebar_toggle_style
 # 1. 基础配置
 st.set_page_config(
     page_title="爱波塔-商品期权技术分析",
@@ -428,40 +429,6 @@ st.markdown("""
         border-color: #334155 !important;
     }
 
-    /* 11. 侧边栏折叠按钮样式 */
-    button[data-testid="stSidebarCollapsedControl"] {
-        background-color: #3b82f6 !important; /* 亮蓝色 */
-        border: 2px solid rgba(255, 255, 255, 0.6) !important;
-        border-radius: 12px !important;
-        width: 40px !important;
-        height: 40px !important;
-        box-shadow: 0 4px 12px rgba(0,0,0,0.5) !important;
-        position: fixed !important;
-        left: 15px !important;
-        top: 15px !important;
-        z-index: 999999 !important;
-        display: flex !important;
-        align-items: center !important;
-        justify-content: center !important;
-        opacity: 1 !important;
-        transition: transform 0.2s ease !important;
-    }
-
-    button[data-testid="stSidebarCollapsedControl"]:hover {
-        background-color: #2563eb !important;
-        transform: scale(1.1) !important;
-        border-color: #ffffff !important;
-    }
-
-    button[data-testid="stSidebarCollapsedControl"] svg,
-    button[data-testid="stSidebarCollapsedControl"] i {
-        fill: #ffffff !important;
-        color: #ffffff !important;
-        stroke: #ffffff !important;
-        width: 20px !important;
-        height: 20px !important;
-    }
-
     /* 12. 侧边栏中的Info/Warning/Success框 */
     [data-testid="stSidebar"] [data-testid="stAlert"] {
         background-color: #1e293b !important;
@@ -544,6 +511,7 @@ st.markdown("""
     }
 </style>
 """, unsafe_allow_html=True)
+inject_sidebar_toggle_style(mode="high_contrast")
 
 # 2. 侧边栏逻辑
 with st.sidebar:
@@ -895,7 +863,6 @@ if target_contract:
         st.warning(f"暂无 {target_contract} 的 K 线数据。")
         if is_continuous:
             st.caption("提示：可能是数据库中 futures_price 表缺少主连代码（如 IF 或 IF0）。")
-
 
 
 

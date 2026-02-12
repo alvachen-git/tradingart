@@ -25,6 +25,7 @@ import extra_streamlit_components as stx
 import streamlit.components.v1 as components
 import uuid #用于生成唯一ID
 from market_tools import get_market_snapshot,tool_query_specific_option
+from ui_components import inject_sidebar_toggle_style
 from sqlalchemy import text
 from dotenv import load_dotenv
 from langchain_core.callbacks import BaseCallbackHandler
@@ -270,46 +271,6 @@ st.markdown("""
         color: #8b949e !important; /* 强制灰白 */
     }
     
-    /* 1. 锁定按钮容器：给它加一个明显的背景色块 */
-    button[data-testid="stSidebarCollapsedControl"] {
-        background-color: #3b82f6 !important; /* 亮蓝色底 (如果不喜欢蓝色，可改为 #FFD700 金色) */
-        border: 2px solid rgba(255, 255, 255, 0.6) !important; /* 半透明白边框 */
-        border-radius: 12px !important;       /* 圆角矩形 */
-        width: 40px !important;               /* 强制宽度 */
-        height: 40px !important;              /* 强制高度 */
-        box-shadow: 0 4px 12px rgba(0,0,0,0.5) !important; /* 明显的阴影，增加立体感 */
-        
-        /* 强制定位：防止被 Header 遮挡 */
-        position: fixed !important;
-        left: 15px !important;
-        top: 15px !important;
-        z-index: 999999 !important; /* 层级最高，浮在一切之上 */
-        
-        /* 确保内容居中 */
-        display: flex !important;
-        align-items: center !important;
-        justify-content: center !important;
-        opacity: 1 !important; /* 防止被系统默认的透明度影响 */
-        transition: transform 0.2s ease !important;
-    }
-
-    /* 2. 鼠标悬停效果：点击欲望 */
-    button[data-testid="stSidebarCollapsedControl"]:hover {
-        background-color: #2563eb !important; /* 悬停深蓝 */
-        transform: scale(1.1) !important;     /* 微微放大 */
-        border-color: #ffffff !important;     /* 边框变亮白 */
-    }
-
-    /* 3. 核心修复：强制内部的箭头图标(SVG)变白 */
-    button[data-testid="stSidebarCollapsedControl"] svg,
-    button[data-testid="stSidebarCollapsedControl"] i {
-        fill: #ffffff !important;    /* 填充纯白 */
-        color: #ffffff !important;   /* 颜色纯白 */
-        stroke: #ffffff !important;  /* 描边纯白 */
-        width: 20px !important;      /* 强制图标大小 */
-        height: 20px !important;
-    }
-
     /* 调整底部输入框样式 */
     .stChatInput {
         padding-bottom: 5px;
@@ -450,6 +411,7 @@ st.markdown("""
     }
 </style>
 """, unsafe_allow_html=True)
+inject_sidebar_toggle_style(mode="high_contrast")
 
 
 # ==========================================
@@ -1654,25 +1616,21 @@ if "pending_task" in st.session_state and st.session_state.pending_task:
 
             if current_status in ["pending", "processing"]:
                 progress_msg = task_status.get("progress", "正在处理...")
-                status_placeholder.success(f"🚀 {progress_msg}")
-
-                # 根据进度消息显示不同的加载文本
-                if "初始化" in progress_msg:
-                    loading_text = "爱波塔正在热身..."
-                elif "构建" in progress_msg:
-                    loading_text = "正在组建分析团队..."
-                elif "协作" in progress_msg:
-                    loading_text = "爱波塔团队正在协作分析..."
-                elif "整理" in progress_msg:
-                    loading_text = "正在整理分析报告..."
-                else:
-                    loading_text = "爱波塔正在处理，请稍候..."
+                status_placeholder.info(f"🚀 {progress_msg}")
 
                 with content_placeholder.container():
-                    with st.spinner(loading_text):
-                        time.sleep(1.5)
-
-                st.rerun()
+                    st.caption("任务正在后台执行。你可以手动刷新状态，或停止等待以解除页面持续运行。")
+                    c1, c2 = st.columns(2)
+                    with c1:
+                        if st.button("🔄 刷新任务状态", key=f"btn_refresh_task_{task_id}"):
+                            st.rerun()
+                    with c2:
+                        if st.button("🛑 停止等待", key=f"btn_cancel_waiting_{task_id}"):
+                            if "pending_task" in st.session_state:
+                                del st.session_state.pending_task
+                            if current_user != "访客":
+                                task_manager.clear_user_pending_task(current_user)
+                            st.rerun()
 
             elif current_status == "success":
                 # 任务完成，显示结果
@@ -1805,6 +1763,41 @@ with st.container():
                             请在下方输入框输入问题 <span style="color: #cbd5e1; font-size: 13px;">(例如：'帮分析持仓风险')</span>
                         </div>
                         """, unsafe_allow_html=True)
+
+# 侧栏按钮样式最终兜底（只命中左上角侧栏开关，不影响右上角菜单）
+st.markdown("""
+<style>
+button[data-testid="stExpandSidebarButton"],
+[data-testid="stSidebarHeader"] button[data-testid="stBaseButton-headerNoPadding"] {
+    width: 36px !important;
+    height: 36px !important;
+    min-width: 36px !important;
+    min-height: 36px !important;
+    background: #2563eb !important;
+    border: 2px solid rgba(255, 255, 255, 0.9) !important;
+    border-radius: 10px !important;
+    box-shadow: 0 6px 16px rgba(2, 6, 23, 0.65) !important;
+    opacity: 1 !important;
+}
+
+button[data-testid="stExpandSidebarButton"] {
+    position: fixed !important;
+    top: 14px !important;
+    left: 14px !important;
+    z-index: 999997 !important;
+}
+
+button[data-testid="stExpandSidebarButton"] *,
+[data-testid="stSidebarHeader"] button[data-testid="stBaseButton-headerNoPadding"] * {
+    color: #ffffff !important;
+    fill: #ffffff !important;
+    stroke: #ffffff !important;
+    opacity: 1 !important;
+    font-weight: 800 !important;
+    text-shadow: 0 1px 2px rgba(0,0,0,0.55) !important;
+}
+</style>
+""", unsafe_allow_html=True)
 
 # D. 底部输入框 (Sticky Footer) [修改点：使用 st.chat_input]
 if prompt := st.chat_input("我受过交易汇训练，欢迎问我任何实战交易问题..."):

@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 import subscription_service as sub_svc
 import streamlit.components.v1 as components
 from share_utils import add_share_button
+from ui_components import inject_sidebar_toggle_style
 
 
 # ==========================================
@@ -356,17 +357,6 @@ st.markdown("""
         color: #cbd5e1 !important;
     }
 
-    /* 🔥🔥🔥 [新增] 修复侧边栏折叠按钮 (Home.py 同款) 🔥🔥🔥 */
-    button[data-testid="stSidebarCollapsedControl"] {
-        background-color: #3b82f6 !important;
-        border: 2px solid rgba(255, 255, 255, 0.6) !important;
-        border-radius: 12px !important;
-        box-shadow: 0 4px 12px rgba(0,0,0,0.5) !important;
-    }
-    button[data-testid="stSidebarCollapsedControl"] svg {
-        fill: #ffffff !important;
-        color: #ffffff !important;
-    }
     /* ========== 侧边栏统一样式 ========== */
     .sidebar-card {
         background-color: #1E2329;
@@ -549,6 +539,7 @@ st.markdown("""
     }
 </style>
 """, unsafe_allow_html=True)
+inject_sidebar_toggle_style(mode="high_contrast")
 
 # ==========================================
 # 初始化 Session State
