@@ -1616,6 +1616,15 @@ if "pending_task" in st.session_state and st.session_state.pending_task:
 
             if current_status in ["pending", "processing"]:
                 progress_msg = task_status.get("progress", "正在处理...")
+                elapsed_sec = int(max(0, time.time() - task_start))
+                phase_steps = [
+                    ("🛰️ 正在检索市场数据", "读取行情、新闻与历史上下文"),
+                    ("🧠 正在进行策略推理", "多模型协作评估方向与风险"),
+                    ("🧪 正在校验关键结论", "交叉检查数据一致性与边界条件"),
+                    ("📝 正在整理最终回答", "生成结构化结论与可执行建议"),
+                ]
+                phase_idx = (elapsed_sec // 6) % len(phase_steps)
+                phase_title, phase_desc = phase_steps[phase_idx]
                 status_placeholder.markdown(f"""
                 <style>
                 .thinking-wrap {{
@@ -1637,6 +1646,17 @@ if "pending_task" in st.session_state and st.session_state.pending_task:
                     margin-top: 6px;
                     font-size: 13px;
                     color: #cbd5e1;
+                }}
+                .thinking-phase {{
+                    margin-top: 8px;
+                    color: #bfdbfe;
+                    font-size: 13px;
+                    font-weight: 600;
+                }}
+                .thinking-meta {{
+                    margin-top: 4px;
+                    color: #94a3b8;
+                    font-size: 12px;
                 }}
                 .thinking-dots {{
                     display: inline-flex;
@@ -1667,7 +1687,9 @@ if "pending_task" in st.session_state and st.session_state.pending_task:
                             <span class="thinking-dot"></span>
                         </span>
                     </div>
+                    <div class="thinking-phase">{phase_title}</div>
                     <div class="thinking-sub">{progress_msg}</div>
+                    <div class="thinking-meta">{phase_desc} · 已等待 {elapsed_sec}s</div>
                 </div>
                 """, unsafe_allow_html=True)
 
