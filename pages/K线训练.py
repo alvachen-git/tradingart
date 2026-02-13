@@ -106,6 +106,17 @@ st.markdown("""
         background: #f8fafc !important;
         border: 1px solid #334155 !important;
     }
+    [data-baseweb="select"] div,
+    [data-baseweb="select"] span,
+    [data-baseweb="select"] input {
+        color: #0f172a !important;
+        -webkit-text-fill-color: #0f172a !important;
+        font-weight: 600 !important;
+    }
+    [data-baseweb="select"] svg {
+        color: #334155 !important;
+        fill: #334155 !important;
+    }
     .game-setup-card {
         background: linear-gradient(135deg, #1a1f2e, #2a3441);
         border: 2px solid #3b4252; border-radius: 16px;
@@ -320,6 +331,26 @@ st.markdown("""
     }
     @media (max-width: 768px) {
         .game-guide-grid { grid-template-columns: 1fr; }
+        [data-testid="stSelectbox"] label p {
+            color: #e2e8f0 !important;
+            font-size: 17px !important;
+            font-weight: 800 !important;
+        }
+        [data-baseweb="select"] > div {
+            min-height: 52px !important;
+        }
+        [data-baseweb="select"] div,
+        [data-baseweb="select"] span,
+        [data-baseweb="select"] input {
+            font-size: 20px !important;
+            color: #0f172a !important;
+            -webkit-text-fill-color: #0f172a !important;
+        }
+        [data-baseweb="popover"] [role="listbox"] * {
+            color: #0f172a !important;
+            -webkit-text-fill-color: #0f172a !important;
+            font-size: 18px !important;
+        }
     }
 </style>
 """, unsafe_allow_html=True)
@@ -668,7 +699,7 @@ if not st.session_state.get('game_started'):
         <div class="game-guide-card">
             <div class="game-guide-title">🎯 游戏说明</div>
             <div class="game-guide-grid">
-                <div class="guide-item"><b>1. 客观数据</b><span>本游戏采用真实市场的历史交易价格。</span></div>
+                <div class="guide-item"><b>1. 客观数据</b><span>本游戏采用真实市场的历史交易价格，每场游戏是100根日K线。</span></div>
                 <div class="guide-item"><b>2. K线为主</b><span>游戏主要训练K线交易，没有任何指标提供。</span></div>
                 <div class="guide-item"><b>3. 中离惩罚</b><span>如果没有正常结算游戏，会被处罚扣资金5万。</span></div>
             </div>
@@ -1008,6 +1039,19 @@ if st.session_state.get('game_started') and 'game_data' in st.session_state:
             color: #94a3b8;
             font-size: 12px;
         }}
+        .settle-manual {{
+            margin-top: 10px;
+            width: 100%;
+            padding: 9px 12px;
+            border-radius: 10px;
+            border: 1px dashed #475569;
+            background: rgba(30, 41, 59, 0.6);
+            color: #cbd5e1;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            display: none;
+        }}
     </style>
 </head>
 <body>
@@ -1122,6 +1166,7 @@ if st.session_state.get('game_started') and 'game_data' in st.session_state:
                 <button class="settle-btn" id="settle-confirm-btn" onclick="confirmSettleEnd()">确认结束</button>
             </div>
             <div class="settle-hint">请确认本局结果后，点击按钮结束</div>
+            <button class="settle-manual" id="settle-manual-btn" onclick="manualSettleNavigate()">手动返回入口页</button>
         </div>
     </div>
 
@@ -1586,12 +1631,14 @@ function getLots() {{
             const profitEl = document.getElementById('settle-profit');
             const rateEl = document.getElementById('settle-rate');
             const hint = document.querySelector('.settle-hint');
+            const manualBtn = document.getElementById('settle-manual-btn');
             profitEl.textContent = (profit >= 0 ? '+' : '') + Math.round(profit).toLocaleString();
             rateEl.textContent = (rate >= 0 ? '+' : '') + (rate * 100).toFixed(2) + '%';
             profitEl.className = 'settle-value ' + (profit >= 0 ? 'settle-profit' : 'settle-loss');
             rateEl.className = 'settle-value ' + (rate >= 0 ? 'settle-profit' : 'settle-loss');
             document.getElementById('settle-confirm-btn').disabled = false;
             document.getElementById('settle-review-btn').disabled = false;
+            if (manualBtn) manualBtn.style.display = 'none';
             if (hint) hint.textContent = '可先回顾K线交易，再确认结束';
             overlay.style.display = 'flex';
         }}
@@ -1599,6 +1646,19 @@ function getLots() {{
         function reviewAfterSettle() {{
             const overlay = document.getElementById('settle-overlay');
             overlay.style.display = 'none';
+        }}
+
+        function manualSettleNavigate() {{
+            if (!settleQuery) return;
+            try {{
+                window.top.location.href = settleQuery;
+            }} catch (e) {{
+                try {{
+                    window.parent.location.href = settleQuery;
+                }} catch (e2) {{
+                    window.location.href = settleQuery;
+                }}
+            }}
         }}
 
         function navigateToResult(url) {{
@@ -1630,8 +1690,10 @@ function getLots() {{
             const btn = document.getElementById('settle-confirm-btn');
             const reviewBtn = document.getElementById('settle-review-btn');
             const hint = document.querySelector('.settle-hint');
+            const manualBtn = document.getElementById('settle-manual-btn');
             btn.disabled = true;
             if (reviewBtn) reviewBtn.disabled = true;
+            if (manualBtn) manualBtn.style.display = 'none';
             if (hint) hint.textContent = '正在保存交易明细...';
 
             const persistResult = await persistTradesOnce();
@@ -1648,13 +1710,15 @@ function getLots() {{
             if (hint) hint.textContent = '结算提交中...';
 
             navigateToResult(settleQuery);
-
-            // 兜底：若父页面跳转被浏览器策略拦截，仍在当前 iframe 完成结算，避免下次误判未完成游戏
+            // 不再强制 iframe 内跳转，避免移动端 Safari 触发第三方上下文导致“像是登出”
             setTimeout(() => {{
-                if (!window.location.search.includes('game_done=1')) {{
-                    window.location.href = settleQuery + '&from_iframe=1';
-                }}
-            }}, 300);
+                const stillHere = !window.location.search.includes('game_done=1');
+                if (!stillHere) return;
+                if (hint) hint.textContent = '若未自动跳转，请点下方按钮手动返回入口页。';
+                if (manualBtn) manualBtn.style.display = 'block';
+                btn.disabled = false;
+                if (reviewBtn) reviewBtn.disabled = false;
+            }}, 1200);
         }}
 
         // 结束游戏
