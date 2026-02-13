@@ -20,12 +20,15 @@ from datetime import datetime, timedelta
 import sys
 import os
 import time
+from html import escape
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 import kline_game as kg
 import auth_utils as auth
 import extra_streamlit_components as stx
+
+TRADE_API_URL = kg.get_trade_batch_api_url(prefer_same_domain=True, fallback_port=8765)
 
 # 页面配置
 st.set_page_config(
@@ -39,20 +42,386 @@ st.set_page_config(
 st.markdown("""
 <style>
     .stApp { background-color: #0b1121 !important; color: white !important; }
+    [data-testid="stAppViewContainer"] { background: #0b1121 !important; }
+    [data-testid="stHeader"] {
+        background: transparent !important;
+        box-shadow: none !important;
+        border-bottom: 0 !important;
+    }
     .block-container { padding: 0.5rem 1rem !important; max-width: 100% !important; }
     #MainMenu, footer, [data-testid="stDecoration"] { display: none !important; }
+    [data-testid="stSidebar"] { background-color: #0f172a !important; }
+    [data-testid="stSidebar"] p, [data-testid="stSidebar"] span, [data-testid="stSidebar"] div {
+        color: #cbd5e1 !important;
+    }
+    [data-testid="stSidebarNav"] a {
+        border-radius: 8px !important;
+        margin: 2px 8px !important;
+    }
+    [data-testid="stSidebarNav"] a[data-selected="true"] {
+        background: #334155 !important;
+    }
+    /* 左上角侧栏开关：高对比，参考 Home.py */
+    button[data-testid="stExpandSidebarButton"],
+    [data-testid="stSidebarCollapsedControl"] button,
+    [data-testid="stSidebarHeader"] button[data-testid="stBaseButton-headerNoPadding"] {
+        width: 36px !important;
+        height: 36px !important;
+        min-width: 36px !important;
+        min-height: 36px !important;
+        background: #2563eb !important;
+        border: 2px solid rgba(255, 255, 255, 0.92) !important;
+        border-radius: 10px !important;
+        box-shadow: 0 6px 16px rgba(2, 6, 23, 0.65) !important;
+        opacity: 1 !important;
+    }
+    button[data-testid="stExpandSidebarButton"],
+    [data-testid="stSidebarCollapsedControl"] button {
+        position: fixed !important;
+        top: 14px !important;
+        left: 14px !important;
+        z-index: 999997 !important;
+    }
+    button[data-testid="stExpandSidebarButton"] *,
+    [data-testid="stSidebarCollapsedControl"] button *,
+    [data-testid="stSidebarHeader"] button[data-testid="stBaseButton-headerNoPadding"] * {
+        color: #ffffff !important;
+        fill: #ffffff !important;
+        stroke: #ffffff !important;
+        opacity: 1 !important;
+        font-weight: 800 !important;
+        text-shadow: 0 1px 2px rgba(0, 0, 0, 0.55) !important;
+    }
     .stButton > button {
         background: linear-gradient(135deg, #3b82f6, #1d4ed8) !important;
         color: white !important; border: none !important;
         padding: 12px 24px !important; border-radius: 8px !important;
+    }
+    [data-testid="stSelectbox"] label p {
+        color: #cbd5e1 !important;
+        font-weight: 700 !important;
+        font-size: 14px !important;
+    }
+    [data-baseweb="select"] > div {
+        background: #f8fafc !important;
+        border: 1px solid #334155 !important;
     }
     .game-setup-card {
         background: linear-gradient(135deg, #1a1f2e, #2a3441);
         border: 2px solid #3b4252; border-radius: 16px;
         padding: 24px; margin: 16px 0;
     }
+    .game-guide-card {
+        margin-top: 14px;
+        padding: 16px;
+        border-radius: 12px;
+        border: 1px solid #24344d;
+        background: linear-gradient(145deg, rgba(15,23,42,.9), rgba(30,41,59,.72));
+    }
+    .game-guide-title {
+        color: #e2e8f0;
+        font-size: 18px;
+        font-weight: 700;
+        margin-bottom: 10px;
+    }
+    .game-guide-grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 10px;
+    }
+    .guide-item {
+        border: 1px solid #334155;
+        border-radius: 10px;
+        padding: 10px 12px;
+        background: rgba(2, 6, 23, .55);
+    }
+    .guide-item b {
+        display: block;
+        color: #f8fafc;
+        margin-bottom: 4px;
+    }
+    .guide-item span {
+        color: #94a3b8;
+        font-size: 13px;
+        line-height: 1.5;
+    }
+    .kline-loading-wrap {
+        margin: 14px 0 8px;
+        padding: 16px;
+        border-radius: 12px;
+        border: 1px solid #34538a;
+        background: linear-gradient(145deg, rgba(15,23,42,.92), rgba(37,99,235,.18));
+        text-align: center;
+    }
+    .kline-loading-spinner {
+        width: 34px;
+        height: 34px;
+        margin: 0 auto 10px;
+        border-radius: 50%;
+        border: 3px solid rgba(148,163,184,.28);
+        border-top-color: #60a5fa;
+        animation: kline-spin 0.9s linear infinite;
+    }
+    .kline-loading-title {
+        color: #e2e8f0;
+        font-size: 15px;
+        font-weight: 700;
+    }
+    .kline-loading-sub {
+        margin-top: 4px;
+        color: #93c5fd;
+        font-size: 12px;
+    }
+    .kline-loading-bars {
+        margin-top: 10px;
+        display: flex;
+        justify-content: center;
+        gap: 5px;
+    }
+    .kline-loading-bars span {
+        width: 6px;
+        height: 16px;
+        border-radius: 8px;
+        background: #60a5fa;
+        animation: kline-bar 0.9s ease-in-out infinite;
+    }
+    .kline-loading-bars span:nth-child(2) { animation-delay: 0.12s; }
+    .kline-loading-bars span:nth-child(3) { animation-delay: 0.24s; }
+    .kline-loading-bars span:nth-child(4) { animation-delay: 0.36s; }
+    .lb-wrap {
+        margin-top: 14px;
+        padding: 16px 16px 10px;
+        border-radius: 14px;
+        border: 1px solid #35537d;
+        background:
+            radial-gradient(circle at 12% -6%, rgba(250,204,21,.14), rgba(15,23,42,0) 36%),
+            radial-gradient(circle at 92% 8%, rgba(59,130,246,.18), rgba(15,23,42,0) 38%),
+            linear-gradient(145deg, rgba(12,19,37,.96), rgba(8,14,30,.97));
+        box-shadow: inset 0 1px 0 rgba(255,255,255,.06), 0 18px 40px rgba(2,6,23,.35);
+    }
+    .lb-title {
+        color: #f8fafc;
+        font-weight: 800;
+        font-size: 20px;
+        margin-bottom: 2px;
+        letter-spacing: .3px;
+    }
+    .lb-subtitle {
+        color: #9fb4d6;
+        font-size: 13px;
+        margin-bottom: 12px;
+    }
+    [data-testid="stRadio"] > div {
+        background: rgba(8,16,35,.78);
+        border: 1px solid #2f456a;
+        border-radius: 12px;
+        padding: 6px;
+        gap: 8px;
+    }
+    [data-testid="stRadio"] label[data-baseweb="radio"] {
+        margin: 0 !important;
+        padding: 8px 14px !important;
+        min-height: 40px;
+        border-radius: 999px;
+        border: 1px solid transparent !important;
+        background: transparent;
+        transition: all .16s ease;
+    }
+    [data-testid="stRadio"] label[data-baseweb="radio"] > div:first-of-type {
+        display: none !important;
+    }
+    [data-testid="stRadio"] label[data-baseweb="radio"] p {
+        color: #c9d6ee !important;
+        font-size: 16px !important;
+        font-weight: 800 !important;
+        letter-spacing: .2px;
+        line-height: 1.2;
+    }
+    [data-testid="stRadio"] label[data-baseweb="radio"]:has(input:checked) {
+        background: linear-gradient(135deg, rgba(245,158,11,.25), rgba(59,130,246,.30)) !important;
+        border-color: #5b7fb0 !important;
+        box-shadow: inset 0 1px 0 rgba(255,255,255,.08), 0 6px 16px rgba(15,23,42,.45);
+    }
+    [data-testid="stRadio"] label[data-baseweb="radio"]:has(input:checked) p {
+        color: #f8fafc !important;
+    }
+    [data-testid="stRadio"] label[data-baseweb="radio"]:hover p {
+        color: #eaf1ff !important;
+    }
+    .lb-board {
+        margin-top: 10px;
+        border: 1px solid #385174;
+        border-radius: 12px;
+        overflow: hidden;
+        background:
+            radial-gradient(circle at 100% 0%, rgba(56,189,248,.08), rgba(11,17,33,0) 34%),
+            linear-gradient(180deg, rgba(9,16,32,.95), rgba(12,20,38,.95));
+        box-shadow: inset 0 1px 0 rgba(255,255,255,.05), 0 12px 24px rgba(2,6,23,.24);
+    }
+    .lb-row {
+        display: grid;
+        grid-template-columns: 1fr 2fr 2fr;
+        align-items: center;
+        min-height: 52px;
+    }
+    .lb-row.lb-head {
+        background: linear-gradient(90deg, rgba(245,158,11,.16), rgba(59,130,246,.14));
+        border-bottom: 1px solid #365177;
+        font-weight: 800;
+        color: #e2edff;
+        letter-spacing: .2px;
+    }
+    .lb-row.lb-item {
+        border-bottom: 1px solid rgba(71,85,105,.35);
+    }
+    .lb-row.lb-item:nth-child(even) {
+        background: rgba(51, 65, 85, .2);
+    }
+    .lb-row.lb-item.top1 {
+        background: linear-gradient(90deg, rgba(245,158,11,.14), rgba(30,41,59,.35));
+    }
+    .lb-row.lb-item.top2 {
+        background: linear-gradient(90deg, rgba(148,163,184,.12), rgba(30,41,59,.32));
+    }
+    .lb-row.lb-item.top3 {
+        background: linear-gradient(90deg, rgba(251,146,60,.10), rgba(30,41,59,.28));
+    }
+    .lb-row.lb-item:last-child {
+        border-bottom: none;
+    }
+    .lb-col {
+        text-align: center;
+        justify-self: center;
+        font-size: 14px;
+        color: #e8eefc;
+        font-weight: 700;
+    }
+    .lb-rank.top3 {
+        color: #fef3c7;
+        font-weight: 800;
+        text-shadow: 0 0 12px rgba(245,158,11,.25);
+    }
+    .lb-value.profit-pos { color: #34d399; }
+    .lb-value.profit-neg { color: #fb7185; }
+    .lb-empty {
+        text-align: center;
+        color: #94a3b8;
+        padding: 24px 8px;
+        border: 1px dashed #334155;
+        border-radius: 12px;
+    }
+    @keyframes kline-spin {
+        from { transform: rotate(0deg); }
+        to { transform: rotate(360deg); }
+    }
+    @keyframes kline-bar {
+        0%, 100% { transform: scaleY(0.7); opacity: 0.65; }
+        50% { transform: scaleY(1.35); opacity: 1; }
+    }
+    @media (max-width: 768px) {
+        .game-guide-grid { grid-template-columns: 1fr; }
+    }
 </style>
 """, unsafe_allow_html=True)
+
+
+def render_loading_block():
+    return """
+    <div class="kline-loading-wrap">
+        <div class="kline-loading-spinner"></div>
+        <div class="kline-loading-title">正在加载K线，请稍候...</div>
+        <div class="kline-loading-sub">系统正在随机抽取标的并准备历史走势</div>
+        <div class="kline-loading-bars"><span></span><span></span><span></span><span></span></div>
+    </div>
+    """
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def load_entry_leaderboards():
+    return kg.get_training_entry_leaderboards(limit=20, min_completed=2)
+
+
+def _format_lb_value(board_key, value):
+    try:
+        v = float(value or 0)
+    except Exception:
+        v = 0.0
+    if board_key == "capital":
+        return f"{int(round(v)):,.0f}"
+    if board_key in ("profit", "max_profit"):
+        return f"{'+' if v >= 0 else ''}{int(round(v)):,.0f}"
+    return f"{int(round(v))}"
+
+
+def _render_lb_board(board_key, rows):
+    if not rows:
+        st.markdown('<div class="lb-empty">暂无符合入榜门槛（完成游戏 > 1）的数据</div>', unsafe_allow_html=True)
+        return
+
+    medal = {1: "🥇", 2: "🥈", 3: "🥉"}
+    item_html = []
+    for i, r in enumerate(rows[:20], start=1):
+        user = escape(str(r.get("user_id", "-")))
+        raw = float(r.get("value", 0) or 0)
+        value = _format_lb_value(board_key, raw)
+        rank_text = f"{medal.get(i, '')}{i}" if i <= 3 else str(i)
+        rank_cls = "lb-rank top3" if i <= 3 else "lb-rank"
+        row_cls = f"top{i}" if i <= 3 else ""
+        val_cls = "lb-value"
+        if board_key in ("profit", "max_profit"):
+            val_cls += " profit-pos" if raw >= 0 else " profit-neg"
+        item_html.append(
+            f'<div class="lb-row lb-item {row_cls}">'
+            f'<div class="lb-col {rank_cls}">{rank_text}</div>'
+            f'<div class="lb-col">{user}</div>'
+            f'<div class="lb-col {val_cls}">{value}</div>'
+            '</div>'
+        )
+
+    board_html = (
+        '<div class="lb-board">'
+        '<div class="lb-row lb-head">'
+        '<div class="lb-col">排名</div>'
+        '<div class="lb-col">玩家</div>'
+        '<div class="lb-col">数据</div>'
+        '</div>'
+        + ''.join(item_html) +
+        '</div>'
+    )
+    st.markdown(
+        board_html,
+        unsafe_allow_html=True,
+    )
+
+
+def render_entry_leaderboards():
+    data = load_entry_leaderboards() or {}
+    board_specs = {
+        "总资金排行": "capital",
+        "单局最大盈利排行": "max_profit",
+        "连胜排行": "streak",
+    }
+    if st.session_state.get("lb_board_type") not in board_specs:
+        st.session_state["lb_board_type"] = "总资金排行"
+
+    st.markdown(
+        """
+        <div class="lb-wrap">
+            <div class="lb-title">🏆 玩家排行榜（Top20）</div>
+            <div class="lb-subtitle">仅展示完成局数 &gt; 1 的玩家，数据每 60 秒刷新一次</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    selected_label = st.radio(
+        "排行榜分类",
+        list(board_specs.keys()),
+        horizontal=True,
+        label_visibility="collapsed",
+        key="lb_board_type",
+    )
+    board_key = board_specs.get(selected_label, "capital")
+    _render_lb_board(board_key, data.get(board_key, []))
 
 
 # 🔧 【修复1】Cookie管理 - 移除 @st.cache_resource 装饰器
@@ -93,10 +462,12 @@ with st.sidebar:
 # 🔧 【修复2】处理游戏结果 - 先处理结果，再检查未完成游戏
 game_done = st.query_params.get('game_done', '')
 if game_done == '1':
-    profit = int(st.query_params.get('profit', '0') or '0')
+    from_iframe = st.query_params.get('from_iframe', '') == '1'
+    profit = float(st.query_params.get('profit', '0') or '0')
     profit_rate = float(st.query_params.get('rate', '0') or '0')
     trade_count = int(st.query_params.get('trades', '0') or '0')
     max_drawdown = float(st.query_params.get('drawdown', '0') or '0')
+    leverage_used = int(float(st.query_params.get('leverage', '1') or '1'))
     game_id = int(st.query_params.get('game_id', '0') or '0') or None
     symbol = st.query_params.get('symbol', '')
     symbol_name = st.query_params.get('symbol_name', '未知')
@@ -110,12 +481,27 @@ if game_done == '1':
     # 🔧 记录刚结束的游戏ID
     st.session_state['just_finished_game_id'] = game_id
 
+    new_achievements = []
     try:
         if game_id:
             game_info = kg.get_game_info(game_id)
             if game_info:
-                kg.end_game(game_id, game_info['user_id'], 'finished', 'completed',
-                            profit, profit_rate, capital_before + profit, trade_count, max_drawdown)
+                settle_result = kg.end_game(
+                    game_id, game_info['user_id'], 'finished', 'completed',
+                    profit, profit_rate, capital_before + profit, trade_count, max_drawdown
+                )
+                if settle_result and settle_result.get("ok"):
+                    profit = float(settle_result.get("profit", profit))
+                    profit_rate = float(settle_result.get("profit_rate", profit_rate))
+                    trade_count = int(settle_result.get("trade_count", trade_count))
+                    new_achievements = kg.check_achievements(
+                        user_id=game_info['user_id'],
+                        game_profit=profit,
+                        profit_rate=profit_rate,
+                        trade_count=trade_count,
+                        max_drawdown=max_drawdown,
+                        leverage=leverage_used
+                    ) or []
     except Exception as e:
         print(f"结算游戏失败: {e}")
 
@@ -136,10 +522,26 @@ if game_done == '1':
             </div>
         </div>
         """, unsafe_allow_html=True)
-        if st.button("🎮 再来一局", type="primary", use_container_width=True):
-            # 清除刚结束的游戏ID标记
-            st.session_state['just_finished_game_id'] = None
-            st.rerun()
+        if new_achievements:
+            items = "".join(
+                f"<li style='margin:6px 0;color:#e2e8f0;'>🏆 <b>{a['name']}</b>：{a.get('desc','')}（+{int(a.get('exp',0))} EXP）</li>"
+                for a in new_achievements
+            )
+            st.markdown(f"""
+            <div class="game-guide-card" style="margin-top:12px;">
+                <div class="game-guide-title">🎉 本局解锁成就</div>
+                <ul style="margin:0;padding-left:18px;">{items}</ul>
+            </div>
+            """, unsafe_allow_html=True)
+        else:
+            st.caption("本局暂无新成就解锁。")
+        if from_iframe:
+            st.info("本局已完成结算，请点击左侧「K线训练」返回主页面继续。")
+        else:
+            if st.button("🎮 再来一局", type="primary", use_container_width=True):
+                # 清除刚结束的游戏ID标记
+                st.session_state['just_finished_game_id'] = None
+                st.rerun()
     st.stop()
 
 # 登录检查
@@ -201,22 +603,54 @@ if not st.session_state.get('game_started'):
             speed_ms = {"1秒/根": 1000, "5秒/根": 5000}[speed]
             speed_sec = {"1秒/根": 1, "5秒/根": 5}[speed]
         with col_b:
-            leverage = st.selectbox("杠杆倍数", ["1倍", "5倍", "10倍"], index=0)
-            leverage_val = {"1倍": 1, "5倍": 5, "10倍": 10}[leverage]
+            leverage = st.selectbox("杠杆倍数", ["1倍", "10倍"], index=0)
+            leverage_val = {"1倍": 1, "10倍": 10}[leverage]
 
         if st.button("🎮 开始游戏", type="primary", use_container_width=True):
+            loading_placeholder = st.empty()
+            loading_placeholder.markdown(render_loading_block(), unsafe_allow_html=True)
             with st.spinner("加载K线数据..."):
                 symbol, symbol_name, symbol_type, df = kg.get_random_kline_data(bars=100, history_bars=60)
                 if df is None or len(df) < 160:
+                    loading_placeholder.empty()
                     st.error("数据加载失败")
                     st.stop()
 
-                kline_data = [{'open': float(r['open_price']), 'high': float(r['high_price']),
-                               'low': float(r['low_price']), 'close': float(r['close_price'])} for _, r in
-                              df.iterrows()]
+                def _safe_float(v):
+                    try:
+                        f = float(v)
+                    except (TypeError, ValueError):
+                        return None
+                    return f if pd.notna(f) else None
+
+                # 过滤无效K线，避免前端图表因 NaN/None 直接报错后整页不渲染
+                kline_data = []
+                for _, r in df.iterrows():
+                    o = _safe_float(r.get('open_price'))
+                    h = _safe_float(r.get('high_price'))
+                    l = _safe_float(r.get('low_price'))
+                    c = _safe_float(r.get('close_price'))
+                    if None in (o, h, l, c):
+                        continue
+                    trade_date = r.get('trade_date') if 'trade_date' in r else None
+                    if trade_date is None and hasattr(r, "name"):
+                        trade_date = r.name
+                    if isinstance(trade_date, pd.Timestamp):
+                        trade_date = trade_date.strftime("%Y-%m-%d")
+                    elif isinstance(trade_date, datetime):
+                        trade_date = trade_date.strftime("%Y-%m-%d")
+                    elif trade_date is not None:
+                        trade_date = str(trade_date)[:10]
+                    kline_data.append({'open': o, 'high': h, 'low': l, 'close': c, 'date': trade_date})
+
+                if len(kline_data) < 160:
+                    loading_placeholder.empty()
+                    st.error("K线数据质量不足，请重试")
+                    st.stop()
 
                 game_id = kg.start_game(user_id, symbol, symbol_name, symbol_type, user_capital, leverage_val, speed_sec)
                 if not game_id:
+                    loading_placeholder.empty()
                     st.error("游戏创建失败")
                     st.stop()
 
@@ -224,17 +658,33 @@ if not st.session_state.get('game_started'):
                 st.session_state['game_data'] = {
                     'kline_data': kline_data,
                     'config': {'symbol': symbol, 'symbolName': symbol_name, 'symbolType': symbol_type,
-                               'capital': user_capital, 'leverage': leverage_val, 'speed': speed_ms, 'gameId': game_id}
+                               'capital': user_capital, 'leverage': leverage_val, 'speed': speed_ms,
+                               'gameId': game_id, 'userId': user_id, 'tradeApiUrl': TRADE_API_URL or ''}
                 }
+                loading_placeholder.empty()
                 st.rerun()
 
-        with st.expander("📋 交易规则"):
+        st.markdown("""
+        <div class="game-guide-card">
+            <div class="game-guide-title">🎯 游戏说明</div>
+            <div class="game-guide-grid">
+                <div class="guide-item"><b>1. 客观数据</b><span>本游戏采用真实市场的历史交易价格。</span></div>
+                <div class="guide-item"><b>2. K线为主</b><span>游戏主要训练K线交易，没有任何指标提供。</span></div>
+                <div class="guide-item"><b>3. 中离惩罚</b><span>如果没有正常结算游戏，会被处罚扣资金5万。</span></div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        render_entry_leaderboards()
+
+        with st.expander("📋 交易规则（展开查看）"):
             st.markdown("""
             - **每手 = 1,000元**，可自由选择加仓手数
             - 支持**做多**和**做空**
             - 可以多次**加仓**，累计持仓
             - 可以选择**平仓手数**或一键全平
             - 杠杆放大盈亏，注意风险
+            - 选择 **10倍杠杆** 时，总开仓保证金不超过当前总资金的 **50%**
             """)
     st.stop()
 
@@ -246,13 +696,15 @@ if st.session_state.get('game_started') and 'game_data' in st.session_state:
     kline_data = game_data['kline_data']
     config = game_data['config']
 
+    config_json = json.dumps(config, ensure_ascii=False)
+    kline_json = json.dumps(kline_data, ensure_ascii=False)
+
     # 🔧 【修复3】K线颜色改为中国标准：红涨绿跌
     trading_html = f'''
 <!DOCTYPE html>
 <html>
 <head>
     <meta charset="utf-8">
-    <script src="https://unpkg.com/lightweight-charts@4.0.1/dist/lightweight-charts.standalone.production.js"></script>
     <style>
         * {{ margin: 0; padding: 0; box-sizing: border-box; }}
         body {{ 
@@ -371,14 +823,22 @@ if st.session_state.get('game_started') and 'game_data' in st.session_state:
         /* 交易按钮 */
         .action-buttons {{
             display: flex;
-            gap: 8px;
+            gap: 12px;
+            flex: 1;
+            justify-content: flex-start;
+        }}
+        .action-group {{
+            display: flex;
+            gap: 12px;
         }}
         .action-btn {{
-            padding: 8px 16px;
+            min-width: 92px;
+            height: 48px;
+            padding: 0 18px;
             border: none;
-            border-radius: 6px;
-            font-size: 13px;
-            font-weight: 600;
+            border-radius: 10px;
+            font-size: 16px;
+            font-weight: 700;
             cursor: pointer;
             transition: all 0.15s;
             white-space: nowrap;
@@ -407,6 +867,60 @@ if st.session_state.get('game_started') and 'game_data' in st.session_state:
             cursor: pointer;
         }}
         .end-btn:hover {{ background: #64748b; }}
+
+        @media (max-width: 768px) {{
+            .trade-panel {{
+                padding: 10px 10px 14px;
+            }}
+            .panel-row {{
+                flex-wrap: wrap;
+                gap: 12px;
+            }}
+            .account-info,
+            .position-info {{
+                width: 100%;
+                border-right: none;
+                padding: 0;
+                justify-content: space-between;
+            }}
+            .trade-controls {{
+                width: 100%;
+                flex-direction: column;
+                align-items: stretch;
+                gap: 10px;
+            }}
+            .lot-selector {{
+                width: 100%;
+                justify-content: space-between;
+                flex-wrap: wrap;
+            }}
+            .action-buttons {{
+                width: 100%;
+                display: grid;
+                grid-template-columns: 1fr 1fr;
+                gap: 10px;
+            }}
+            .action-group {{
+                display: grid;
+                grid-template-rows: 1fr 1fr;
+                gap: 10px;
+            }}
+            .action-btn {{
+                width: 100%;
+                min-width: 0;
+                height: 50px;
+                font-size: 17px;
+            }}
+            .end-section {{
+                width: 100%;
+                margin-left: 0;
+            }}
+            .end-btn {{
+                width: 100%;
+                height: 46px;
+                font-size: 16px;
+            }}
+        }}
 
         /* 结算提示层 */
         .settle-overlay {{
@@ -459,6 +973,41 @@ if st.session_state.get('game_started') and 'game_data' in st.session_state:
         .settle-value {{ font-size: 20px; font-weight: 700; }}
         .settle-profit {{ color: #ef4444; }}
         .settle-loss {{ color: #22c55e; }}
+        .settle-btn {{
+            margin-top: 14px;
+            width: 100%;
+            padding: 10px 12px;
+            border: none;
+            border-radius: 10px;
+            background: linear-gradient(135deg, #3b82f6, #1d4ed8);
+            color: #fff;
+            font-size: 16px;
+            font-weight: 700;
+            cursor: pointer;
+        }}
+        .settle-btn:disabled {{
+            opacity: 0.7;
+            cursor: not-allowed;
+        }}
+        .settle-actions {{
+            margin-top: 14px;
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+        }}
+        .settle-actions .settle-btn {{
+            margin-top: 0;
+        }}
+        .settle-btn.secondary {{
+            background: #1e293b;
+            border: 1px solid #334155;
+            color: #e2e8f0;
+        }}
+        .settle-hint {{
+            margin-top: 10px;
+            color: #94a3b8;
+            font-size: 12px;
+        }}
     </style>
 </head>
 <body>
@@ -534,10 +1083,14 @@ if st.session_state.get('game_started') and 'game_data' in st.session_state:
 
                 <!-- 交易按钮 -->
                 <div class="action-buttons">
-                    <button id="btn-long" class="action-btn btn-long" onclick="openPosition('long')">做多</button>
-                    <button id="btn-short" class="action-btn btn-short" onclick="openPosition('short')">做空</button>
-                    <button id="btn-close" class="action-btn btn-close" onclick="closePosition()" disabled>平仓</button>
-                    <button id="btn-close-all" class="action-btn btn-close-all" onclick="closeAll()" disabled>全平</button>
+                    <div class="action-group action-group-open">
+                        <button id="btn-long" class="action-btn btn-long" onclick="openPosition('long')">做多</button>
+                        <button id="btn-short" class="action-btn btn-short" onclick="openPosition('short')">做空</button>
+                    </div>
+                    <div class="action-group action-group-close">
+                        <button id="btn-close" class="action-btn btn-close" onclick="closePosition()" disabled>平仓</button>
+                        <button id="btn-close-all" class="action-btn btn-close-all" onclick="closeAll()" disabled>全平</button>
+                    </div>
                 </div>
             </div>
 
@@ -564,22 +1117,19 @@ if st.session_state.get('game_started') and 'game_data' in st.session_state:
                     <div class="settle-value" id="settle-rate">--</div>
                 </div>
             </div>
+            <div class="settle-actions">
+                <button class="settle-btn secondary" id="settle-review-btn" onclick="reviewAfterSettle()">回顾K线</button>
+                <button class="settle-btn" id="settle-confirm-btn" onclick="confirmSettleEnd()">确认结束</button>
+            </div>
+            <div class="settle-hint">请确认本局结果后，点击按钮结束</div>
         </div>
     </div>
 
     <script>
-        const CONFIG = {{
-            capital: {config['capital']},
-            leverage: {config['leverage']},
-            speed: {config['speed']},
-            gameId: {config['gameId']},
-            symbol: '{config['symbol']}',
-            symbolName: '{config['symbolName']}',
-            symbolType: '{config['symbolType']}',
-            lotSize: 1000  // 每手1000元
-        }};
+        const CONFIG = {config_json};
+        CONFIG.lotSize = 1000;
 
-        const KLINE = {json.dumps(kline_data)};
+        const KLINE = {kline_json};
         const HISTORY = 60, PLAY = 100;
 
         // 游戏状态
@@ -595,11 +1145,174 @@ if st.session_state.get('game_started') and 'game_data' in st.session_state:
             prevPrice: KLINE[HISTORY - 1].close
         }};
 
-        let chart, candles;
+        let chart, candles, playTimer = null;
+        let tradeMarkers = [];
+        let settleQuery = '';
+        let settleSummary = null;
+        let tradeEvents = [];
+        let tradePersistPromise = null;
+        let tradePersisted = false;
+
+        function clonePosition(pos) {{
+            return {{
+                direction: pos?.direction || null,
+                lots: Number(pos?.lots || 0),
+                avgPrice: Number(pos?.avgPrice || 0),
+                totalCost: Number(pos?.totalCost || 0),
+            }};
+        }}
+
+        function resolveTradeApiUrl() {{
+            const configured = String(CONFIG.tradeApiUrl || '').trim();
+            if (configured) return configured;
+            return '/api/kline/trades/batch';
+        }}
+
+        function pushTradeEvent(action, lots, price, positionBefore) {{
+            if (!lots || lots <= 0) return;
+            const bar = getCurrentBar() || {{}};
+            const event = {{
+                trade_seq: tradeEvents.length + 1,
+                action: action,
+                trade_time: new Date().toISOString(),
+                bar_index: state.bar,
+                bar_date: bar.date || null,
+                price: Number(price || 0),
+                lots: Number(lots || 0),
+                amount: Number((lots || 0) * (CONFIG.lotSize || 1000)),
+                leverage: Number(CONFIG.leverage || 1),
+                symbol: CONFIG.symbol,
+                symbol_name: CONFIG.symbolName,
+                symbol_type: CONFIG.symbolType,
+                position_before: clonePosition(positionBefore),
+                position_after: clonePosition(state.position),
+                realized_pnl_after: Number(state.pnl.realized || 0),
+                floating_pnl_after: Number(state.pnl.floating || 0),
+            }};
+            tradeEvents.push(event);
+        }}
+
+        async function persistTradesOnce() {{
+            if (tradePersisted) return {{ ok: true, already: true }};
+            if (tradePersistPromise) return tradePersistPromise;
+
+            const apiUrl = resolveTradeApiUrl();
+            if (!apiUrl) return {{ ok: false, message: 'trade api unavailable' }};
+
+            const payload = {{
+                game_id: Number(CONFIG.gameId || 0),
+                user_id: String(CONFIG.userId || ''),
+                symbol: CONFIG.symbol,
+                symbol_name: CONFIG.symbolName,
+                symbol_type: CONFIG.symbolType,
+                trades: tradeEvents
+            }};
+
+            tradePersistPromise = fetch(apiUrl, {{
+                method: 'POST',
+                headers: {{ 'Content-Type': 'application/json' }},
+                body: JSON.stringify(payload)
+            }}).then(async (res) => {{
+                let body = {{}};
+                try {{
+                    body = await res.json();
+                }} catch (e) {{
+                    body = {{ ok: false, message: 'invalid api response' }};
+                }}
+                if (res.ok && body.ok) {{
+                    tradePersisted = true;
+                    return {{ ok: true, body }};
+                }}
+                return {{ ok: false, status: res.status, body }};
+            }}).catch((err) => {{
+                return {{ ok: false, message: String(err) }};
+            }}).finally(() => {{
+                tradePersistPromise = null;
+            }});
+
+            return tradePersistPromise;
+        }}
+
+        function upsertTradeMarker(type, lots) {{
+            if (!candles) return;
+            const barIdx = state.bar;
+            const markerKey = `${{barIdx}}_${{type}}`;
+            const markerMap = {{
+                open_long:  {{ position: 'belowBar', color: '#ef4444', shape: 'arrowUp', baseText: '做多' }},
+                open_short: {{ position: 'aboveBar', color: '#22c55e', shape: 'arrowDown', baseText: '做空' }},
+                close_long: {{ position: 'aboveBar', color: '#60a5fa', shape: 'circle', baseText: '平多' }},
+                close_short: {{ position: 'belowBar', color: '#a78bfa', shape: 'circle', baseText: '平空' }}
+            }};
+            const m = markerMap[type];
+            if (!m) return;
+
+            const existing = tradeMarkers.find(x => x.id === markerKey);
+            if (existing) {{
+                existing.lots += lots;
+                existing.text = `${{m.baseText}} ${{existing.lots}}手`;
+            }} else {{
+                tradeMarkers.push({{
+                    id: markerKey,
+                    time: barIdx,
+                    position: m.position,
+                    color: m.color,
+                    shape: m.shape,
+                    text: `${{m.baseText}} ${{lots}}手`,
+                    lots
+                }});
+            }}
+
+            const sorted = tradeMarkers
+                .slice()
+                .sort((a, b) => a.time - b.time)
+                .map((x) => ({{
+                    time: x.time,
+                    position: x.position,
+                    color: x.color,
+                    shape: x.shape,
+                    text: x.text
+                }}));
+            candles.setMarkers(sorted);
+        }}
+
+        async function ensureChartLib() {{
+            if (window.LightweightCharts) return true;
+
+            const urls = [
+                'https://unpkg.com/lightweight-charts@4.0.1/dist/lightweight-charts.standalone.production.js',
+                'https://cdn.jsdelivr.net/npm/lightweight-charts@4.0.1/dist/lightweight-charts.standalone.production.js'
+            ];
+
+            for (const url of urls) {{
+                const loaded = await new Promise((resolve) => {{
+                    const script = document.createElement('script');
+                    script.src = url;
+                    script.async = true;
+                    script.onload = () => resolve(true);
+                    script.onerror = () => resolve(false);
+                    document.head.appendChild(script);
+                }});
+                if (loaded && window.LightweightCharts) return true;
+            }}
+            return false;
+        }}
 
         // 初始化图表
-        function initChart() {{
+        async function initChart() {{
+            const libReady = await ensureChartLib();
+            if (!libReady) {{
+                alert('图表库加载失败，请刷新后重试');
+                return;
+            }}
+
             const el = document.getElementById('chart');
+            el.innerHTML = '';
+            if (chart) chart.remove();
+            tradeMarkers = [];
+            tradeEvents = [];
+            tradePersistPromise = null;
+            tradePersisted = false;
+
             chart = LightweightCharts.createChart(el, {{
                 width: el.clientWidth, height: el.clientHeight,
                 layout: {{ background: {{ type: 'solid', color: '#0f172a' }}, textColor: '#94a3b8' }},
@@ -626,21 +1339,22 @@ if st.session_state.get('game_started') and 'game_data' in st.session_state:
         }}
 
         // 播放K线
-        function playBar() {{
+function playBar() {{
             if (!state.running) return;
+            if (state.played >= PLAY) {{ endGame(); return; }}
             state.bar++;
             state.played++;
 
-            if (state.played > PLAY) {{ endGame(); return; }}
-
             const bar = KLINE[state.bar];
+            if (!bar) {{ endGame(); return; }}
             candles.update({{ time: state.bar, open: bar.open, high: bar.high, low: bar.low, close: bar.close }});
 
             calcPnL();
             updateDisplay();
             state.prevPrice = bar.close;
 
-            setTimeout(playBar, CONFIG.speed);
+            if (playTimer) clearTimeout(playTimer);
+            playTimer = setTimeout(playBar, CONFIG.speed);
         }}
 
         // 设置手数
@@ -656,8 +1370,18 @@ if st.session_state.get('game_started') and 'game_data' in st.session_state:
             }});
         }}
 
-        function getLots() {{
+function getLots() {{
             return Math.max(1, parseInt(document.getElementById('lot-input').value) || 1);
+        }}
+
+        function getCurrentBar() {{
+            const idx = Math.max(0, Math.min(state.bar, KLINE.length - 1));
+            return KLINE[idx];
+        }}
+
+        function getCurrentPrice() {{
+            const bar = getCurrentBar();
+            return bar ? bar.close : state.prevPrice;
         }}
 
         // 开仓/加仓
@@ -665,13 +1389,30 @@ if st.session_state.get('game_started') and 'game_data' in st.session_state:
             if (!state.running) return;
 
             const lots = getLots();
-            const price = KLINE[state.bar].close;
-            const cost = lots * CONFIG.lotSize;
+            const price = getCurrentPrice();
+            const posBefore = clonePosition(state.position);
+            const marginCost = lots * CONFIG.lotSize;
+            const leverage = CONFIG.leverage || 1;
 
             // 检查资金
-            if (cost > state.cash) {{
-                alert('资金不足！需要 ' + cost.toLocaleString() + ' 元，可用 ' + state.cash.toLocaleString() + ' 元');
+            if (marginCost > state.cash) {{
+                alert('资金不足！需要 ' + marginCost.toLocaleString() + ' 元，可用 ' + state.cash.toLocaleString() + ' 元');
                 return;
+            }}
+
+            // 风控：10倍杠杆时，总开仓保证金 <= 当前总资金的50%
+            if (leverage === 10) {{
+                const equity = state.cash + state.position.totalCost;
+                const nextTotalMargin = state.position.totalCost + marginCost;
+                const maxMargin = equity * 0.5;
+                if (nextTotalMargin > maxMargin) {{
+                    alert(
+                        '10倍杠杆风险限制：总开仓保证金不能超过当前总资金50%。\\n' +
+                        '当前上限：' + Math.floor(maxMargin).toLocaleString() + ' 元，' +
+                        '本次后将达到：' + Math.floor(nextTotalMargin).toLocaleString() + ' 元'
+                    );
+                    return;
+                }}
             }}
 
             // 如果已有反向持仓，需要先平仓
@@ -687,7 +1428,7 @@ if st.session_state.get('game_started') and 'game_data' in st.session_state:
                     direction: dir,
                     lots: lots,
                     avgPrice: price,
-                    totalCost: cost
+                    totalCost: marginCost
                 }};
             }} else {{
                 // 加仓 - 计算新均价
@@ -696,23 +1437,29 @@ if st.session_state.get('game_started') and 'game_data' in st.session_state:
                 const totalLots = state.position.lots + lots;
                 state.position.avgPrice = (oldValue + newValue) / totalLots;
                 state.position.lots = totalLots;
-                state.position.totalCost += cost;
+                state.position.totalCost += marginCost;
             }}
 
-            state.cash -= cost;
+            state.cash -= marginCost;
             state.trades++;
+            upsertTradeMarker(dir === 'long' ? 'open_long' : 'open_short', lots);
 
             calcPnL();
+            const action = posBefore.direction ? (dir === 'long' ? 'add_long' : 'add_short') : (dir === 'long' ? 'open_long' : 'open_short');
+            pushTradeEvent(action, lots, price, posBefore);
             updateDisplay();
             updateButtons();
         }}
 
         // 平仓（按手数）
-        function closePosition(force=false) {{
+        function closePosition(force=false, lotsOverride=null) {{
             if ((!state.running && !force) || !state.position.direction) return;
 
-            const lots = Math.min(getLots(), state.position.lots);
-            const price = KLINE[state.bar].close;
+            const selectedLots = lotsOverride ?? getLots();
+            const lots = Math.min(selectedLots, state.position.lots);
+            const price = getCurrentPrice();
+            const posBefore = clonePosition(state.position);
+            const closingDir = state.position.direction;
 
             // 计算盈亏
             let pnl;
@@ -727,6 +1474,7 @@ if st.session_state.get('game_started') and 'game_data' in st.session_state:
             state.cash += returnCost + pnl;
             state.pnl.realized += pnl;
             state.trades++;
+            upsertTradeMarker(closingDir === 'long' ? 'close_long' : 'close_short', lots);
 
             // 更新持仓
             state.position.lots -= lots;
@@ -737,6 +1485,11 @@ if st.session_state.get('game_started') and 'game_data' in st.session_state:
             }}
 
             calcPnL();
+            const fullyClosed = lots >= (posBefore.lots || 0);
+            const action = closingDir === 'long'
+                ? (fullyClosed ? 'close_long_all' : 'close_long_partial')
+                : (fullyClosed ? 'close_short_all' : 'close_short_partial');
+            pushTradeEvent(action, lots, price, posBefore);
             updateDisplay();
             updateButtons();
         }}
@@ -744,8 +1497,7 @@ if st.session_state.get('game_started') and 'game_data' in st.session_state:
         // 全部平仓
         function closeAll() {{
             if (!state.position.direction) return;
-            document.getElementById('lot-input').value = state.position.lots;
-            closePosition(true);
+            closePosition(true, state.position.lots);
         }}
 
         // 计算浮动盈亏
@@ -755,7 +1507,7 @@ if st.session_state.get('game_started') and 'game_data' in st.session_state:
                 return;
             }}
 
-            const price = KLINE[state.bar].close;
+            const price = getCurrentPrice();
             const lots = state.position.lots;
 
             if (state.position.direction === 'long') {{
@@ -772,7 +1524,7 @@ if st.session_state.get('game_started') and 'game_data' in st.session_state:
 
         // 更新显示
         function updateDisplay() {{
-            const price = KLINE[state.bar].close;
+            const price = getCurrentPrice();
             const change = ((price - state.prevPrice) / state.prevPrice * 100);
 
             // 价格 - 红涨绿跌
@@ -789,7 +1541,7 @@ if st.session_state.get('game_started') and 'game_data' in st.session_state:
             // 账户
             document.getElementById('available-cash').textContent = Math.round(state.cash).toLocaleString();
 
-            const posValue = state.position.lots * CONFIG.lotSize;
+            const posValue = state.position.lots * CONFIG.lotSize * (CONFIG.leverage || 1);
             document.getElementById('position-value').textContent = posValue.toLocaleString();
 
             // 浮动盈亏 - 红涨绿跌
@@ -833,37 +1585,115 @@ if st.session_state.get('game_started') and 'game_data' in st.session_state:
             document.getElementById('settle-symbol-code').textContent = CONFIG.symbol;
             const profitEl = document.getElementById('settle-profit');
             const rateEl = document.getElementById('settle-rate');
+            const hint = document.querySelector('.settle-hint');
             profitEl.textContent = (profit >= 0 ? '+' : '') + Math.round(profit).toLocaleString();
             rateEl.textContent = (rate >= 0 ? '+' : '') + (rate * 100).toFixed(2) + '%';
             profitEl.className = 'settle-value ' + (profit >= 0 ? 'settle-profit' : 'settle-loss');
             rateEl.className = 'settle-value ' + (rate >= 0 ? 'settle-profit' : 'settle-loss');
+            document.getElementById('settle-confirm-btn').disabled = false;
+            document.getElementById('settle-review-btn').disabled = false;
+            if (hint) hint.textContent = '可先回顾K线交易，再确认结束';
             overlay.style.display = 'flex';
+        }}
+
+        function reviewAfterSettle() {{
+            const overlay = document.getElementById('settle-overlay');
+            overlay.style.display = 'none';
+        }}
+
+        function navigateToResult(url) {{
+            // 优先尝试跳出 iframe，避免结束后出现页面嵌套
+            try {{
+                const pdoc = window.parent && window.parent.document;
+                if (pdoc && pdoc.body) {{
+                    const a = pdoc.createElement('a');
+                    a.href = url;
+                    a.target = '_self';
+                    a.style.display = 'none';
+                    pdoc.body.appendChild(a);
+                    a.click();
+                    a.remove();
+                }}
+            }} catch (e) {{}}
+
+            try {{
+                window.top.location.assign(url);
+            }} catch (e) {{}}
+
+            try {{
+                window.parent.location.assign(url);
+            }} catch (e) {{}}
+        }}
+
+        async function confirmSettleEnd() {{
+            if (!settleQuery) return;
+            const btn = document.getElementById('settle-confirm-btn');
+            const reviewBtn = document.getElementById('settle-review-btn');
+            const hint = document.querySelector('.settle-hint');
+            btn.disabled = true;
+            if (reviewBtn) reviewBtn.disabled = true;
+            if (hint) hint.textContent = '正在保存交易明细...';
+
+            const persistResult = await persistTradesOnce();
+            if (!persistResult || !persistResult.ok) {{
+                const msg = persistResult?.body?.message || persistResult?.message || '未知错误';
+                if (hint) hint.textContent = '交易明细保存失败，可重试或继续结束';
+                const goOn = confirm('交易明细保存失败（' + msg + '）。\\n是否仍结束本局？');
+                if (!goOn) {{
+                    btn.disabled = false;
+                    if (reviewBtn) reviewBtn.disabled = false;
+                    return;
+                }}
+            }}
+            if (hint) hint.textContent = '结算提交中...';
+
+            navigateToResult(settleQuery);
+
+            // 兜底：若父页面跳转被浏览器策略拦截，仍在当前 iframe 完成结算，避免下次误判未完成游戏
+            setTimeout(() => {{
+                if (!window.location.search.includes('game_done=1')) {{
+                    window.location.href = settleQuery + '&from_iframe=1';
+                }}
+            }}, 300);
         }}
 
         // 结束游戏
         function endGame() {{
+            if (state.ending) {{
+                if (settleSummary) showSettleOverlay(settleSummary.profit, settleSummary.rate);
+                return;
+            }}
+
             state.running = false;
             state.ending = true;
+            if (playTimer) {{
+                clearTimeout(playTimer);
+                playTimer = null;
+            }}
             if (state.position.direction) closeAll();
 
             const profit = state.pnl.realized;
             const rate = profit / CONFIG.capital;
+            settleSummary = {{ profit: profit, rate: rate }};
 
             showSettleOverlay(profit, rate);
 
-            setTimeout(() => {{
-                const p = new URLSearchParams({{
-                    game_done: '1', profit: Math.round(profit), rate: rate.toFixed(4),
-                    trades: state.trades, drawdown: state.pnl.maxDD.toFixed(4),
-                    game_id: CONFIG.gameId, symbol: CONFIG.symbol,
-                    symbol_name: CONFIG.symbolName, symbol_type: CONFIG.symbolType,
-                    capital: CONFIG.capital
-                }});
-                location.href = '?' + p.toString();
-            }}, 1500);
+            const p = new URLSearchParams({{
+                game_done: '1', profit: Math.round(profit), rate: rate.toFixed(4),
+                trades: state.trades, drawdown: state.pnl.maxDD.toFixed(4),
+                game_id: CONFIG.gameId, symbol: CONFIG.symbol,
+                symbol_name: CONFIG.symbolName, symbol_type: CONFIG.symbolType,
+                capital: CONFIG.capital, leverage: CONFIG.leverage
+            }});
+            settleQuery = '?' + p.toString();
+            persistTradesOnce();
         }}
 
         function confirmEnd() {{
+            if (state.ending) {{
+                endGame();
+                return;
+            }}
             if (confirm('确认结束？将自动平仓结算。')) endGame();
         }}
 

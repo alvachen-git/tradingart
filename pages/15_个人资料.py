@@ -9,6 +9,8 @@ from dotenv import load_dotenv
 import plotly.express as px
 import time
 import sys
+from html import escape
+from textwrap import dedent
 
 # 1. 环境初始化
 load_dotenv(override=True)
@@ -123,6 +125,73 @@ st.markdown("""
         border-radius: 8px;
         display: inline-block;
         font-size: 14px;
+    }
+
+    /* 成就徽章墙 */
+    .achv-wrap {
+        background: linear-gradient(145deg, #111827 0%, #0f172a 100%);
+        border: 1px solid #334155;
+        border-radius: 14px;
+        padding: 16px;
+        margin: 10px 0 18px;
+    }
+    .achv-head {
+        display: flex;
+        justify-content: space-between;
+        align-items: baseline;
+        margin-bottom: 12px;
+    }
+    .achv-title {
+        font-size: 18px;
+        font-weight: 700;
+        color: #f8fafc;
+    }
+    .achv-progress {
+        font-size: 13px;
+        color: #93c5fd;
+    }
+    .achv-grid {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 10px;
+    }
+    .achv-badge {
+        border: 1px solid #334155;
+        border-radius: 12px;
+        padding: 10px;
+        min-height: 100px;
+        background: rgba(30, 41, 59, 0.65);
+    }
+    .achv-badge.locked {
+        opacity: 0.45;
+        filter: grayscale(1);
+    }
+    .achv-icon {
+        font-size: 20px;
+        margin-bottom: 6px;
+    }
+    .achv-name {
+        color: #e2e8f0;
+        font-size: 14px;
+        font-weight: 700;
+        line-height: 1.25;
+        margin-bottom: 4px;
+    }
+    .achv-desc {
+        color: #94a3b8;
+        font-size: 12px;
+        line-height: 1.4;
+    }
+    .achv-time {
+        margin-top: 6px;
+        color: #60a5fa;
+        font-size: 11px;
+    }
+    @media (max-width: 1024px) {
+        .achv-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    }
+    @media (max-width: 768px) {
+        .achv-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     }
 </style>
 """, unsafe_allow_html=True)
@@ -326,6 +395,113 @@ def get_memory_fragments(user_id):
         return pd.DataFrame()
 
 
+def get_achievement_catalog():
+    try:
+        from kline_game import ACHIEVEMENTS
+        return ACHIEVEMENTS
+    except Exception:
+        return {}
+
+
+def get_user_achievements(user_id):
+    engine = get_db_engine()
+    if not engine:
+        return []
+    try:
+        with engine.connect() as conn:
+            sql = text("""
+                SELECT achievement_code, achievement_name, unlocked_at, exp_reward
+                FROM kline_game_achievements
+                WHERE user_id = :uid
+                ORDER BY unlocked_at DESC
+            """)
+            rows = conn.execute(sql, {"uid": user_id}).mappings().fetchall()
+            return [dict(r) for r in rows]
+    except Exception:
+        return []
+
+
+def render_achievement_badges(user_id):
+    # 进入个人资料页时做一次成就补齐，避免历史局因旧版本逻辑漏发
+    try:
+        from kline_game import check_achievements
+        check_achievements(
+            user_id=user_id,
+            game_profit=0,
+            profit_rate=0,
+            trade_count=0,
+            max_drawdown=0,
+            leverage=1,
+        )
+    except Exception:
+        pass
+
+    catalog = get_achievement_catalog() or {}
+    unlocked_rows = get_user_achievements(user_id)
+
+    if not catalog:
+        st.info("成就系统资料暂不可用")
+        return
+
+    unlocked_map = {str(r.get("achievement_code")): r for r in unlocked_rows}
+    total = len(catalog)
+    done = len(unlocked_map)
+
+    icon_map = {
+        "dual_leverage": "⚖️", "games_20": "📚",
+        "profit_100k": "💯", "profit_500k": "💸", "rate_50": "📈",
+        "loss_100k": "⚠️", "loss_500k": "🧯",
+        "no_drawdown_win": "🛡️", "streak_5": "🔥", "streak_10": "🏆",
+        "trader_20": "⚡", "zen_1_trade_win": "🎯",
+        "lev10_win": "🧠",
+        "gross_profit_100k": "🥉", "gross_profit_1m": "🥈", "gross_profit_10m": "🥇",
+        "gross_loss_500k": "🌊",
+    }
+
+    cards_html = []
+    for code, meta in catalog.items():
+        unlocked = code in unlocked_map
+        row = unlocked_map.get(code, {})
+        unlocked_at = row.get("unlocked_at")
+        unlocked_text = "<div class='achv-time' style='color:#64748b;'>未解锁</div>"
+        if unlocked and unlocked_at:
+            unlocked_text = f"<div class='achv-time'>解锁：{escape(str(unlocked_at))[:16]}</div>"
+        elif unlocked:
+            unlocked_text = "<div class='achv-time'>已解锁</div>"
+
+        cards_html.append(
+            dedent(
+                f"""
+                <div class="achv-badge {'unlocked' if unlocked else 'locked'}">
+                    <div class="achv-icon">{icon_map.get(code, '🏅')}</div>
+                    <div class="achv-name">{escape(meta.get('name', code))}</div>
+                    {unlocked_text}
+                </div>
+                """
+            ).strip()
+        )
+
+    html = dedent(
+        f"""
+        <div class="achv-wrap">
+            <div class="achv-head">
+                <div class="achv-title">🏅 成就徽章</div>
+                <div class="achv-progress">已解锁 {done}/{total}</div>
+            </div>
+            <div class="achv-grid">{''.join(cards_html)}</div>
+        </div>
+        """
+    ).strip()
+
+    st.markdown(html, unsafe_allow_html=True)
+
+
+def get_achievement_progress(user_id):
+    catalog = get_achievement_catalog() or {}
+    unlocked_rows = get_user_achievements(user_id)
+    return len(unlocked_rows), len(catalog)
+
+
 # ================= 页面主逻辑 =================
 
 # 1. 权限检查
@@ -380,6 +556,10 @@ with col3:
     """, unsafe_allow_html=True)
     st.markdown('</div>', unsafe_allow_html=True)
 
+st.markdown("---")
+done_count, total_count = get_achievement_progress(username)
+with st.expander(f"🏅 成就徽章（已解锁 {done_count}/{total_count}，点击展开）", expanded=False):
+    render_achievement_badges(username)
 st.markdown("---")
 
 # ============================================
