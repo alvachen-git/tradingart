@@ -431,6 +431,30 @@ def check_token(username, token):
         return False
 
 
+def restore_login_from_cookies(cookies: dict) -> bool:
+    """
+    从浏览器 Cookie 恢复登录态。
+    仅在 session_state 未登录时尝试恢复。
+    """
+    if st.session_state.get("is_logged_in") and st.session_state.get("user_id"):
+        return True
+
+    cookies = cookies or {}
+    c_user = cookies.get("username")
+    c_token = cookies.get("token")
+
+    if not c_user or not c_token or not str(c_user).strip():
+        return False
+
+    if not check_token(str(c_user), c_token):
+        return False
+
+    st.session_state["is_logged_in"] = True
+    st.session_state["user_id"] = str(c_user)
+    st.session_state["token"] = c_token
+    return True
+
+
 # ============================================
 # 用户信息查询
 # ============================================

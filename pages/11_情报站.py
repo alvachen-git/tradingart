@@ -3,6 +3,8 @@ import time
 import streamlit as st
 from datetime import datetime, timedelta
 import subscription_service as sub_svc
+import auth_utils as auth
+import extra_streamlit_components as stx
 import streamlit.components.v1 as components
 from share_utils import add_share_button
 from ui_components import inject_sidebar_toggle_style
@@ -548,6 +550,31 @@ if 'selected_channel' not in st.session_state:
     st.session_state.selected_channel = 'all'
 if 'expanded_content' not in st.session_state:
     st.session_state.expanded_content = set()
+if 'is_logged_in' not in st.session_state:
+    st.session_state.is_logged_in = False
+    st.session_state.user_id = None
+    st.session_state.token = None
+if 'intel_cookie_retry_once' not in st.session_state:
+    st.session_state.intel_cookie_retry_once = False
+
+cookie_manager = stx.CookieManager(key="intel_cookie_manager")
+cookies = cookie_manager.get_all() or {}
+
+if not st.session_state.get("is_logged_in") and not st.session_state.get("just_logged_out", False):
+    restored = auth.restore_login_from_cookies(cookies)
+    if not restored and not cookies and not st.session_state.get("intel_cookie_retry_once", False):
+        st.session_state.intel_cookie_retry_once = True
+        time.sleep(0.15)
+        st.rerun()
+    elif not restored and (cookies.get("username") or cookies.get("token")):
+        try:
+            cookie_manager.delete("username", key="intel_del_user")
+            cookie_manager.delete("token", key="intel_del_token")
+        except:
+            pass
+
+if st.session_state.get("just_logged_out", False):
+    st.session_state.just_logged_out = False
 
 
 # ==========================================

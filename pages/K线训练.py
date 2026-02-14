@@ -472,15 +472,21 @@ if 'game_started' not in st.session_state:
 # 🔧 【修复2】新增：用于记录刚结束的游戏ID，避免误判
 if 'just_finished_game_id' not in st.session_state:
     st.session_state['just_finished_game_id'] = None
+if 'kline_cookie_retry_once' not in st.session_state:
+    st.session_state['kline_cookie_retry_once'] = False
 
 # 恢复登录
 if not st.session_state.get('is_logged_in'):
     try:
         cookies = cookie_manager.get_all() or {}
-        if cookies.get("username") and cookies.get("token"):
-            if auth.check_token(str(cookies["username"]), cookies["token"]):
-                st.session_state['is_logged_in'] = True
-                st.session_state['user_id'] = str(cookies["username"])
+        restored = auth.restore_login_from_cookies(cookies)
+        if not restored and not cookies and not st.session_state.get("kline_cookie_retry_once", False):
+            st.session_state["kline_cookie_retry_once"] = True
+            time.sleep(0.15)
+            st.rerun()
+        elif not restored and (cookies.get("username") or cookies.get("token")):
+            cookie_manager.delete("username", key="kline_del_user")
+            cookie_manager.delete("token", key="kline_del_token")
     except:
         pass
 

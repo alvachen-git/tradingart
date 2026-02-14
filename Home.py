@@ -664,6 +664,8 @@ def native_share_button(user_content, ai_content, key):
 # ==========================================
 cookie_manager = stx.CookieManager(key="main_cookie_manager")
 cookies = cookie_manager.get_all() or {}
+if "home_cookie_retry_once" not in st.session_state:
+    st.session_state.home_cookie_retry_once = False
 
 # 🔥 [关键修复] 在任何 rerun 之前，先读取公告状态并保存到 session_state
 # 这样即使后面触发 rerun，公告状态也不会丢失
@@ -688,48 +690,52 @@ should_auto_login = (
     and not st.session_state.get('just_logged_out', False)  # ← 这行很重要！
 )
 
-if should_auto_login and cookies:
-    c_user = cookies.get("username")
-    c_token = cookies.get("token")
+if should_auto_login:
+    restored = auth.restore_login_from_cookies(cookies)
 
-    if c_user and c_token and str(c_user).strip() != "":
-        if auth.check_token(str(c_user), c_token):
-            st.session_state['is_logged_in'] = True
-            st.session_state['user_id'] = str(c_user)
-            st.session_state['token'] = c_token
+    if restored:
+        c_user = st.session_state.get("user_id")
 
-            # 🔥 [新增] 自动登录后，尝试从 Redis 恢复待处理任务
-            from task_manager import TaskManager
+        # 🔥 [新增] 自动登录后，尝试从 Redis 恢复待处理任务
+        from task_manager import TaskManager
 
-            task_manager = TaskManager()
-            pending_task_data = task_manager.get_user_pending_task(str(c_user))
+        task_manager = TaskManager()
+        pending_task_data = task_manager.get_user_pending_task(str(c_user))
 
-            if pending_task_data:
-                # 恢复任务信息到 Session State
-                st.session_state.pending_task = {
-                    "task_id": pending_task_data["task_id"],
-                    "prompt": pending_task_data["prompt"],
-                    "image_context": pending_task_data.get("image_context", ""),
-                    "risk": pending_task_data.get("risk_preference", "稳健型"),
-                    "start_time": pending_task_data["start_time"]
-                }
+        if pending_task_data:
+            # 恢复任务信息到 Session State
+            st.session_state.pending_task = {
+                "task_id": pending_task_data["task_id"],
+                "prompt": pending_task_data["prompt"],
+                "image_context": pending_task_data.get("image_context", ""),
+                "risk": pending_task_data.get("risk_preference", "稳健型"),
+                "start_time": pending_task_data["start_time"]
+            }
 
-                # 恢复用户消息到历史（如果 messages 为空）
-                if not st.session_state.get("messages"):
-                    st.session_state.messages = [
-                        {"role": "user", "content": pending_task_data["prompt"]}
-                    ]
+            # 恢复用户消息到历史（如果 messages 为空）
+            if not st.session_state.get("messages"):
+                st.session_state.messages = [
+                    {"role": "user", "content": pending_task_data["prompt"]}
+                ]
 
-                st.toast(f"欢迎回来，{c_user} (已恢复您的任务)")
-                print(f"✅ 自动登录后恢复任务: {pending_task_data['task_id']}")
-            else:
-                st.toast(f"欢迎回来，{c_user} (自动登录)")
-
-            time.sleep(0.3)
-            st.rerun()
-
+            st.toast(f"欢迎回来，{c_user} (已恢复您的任务)")
+            print(f"✅ 自动登录后恢复任务: {pending_task_data['task_id']}")
         else:
-            # 🔥 新增：Token 失效时清除 Cookie
+            st.toast(f"欢迎回来，{c_user} (自动登录)")
+
+        time.sleep(0.3)
+        st.rerun()
+
+    # 某些浏览器首次载入时 Cookie 组件还没就绪，重跑一次再读
+    elif not cookies and not st.session_state.get("home_cookie_retry_once", False):
+        st.session_state.home_cookie_retry_once = True
+        time.sleep(0.15)
+        st.rerun()
+    else:
+        # Token 失效时清除 Cookie，避免反复失败
+        c_user = cookies.get("username")
+        c_token = cookies.get("token")
+        if c_user or c_token:
             try:
                 cookie_manager.delete("username", key="auto_clean_user")
                 cookie_manager.delete("token", key="auto_clean_token")

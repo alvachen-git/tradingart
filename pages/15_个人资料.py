@@ -9,6 +9,8 @@ from dotenv import load_dotenv
 import plotly.express as px
 import time
 import sys
+import auth_utils as auth
+import extra_streamlit_components as stx
 from html import escape
 from textwrap import dedent
 
@@ -503,6 +505,33 @@ def get_achievement_progress(user_id):
 
 
 # ================= 页面主逻辑 =================
+
+# 登录态恢复（处理 Streamlit 会话超时）
+if "is_logged_in" not in st.session_state:
+    st.session_state.is_logged_in = False
+    st.session_state.user_id = None
+    st.session_state.token = None
+if "profile_cookie_retry_once" not in st.session_state:
+    st.session_state.profile_cookie_retry_once = False
+
+cookie_manager = stx.CookieManager(key="profile_cookie_manager")
+cookies = cookie_manager.get_all() or {}
+
+if not st.session_state.get("is_logged_in") and not st.session_state.get("just_logged_out", False):
+    restored = auth.restore_login_from_cookies(cookies)
+    if not restored and not cookies and not st.session_state.get("profile_cookie_retry_once", False):
+        st.session_state.profile_cookie_retry_once = True
+        time.sleep(0.15)
+        st.rerun()
+    elif not restored and (cookies.get("username") or cookies.get("token")):
+        try:
+            cookie_manager.delete("username", key="profile_del_user")
+            cookie_manager.delete("token", key="profile_del_token")
+        except:
+            pass
+
+if st.session_state.get("just_logged_out", False):
+    st.session_state.just_logged_out = False
 
 # 1. 权限检查
 if not st.session_state.get('is_logged_in', False):
