@@ -697,9 +697,9 @@ if not st.session_state.get('game_started'):
 
         col_a, col_b = st.columns(2)
         with col_a:
-            speed = st.selectbox("播放速度", ["1秒/根", "5秒/根"], index=0)
-            speed_ms = {"1秒/根": 1000, "5秒/根": 5000}[speed]
-            speed_sec = {"1秒/根": 1, "5秒/根": 5}[speed]
+            speed = st.selectbox("播放速度", ["1秒/根", "3秒/根", "5秒/根"], index=0)
+            speed_ms = {"1秒/根": 1000, "3秒/根": 3000, "5秒/根": 5000}[speed]
+            speed_sec = {"1秒/根": 1, "3秒/根": 3, "5秒/根": 5}[speed]
         with col_b:
             leverage = st.selectbox("杠杆倍数", ["1倍", "10倍"], index=0)
             leverage_val = {"1倍": 1, "10倍": 10}[leverage]
