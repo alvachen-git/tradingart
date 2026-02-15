@@ -560,6 +560,7 @@ def fix_missing_columns(missing_columns):
 # ==========================================
 _SYMBOL_CACHE = {
     "stock": {"ts": 0, "min_bars": 0, "symbols": []},
+    "index": {"ts": 0, "min_bars": 0, "symbols": []},
     "future": {"ts": 0, "min_bars": 0, "symbols": []},
 }
 
@@ -578,6 +579,19 @@ _FUTURES_NAME_MAP = {
     # 金融/股指/国债
     "IF": "沪深300", "IH": "上证50", "IC": "中证500", "IM": "中证1000",
     "T": "10年国债", "TF": "5年国债", "TS": "2年国债",
+}
+
+_INDEX_NAME_MAP = {
+    "000001.SH": "上证指数",
+    "399001.SZ": "深证成指",
+    "000300.SH": "沪深300",
+    "000905.SH": "中证500",
+    "000852.SH": "中证1000",
+    "000688.SH": "科创50",
+    "399006.SZ": "创业板指",
+    "000016.SH": "上证50",
+    "399005.SZ": "中小100",
+    "932000.CSI": "中证2000",
 }
 
 
@@ -632,6 +646,10 @@ def _resolve_future_name(conn, symbol: str) -> str:
     return symbol
 
 
+def _resolve_index_name(symbol: str) -> str:
+    return _INDEX_NAME_MAP.get(str(symbol or "").upper(), symbol)
+
+
 def _get_cached_symbols(conn, market_type, min_bars, ttl_seconds=300):
     """
     获取可用品种列表（带缓存），减少每次游戏开始的聚合查询耗时
@@ -645,6 +663,16 @@ def _get_cached_symbols(conn, market_type, min_bars, ttl_seconds=300):
         sql = text("""
             SELECT ts_code
             FROM stock_price
+            WHERE open_price IS NOT NULL
+              AND close_price IS NOT NULL
+            GROUP BY ts_code
+            HAVING COUNT(*) >= :min_bars
+        """)
+    elif market_type == "index":
+        # 参考项目内其他脚本（如 kline_tools.py）对 index_price 的查询方式
+        sql = text("""
+            SELECT ts_code
+            FROM index_price
             WHERE open_price IS NOT NULL
               AND close_price IS NOT NULL
             GROUP BY ts_code
@@ -680,11 +708,15 @@ def get_random_kline_data(bars=100, history_bars=60):
 
     try:
         with engine.connect() as conn:
-            # 随机决定是股票还是期货
-            is_stock = random.random() > 0.5
-            print(f"[GET_KLINE] 选择类型: {'股票' if is_stock else '期货'}")
+            # 随机决定类型：股票40% / 指数10% / 期货50%
+            selected_type = random.choices(
+                ["stock", "index", "future"],
+                weights=[40, 10, 50],
+                k=1
+            )[0]
+            print(f"[GET_KLINE] 选择类型: {selected_type}")
 
-            if is_stock:
+            if selected_type == "stock":
                 # 从股票中随机选一个有足够数据的（带缓存）
                 symbols = _get_cached_symbols(conn, "stock", total_bars + 50)
                 if not symbols:
@@ -710,6 +742,17 @@ def get_random_kline_data(bars=100, history_bars=60):
                     symbol_name = name_result[0] if name_result else symbol
                 except:
                     symbol_name = symbol
+            elif selected_type == "index":
+                symbols = _get_cached_symbols(conn, "index", total_bars + 50)
+                if not symbols:
+                    print("[GET_KLINE] ❌ 未找到足够数据的指数，改用股票")
+                    return get_random_kline_data(bars, history_bars)
+
+                symbol = random.choice(symbols)
+                symbol_type = 'index'
+                table_name = 'index_price'
+                symbol_name = _resolve_index_name(symbol)
+                print(f"[GET_KLINE] 选中指数: {symbol} ({symbol_name})")
             else:
                 # 从期货主力合约中随机选一个（不含数字的代码是主力，带缓存）
                 symbols = _get_cached_symbols(conn, "future", total_bars + 50)

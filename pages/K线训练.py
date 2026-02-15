@@ -367,6 +367,17 @@ def render_loading_block():
     """
 
 
+def render_settlement_processing_block():
+    return """
+    <div class="kline-loading-wrap" style="min-height:45vh;">
+        <div class="kline-loading-spinner"></div>
+        <div class="kline-loading-title">正在结算本局结果...</div>
+        <div class="kline-loading-sub">系统正在保存交易记录并生成结算页</div>
+        <div class="kline-loading-bars"><span></span><span></span><span></span><span></span></div>
+    </div>
+    """
+
+
 @st.cache_data(ttl=60, show_spinner=False)
 def load_entry_leaderboards():
     return kg.get_training_entry_leaderboards(limit=20, min_completed=2)
@@ -474,6 +485,10 @@ if 'just_finished_game_id' not in st.session_state:
     st.session_state['just_finished_game_id'] = None
 if 'kline_cookie_retry_once' not in st.session_state:
     st.session_state['kline_cookie_retry_once'] = False
+if 'settlement_pending' not in st.session_state:
+    st.session_state['settlement_pending'] = None
+if 'settlement_view' not in st.session_state:
+    st.session_state['settlement_view'] = None
 
 # 恢复登录
 if not st.session_state.get('is_logged_in'):
@@ -496,26 +511,47 @@ with st.sidebar:
     if st.session_state.get('is_logged_in'):
         st.success(f"👤 {st.session_state.get('user_id')}")
 
-# 🔧 【修复2】处理游戏结果 - 先处理结果，再检查未完成游戏
+# 🔧 处理游戏结果：先把 query 参数落到 session，避免被 rerun 清空后页面闪退
 game_done = st.query_params.get('game_done', '')
 if game_done == '1':
-    from_iframe = st.query_params.get('from_iframe', '') == '1'
-    profit = float(st.query_params.get('profit', '0') or '0')
-    profit_rate = float(st.query_params.get('rate', '0') or '0')
-    trade_count = int(st.query_params.get('trades', '0') or '0')
-    max_drawdown = float(st.query_params.get('drawdown', '0') or '0')
-    leverage_used = int(float(st.query_params.get('leverage', '1') or '1'))
-    game_id = int(st.query_params.get('game_id', '0') or '0') or None
-    symbol = st.query_params.get('symbol', '')
-    symbol_name = st.query_params.get('symbol_name', '未知')
-    symbol_type = st.query_params.get('symbol_type', 'stock')
-    capital_before = int(float(st.query_params.get('capital', '1000000') or '1000000'))
-
+    try:
+        st.session_state['settlement_pending'] = {
+            'from_iframe': st.query_params.get('from_iframe', '') == '1',
+            'profit': float(st.query_params.get('profit', '0') or '0'),
+            'profit_rate': float(st.query_params.get('rate', '0') or '0'),
+            'trade_count': int(st.query_params.get('trades', '0') or '0'),
+            'max_drawdown': float(st.query_params.get('drawdown', '0') or '0'),
+            'leverage_used': int(float(st.query_params.get('leverage', '1') or '1')),
+            'game_id': int(st.query_params.get('game_id', '0') or '0') or None,
+            'symbol': st.query_params.get('symbol', ''),
+            'symbol_name': st.query_params.get('symbol_name', '未知'),
+            'symbol_type': st.query_params.get('symbol_type', 'stock'),
+            'capital_before': int(float(st.query_params.get('capital', '1000000') or '1000000')),
+        }
+    except Exception:
+        st.session_state['settlement_pending'] = None
     st.query_params.clear()
-    st.session_state['game_started'] = False
-    if 'game_data' in st.session_state: del st.session_state['game_data']
+    st.rerun()
 
-    # 🔧 记录刚结束的游戏ID
+# 处理并持久化结算结果（只做一次）
+if st.session_state.get('settlement_pending') and not st.session_state.get('settlement_view'):
+    st.markdown(render_settlement_processing_block(), unsafe_allow_html=True)
+    pending = st.session_state['settlement_pending']
+    from_iframe = pending.get('from_iframe', False)
+    profit = float(pending.get('profit', 0))
+    profit_rate = float(pending.get('profit_rate', 0))
+    trade_count = int(pending.get('trade_count', 0))
+    max_drawdown = float(pending.get('max_drawdown', 0))
+    leverage_used = int(pending.get('leverage_used', 1))
+    game_id = pending.get('game_id')
+    symbol = pending.get('symbol', '')
+    symbol_name = pending.get('symbol_name', '未知')
+    symbol_type = pending.get('symbol_type', 'stock')
+    capital_before = int(pending.get('capital_before', 1000000))
+
+    st.session_state['game_started'] = False
+    if 'game_data' in st.session_state:
+        del st.session_state['game_data']
     st.session_state['just_finished_game_id'] = game_id
 
     new_achievements = []
@@ -542,10 +578,34 @@ if game_done == '1':
     except Exception as e:
         print(f"结算游戏失败: {e}")
 
+    st.session_state['settlement_view'] = {
+        'from_iframe': from_iframe,
+        'profit': profit,
+        'profit_rate': profit_rate,
+        'trade_count': trade_count,
+        'symbol': symbol,
+        'symbol_name': symbol_name,
+        'symbol_type': symbol_type,
+        'new_achievements': new_achievements,
+    }
+    st.session_state['settlement_pending'] = None
+    # 避免“处理中动画”和“结算页”出现在同一轮渲染中
+    st.rerun()
+
+# 展示结算页（手动确认后才离开）
+if st.session_state.get('settlement_view'):
+    view = st.session_state['settlement_view']
+    from_iframe = view.get('from_iframe', False)
+    profit = float(view.get('profit', 0))
+    profit_rate = float(view.get('profit_rate', 0))
+    trade_count = int(view.get('trade_count', 0))
+    symbol = view.get('symbol', '')
+    symbol_name = view.get('symbol_name', '未知')
+    new_achievements = view.get('new_achievements') or []
+
     st.markdown("<h1 style='text-align:center;color:#e5e7eb;'>🎯 游戏结束</h1>", unsafe_allow_html=True)
     col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
-        # 🔧 【修复3】盈利显示也改为红涨绿跌
         profit_color = '#ef4444' if profit > 0 else '#22c55e' if profit < 0 else '#e5e7eb'
         st.markdown(f"""
         <div class="game-setup-card" style="text-align:center;">
@@ -572,11 +632,12 @@ if game_done == '1':
             """, unsafe_allow_html=True)
         else:
             st.caption("本局暂无新成就解锁。")
+
         if from_iframe:
             st.info("本局已完成结算，请点击左侧「K线训练」返回主页面继续。")
         else:
             if st.button("🎮 再来一局", type="primary", use_container_width=True):
-                # 清除刚结束的游戏ID标记
+                st.session_state['settlement_view'] = None
                 st.session_state['just_finished_game_id'] = None
                 st.rerun()
     st.stop()
@@ -1058,6 +1119,35 @@ if st.session_state.get('game_started') and 'game_data' in st.session_state:
             cursor: pointer;
             display: none;
         }}
+        .settle-wait-mask {{
+            position: absolute;
+            inset: 0;
+            background: rgba(2, 6, 23, 0.86);
+            border-radius: 18px;
+            display: none;
+            align-items: center;
+            justify-content: center;
+            z-index: 10;
+        }}
+        .settle-wait-box {{
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 10px;
+            color: #e2e8f0;
+            font-weight: 600;
+        }}
+        .settle-wait-spinner {{
+            width: 30px;
+            height: 30px;
+            border-radius: 50%;
+            border: 3px solid rgba(96, 165, 250, 0.25);
+            border-top-color: #60a5fa;
+            animation: settleSpin 0.8s linear infinite;
+        }}
+        @keyframes settleSpin {{
+            to {{ transform: rotate(360deg); }}
+        }}
     </style>
 </head>
 <body>
@@ -1154,9 +1244,15 @@ if st.session_state.get('game_started') and 'game_data' in st.session_state:
     <!-- 结算遮罩 -->
     <div class="settle-overlay" id="settle-overlay">
         <div class="settle-card">
+            <div class="settle-wait-mask" id="settle-wait-mask">
+                <div class="settle-wait-box">
+                    <div class="settle-wait-spinner"></div>
+                    <div id="settle-wait-text">正在提交结算...</div>
+                </div>
+            </div>
             <div class="settle-title">结算中</div>
-            <div class="settle-symbol" id="settle-symbol-name">--</div>
-            <div class="settle-sub" id="settle-symbol-code">--</div>
+            <div class="settle-symbol" id="settle-comment-title">--</div>
+            <div class="settle-sub" id="settle-comment-sub">--</div>
             <div class="settle-row">
                 <div class="settle-item">
                     <div class="settle-label">盈亏</div>
@@ -1630,10 +1726,44 @@ function getLots() {{
             document.getElementById('btn-close-all').disabled = !hasPos;
         }}
 
+        function buildSettleComment(profit, rate) {{
+            const tradeCount = Number(state.trades || 0);
+            const drawdown = Number(state.pnl.maxDD || 0);
+            const absProfit = Math.abs(profit || 0);
+
+            if (rate >= 0.5 || profit >= 500000) {{
+                return {{ title: 'K线之神降临', sub: '你刚刚把市场当成了乐高，拆完还能原样拼回去。' }};
+            }}
+            if (profit >= 100000) {{
+                return {{ title: '印钞机启动', sub: '每根K线都像在给你发工资，老板都想问你缺不缺同事。' }};
+            }}
+            if (profit > 0 && drawdown <= 0.02) {{
+                return {{ title: '稳如老狗（褒义）', sub: '波动在闹，你在笑；回撤想进门都找不到门铃。' }};
+            }}
+            if (profit > 0) {{
+                return {{ title: '顺风小赚王', sub: '今天是“赚一点点但很开心”模式，节奏感在线。' }};
+            }}
+            if (profit === 0 && tradeCount <= 1) {{
+                return {{ title: '忍者潜行局', sub: '几乎没出手，主打一个“市场先动，我再决定”。' }};
+            }}
+            if (tradeCount >= 20 && profit <= 0) {{
+                return {{ title: '手速型选手', sub: '你把交易台当音游在打了，下一局试试少按几个键。' }};
+            }}
+            if (absProfit >= 500000) {{
+                return {{ title: '过山车VIP', sub: '资金曲线体验了失重感，建议先系好风控安全带。' }};
+            }}
+            if (profit < 0) {{
+                return {{ title: '学费已到账', sub: '市场收了点学费，但知识点已经打包进背包了。' }};
+            }}
+            return {{ title: '剧情平稳收官', sub: '没有大起大落，属于“导演都夸节奏稳”的一局。' }};
+        }}
+
         function showSettleOverlay(profit, rate) {{
             const overlay = document.getElementById('settle-overlay');
-            document.getElementById('settle-symbol-name').textContent = CONFIG.symbolName;
-            document.getElementById('settle-symbol-code').textContent = CONFIG.symbol;
+            const waitMask = document.getElementById('settle-wait-mask');
+            const comment = buildSettleComment(profit, rate);
+            document.getElementById('settle-comment-title').textContent = comment.title;
+            document.getElementById('settle-comment-sub').textContent = comment.sub;
             const profitEl = document.getElementById('settle-profit');
             const rateEl = document.getElementById('settle-rate');
             const hint = document.querySelector('.settle-hint');
@@ -1646,6 +1776,7 @@ function getLots() {{
             document.getElementById('settle-review-btn').disabled = false;
             if (manualBtn) manualBtn.style.display = 'none';
             if (hint) hint.textContent = '可先回顾K线交易，再确认结束';
+            if (waitMask) waitMask.style.display = 'none';
             overlay.style.display = 'flex';
         }}
 
@@ -1697,10 +1828,14 @@ function getLots() {{
             const reviewBtn = document.getElementById('settle-review-btn');
             const hint = document.querySelector('.settle-hint');
             const manualBtn = document.getElementById('settle-manual-btn');
+            const waitMask = document.getElementById('settle-wait-mask');
+            const waitText = document.getElementById('settle-wait-text');
             btn.disabled = true;
             if (reviewBtn) reviewBtn.disabled = true;
             if (manualBtn) manualBtn.style.display = 'none';
             if (hint) hint.textContent = '正在保存交易明细...';
+            if (waitText) waitText.textContent = '正在提交结算...';
+            if (waitMask) waitMask.style.display = 'flex';
 
             const persistResult = await persistTradesOnce();
             if (!persistResult || !persistResult.ok) {{
@@ -1710,10 +1845,12 @@ function getLots() {{
                 if (!goOn) {{
                     btn.disabled = false;
                     if (reviewBtn) reviewBtn.disabled = false;
+                    if (waitMask) waitMask.style.display = 'none';
                     return;
                 }}
             }}
             if (hint) hint.textContent = '结算提交中...';
+            if (waitText) waitText.textContent = '正在跳转结算页...';
 
             navigateToResult(settleQuery);
             // 不再强制 iframe 内跳转，避免移动端 Safari 触发第三方上下文导致“像是登出”
@@ -1724,6 +1861,8 @@ function getLots() {{
                 if (manualBtn) manualBtn.style.display = 'block';
                 btn.disabled = false;
                 if (reviewBtn) reviewBtn.disabled = false;
+                if (waitText) waitText.textContent = '等待你确认手动返回...';
+                if (waitMask) waitMask.style.display = 'none';
             }}, 1200);
         }}
 
