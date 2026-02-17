@@ -41,6 +41,12 @@ st.set_page_config(
 # 样式
 st.markdown("""
 <style>
+    :root {
+        --sp-1: 8px;
+        --sp-2: 12px;
+        --sp-3: 16px;
+        --sp-4: 24px;
+    }
     .stApp { background-color: #0b1121 !important; color: white !important; }
     [data-testid="stAppViewContainer"] { background: #0b1121 !important; }
     [data-testid="stHeader"] {
@@ -48,7 +54,7 @@ st.markdown("""
         box-shadow: none !important;
         border-bottom: 0 !important;
     }
-    .block-container { padding: 0.5rem 1rem !important; max-width: 100% !important; }
+    .block-container { padding: var(--sp-1) var(--sp-3) !important; max-width: 100% !important; }
     #MainMenu, footer, [data-testid="stDecoration"] { display: none !important; }
     [data-testid="stSidebar"] { background-color: #0f172a !important; }
     [data-testid="stSidebar"] p, [data-testid="stSidebar"] span, [data-testid="stSidebar"] div {
@@ -95,7 +101,19 @@ st.markdown("""
     .stButton > button {
         background: linear-gradient(135deg, #3b82f6, #1d4ed8) !important;
         color: white !important; border: none !important;
-        padding: 12px 24px !important; border-radius: 8px !important;
+        padding: 12px 24px !important; border-radius: 10px !important;
+        transition: transform .16s ease, box-shadow .16s ease, filter .16s ease, background .16s ease !important;
+        box-shadow: 0 8px 18px rgba(37, 99, 235, .28);
+    }
+    .stButton > button:hover {
+        transform: translateY(-1px);
+        box-shadow: 0 12px 24px rgba(37, 99, 235, .36);
+        filter: brightness(1.04);
+    }
+    .stButton > button:active {
+        transform: translateY(1px) scale(.995);
+        box-shadow: 0 4px 10px rgba(37, 99, 235, .25);
+        filter: brightness(.96);
     }
     [data-testid="stSelectbox"] label p {
         color: #cbd5e1 !important;
@@ -123,8 +141,8 @@ st.markdown("""
         padding: 24px; margin: 16px 0;
     }
     .game-guide-card {
-        margin-top: 14px;
-        padding: 16px;
+        margin-top: var(--sp-2);
+        padding: var(--sp-3);
         border-radius: 12px;
         border: 1px solid #24344d;
         background: linear-gradient(145deg, rgba(15,23,42,.9), rgba(30,41,59,.72));
@@ -138,12 +156,12 @@ st.markdown("""
     .game-guide-grid {
         display: grid;
         grid-template-columns: repeat(3, minmax(0, 1fr));
-        gap: 10px;
+        gap: var(--sp-1);
     }
     .guide-item {
         border: 1px solid #334155;
         border-radius: 10px;
-        padding: 10px 12px;
+        padding: var(--sp-1) var(--sp-2);
         background: rgba(2, 6, 23, .55);
     }
     .guide-item b {
@@ -155,6 +173,104 @@ st.markdown("""
         color: #94a3b8;
         font-size: 13px;
         line-height: 1.5;
+    }
+    .entry-hero-wrap {
+        margin-top: var(--sp-1);
+        border: 1px solid #35537d;
+        border-radius: 16px;
+        padding: var(--sp-2) var(--sp-3);
+        background:
+            radial-gradient(circle at 8% -8%, rgba(34, 211, 238, .18), rgba(15,23,42,0) 38%),
+            radial-gradient(circle at 95% 15%, rgba(59, 130, 246, .25), rgba(15,23,42,0) 42%),
+            linear-gradient(135deg, rgba(8,14,29,.96), rgba(10,18,34,.98));
+        box-shadow: inset 0 1px 0 rgba(255,255,255,.07), 0 18px 40px rgba(2,6,23,.35);
+        position: relative;
+        overflow: hidden;
+    }
+    .entry-hero-wrap::after {
+        content: "";
+        position: absolute;
+        top: -45%;
+        left: -30%;
+        width: 30%;
+        height: 190%;
+        background: linear-gradient(100deg, rgba(255,255,255,0), rgba(191,219,254,.35), rgba(255,255,255,0));
+        transform: skewX(-18deg);
+        animation: heroSweep 4.8s ease-in-out infinite;
+        pointer-events: none;
+    }
+    .entry-title {
+        margin-top: 2px;
+        font-size: clamp(30px, 4.4vw, 44px);
+        font-weight: 900;
+        line-height: 1.06;
+        letter-spacing: 1px;
+        background: linear-gradient(180deg, #f8fbff 0%, #bcd4ff 55%, #7fb3ff 100%);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        text-shadow: 0 0 24px rgba(59,130,246,.18);
+        position: relative;
+        z-index: 2;
+    }
+    .entry-sub {
+        margin-top: 6px;
+        color: #9fb4d6;
+        font-size: 12px;
+        line-height: 1.6;
+    }
+    .entry-unified-panel {
+        margin-top: var(--sp-2);
+    }
+    .entry-capital-mini {
+        border: 1px solid #35537d;
+        border-radius: 12px;
+        padding: var(--sp-2);
+        background: linear-gradient(145deg, rgba(18,27,48,.94), rgba(12,20,36,.96));
+        min-height: 170px;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+    }
+    .entry-capital-row {
+        display: grid;
+        grid-template-columns: minmax(92px, 1fr) auto;
+        align-items: center;
+        gap: 12px;
+    }
+    .entry-capital-label {
+        color: #9cb0cf;
+        font-size: 16px;
+        font-weight: 800;
+        letter-spacing: .2px;
+        white-space: nowrap;
+    }
+    .entry-capital-value {
+        color: #f8fafc;
+        font-size: clamp(30px, 4vw, 42px);
+        font-weight: 900;
+        line-height: 1;
+        white-space: nowrap;
+        letter-spacing: .2px;
+    }
+    .entry-unified-panel [data-testid="stSelectbox"] {
+        margin-bottom: 0 !important;
+    }
+    .entry-unified-panel [data-testid="stSelectbox"] label p {
+        font-size: 13px !important;
+        color: #dbe8ff !important;
+    }
+    .entry-unified-panel .stButton > button {
+        margin-top: var(--sp-1) !important;
+        min-height: 46px !important;
+    }
+    .entry-gap-hero {
+        height: 14px;
+    }
+    .entry-gap-cta {
+        height: 14px;
+    }
+    .entry-gap-guide {
+        height: 16px;
     }
     .kline-loading-wrap {
         margin: 14px 0 8px;
@@ -200,8 +316,8 @@ st.markdown("""
     .kline-loading-bars span:nth-child(3) { animation-delay: 0.24s; }
     .kline-loading-bars span:nth-child(4) { animation-delay: 0.36s; }
     .lb-wrap {
-        margin-top: 14px;
-        padding: 16px 16px 10px;
+        margin-top: var(--sp-2);
+        padding: var(--sp-3) var(--sp-3) var(--sp-2);
         border-radius: 14px;
         border: 1px solid #35537d;
         background:
@@ -222,6 +338,88 @@ st.markdown("""
         font-size: 13px;
         margin-bottom: 12px;
     }
+    .lb-podium {
+        margin-top: 6px;
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 10px;
+    }
+    .lb-podium-card {
+        border-radius: 12px;
+        padding: 10px 10px 12px;
+        border: 1px solid #415c82;
+        background: linear-gradient(165deg, rgba(15,23,42,.9), rgba(30,41,59,.72));
+        text-align: center;
+        box-shadow: inset 0 1px 0 rgba(255,255,255,.06);
+    }
+    .lb-podium-rank {
+        font-weight: 900;
+        font-size: 18px;
+        letter-spacing: .4px;
+        margin-bottom: 2px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 6px;
+    }
+    .lb-medal {
+        width: 22px;
+        height: 22px;
+        border-radius: 999px 999px 999px 999px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        position: relative;
+        box-shadow: inset 0 1px 0 rgba(255,255,255,.45), 0 2px 8px rgba(2,6,23,.35);
+    }
+    .lb-medal::before {
+        content: "✦";
+        font-size: 11px;
+        line-height: 1;
+        font-weight: 900;
+        color: rgba(15, 23, 42, .92);
+        text-shadow: 0 1px 0 rgba(255,255,255,.28);
+    }
+    .lb-medal-gold {
+        background: linear-gradient(145deg, #fde68a, #f59e0b);
+    }
+    .lb-medal-silver {
+        background: linear-gradient(145deg, #f1f5f9, #94a3b8);
+    }
+    .lb-medal-bronze {
+        background: linear-gradient(145deg, #fdba74, #c2410c);
+    }
+    .lb-podium-user {
+        color: #e2e8f0;
+        font-size: 14px;
+        font-weight: 800;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+    .lb-podium-val {
+        margin-top: 4px;
+        color: #bfdbfe;
+        font-size: 15px;
+        font-weight: 900;
+    }
+    .lb-podium-card.rank-1 {
+        border-color: #b9892a;
+        background: linear-gradient(165deg, rgba(77,51,16,.36), rgba(15,23,42,.94));
+        box-shadow: inset 0 1px 0 rgba(255,255,255,.08), 0 10px 24px rgba(146,95,23,.25);
+        transform: translateY(-3px);
+    }
+    .lb-podium-card.rank-2 {
+        border-color: #8093ad;
+        background: linear-gradient(165deg, rgba(73,85,104,.30), rgba(15,23,42,.94));
+    }
+    .lb-podium-card.rank-3 {
+        border-color: #9a6b3e;
+        background: linear-gradient(165deg, rgba(88,56,32,.32), rgba(15,23,42,.94));
+    }
+    .lb-podium-card.rank-1 .lb-podium-rank { color: #fbbf24; }
+    .lb-podium-card.rank-2 .lb-podium-rank { color: #d1d5db; }
+    .lb-podium-card.rank-3 .lb-podium-rank { color: #fb923c; }
     [data-testid="stRadio"] > div {
         background: rgba(8,16,35,.78);
         border: 1px solid #2f456a;
@@ -321,6 +519,12 @@ st.markdown("""
         border: 1px dashed #334155;
         border-radius: 12px;
     }
+    @keyframes heroSweep {
+        0% { transform: translateX(-180%) skewX(-18deg); opacity: 0; }
+        20% { opacity: .85; }
+        45% { transform: translateX(440%) skewX(-18deg); opacity: 0; }
+        100% { transform: translateX(440%) skewX(-18deg); opacity: 0; }
+    }
     @keyframes kline-spin {
         from { transform: rotate(0deg); }
         to { transform: rotate(360deg); }
@@ -330,6 +534,29 @@ st.markdown("""
         50% { transform: scaleY(1.35); opacity: 1; }
     }
     @media (max-width: 768px) {
+        .entry-hero-wrap { padding: 12px 12px; }
+        .entry-title { letter-spacing: .6px; }
+        .entry-capital-row { grid-template-columns: 1fr; justify-items: start; gap: 6px; }
+        .entry-capital-value { font-size: 30px; }
+        .entry-unified-panel { padding: 10px; }
+        .entry-capital-mini { min-height: 156px; }
+        .entry-capital-label {
+            font-size: 15px;
+        }
+        .entry-gap-hero {
+            height: 12px;
+        }
+        .entry-gap-cta {
+            height: 12px;
+        }
+        .entry-gap-guide {
+            height: 14px;
+        }
+        .lb-podium {
+            grid-template-columns: 1fr;
+            gap: 8px;
+        }
+        .lb-podium-card.rank-1 { transform: none; }
         .game-guide-grid { grid-template-columns: 1fr; }
         [data-testid="stSelectbox"] label p {
             color: #e2e8f0 !important;
@@ -350,6 +577,16 @@ st.markdown("""
             color: #0f172a !important;
             -webkit-text-fill-color: #0f172a !important;
             font-size: 18px !important;
+        }
+    }
+    @media (max-width: 1200px) and (min-width: 769px) {
+        .entry-capital-row {
+            grid-template-columns: 1fr;
+            justify-items: start;
+            gap: 8px;
+        }
+        .entry-capital-value {
+            font-size: clamp(30px, 3.2vw, 38px);
         }
     }
 </style>
@@ -436,15 +673,37 @@ def _render_lb_board(board_key, rows):
         st.markdown('<div class="lb-empty">暂无符合入榜门槛（完成游戏 > 1）的数据</div>', unsafe_allow_html=True)
         return
 
-    medal = {1: "🥇", 2: "🥈", 3: "🥉"}
+    medal = {1: "TOP 1", 2: "TOP 2", 3: "TOP 3"}
+    medal_cls = {1: "lb-medal-gold", 2: "lb-medal-silver", 3: "lb-medal-bronze"}
+    top3 = rows[:3]
+    if top3:
+        podium_html = []
+        for i, r in enumerate(top3, start=1):
+            user = escape(str(r.get("user_id", "-")))
+            raw = float(r.get("value", 0) or 0)
+            value = _format_lb_value(board_key, raw)
+            val_cls = "lb-podium-val"
+            if board_key in ("profit", "max_profit"):
+                val_cls += " profit-pos" if raw >= 0 else " profit-neg"
+            podium_html.append(
+                f'<div class="lb-podium-card rank-{i}">'
+                f'<div class="lb-podium-rank"><span class="lb-medal {medal_cls.get(i, "")}"></span>{medal.get(i, f"TOP {i}")}</div>'
+                f'<div class="lb-podium-user">{user}</div>'
+                f'<div class="{val_cls}">{value}</div>'
+                '</div>'
+            )
+        st.markdown(f'<div class="lb-podium">{"".join(podium_html)}</div>', unsafe_allow_html=True)
+
     item_html = []
     for i, r in enumerate(rows[:20], start=1):
+        if i <= 3:
+            continue
         user = escape(str(r.get("user_id", "-")))
         raw = float(r.get("value", 0) or 0)
         value = _format_lb_value(board_key, raw)
-        rank_text = f"{medal.get(i, '')}{i}" if i <= 3 else str(i)
-        rank_cls = "lb-rank top3" if i <= 3 else "lb-rank"
-        row_cls = f"top{i}" if i <= 3 else ""
+        rank_text = str(i)
+        rank_cls = "lb-rank"
+        row_cls = ""
         val_cls = "lb-value"
         if board_key in ("profit", "max_profit"):
             val_cls += " profit-pos" if raw >= 0 else " profit-neg"
@@ -463,7 +722,7 @@ def _render_lb_board(board_key, rows):
         '<div class="lb-col">玩家</div>'
         '<div class="lb-col">数据</div>'
         '</div>'
-        + ''.join(item_html) +
+        + (''.join(item_html) if item_html else '<div class="lb-empty" style="border:none;border-radius:0;">已展示前三名，暂无更多玩家</div>') +
         '</div>'
     )
     st.markdown(
@@ -779,23 +1038,33 @@ user_capital = kg.get_user_capital(user_id) or 1000000
 
 # 游戏设置页面
 if not st.session_state.get('game_started'):
-    st.markdown("<h1 style='text-align:center;color:#e5e7eb;'>📈 K线交易训练</h1>", unsafe_allow_html=True)
     col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
-        st.markdown(f"""<div style="background:#2a3441;padding:16px;border-radius:10px;text-align:center;margin:16px 0;">
-            <div style="color:#9ca3af;">账户资金</div>
-            <div style="font-size:32px;font-weight:700;color:#ef4444;">{user_capital:,.0f}</div>
-            <div style="color:#64748b;font-size:14px;margin-top:8px;">每手 = 1,000元</div>
-        </div>""", unsafe_allow_html=True)
+        st.markdown("""
+        <div class="entry-hero-wrap">
+            <div class="entry-title">K线交易训练</div>
+            <div class="entry-sub">高压缩信息密度训练场。仅凭K线做决策，在100根日线内完成完整交易闭环。</div>
+        </div>
+        """, unsafe_allow_html=True)
+        st.markdown('<div class="entry-gap-hero"></div>', unsafe_allow_html=True)
 
-        col_a, col_b = st.columns(2)
+        col_a, col_b = st.columns([1, 1], gap="small")
         with col_a:
+            st.markdown(f"""
+            <div class="entry-capital-mini">
+                <div class="entry-capital-row">
+                    <div class="entry-capital-label">账户资金</div>
+                    <div class="entry-capital-value">{user_capital:,.0f}</div>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+        with col_b:
             speed = st.selectbox("播放速度", ["1秒/根", "3秒/根", "5秒/根"], index=0)
             speed_ms = {"1秒/根": 1000, "3秒/根": 3000, "5秒/根": 5000}[speed]
             speed_sec = {"1秒/根": 1, "3秒/根": 3, "5秒/根": 5}[speed]
-        with col_b:
             leverage = st.selectbox("杠杆倍数", ["1倍", "10倍"], index=0)
             leverage_val = {"1倍": 1, "10倍": 10}[leverage]
+        st.markdown('<div class="entry-gap-cta"></div>', unsafe_allow_html=True)
 
         if st.button("🎮 开始游戏", type="primary", use_container_width=True):
             loading_placeholder = st.empty()
@@ -854,17 +1123,18 @@ if not st.session_state.get('game_started'):
                 }
                 loading_placeholder.empty()
                 st.rerun()
+        st.markdown('<div class="entry-gap-guide"></div>', unsafe_allow_html=True)
 
-        st.markdown("""
-        <div class="game-guide-card">
-            <div class="game-guide-title">🎯 游戏说明</div>
-            <div class="game-guide-grid">
-                <div class="guide-item"><b>1. 客观数据</b><span>本游戏采用真实市场的历史交易价格，每场游戏是100根日K线。</span></div>
-                <div class="guide-item"><b>2. K线为主</b><span>游戏主要训练K线交易，没有任何指标提供。</span></div>
-                <div class="guide-item"><b>3. 中离惩罚</b><span>如果没有正常结算游戏，会被处罚扣资金5万。</span></div>
+        with st.expander("🎯 游戏说明（展开查看）", expanded=False):
+            st.markdown("""
+            <div class="game-guide-card" style="margin-top:0;">
+                <div class="game-guide-grid">
+                    <div class="guide-item"><b>1. 客观数据</b><span>本游戏采用真实市场的历史交易价格，每场游戏是100根日K线。</span></div>
+                    <div class="guide-item"><b>2. K线为主</b><span>游戏主要训练K线交易，没有任何指标提供。</span></div>
+                    <div class="guide-item"><b>3. 中离惩罚</b><span>如果没有正常结算游戏，会被处罚扣资金5万。</span></div>
+                </div>
             </div>
-        </div>
-        """, unsafe_allow_html=True)
+            """, unsafe_allow_html=True)
 
         render_entry_leaderboards()
 
