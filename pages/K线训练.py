@@ -378,6 +378,42 @@ def render_settlement_processing_block():
     """
 
 
+def open_feedback_dialog(game_id, user_id, symbol, symbol_name, symbol_type):
+    @st.dialog("反馈建议")
+    def _dialog():
+        with st.form(f"feedback_form_dialog_{game_id}", clear_on_submit=True):
+            rating = st.slider("本局体验评分", min_value=1, max_value=5, value=4, step=1)
+            content = st.text_area("反馈内容", height=140, placeholder="请输入本局游戏体验、问题或优化建议")
+            submitted = st.form_submit_button("提交反馈", type="primary", use_container_width=True)
+
+        if submitted:
+            if not str(content or "").strip():
+                st.warning("请输入反馈内容后再提交。")
+                return
+            result = kg.save_game_feedback(
+                game_id=game_id,
+                user_id=user_id,
+                content=content,
+                rating=rating,
+                symbol=symbol,
+                symbol_name=symbol_name,
+                symbol_type=symbol_type,
+            )
+            if result.get("ok"):
+                saved = list(st.session_state.get('feedback_saved_games') or [])
+                gid = str(game_id)
+                if gid not in saved:
+                    saved.append(gid)
+                st.session_state['feedback_saved_games'] = saved
+                st.success("反馈已提交，感谢建议。")
+                time.sleep(0.4)
+                st.rerun()
+            else:
+                st.error(f"反馈提交失败：{result.get('message', '未知错误')}")
+
+    _dialog()
+
+
 @st.cache_data(ttl=60, show_spinner=False)
 def load_entry_leaderboards():
     return kg.get_training_entry_leaderboards(limit=20, min_completed=2)
@@ -489,6 +525,10 @@ if 'settlement_pending' not in st.session_state:
     st.session_state['settlement_pending'] = None
 if 'settlement_view' not in st.session_state:
     st.session_state['settlement_view'] = None
+if 'feedback_inline_open' not in st.session_state:
+    st.session_state['feedback_inline_open'] = False
+if 'feedback_saved_games' not in st.session_state:
+    st.session_state['feedback_saved_games'] = []
 
 # 恢复登录
 if not st.session_state.get('is_logged_in'):
@@ -579,6 +619,7 @@ if st.session_state.get('settlement_pending') and not st.session_state.get('sett
         print(f"结算游戏失败: {e}")
 
     st.session_state['settlement_view'] = {
+        'game_id': game_id,
         'from_iframe': from_iframe,
         'profit': profit,
         'profit_rate': profit_rate,
@@ -595,13 +636,18 @@ if st.session_state.get('settlement_pending') and not st.session_state.get('sett
 # 展示结算页（手动确认后才离开）
 if st.session_state.get('settlement_view'):
     view = st.session_state['settlement_view']
+    game_id = int(view.get('game_id') or 0)
     from_iframe = view.get('from_iframe', False)
     profit = float(view.get('profit', 0))
     profit_rate = float(view.get('profit_rate', 0))
     trade_count = int(view.get('trade_count', 0))
     symbol = view.get('symbol', '')
     symbol_name = view.get('symbol_name', '未知')
+    symbol_type = view.get('symbol_type', 'stock')
     new_achievements = view.get('new_achievements') or []
+    uid = st.session_state.get('user_id')
+    saved_games = st.session_state.get('feedback_saved_games') or []
+    feedback_done = str(game_id) in saved_games
 
     st.markdown("<h1 style='text-align:center;color:#e5e7eb;'>🎯 游戏结束</h1>", unsafe_allow_html=True)
     col1, col2, col3 = st.columns([1, 2, 1])
@@ -633,13 +679,60 @@ if st.session_state.get('settlement_view'):
         else:
             st.caption("本局暂无新成就解锁。")
 
+        col_feedback, col_replay = st.columns(2)
+        with col_feedback:
+            feedback_label = "反馈已提交" if feedback_done else "反馈建议"
+            if st.button(feedback_label, use_container_width=True, disabled=feedback_done):
+                if hasattr(st, "dialog"):
+                    open_feedback_dialog(game_id, uid, symbol, symbol_name, symbol_type)
+                else:
+                    st.session_state['feedback_inline_open'] = True
+                    st.rerun()
+
+        if st.session_state.get('feedback_inline_open') and not feedback_done:
+            with st.form(f"feedback_form_inline_{game_id}"):
+                rating = st.slider("本局体验评分", min_value=1, max_value=5, value=4, step=1, key=f"feedback_rate_inline_{game_id}")
+                content = st.text_area("反馈内容", height=120, placeholder="请输入本局游戏体验、问题或优化建议", key=f"feedback_text_inline_{game_id}")
+                submit_feedback = st.form_submit_button("提交反馈", type="primary", use_container_width=True)
+                cancel_feedback = st.form_submit_button("取消")
+                if cancel_feedback:
+                    st.session_state['feedback_inline_open'] = False
+                    st.rerun()
+                if submit_feedback:
+                    if not str(content or "").strip():
+                        st.warning("请输入反馈内容后再提交。")
+                    else:
+                        save_res = kg.save_game_feedback(
+                            game_id=game_id,
+                            user_id=uid,
+                            content=content,
+                            rating=rating,
+                            symbol=symbol,
+                            symbol_name=symbol_name,
+                            symbol_type=symbol_type,
+                        )
+                        if save_res.get("ok"):
+                            saved = list(st.session_state.get('feedback_saved_games') or [])
+                            gid = str(game_id)
+                            if gid not in saved:
+                                saved.append(gid)
+                            st.session_state['feedback_saved_games'] = saved
+                            st.session_state['feedback_inline_open'] = False
+                            st.success("反馈已提交，感谢建议。")
+                            time.sleep(0.4)
+                            st.rerun()
+                        else:
+                            st.error(f"反馈提交失败：{save_res.get('message', '未知错误')}")
+
         if from_iframe:
             st.info("本局已完成结算，请点击左侧「K线训练」返回主页面继续。")
         else:
-            if st.button("🎮 再来一局", type="primary", use_container_width=True):
-                st.session_state['settlement_view'] = None
-                st.session_state['just_finished_game_id'] = None
-                st.rerun()
+            with col_replay:
+                if st.button("🎮 再来一局", type="primary", use_container_width=True):
+                    st.session_state['settlement_view'] = None
+                    st.session_state['just_finished_game_id'] = None
+                    st.session_state['feedback_inline_open'] = False
+                    st.rerun()
     st.stop()
 
 # 登录检查

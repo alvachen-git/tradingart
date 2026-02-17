@@ -308,6 +308,102 @@ def save_trade_batch(game_id, user_id, trades, symbol=None, symbol_name=None, sy
         return {"ok": False, "message": str(e)}
 
 
+def _ensure_feedback_storage():
+    """确保游戏反馈表存在"""
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS kline_game_feedback (
+                    id BIGINT PRIMARY KEY AUTO_INCREMENT,
+                    game_id BIGINT NOT NULL,
+                    user_id VARCHAR(128) NOT NULL,
+                    rating INT NULL,
+                    content TEXT NOT NULL,
+                    symbol VARCHAR(32) NULL,
+                    symbol_name VARCHAR(64) NULL,
+                    symbol_type VARCHAR(16) NULL,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    UNIQUE KEY uk_game_user (game_id, user_id),
+                    KEY idx_user_time (user_id, created_at)
+                )
+            """))
+        return True
+    except Exception as e:
+        print(f"[FEEDBACK] 初始化失败: {e}")
+        traceback.print_exc()
+        return False
+
+
+def save_game_feedback(game_id, user_id, content, rating=None, symbol=None, symbol_name=None, symbol_type=None):
+    """保存一局游戏反馈（同一局重复提交则更新）"""
+    gid = _to_int(game_id, 0)
+    uid = str(user_id or "").strip()
+    text_content = str(content or "").strip()
+    score = _to_int(rating, 0)
+
+    if gid <= 0 or not uid:
+        return {"ok": False, "message": "missing game_id/user_id"}
+    if not text_content:
+        return {"ok": False, "message": "feedback content is empty"}
+    if len(text_content) > 2000:
+        text_content = text_content[:2000]
+    if score <= 0:
+        score = None
+    elif score > 5:
+        score = 5
+
+    if not _ensure_feedback_storage():
+        return {"ok": False, "message": "feedback storage not ready"}
+
+    try:
+        with engine.begin() as conn:
+            game_row = conn.execute(
+                text("""
+                    SELECT id, user_id
+                    FROM kline_game_records
+                    WHERE id = :gid
+                    LIMIT 1
+                """),
+                {"gid": gid},
+            ).fetchone()
+            if not game_row:
+                return {"ok": False, "message": "game not found"}
+            owner = str(game_row[1] or "")
+            if owner != uid:
+                return {"ok": False, "message": "game ownership mismatch"}
+
+            conn.execute(
+                text("""
+                    INSERT INTO kline_game_feedback
+                    (game_id, user_id, rating, content, symbol, symbol_name, symbol_type)
+                    VALUES
+                    (:gid, :uid, :rating, :content, :symbol, :symbol_name, :symbol_type)
+                    ON DUPLICATE KEY UPDATE
+                        rating = VALUES(rating),
+                        content = VALUES(content),
+                        symbol = VALUES(symbol),
+                        symbol_name = VALUES(symbol_name),
+                        symbol_type = VALUES(symbol_type),
+                        updated_at = CURRENT_TIMESTAMP
+                """),
+                {
+                    "gid": gid,
+                    "uid": uid,
+                    "rating": score,
+                    "content": text_content,
+                    "symbol": str(symbol or "")[:32],
+                    "symbol_name": str(symbol_name or "")[:64],
+                    "symbol_type": str(symbol_type or "")[:16],
+                },
+            )
+        return {"ok": True}
+    except Exception as e:
+        print(f"[FEEDBACK] 保存失败: game_id={gid}, user={uid}, err={e}")
+        traceback.print_exc()
+        return {"ok": False, "message": str(e)}
+
+
 def ensure_trade_batch_api_server(host="0.0.0.0", port=8765):
     """
     启动轻量交易批量写入 API（幂等）
