@@ -1090,8 +1090,11 @@ if not st.session_state.get('game_started'):
                     h = _safe_float(r.get('high_price'))
                     l = _safe_float(r.get('low_price'))
                     c = _safe_float(r.get('close_price'))
+                    v = _safe_float(r.get('vol'))
                     if None in (o, h, l, c):
                         continue
+                    if v is None or v < 0:
+                        v = 0.0
                     trade_date = r.get('trade_date') if 'trade_date' in r else None
                     if trade_date is None and hasattr(r, "name"):
                         trade_date = r.name
@@ -1101,7 +1104,10 @@ if not st.session_state.get('game_started'):
                         trade_date = trade_date.strftime("%Y-%m-%d")
                     elif trade_date is not None:
                         trade_date = str(trade_date)[:10]
-                    kline_data.append({'open': o, 'high': h, 'low': l, 'close': c, 'date': trade_date})
+                    kline_data.append({
+                        'open': o, 'high': h, 'low': l, 'close': c,
+                        'volume': v, 'date': trade_date
+                    })
 
                 if len(kline_data) < 160:
                     loading_placeholder.empty()
@@ -1655,7 +1661,7 @@ if st.session_state.get('game_started') and 'game_data' in st.session_state:
             prevPrice: KLINE[HISTORY - 1].close
         }};
 
-        let chart, candles, playTimer = null;
+        let chart, candles, volumeSeries, playTimer = null;
         let tradeMarkers = [];
         let settleQuery = '';
         let settleSummary = null;
@@ -1828,7 +1834,10 @@ if st.session_state.get('game_started') and 'game_data' in st.session_state:
                 layout: {{ background: {{ type: 'solid', color: '#0f172a' }}, textColor: '#94a3b8' }},
                 grid: {{ vertLines: {{ color: '#1e293b' }}, horzLines: {{ color: '#1e293b' }} }},
                 crosshair: {{ mode: LightweightCharts.CrosshairMode.Normal }},
-                rightPriceScale: {{ borderColor: '#334155' }},
+                rightPriceScale: {{
+                    borderColor: '#334155',
+                    scaleMargins: {{ top: 0.08, bottom: 0.28 }}
+                }},
                 timeScale: {{ borderColor: '#334155', timeVisible: false }}
             }});
 
@@ -1839,8 +1848,24 @@ if st.session_state.get('game_started') and 'game_data' in st.session_state:
                 wickUpColor: '#ef4444', wickDownColor: '#22c55e'
             }});
 
+            // 成交量柱：放在主图底部区域
+            volumeSeries = chart.addHistogramSeries({{
+                priceFormat: {{ type: 'volume' }},
+                priceScaleId: '',
+                lastValueVisible: false,
+                priceLineVisible: false,
+            }});
+            chart.priceScale('').applyOptions({{
+                scaleMargins: {{ top: 0.76, bottom: 0 }}
+            }});
+
             candles.setData(KLINE.slice(0, HISTORY).map((d, i) => ({{
                 time: i, open: d.open, high: d.high, low: d.low, close: d.close
+            }})));
+            volumeSeries.setData(KLINE.slice(0, HISTORY).map((d, i) => ({{
+                time: i,
+                value: Number(d.volume || 0),
+                color: d.close >= d.open ? 'rgba(239,68,68,0.45)' : 'rgba(34,197,94,0.45)'
             }})));
             chart.timeScale().fitContent();
 
@@ -1858,6 +1883,11 @@ function playBar() {{
             const bar = KLINE[state.bar];
             if (!bar) {{ endGame(); return; }}
             candles.update({{ time: state.bar, open: bar.open, high: bar.high, low: bar.low, close: bar.close }});
+            volumeSeries.update({{
+                time: state.bar,
+                value: Number(bar.volume || 0),
+                color: bar.close >= bar.open ? 'rgba(239,68,68,0.45)' : 'rgba(34,197,94,0.45)'
+            }});
 
             calcPnL();
             updateDisplay();

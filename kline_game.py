@@ -789,7 +789,7 @@ def _get_cached_symbols(conn, market_type, min_bars, ttl_seconds=300):
     symbols = [r[0] for r in rows]
     _SYMBOL_CACHE[market_type] = {"ts": now, "min_bars": min_bars, "symbols": symbols}
     return symbols
-def get_random_kline_data(bars=100, history_bars=60):
+def get_random_kline_data(bars=100, history_bars=60, _attempt=1, _max_attempts=12):
     """
     随机抽取一段历史K线数据
     返回: symbol, symbol_name, symbol_type, df (包含OHLCV)
@@ -798,9 +798,13 @@ def get_random_kline_data(bars=100, history_bars=60):
 
     【修改】添加了更详细的日志
     """
+    if _attempt > _max_attempts:
+        print(f"[GET_KLINE] ❌ 超过最大尝试次数({_max_attempts})，终止抽样")
+        return None, None, None, None
+
     total_bars = bars + history_bars  # 总共需要160根
 
-    print(f"[GET_KLINE] 开始获取K线数据, 需要 {total_bars} 根")
+    print(f"[GET_KLINE] 开始获取K线数据, 需要 {total_bars} 根, 尝试 {_attempt}/{_max_attempts}")
 
     try:
         with engine.connect() as conn:
@@ -842,7 +846,7 @@ def get_random_kline_data(bars=100, history_bars=60):
                 symbols = _get_cached_symbols(conn, "index", total_bars + 50)
                 if not symbols:
                     print("[GET_KLINE] ❌ 未找到足够数据的指数，改用股票")
-                    return get_random_kline_data(bars, history_bars)
+                    return get_random_kline_data(bars, history_bars, _attempt + 1, _max_attempts)
 
                 symbol = random.choice(symbols)
                 symbol_type = 'index'
@@ -855,7 +859,7 @@ def get_random_kline_data(bars=100, history_bars=60):
                 if not symbols:
                     print("[GET_KLINE] ❌ 未找到足够数据的期货，改用股票")
                     # 如果期货没数据，改用股票
-                    return get_random_kline_data(bars, history_bars)
+                    return get_random_kline_data(bars, history_bars, _attempt + 1, _max_attempts)
 
                 symbol = random.choice(symbols)
                 result = (symbol,)
@@ -863,7 +867,7 @@ def get_random_kline_data(bars=100, history_bars=60):
                 if not result:
                     print("[GET_KLINE] ❌ 未找到足够数据的期货，改用股票")
                     # 如果期货没数据，改用股票
-                    return get_random_kline_data(bars, history_bars)
+                    return get_random_kline_data(bars, history_bars, _attempt + 1, _max_attempts)
 
                 symbol = result[0]
                 symbol_type = 'future'
@@ -911,6 +915,14 @@ def get_random_kline_data(bars=100, history_bars=60):
 
             if len(df) < total_bars:
                 print(f"[GET_KLINE] ❌ 获取数据不足: 需要 {total_bars}, 获取 {len(df)}")
+                return None, None, None, None
+
+            avg_vol = float(df["vol"].fillna(0).mean()) if "vol" in df.columns else 0.0
+            if avg_vol < 500:
+                print(f"[GET_KLINE] ❌ 成交量不足: avg(vol)={avg_vol:.2f} < 500, 标的 {symbol}")
+                if _attempt < _max_attempts:
+                    return get_random_kline_data(bars, history_bars, _attempt + 1, _max_attempts)
+                print(f"[GET_KLINE] ❌ 已达到最大重试次数({_max_attempts})，放弃本次抽样")
                 return None, None, None, None
 
             df['trade_date'] = pd.to_datetime(df['trade_date'])
