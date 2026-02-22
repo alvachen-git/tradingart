@@ -769,6 +769,31 @@ def get_cookie_manager():
 
 cookie_manager = get_cookie_manager()
 
+
+def _restore_login_with_cookie_state():
+    """
+    返回:
+    - restored: bool
+    - state: ok | empty | partial | invalid | error
+    - cookies: dict
+    """
+    try:
+        cookies = cookie_manager.get_all() or {}
+    except Exception:
+        return False, "error", {}
+
+    restored = auth.restore_login_from_cookies(cookies)
+    if restored:
+        return True, "ok", cookies
+
+    c_user = str(cookies.get("username") or "").strip()
+    c_token = str(cookies.get("token") or "").strip()
+    if not c_user and not c_token:
+        return False, "empty", cookies
+    if (c_user and not c_token) or (c_token and not c_user):
+        return False, "partial", cookies
+    return False, "invalid", cookies
+
 if 'is_logged_in' not in st.session_state:
     st.session_state['is_logged_in'] = False
     st.session_state['user_id'] = None
@@ -791,18 +816,14 @@ if 'feedback_saved_games' not in st.session_state:
 
 # 恢复登录
 if not st.session_state.get('is_logged_in'):
-    try:
-        cookies = cookie_manager.get_all() or {}
-        restored = auth.restore_login_from_cookies(cookies)
-        if not restored and not cookies and not st.session_state.get("kline_cookie_retry_once", False):
-            st.session_state["kline_cookie_retry_once"] = True
-            time.sleep(0.15)
-            st.rerun()
-        elif not restored and (cookies.get("username") or cookies.get("token")):
-            cookie_manager.delete("username", key="kline_del_user")
-            cookie_manager.delete("token", key="kline_del_token")
-    except:
-        pass
+    restored, restore_state, _ = _restore_login_with_cookie_state()
+    if restored:
+        st.session_state["kline_cookie_retry_once"] = False
+    elif restore_state in ("empty", "partial", "error") and not st.session_state.get("kline_cookie_retry_once", False):
+        # IE/兼容模式下首次读取 cookie 偶尔只返回部分字段，这里重试一次避免误判登出
+        st.session_state["kline_cookie_retry_once"] = True
+        time.sleep(0.15)
+        st.rerun()
 
 # 侧边栏
 with st.sidebar:
@@ -988,6 +1009,18 @@ if st.session_state.get('settlement_view'):
         else:
             with col_replay:
                 if st.button("🎮 再来一局", type="primary", use_container_width=True):
+                    if not st.session_state.get('is_logged_in'):
+                        # 点击“再来一局”前再尝试一次恢复，避免结算页可见但入口页被误判未登录
+                        st.session_state["kline_cookie_retry_once"] = False
+                        restored, restore_state, _ = _restore_login_with_cookie_state()
+                        if not restored and restore_state in ("empty", "partial", "error"):
+                            time.sleep(0.15)
+                            st.rerun()
+                        if not restored:
+                            st.warning("登录状态已失效，请先回首页登录。")
+                            st.page_link("Home.py", label="🏠 返回首页登录", use_container_width=True)
+                            st.stop()
+
                     st.session_state['settlement_view'] = None
                     st.session_state['just_finished_game_id'] = None
                     st.session_state['feedback_inline_open'] = False
@@ -1206,8 +1239,22 @@ if st.session_state.get('game_started') and 'game_data' in st.session_state:
         .info-badge span {{ color: #f59e0b; font-weight: 600; }}
 
         /* K线图区域 */
-        .chart-area {{ flex: 1; background: #0f172a; min-height: 0; }}
+        .chart-area {{ flex: 1; background: #0f172a; min-height: 0; position: relative; }}
         #chart {{ width: 100%; height: 100%; }}
+        .volume-label {{
+            position: absolute;
+            left: 12px;
+            bottom: 12px;
+            padding: 2px 8px;
+            border-radius: 6px;
+            border: 1px solid #334155;
+            background: rgba(15, 23, 42, 0.78);
+            color: #94a3b8;
+            font-size: 12px;
+            line-height: 1.3;
+            pointer-events: none;
+            z-index: 5;
+        }}
 
         /* 底部交易面板 */
         .trade-panel {{
@@ -1538,7 +1585,10 @@ if st.session_state.get('game_started') and 'game_data' in st.session_state:
     </div>
 
     <!-- K线图 -->
-    <div class="chart-area"><div id="chart"></div></div>
+    <div class="chart-area">
+        <div id="chart"></div>
+        <div class="volume-label">成交量</div>
+    </div>
 
     <!-- 底部交易面板 -->
     <div class="trade-panel">
@@ -1838,7 +1888,11 @@ if st.session_state.get('game_started') and 'game_data' in st.session_state:
                     borderColor: '#334155',
                     scaleMargins: {{ top: 0.08, bottom: 0.28 }}
                 }},
-                timeScale: {{ borderColor: '#334155', timeVisible: false }}
+                timeScale: {{
+                    borderColor: '#334155',
+                    timeVisible: false,
+                    visible: false
+                }}
             }});
 
             // 🔧 【修复3】K线颜色：红涨绿跌（中国标准）
