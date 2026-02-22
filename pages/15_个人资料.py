@@ -517,13 +517,40 @@ if "profile_cookie_retry_once" not in st.session_state:
 cookie_manager = stx.CookieManager(key="profile_cookie_manager")
 cookies = cookie_manager.get_all() or {}
 
+
+def _restore_login_with_cookie_state(cookies: dict):
+    """
+    返回:
+    - restored: bool
+    - state: ok | empty | partial | invalid | error
+    """
+    cookies = cookies or {}
+    try:
+        restored = auth.restore_login_from_cookies(cookies)
+    except Exception:
+        return False, "error"
+
+    if restored:
+        return True, "ok"
+
+    c_user = str(cookies.get("username") or "").strip()
+    c_token = str(cookies.get("token") or "").strip()
+    if not c_user and not c_token:
+        return False, "empty"
+    if (c_user and not c_token) or (c_token and not c_user):
+        return False, "partial"
+    return False, "invalid"
+
+
 if not st.session_state.get("is_logged_in") and not st.session_state.get("just_logged_out", False):
-    restored = auth.restore_login_from_cookies(cookies)
-    if not restored and not cookies and not st.session_state.get("profile_cookie_retry_once", False):
+    restored, restore_state = _restore_login_with_cookie_state(cookies)
+    if restored:
+        st.session_state.profile_cookie_retry_once = False
+    elif restore_state in ("empty", "partial", "error") and not st.session_state.get("profile_cookie_retry_once", False):
         st.session_state.profile_cookie_retry_once = True
         time.sleep(0.15)
         st.rerun()
-    elif not restored and (cookies.get("username") or cookies.get("token")):
+    elif restore_state == "invalid":
         try:
             cookie_manager.delete("username", key="profile_del_user")
             cookie_manager.delete("token", key="profile_del_token")

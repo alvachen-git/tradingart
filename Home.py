@@ -667,6 +667,30 @@ cookies = cookie_manager.get_all() or {}
 if "home_cookie_retry_once" not in st.session_state:
     st.session_state.home_cookie_retry_once = False
 
+
+def _restore_login_with_cookie_state(cookies: dict):
+    """
+    返回:
+    - restored: bool
+    - state: ok | empty | partial | invalid | error
+    """
+    cookies = cookies or {}
+    try:
+        restored = auth.restore_login_from_cookies(cookies)
+    except Exception:
+        return False, "error"
+
+    if restored:
+        return True, "ok"
+
+    c_user = str(cookies.get("username") or "").strip()
+    c_token = str(cookies.get("token") or "").strip()
+    if not c_user and not c_token:
+        return False, "empty"
+    if (c_user and not c_token) or (c_token and not c_user):
+        return False, "partial"
+    return False, "invalid"
+
 # 🔥 [关键修复] 在任何 rerun 之前，先读取公告状态并保存到 session_state
 # 这样即使后面触发 rerun，公告状态也不会丢失
 if 'announcement_cookie_loaded' not in st.session_state:
@@ -691,9 +715,10 @@ should_auto_login = (
 )
 
 if should_auto_login:
-    restored = auth.restore_login_from_cookies(cookies)
+    restored, restore_state = _restore_login_with_cookie_state(cookies)
 
     if restored:
+        st.session_state.home_cookie_retry_once = False
         c_user = st.session_state.get("user_id")
 
         # 🔥 [新增] 自动登录后，尝试从 Redis 恢复待处理任务
@@ -726,12 +751,12 @@ if should_auto_login:
         time.sleep(0.3)
         st.rerun()
 
-    # 某些浏览器首次载入时 Cookie 组件还没就绪，重跑一次再读
-    elif not cookies and not st.session_state.get("home_cookie_retry_once", False):
+    # 某些浏览器首次载入时 Cookie 组件还没就绪，或只读到部分字段：重跑一次再读
+    elif restore_state in ("empty", "partial", "error") and not st.session_state.get("home_cookie_retry_once", False):
         st.session_state.home_cookie_retry_once = True
         time.sleep(0.15)
         st.rerun()
-    else:
+    elif restore_state == "invalid":
         # Token 失效时清除 Cookie，避免反复失败
         c_user = cookies.get("username")
         c_token = cookies.get("token")
