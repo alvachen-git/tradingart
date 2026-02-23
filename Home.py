@@ -45,6 +45,8 @@ for key in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"]:
         del os.environ[key]
 
 # ==================== 公告配置区 ====================
+ENABLE_HOME_ANNOUNCEMENT = False  # 临时关闭首页公告，恢复时改为 True
+
 ANNOUNCEMENT_CONTENT = {
     "title": "🎉 最新动态",
     "sections": [
@@ -1588,7 +1590,7 @@ with st.sidebar:
         期权知识学习
         """)
 # 只在用户登录后显示公告
-if st.session_state.get('is_logged_in', False):
+if st.session_state.get('is_logged_in', False) and ENABLE_HOME_ANNOUNCEMENT:
     check_and_show_announcement()
 
 # B. 处理卡片点击产生的 Pending Prompt [修改点：处理快捷指令]

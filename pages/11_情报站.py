@@ -865,9 +865,9 @@ st.markdown(
 
 # 获取内容
 if st.session_state.selected_channel == 'all':
-    contents = sub_svc.get_channel_contents(days=7, limit=30)
+    contents = sub_svc.get_channel_contents(days=10, limit=30)
 else:
-    contents = sub_svc.get_channel_contents(channel_code=st.session_state.selected_channel, days=7, limit=20)
+    contents = sub_svc.get_channel_contents(channel_code=st.session_state.selected_channel, days=10, limit=20)
 
 if not contents:
     st.markdown("""
