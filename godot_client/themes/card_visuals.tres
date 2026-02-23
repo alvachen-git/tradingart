@@ -1,0 +1,32 @@
+[gd_resource type="Resource" script_class="CardVisuals" load_steps=7 format=3]
+
+[ext_resource type="Script" path="res://scripts/card_visuals.gd" id="1_kg4kv"]
+[ext_resource type="Texture2D" path="res://assets/ui/cards/frames/frame_t1.png" id="2_h9tpd"]
+[ext_resource type="Texture2D" path="res://assets/ui/cards/frames/frame_t2.png" id="3_sj7k1"]
+[ext_resource type="Texture2D" path="res://assets/ui/cards/frames/frame_t3.png" id="4_hm2qp"]
+[ext_resource type="Texture2D" path="res://assets/ui/cards/frames/frame_t4.png" id="5_tq7pl"]
+[ext_resource type="Texture2D" path="res://assets/ui/cards/frames/frame_selected_overlay.png" id="6_mf3rn"]
+
+[resource]
+script = ExtResource("1_kg4kv")
+frame_tier_1 = ExtResource("2_h9tpd")
+frame_tier_2 = ExtResource("3_sj7k1")
+frame_tier_3 = ExtResource("4_hm2qp")
+frame_tier_4 = ExtResource("5_tq7pl")
+frame_selected_overlay = ExtResource("6_mf3rn")
+tier_1_border = Color(0.380392, 0.556863, 0.792157, 1)
+tier_2_border = Color(0.85098, 0.623529, 0.321569, 1)
+tier_3_border = Color(0.956863, 0.827451, 0.360784, 1)
+tier_4_border = Color(0.819608, 0.580392, 0.968627, 1)
+tier_1_glow = Color(0.160784, 0.262745, 0.392157, 1)
+tier_2_glow = Color(0.352941, 0.254902, 0.141176, 1)
+tier_3_glow = Color(0.439216, 0.364706, 0.145098, 1)
+tier_4_glow = Color(0.258824, 0.180392, 0.360784, 1)
+name_bar_tint_tier_1 = Color(0.2, 0.31, 0.45, 0.95)
+name_bar_tint_tier_2 = Color(0.47, 0.33, 0.16, 0.95)
+name_bar_tint_tier_3 = Color(0.52, 0.42, 0.12, 0.95)
+name_bar_tint_tier_4 = Color(0.39, 0.24, 0.48, 0.95)
+type_badge_bg_tier_1 = Color(0.16, 0.24, 0.33, 0.96)
+type_badge_bg_tier_2 = Color(0.38, 0.27, 0.16, 0.96)
+type_badge_bg_tier_3 = Color(0.41, 0.34, 0.13, 0.96)
+type_badge_bg_tier_4 = Color(0.32, 0.2, 0.42, 0.96)
