@@ -1222,6 +1222,8 @@ if st.session_state.get('game_started') and 'game_data' in st.session_state:
             display: flex;
             justify-content: space-between;
             align-items: center;
+            gap: 12px;
+            flex-wrap: wrap;
             padding: 10px 20px;
             background: rgba(30, 41, 59, 0.95);
             border-bottom: 1px solid #334155;
@@ -1237,11 +1239,102 @@ if st.session_state.get('game_started') and 'game_data' in st.session_state:
         .progress-fill {{ height: 100%; background: linear-gradient(90deg, #3b82f6, #ef4444); transition: width 0.3s; }}
         .info-badge {{ background: #1e293b; padding: 6px 12px; border-radius: 6px; font-size: 13px; }}
         .info-badge span {{ color: #f59e0b; font-weight: 600; }}
+        .top-right {{
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-left: auto;
+            flex-wrap: wrap;
+            justify-content: flex-end;
+        }}
+        .badge-row {{
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+        }}
+        .indicator-panel {{
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 4px 8px;
+            border-radius: 8px;
+            border: 1px solid #334155;
+            background: rgba(15, 23, 42, 0.8);
+        }}
+        .indicator-label {{
+            color: #94a3b8;
+            font-size: 12px;
+            font-weight: 700;
+            letter-spacing: .2px;
+        }}
+        .toggle-chip {{
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 4px 8px;
+            border: 1px solid #334155;
+            border-radius: 999px;
+            background: #111827;
+            color: #cbd5e1;
+            font-size: 12px;
+            cursor: pointer;
+            user-select: none;
+        }}
+        .toggle-chip input {{
+            accent-color: #3b82f6;
+            width: 13px;
+            height: 13px;
+            cursor: pointer;
+        }}
+        .segmented {{
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            background: #111827;
+            border: 1px solid #334155;
+            border-radius: 999px;
+            padding: 3px;
+        }}
+        .seg-btn {{
+            border: none;
+            background: transparent;
+            color: #94a3b8;
+            font-size: 12px;
+            font-weight: 700;
+            padding: 5px 9px;
+            border-radius: 999px;
+            cursor: pointer;
+            transition: all .12s ease;
+            white-space: nowrap;
+        }}
+        .seg-btn.active {{
+            background: #2563eb;
+            color: #fff;
+            box-shadow: 0 4px 12px rgba(37, 99, 235, .32);
+        }}
 
         /* K线图区域 */
         .chart-area {{ flex: 1; background: #0f172a; min-height: 0; position: relative; }}
         #chart {{ width: 100%; height: 100%; }}
-        .volume-label {{
+        .chart-info-panel {{
+            position: absolute;
+            top: 12px;
+            left: 12px;
+            min-width: 240px;
+            max-width: min(52vw, 520px);
+            padding: 6px 10px;
+            border-radius: 10px;
+            border: 1px solid rgba(51, 65, 85, 0.95);
+            background: rgba(15, 23, 42, 0.88);
+            color: #dbe6f5;
+            font-size: 12px;
+            line-height: 1.3;
+            white-space: pre-line;
+            pointer-events: none;
+            z-index: 6;
+            box-shadow: 0 8px 20px rgba(2, 6, 23, 0.32);
+        }}
+        .subpane-label {{
             position: absolute;
             left: 12px;
             bottom: 12px;
@@ -1434,6 +1527,41 @@ if st.session_state.get('game_started') and 'game_data' in st.session_state:
                 height: 46px;
                 font-size: 16px;
             }}
+            .top-bar {{
+                padding: 10px 12px;
+                gap: 10px;
+            }}
+            .price-section {{
+                gap: 12px;
+                width: 100%;
+                justify-content: space-between;
+            }}
+            .progress-section {{
+                width: 100%;
+                justify-content: space-between;
+            }}
+            .progress-bar {{
+                width: min(58vw, 220px);
+            }}
+            .top-right {{
+                width: 100%;
+                margin-left: 0;
+                justify-content: flex-start;
+            }}
+            .indicator-panel {{
+                width: 100%;
+                flex-wrap: wrap;
+                gap: 6px;
+            }}
+            .chart-info-panel {{
+                top: 10px;
+                left: 10px;
+                right: 10px;
+                max-width: none;
+                min-width: 0;
+                font-size: 11px;
+                padding: 7px 8px;
+            }}
         }}
 
         /* 结算提示层 */
@@ -1578,16 +1706,32 @@ if st.session_state.get('game_started') and 'game_data' in st.session_state:
             <div class="progress-bar"><div id="progress-fill" class="progress-fill" style="width:0%"></div></div>
             <span id="progress-text" style="color:#94a3b8;font-size:13px;">0/100</span>
         </div>
-        <div style="display:flex;gap:12px;">
-            <div class="info-badge">杠杆: <span>{config['leverage']}x</span></div>
-            <div class="info-badge">每手: <span>1,000元</span></div>
+        <div class="top-right">
+            <div class="badge-row">
+                <div class="info-badge">杠杆: <span>{config['leverage']}x</span></div>
+                <div class="info-badge">每手: <span>1,000元</span></div>
+            </div>
+            <div class="indicator-panel">
+                <span class="indicator-label">指标</span>
+                <label class="toggle-chip" for="toggle-ma">
+                    <input type="checkbox" id="toggle-ma" onchange="setShowMA(this.checked)">
+                    <span>MA(5/20/60)</span>
+                </label>
+                <span class="indicator-label">副图</span>
+                <div class="segmented" id="subpane-switch">
+                    <button type="button" class="seg-btn active" data-mode="volume" onclick="setSubpaneMode('volume')">成交量</button>
+                    <button type="button" class="seg-btn" data-mode="macd" onclick="setSubpaneMode('macd')">MACD</button>
+                    <button type="button" class="seg-btn" data-mode="off" onclick="setSubpaneMode('off')">关闭</button>
+                </div>
+            </div>
         </div>
     </div>
 
     <!-- K线图 -->
     <div class="chart-area">
         <div id="chart"></div>
-        <div class="volume-label">成交量</div>
+        <div class="chart-info-panel" id="chart-info-panel" style="display:none;"></div>
+        <div class="subpane-label" id="subpane-label">成交量</div>
     </div>
 
     <!-- 底部交易面板 -->
@@ -1711,13 +1855,338 @@ if st.session_state.get('game_started') and 'game_data' in st.session_state:
             prevPrice: KLINE[HISTORY - 1].close
         }};
 
+        const MA_PERIODS = [5, 20, 60];
+        const MACD_PARAMS = {{ fast: 12, slow: 26, signal: 9 }};
+
         let chart, candles, volumeSeries, playTimer = null;
+        let ma5Series, ma20Series, ma60Series = null;
+        let macdHistSeries, macdDifSeries, macdDeaSeries, macdZeroSeries = null;
         let tradeMarkers = [];
         let settleQuery = '';
         let settleSummary = null;
         let tradeEvents = [];
         let tradePersistPromise = null;
         let tradePersisted = false;
+        let indicatorCache = null;
+        let hoverState = {{
+            active: false,
+            barIndex: HISTORY - 1,
+        }};
+        let uiState = {{
+            showMA: false,
+            subpaneMode: 'volume', // 'volume' | 'macd' | 'off'
+        }};
+
+        function calcSMA(values, period) {{
+            const out = new Array(values.length).fill(null);
+            if (!Array.isArray(values) || period <= 0) return out;
+            let sum = 0;
+            for (let i = 0; i < values.length; i++) {{
+                const v = Number(values[i]);
+                if (!Number.isFinite(v)) continue;
+                sum += v;
+                if (i >= period) {{
+                    const oldV = Number(values[i - period]);
+                    if (Number.isFinite(oldV)) sum -= oldV;
+                }}
+                if (i >= period - 1) {{
+                    out[i] = sum / period;
+                }}
+            }}
+            return out;
+        }}
+
+        function calcEMA(values, period) {{
+            const out = new Array(values.length).fill(null);
+            if (!Array.isArray(values) || values.length === 0 || period <= 0) return out;
+            const k = 2 / (period + 1);
+            let prev = null;
+            for (let i = 0; i < values.length; i++) {{
+                const v = Number(values[i]);
+                if (!Number.isFinite(v)) continue;
+                if (prev === null) {{
+                    prev = v;
+                }} else {{
+                    prev = (v * k) + (prev * (1 - k));
+                }}
+                out[i] = prev;
+            }}
+            return out;
+        }}
+
+        function calcMACD(values, fast=12, slow=26, signal=9) {{
+            const emaFast = calcEMA(values, fast);
+            const emaSlow = calcEMA(values, slow);
+            const dif = new Array(values.length).fill(null);
+            for (let i = 0; i < values.length; i++) {{
+                if (emaFast[i] == null || emaSlow[i] == null) continue;
+                dif[i] = emaFast[i] - emaSlow[i];
+            }}
+
+            const difInput = dif.map(v => (v == null ? NaN : v));
+            const dea = calcEMA(difInput, signal);
+            const hist = new Array(values.length).fill(null);
+            for (let i = 0; i < values.length; i++) {{
+                if (dif[i] == null || dea[i] == null) continue;
+                hist[i] = 2 * (dif[i] - dea[i]);
+            }}
+            return {{ dif, dea, hist }};
+        }}
+
+        function buildIndicatorCache() {{
+            const closes = KLINE.map((d) => Number(d.close || 0));
+            return {{
+                ma5: calcSMA(closes, MA_PERIODS[0]),
+                ma20: calcSMA(closes, MA_PERIODS[1]),
+                ma60: calcSMA(closes, MA_PERIODS[2]),
+                macd: calcMACD(closes, MACD_PARAMS.fast, MACD_PARAMS.slow, MACD_PARAMS.signal),
+            }};
+        }}
+
+        function indicatorSeriesData(values, endExclusive) {{
+            const out = [];
+            const max = Math.min(Number(endExclusive || 0), values.length);
+            for (let i = 0; i < max; i++) {{
+                const v = values[i];
+                if (v == null || !Number.isFinite(Number(v))) continue;
+                out.push({{ time: i, value: Number(v) }});
+            }}
+            return out;
+        }}
+
+        function macdHistSeriesData(histValues, endExclusive) {{
+            const out = [];
+            const max = Math.min(Number(endExclusive || 0), histValues.length);
+            for (let i = 0; i < max; i++) {{
+                const v = histValues[i];
+                if (v == null || !Number.isFinite(Number(v))) continue;
+                const num = Number(v);
+                out.push({{
+                    time: i,
+                    value: num,
+                    color: num >= 0 ? 'rgba(239,68,68,0.55)' : 'rgba(34,197,94,0.55)'
+                }});
+            }}
+            return out;
+        }}
+
+        function zeroLineSeriesData(endExclusive) {{
+            const out = [];
+            const max = Math.max(0, Math.min(Number(endExclusive || 0), KLINE.length));
+            for (let i = 0; i < max; i++) {{
+                out.push({{ time: i, value: 0 }});
+            }}
+            return out;
+        }}
+
+        function setSeriesVisible(series, visible) {{
+            if (!series) return;
+            try {{
+                series.applyOptions({{ visible: !!visible }});
+            }} catch (e) {{
+                // 某些版本/系列不支持 visible 时降级为透明
+                try {{
+                    series.applyOptions({{
+                        color: visible ? undefined : 'rgba(0,0,0,0)',
+                        lineColor: visible ? undefined : 'rgba(0,0,0,0)',
+                    }});
+                }} catch (_e) {{}}
+            }}
+        }}
+
+        function updateSubpaneLabel() {{
+            const el = document.getElementById('subpane-label');
+            if (!el) return;
+            if (uiState.subpaneMode === 'volume') {{
+                el.textContent = '成交量';
+                el.style.display = 'block';
+            }} else if (uiState.subpaneMode === 'macd') {{
+                el.textContent = `MACD(${{MACD_PARAMS.fast}},${{MACD_PARAMS.slow}},${{MACD_PARAMS.signal}})`;
+                el.style.display = 'block';
+            }} else {{
+                el.textContent = '副图关闭';
+                el.style.display = 'none';
+            }}
+        }}
+
+        function fmtVal(v, digits=2) {{
+            const n = Number(v);
+            if (!Number.isFinite(n)) return '--';
+            return n.toFixed(digits);
+        }}
+
+        function fmtVol(v) {{
+            const n = Number(v);
+            if (!Number.isFinite(n)) return '--';
+            if (Math.abs(n) >= 100000000) return (n / 100000000).toFixed(2) + '亿';
+            if (Math.abs(n) >= 10000) return (n / 10000).toFixed(2) + '万';
+            return Math.round(n).toLocaleString();
+        }}
+
+        function setChartInfoPanelVisible(visible) {{
+            const panel = document.getElementById('chart-info-panel');
+            if (!panel) return;
+            panel.style.display = visible ? 'block' : 'none';
+        }}
+
+        function updateChartInfoPanel(barIndex) {{
+            const panel = document.getElementById('chart-info-panel');
+            if (!panel) return;
+            const idx = Math.max(0, Math.min(Number(barIndex || 0), KLINE.length - 1));
+            const bar = KLINE[idx];
+            if (!bar) {{
+                panel.textContent = '无数据';
+                return;
+            }}
+
+            const lines = [];
+            lines.push(
+                '开 ' + fmtVal(bar.open) +
+                '  高 ' + fmtVal(bar.high) +
+                '  低 ' + fmtVal(bar.low) +
+                '  收 ' + fmtVal(bar.close) +
+                '  量 ' + fmtVol(bar.volume)
+            );
+
+            if (indicatorCache) {{
+                lines.push(
+                    'MA5 ' + fmtVal(indicatorCache.ma5[idx]) +
+                    '  MA20 ' + fmtVal(indicatorCache.ma20[idx]) +
+                    '  MA60 ' + fmtVal(indicatorCache.ma60[idx]) +
+                    '  DIF ' + fmtVal(indicatorCache.macd?.dif?.[idx], 3) +
+                    '  DEA ' + fmtVal(indicatorCache.macd?.dea?.[idx], 3) +
+                    '  MACD ' + fmtVal(indicatorCache.macd?.hist?.[idx], 3)
+                );
+            }} else {{
+                lines.push('MA5 --  MA20 --  MA60 --  DIF --  DEA --  MACD --');
+            }}
+
+            panel.textContent = lines.join('\\n');
+        }}
+
+        function bindChartHoverInfo() {{
+            if (!chart) return;
+            chart.subscribeCrosshairMove((param) => {{
+                const point = param && param.point;
+                const hasPoint = !!(point && Number.isFinite(point.x) && Number.isFinite(point.y));
+                if (!hasPoint) {{
+                    hoverState.active = false;
+                    hoverState.barIndex = Math.max(0, Math.min(state.bar, KLINE.length - 1));
+                    setChartInfoPanelVisible(false);
+                    return;
+                }}
+
+                const chartEl = document.getElementById('chart');
+                if (chartEl) {{
+                    if (point.x < 0 || point.y < 0 || point.x > chartEl.clientWidth || point.y > chartEl.clientHeight) {{
+                        hoverState.active = false;
+                        hoverState.barIndex = Math.max(0, Math.min(state.bar, KLINE.length - 1));
+                        setChartInfoPanelVisible(false);
+                        return;
+                    }}
+                }}
+
+                const t = param.time;
+                if (typeof t !== 'number' || !Number.isFinite(t)) return;
+                const idx = Math.max(0, Math.min(Math.round(t), KLINE.length - 1));
+                hoverState.active = true;
+                hoverState.barIndex = idx;
+                setChartInfoPanelVisible(true);
+                updateChartInfoPanel(idx);
+            }});
+        }}
+
+        function syncIndicatorControls() {{
+            const maToggle = document.getElementById('toggle-ma');
+            if (maToggle) maToggle.checked = !!uiState.showMA;
+            document.querySelectorAll('#subpane-switch .seg-btn').forEach((btn) => {{
+                btn.classList.toggle('active', btn.dataset.mode === uiState.subpaneMode);
+            }});
+            updateSubpaneLabel();
+        }}
+
+        function applyIndicatorVisibility() {{
+            const showMA = !!uiState.showMA;
+            const showVol = uiState.subpaneMode === 'volume';
+            const showMacd = uiState.subpaneMode === 'macd';
+
+            setSeriesVisible(ma5Series, showMA);
+            setSeriesVisible(ma20Series, showMA);
+            setSeriesVisible(ma60Series, showMA);
+
+            setSeriesVisible(volumeSeries, showVol);
+            setSeriesVisible(macdHistSeries, showMacd);
+            setSeriesVisible(macdDifSeries, showMacd);
+            setSeriesVisible(macdDeaSeries, showMacd);
+            setSeriesVisible(macdZeroSeries, showMacd);
+
+            updateSubpaneLabel();
+        }}
+
+        function setShowMA(enabled) {{
+            uiState.showMA = !!enabled;
+            syncIndicatorControls();
+            applyIndicatorVisibility();
+        }}
+
+        function setSubpaneMode(mode) {{
+            const nextMode = (mode === 'volume' || mode === 'macd' || mode === 'off') ? mode : 'volume';
+            uiState.subpaneMode = nextMode;
+            syncIndicatorControls();
+            applyIndicatorVisibility();
+        }}
+
+        function setInitialIndicatorData(endExclusive) {{
+            if (!indicatorCache) return;
+            ma5Series?.setData(indicatorSeriesData(indicatorCache.ma5, endExclusive));
+            ma20Series?.setData(indicatorSeriesData(indicatorCache.ma20, endExclusive));
+            ma60Series?.setData(indicatorSeriesData(indicatorCache.ma60, endExclusive));
+
+            volumeSeries?.setData(KLINE.slice(0, endExclusive).map((d, i) => ({{
+                time: i,
+                value: Number(d.volume || 0),
+                color: d.close >= d.open ? 'rgba(239,68,68,0.45)' : 'rgba(34,197,94,0.45)'
+            }})));
+
+            macdHistSeries?.setData(macdHistSeriesData(indicatorCache.macd.hist, endExclusive));
+            macdDifSeries?.setData(indicatorSeriesData(indicatorCache.macd.dif, endExclusive));
+            macdDeaSeries?.setData(indicatorSeriesData(indicatorCache.macd.dea, endExclusive));
+            macdZeroSeries?.setData(zeroLineSeriesData(endExclusive));
+        }}
+
+        function updateIndicatorAt(index) {{
+            if (!indicatorCache || index < 0) return;
+            const bar = KLINE[index];
+            if (!bar) return;
+
+            volumeSeries?.update({{
+                time: index,
+                value: Number(bar.volume || 0),
+                color: bar.close >= bar.open ? 'rgba(239,68,68,0.45)' : 'rgba(34,197,94,0.45)'
+            }});
+
+            const ma5 = indicatorCache.ma5[index];
+            const ma20 = indicatorCache.ma20[index];
+            const ma60 = indicatorCache.ma60[index];
+            if (ma5 != null && Number.isFinite(Number(ma5))) ma5Series?.update({{ time: index, value: Number(ma5) }});
+            if (ma20 != null && Number.isFinite(Number(ma20))) ma20Series?.update({{ time: index, value: Number(ma20) }});
+            if (ma60 != null && Number.isFinite(Number(ma60))) ma60Series?.update({{ time: index, value: Number(ma60) }});
+
+            const dif = indicatorCache.macd.dif[index];
+            const dea = indicatorCache.macd.dea[index];
+            const hist = indicatorCache.macd.hist[index];
+            if (dif != null && Number.isFinite(Number(dif))) macdDifSeries?.update({{ time: index, value: Number(dif) }});
+            if (dea != null && Number.isFinite(Number(dea))) macdDeaSeries?.update({{ time: index, value: Number(dea) }});
+            if (hist != null && Number.isFinite(Number(hist))) {{
+                const h = Number(hist);
+                macdHistSeries?.update({{
+                    time: index,
+                    value: h,
+                    color: h >= 0 ? 'rgba(239,68,68,0.55)' : 'rgba(34,197,94,0.55)'
+                }});
+            }}
+            macdZeroSeries?.update({{ time: index, value: 0 }});
+        }}
 
         function clonePosition(pos) {{
             return {{
@@ -1870,6 +2339,8 @@ if st.session_state.get('game_started') and 'game_data' in st.session_state:
                 alert('图表库加载失败，请刷新后重试');
                 return;
             }}
+            indicatorCache = buildIndicatorCache();
+            syncIndicatorControls();
 
             const el = document.getElementById('chart');
             el.innerHTML = '';
@@ -1902,10 +2373,55 @@ if st.session_state.get('game_started') and 'game_data' in st.session_state:
                 wickUpColor: '#ef4444', wickDownColor: '#22c55e'
             }});
 
+            ma5Series = chart.addLineSeries({{
+                color: '#facc15',
+                lineWidth: 2,
+                lastValueVisible: false,
+                priceLineVisible: false,
+            }});
+            ma20Series = chart.addLineSeries({{
+                color: '#38bdf8',
+                lineWidth: 2,
+                lastValueVisible: false,
+                priceLineVisible: false,
+            }});
+            ma60Series = chart.addLineSeries({{
+                color: '#a78bfa',
+                lineWidth: 2,
+                lastValueVisible: false,
+                priceLineVisible: false,
+            }});
+
             // 成交量柱：放在主图底部区域
             volumeSeries = chart.addHistogramSeries({{
                 priceFormat: {{ type: 'volume' }},
                 priceScaleId: '',
+                lastValueVisible: false,
+                priceLineVisible: false,
+            }});
+            macdHistSeries = chart.addHistogramSeries({{
+                priceScaleId: '',
+                lastValueVisible: false,
+                priceLineVisible: false,
+            }});
+            macdDifSeries = chart.addLineSeries({{
+                priceScaleId: '',
+                color: '#60a5fa',
+                lineWidth: 2,
+                lastValueVisible: false,
+                priceLineVisible: false,
+            }});
+            macdDeaSeries = chart.addLineSeries({{
+                priceScaleId: '',
+                color: '#f59e0b',
+                lineWidth: 2,
+                lastValueVisible: false,
+                priceLineVisible: false,
+            }});
+            macdZeroSeries = chart.addLineSeries({{
+                priceScaleId: '',
+                color: 'rgba(148,163,184,0.65)',
+                lineWidth: 1,
                 lastValueVisible: false,
                 priceLineVisible: false,
             }});
@@ -1916,12 +2432,13 @@ if st.session_state.get('game_started') and 'game_data' in st.session_state:
             candles.setData(KLINE.slice(0, HISTORY).map((d, i) => ({{
                 time: i, open: d.open, high: d.high, low: d.low, close: d.close
             }})));
-            volumeSeries.setData(KLINE.slice(0, HISTORY).map((d, i) => ({{
-                time: i,
-                value: Number(d.volume || 0),
-                color: d.close >= d.open ? 'rgba(239,68,68,0.45)' : 'rgba(34,197,94,0.45)'
-            }})));
+            setInitialIndicatorData(HISTORY);
+            applyIndicatorVisibility();
             chart.timeScale().fitContent();
+            bindChartHoverInfo();
+            hoverState.active = false;
+            hoverState.barIndex = HISTORY - 1;
+            setChartInfoPanelVisible(false);
 
             updateDisplay();
             setTimeout(() => {{ state.running = true; playBar(); }}, 800);
@@ -1937,15 +2454,14 @@ function playBar() {{
             const bar = KLINE[state.bar];
             if (!bar) {{ endGame(); return; }}
             candles.update({{ time: state.bar, open: bar.open, high: bar.high, low: bar.low, close: bar.close }});
-            volumeSeries.update({{
-                time: state.bar,
-                value: Number(bar.volume || 0),
-                color: bar.close >= bar.open ? 'rgba(239,68,68,0.45)' : 'rgba(34,197,94,0.45)'
-            }});
+            updateIndicatorAt(state.bar);
 
             calcPnL();
             updateDisplay();
             state.prevPrice = bar.close;
+            if (!hoverState.active) {{
+                setChartInfoPanelVisible(false);
+            }}
 
             if (playTimer) clearTimeout(playTimer);
             playTimer = setTimeout(playBar, CONFIG.speed);
