@@ -1022,7 +1022,6 @@ if st.session_state.get('settlement_view'):
                             st.stop()
 
                     st.session_state['settlement_view'] = None
-                    st.session_state['just_finished_game_id'] = None
                     st.session_state['feedback_inline_open'] = False
                     st.rerun()
     st.stop()
