@@ -813,6 +813,8 @@ if 'feedback_inline_open' not in st.session_state:
     st.session_state['feedback_inline_open'] = False
 if 'feedback_saved_games' not in st.session_state:
     st.session_state['feedback_saved_games'] = []
+if 'kline_replay_requested' not in st.session_state:
+    st.session_state['kline_replay_requested'] = False
 
 # 恢复登录
 if not st.session_state.get('is_logged_in'):
@@ -833,6 +835,18 @@ with st.sidebar:
 
 # 🔧 处理游戏结果：先把 query 参数落到 session，避免被 rerun 清空后页面闪退
 game_done = st.query_params.get('game_done', '')
+
+# Safari/WebKit 下“再来一局”可能先 rerun 再清掉 game_done，这里给重开路径更高优先级
+if st.session_state.get('kline_replay_requested'):
+    if game_done == '1':
+        try:
+            st.query_params.clear()
+        except Exception:
+            pass
+        st.rerun()
+    else:
+        st.session_state['kline_replay_requested'] = False
+
 if game_done == '1':
     try:
         st.session_state['settlement_pending'] = {
@@ -1032,7 +1046,9 @@ if st.session_state.get('settlement_view'):
                             st.stop()
 
                     st.session_state['settlement_view'] = None
+                    st.session_state['settlement_pending'] = None
                     st.session_state['feedback_inline_open'] = False
+                    st.session_state['kline_replay_requested'] = True
                     st.rerun()
     st.stop()
 
