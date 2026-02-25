@@ -850,7 +850,17 @@ if game_done == '1':
         }
     except Exception:
         st.session_state['settlement_pending'] = None
+    pending_gid_for_skip = None
+    try:
+        pending_gid_for_skip = int((st.session_state.get('settlement_pending') or {}).get('game_id') or 0) or None
+    except Exception:
+        pending_gid_for_skip = None
     st.query_params.clear()
+    if pending_gid_for_skip:
+        try:
+            st.query_params['skip_unfinished_game_id'] = str(pending_gid_for_skip)
+        except Exception:
+            pass
     st.rerun()
 
 # 处理并持久化结算结果（只做一次）
@@ -1036,6 +1046,12 @@ user_id = st.session_state.get('user_id')
 # 🔧 【修复2】检查未完成游戏 - 排除刚结束的游戏
 if not st.session_state.get('game_started'):
     try:
+        skip_unfinished_qid = None
+        try:
+            skip_unfinished_qid = int(st.query_params.get('skip_unfinished_game_id', '0') or '0') or None
+        except Exception:
+            skip_unfinished_qid = None
+
         last_unfinished = kg.check_unfinished_game(user_id)
         if last_unfinished:
             unfinished_game_id = last_unfinished.get('id')
@@ -1043,9 +1059,18 @@ if not st.session_state.get('game_started'):
 
             # 🔧 核心修复：排除刚结束的游戏
             just_finished_id = st.session_state.get('just_finished_game_id')
-            if just_finished_id and unfinished_game_id == just_finished_id:
+
+            if (
+                (just_finished_id and unfinished_game_id == just_finished_id) or
+                (skip_unfinished_qid and unfinished_game_id == skip_unfinished_qid)
+            ):
                 # 这是刚结束的游戏，跳过惩罚
                 st.session_state['just_finished_game_id'] = None
+                try:
+                    if skip_unfinished_qid:
+                        del st.query_params['skip_unfinished_game_id']
+                except Exception:
+                    pass
             else:
                 # 检查是否是最近10秒内开始的游戏（正常情况）
                 is_recent = game_start_time and isinstance(game_start_time, datetime) and (
@@ -1056,13 +1081,18 @@ if not st.session_state.get('game_started'):
                     with col2:
                         st.markdown(f"""<div class="game-setup-card" style="text-align:center;border-color:#dc2626;">
                             <p style="color:#fca5a5;">品种：{last_unfinished.get('symbol_name', '???')}</p>
-                            <p style="color:#fca5a5;">惩罚：-50,000 元</p>
+                            <p style="color:#fca5a5;">惩罚：-20,000 元</p>
                         </div>""", unsafe_allow_html=True)
                         if st.button("确认并重新开始", type="primary", use_container_width=True):
                             kg.settle_abandoned_game(user_id, last_unfinished['id'])
                             time.sleep(1)
                             st.rerun()
                     st.stop()
+        elif skip_unfinished_qid:
+            try:
+                del st.query_params['skip_unfinished_game_id']
+            except Exception:
+                pass
     except:
         pass
 
@@ -1168,8 +1198,8 @@ if not st.session_state.get('game_started'):
             <div class="game-guide-card" style="margin-top:0;">
                 <div class="game-guide-grid">
                     <div class="guide-item"><b>1. 客观数据</b><span>本游戏采用真实市场的历史交易价格，每场游戏是100根日K线。</span></div>
-                    <div class="guide-item"><b>2. K线为主</b><span>游戏主要训练K线交易，没有任何指标提供。</span></div>
-                    <div class="guide-item"><b>3. 中离惩罚</b><span>如果没有正常结算游戏，会被处罚扣资金5万。</span></div>
+                    <div class="guide-item"><b>2. K线为主</b><span>游戏主要训练K线交易，如果不懂，可咨询客服。</span></div>
+                    <div class="guide-item"><b>3. 中离惩罚</b><span>如果没有正常结算游戏，会被处罚扣资金2万。</span></div>
                 </div>
             </div>
             """, unsafe_allow_html=True)

@@ -1641,7 +1641,7 @@ def check_unfinished_game(user_id):
         return None
 
 
-def settle_abandoned_game(user_id, game_id, penalty=50000):
+def settle_abandoned_game(user_id, game_id, penalty=20000):
     """结算中途离开的游戏（固定扣除惩罚金额）"""
     print(f"[SETTLE_ABANDONED] 结算离开的游戏: user={user_id}, game_id={game_id}, penalty={penalty}")
 
