@@ -177,6 +177,152 @@ def fetch_gfex_patch(date_str):
         print(f" [!] AkShare 补丁异常: {e}")
 
 
+def get_shfe_function():
+    """自动查找正确的上期所函数名"""
+    if hasattr(ak, 'futures_shfe_position_rank'):
+        return ak.futures_shfe_position_rank
+    candidates = ['get_shfe_rank_table', 'futures_hold_rank_shfe', 'futures_shfe_holding_rank']
+    for c in candidates:
+        if hasattr(ak, c):
+            return getattr(ak, c)
+    return None
+
+
+def fetch_shfe_patch(date_str):
+    """
+    上期所全品种补录函数
+    逻辑：AkShare抓取 -> 清洗宽表 -> 转长表 -> 聚合 -> 复用 save_to_db 入库
+    """
+    print(f" [*] [补丁] 正在通过 AkShare 修补上期所数据 (SHFE) {date_str} ...", end="")
+    try:
+        func = get_shfe_function()
+        if not func:
+            print(" [-] 未找到 AkShare SHFE 接口")
+            return
+
+        # 1. 调用接口 (不同 AkShare 版本参数名可能不同，逐个尝试)
+        raw_data = None
+        call_errors = []
+        for kwargs in ({'date': date_str}, {'trade_date': date_str}):
+            try:
+                raw_data = func(**kwargs)
+                break
+            except TypeError as e:
+                call_errors.append(str(e))
+                continue
+        if raw_data is None:
+            try:
+                raw_data = func(date_str)
+            except Exception as e:
+                call_errors.append(str(e))
+                raise RuntimeError(" / ".join(call_errors + [str(e)]))
+
+        # 2. 处理字典/DataFrame 兼容性
+        df = pd.DataFrame()
+        if isinstance(raw_data, dict):
+            dfs = []
+            for _, val in raw_data.items():
+                if isinstance(val, pd.DataFrame):
+                    dfs.append(val)
+            if dfs:
+                df = pd.concat(dfs, ignore_index=True)
+        elif isinstance(raw_data, pd.DataFrame):
+            df = raw_data
+
+        if df.empty:
+            print(" [-] AkShare 返回空")
+            return
+
+        # 3. 超级映射表 (兼容各种列名)
+        rename_dict = {
+            'symbol': 'ts_code', '合约代码': 'ts_code', 'variety': 'variety',
+            'vol_party_name': 'vol_party_name', '成交量会员简称': 'vol_party_name',
+            'long_party_name': 'long_party_name', '持买单会员简称': 'long_party_name',
+            'short_party_name': 'short_party_name', '持卖单会员简称': 'short_party_name',
+            'vol': 'vol', '成交量': 'vol', 'vol_chg': 'vol_chg', '成交量增减': 'vol_chg',
+            'long_open_interest': 'long_vol', '持买单量': 'long_vol', '买持仓': 'long_vol',
+            'long_open_interest_chg': 'long_chg', '持买单量增减': 'long_chg', '买持仓增减': 'long_chg',
+            'short_open_interest': 'short_vol', '持卖单量': 'short_vol', '卖持仓': 'short_vol',
+            'short_open_interest_chg': 'short_chg', '持卖单量增减': 'short_chg', '卖持仓增减': 'short_chg'
+        }
+        df = df.rename(columns=rename_dict)
+
+        if 'ts_code' not in df.columns:
+            print(" [-] 缺少 ts_code 列")
+            return
+
+        # 4. 宽表转长表 (拆解三榜合一)
+        expected_cols = ['vol_party_name', 'vol', 'vol_chg',
+                         'long_party_name', 'long_vol', 'long_chg',
+                         'short_party_name', 'short_vol', 'short_chg']
+        for c in expected_cols:
+            if c not in df.columns:
+                df[c] = None if 'name' in c else 0
+
+        # A. 拆解成交量
+        df_vol = df[['ts_code', 'vol_party_name', 'vol', 'vol_chg']].rename(columns={'vol_party_name': 'broker'})
+        df_vol['long_vol'] = 0
+        df_vol['long_chg'] = 0
+        df_vol['short_vol'] = 0
+        df_vol['short_chg'] = 0
+
+        # B. 拆解买单
+        df_long = df[['ts_code', 'long_party_name', 'long_vol', 'long_chg']].rename(columns={'long_party_name': 'broker'})
+        df_long['vol'] = 0
+        df_long['vol_chg'] = 0
+        df_long['short_vol'] = 0
+        df_long['short_chg'] = 0
+
+        # C. 拆解卖单
+        df_short = df[['ts_code', 'short_party_name', 'short_vol', 'short_chg']].rename(columns={'short_party_name': 'broker'})
+        df_short['vol'] = 0
+        df_short['vol_chg'] = 0
+        df_short['long_vol'] = 0
+        df_short['long_chg'] = 0
+
+        # D. 合并
+        df_combined = pd.concat([df_vol, df_long, df_short], ignore_index=True)
+
+        # 5. 清洗
+        df_combined = df_combined.dropna(subset=['broker'])
+        df_combined = df_combined[df_combined['broker'].astype(str).str.len() > 1]
+        df_combined = df_combined[~df_combined['broker'].isin(['-', 'None', 'nan'])]
+
+        num_cols = ['vol', 'vol_chg', 'long_vol', 'long_chg', 'short_vol', 'short_chg']
+        for c in num_cols:
+            df_combined[c] = df_combined[c].astype(str).str.replace(',', '', regex=False)
+            df_combined[c] = pd.to_numeric(df_combined[c], errors='coerce').fillna(0)
+
+        # 提取纯代码 (rb2501 -> rb)
+        df_combined['ts_code'] = df_combined['ts_code'].apply(lambda x: re.sub(r'\d+', '', str(x)).lower().strip())
+        df_combined = df_combined[df_combined['ts_code'].str.fullmatch(r'[a-z]+', na=False)]
+
+        if df_combined.empty:
+            print(" [-] 清洗后无有效 SHFE 数据")
+            return
+
+        # 6. 聚合与计算
+        df_final = df_combined.groupby(['ts_code', 'broker'])[num_cols].sum().reset_index()
+        df_final['trade_date'] = date_str
+        df_final['net_vol'] = df_final['long_vol'] - df_final['short_vol']
+
+        db_cols = ['trade_date', 'ts_code', 'broker', 'long_vol', 'long_chg', 'short_vol', 'short_chg', 'net_vol']
+        for c in db_cols:
+            if c not in df_final.columns:
+                df_final[c] = 0
+
+        save_data = df_final[db_cols].copy()
+
+        # 7. 复用原本的 save_to_db，覆盖 Tushare 可能缺失/不完整的上期所品种
+        save_to_db(save_data, date_str)
+
+        del df, df_vol, df_long, df_short, df_combined, df_final, save_data
+        gc.collect()
+
+    except Exception as e:
+        print(f" [!] AkShare 补丁异常: {e}")
+
+
 # --- 2. 核心逻辑：获取、清洗、筛选字段 ---
 def fetch_and_save_tushare(date_str, exchange):
     """
@@ -235,10 +381,14 @@ def fetch_and_save_tushare(date_str, exchange):
         #  修改处：在 Tushare 逻辑执行完后，启动广期所补丁
         # ==========================================
         if exchange == 'GFEX':
-            # 这里的补丁现在会覆盖 Tushare 可能不完整的数据 (si, lc, ps, pt, pd)
+            # 这里的补丁会覆盖 Tushare 可能不完整的数据 (si, lc, ps, pt, pd)
             # 以 AkShare 官网数据为准
             print("")  # 换行
             fetch_gfex_patch(date_str)
+        elif exchange == 'SHFE':
+            # 上期所也增加 AkShare 修补，处理 Tushare 偶发缺数/空数据
+            print("")  # 换行
+            fetch_shfe_patch(date_str)
 
     except Exception as e:
         print(f" [!] 异常: {e}")
