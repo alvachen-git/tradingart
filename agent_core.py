@@ -11,7 +11,6 @@ from langgraph.prebuilt import create_react_agent
 from langchain_core.prompts import ChatPromptTemplate
 from macro_tools import get_macro_indicator, get_macro_overview, analyze_yield_curve
 from pydantic import BaseModel, Field
-from langchain_openai import ChatOpenAI  # 或 ChatTongyi
 from langgraph.graph import StateGraph, END
 
 # --- 引入你的工具库 ---
@@ -24,7 +23,7 @@ from polymarket_tool import tool_get_polymarket_sentiment
 from plot_tools import draw_chart_tool,draw_macro_compare_chart
 from futures_fund_flow_tools import get_futures_fund_flow, get_futures_fund_ranking
 from volume_oi_tools import get_volume_oi, get_futures_oi_ranking, get_option_oi_ranking, get_option_volume_abnormal, get_option_oi_abnormal, analyze_etf_option_sentiment, get_etf_option_strikes
-from market_tools import get_market_snapshot, get_price_statistics,tool_query_specific_option,get_historical_price,get_trending_hotspots,get_today_hotlist,analyze_keyword_trend,get_finance_related_trends,search_hotlist_history
+from market_tools import get_market_snapshot, get_price_statistics,tool_query_specific_option,get_historical_price,get_recent_price_series,get_trending_hotspots,get_today_hotlist,analyze_keyword_trend,get_finance_related_trends,search_hotlist_history
 from data_engine import get_commodity_iv_info, check_option_expiry_status,search_broker_holdings_on_date,tool_analyze_position_change,tool_compare_stocks,get_stock_valuation,get_latest_data_date,tool_analyze_broker_positions
 from search_tools import search_web
 from market_correlation import tool_stock_hedging_analysis, tool_futures_correlation_check,tool_stock_correlation_check
@@ -564,6 +563,9 @@ def monitor_node(state: AgentState, llm):
         get_option_oi_ranking,
         get_volume_oi,
         get_market_snapshot,
+        get_historical_price,
+        get_price_statistics,
+        get_recent_price_series,
         tool_analyze_broker_positions,
         get_futures_oi_ranking,
         query_stock_volume,
@@ -614,6 +616,9 @@ def monitor_node(state: AgentState, llm):
     - 查成交量和持仓量 -> get_volume_oi
     - 查期货持仓量排名 -> get_futures_oi_ranking
     - 查标的价格 -> get_market_snapshot
+    - 查某一天历史价格 -> get_historical_price
+    - 查区间统计(最高/最低/区间涨跌) -> get_price_statistics
+    - 查最近N个交易日逐日明细表 -> get_recent_price_series
     - 查宏观指标 -> get_macro_indicator(indicator_code='US10Y')  
     
     
@@ -625,6 +630,8 @@ def monitor_node(state: AgentState, llm):
     3. 如果用户没有指定日期，**必须使用 {latest_trade_date}** 作为查询日期！
     4. 如果工具返回了 Markdown 表格，请原样输出。
     5. 商品都有期权，禁止说商品没有场内期权。
+    6. 用户要“某天价格”优先用 `get_historical_price`；用户要“区间统计”优先用 `get_price_statistics`。
+    7. 用户要“最近N天/最近N个交易日/列表/逐日明细/走势数据表”时，优先用 `get_recent_price_series`，不要只返回 `get_market_snapshot`。
     """
 
     # 3. 创建临时 Agent (ReAct 模式)

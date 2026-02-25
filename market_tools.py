@@ -42,6 +42,11 @@ class PriceStatsInput(BaseModel):
     end_date: str = Field(description="結束日期，格式必須是 YYYYMMDD，例如 '20231031'")
 
 
+class RecentPriceSeriesInput(BaseModel):
+    query: str = Field(description="品种名称或代码，例如 '510500'、'中证500ETF'、'茅台'")
+    days: int = Field(default=10, ge=1, le=60, description="最近交易日数量，默认10，建议不超过60")
+
+
 # --- 3. 輔助函數：清洗日期格式 ---
 def clean_date_str(date_str: str) -> str:
     """防止 AI 傳入 '2023-01-01' 導致 SQL 查詢失敗，統一轉為 '20230101'"""
@@ -796,6 +801,164 @@ def get_historical_price(query: str, trade_date: str):
     except Exception as e:
         print(f"查询错误: {traceback.format_exc()}")
         return f"❌ 查询出错: {e}"
+
+
+@tool(args_schema=RecentPriceSeriesInput)
+def get_recent_price_series(query: str, days: int = 10):
+    """
+    【最近交易日逐日明细】
+    返回股票(A股/港股/ETF)、指数、期货最近 N 个交易日的逐日行情明细表（日期/开高低收/涨跌幅）。
+    适用于回答："给我510500最近10个交易日走势数据，我要列表"、"茅台近5日明细"。
+    """
+    if engine is None:
+        return "❌ 数据库未连接"
+
+    try:
+        n_days = int(days)
+    except Exception:
+        n_days = 10
+    n_days = max(1, min(n_days, 60))
+
+    symbol_code, asset_type = symbol_map.resolve_symbol(query)
+    if not symbol_code:
+        return f"⚠️ 未找到品种: {query}"
+
+    try:
+        target_code = symbol_code.upper()
+        df = pd.DataFrame()
+        display_name = query
+        display_code = target_code
+
+        if asset_type == 'stock':
+            is_hk = target_code.endswith('.HK')
+            if is_hk:
+                sql = text(f"""
+                    SELECT ts_code, name, trade_date, open_price, high_price, low_price, close_price, pct_chg
+                    FROM stock_price
+                    WHERE ts_code = :code
+                    ORDER BY trade_date DESC
+                    LIMIT {n_days}
+                """)
+                df = pd.read_sql(sql, engine, params={"code": target_code})
+            else:
+                codes_to_try = [target_code]
+                if "." in target_code:
+                    codes_to_try.append(target_code.split('.')[0])
+                else:
+                    codes_to_try.extend([f"{target_code}.SZ", f"{target_code}.SH"])
+                code_str = "','".join(set(codes_to_try))
+
+                sql = text(f"""
+                    SELECT ts_code, name, trade_date, open_price, high_price, low_price, close_price, pct_chg
+                    FROM stock_price
+                    WHERE ts_code IN ('{code_str}')
+                    ORDER BY trade_date DESC
+                    LIMIT {n_days}
+                """)
+                df = pd.read_sql(sql, engine)
+
+            if not df.empty:
+                display_name = str(df.iloc[0].get("name") or query)
+                display_code = str(df.iloc[0].get("ts_code") or target_code)
+
+        elif asset_type == 'index':
+            sql = text(f"""
+                SELECT ts_code, trade_date, open_price, high_price, low_price, close_price, pct_chg
+                FROM index_price
+                WHERE ts_code = :code
+                ORDER BY trade_date DESC
+                LIMIT {n_days}
+            """)
+            df = pd.read_sql(sql, engine, params={"code": target_code})
+
+        else:
+            import re
+
+            contract_code = None
+            has_month = bool(re.search(r'\d{2,4}', target_code))
+            if has_month:
+                contract_code = target_code
+            else:
+                pattern = strict_futures_prefix_pattern(target_code)
+                sql_main = text("""
+                    SELECT ts_code
+                    FROM futures_price
+                    WHERE UPPER(ts_code) REGEXP :pattern
+                      AND UPPER(ts_code) NOT LIKE '%TAS%'
+                      AND UPPER(ts_code) REGEXP '[0-9]{4}(\\.[A-Z]+)?$'
+                    ORDER BY trade_date DESC, oi DESC
+                    LIMIT 1
+                """)
+                df_main = pd.read_sql(sql_main, engine, params={"pattern": pattern})
+                if not df_main.empty:
+                    contract_code = str(df_main.iloc[0]["ts_code"])
+
+            if not contract_code:
+                return f"⚠️ 未找到 {query} 的有效期货合约，无法返回最近{n_days}日明细"
+
+            sql = text(f"""
+                SELECT ts_code, trade_date, open_price, high_price, low_price, close_price, pct_chg
+                FROM futures_price
+                WHERE UPPER(ts_code) LIKE :code
+                  AND UPPER(ts_code) NOT LIKE '%TAS%'
+                ORDER BY trade_date DESC
+                LIMIT {n_days}
+            """)
+            df = pd.read_sql(sql, engine, params={"code": f"{contract_code.upper()}%"})
+            display_code = contract_code
+
+        if df.empty:
+            return f"⚠️ {query} 最近{n_days}个交易日无数据"
+
+        # 保证按日期升序展示，便于阅读走势
+        df = df.sort_values("trade_date").reset_index(drop=True)
+
+        def _fmt_num(v):
+            if pd.isna(v):
+                return "-"
+            try:
+                return f"{float(v):.3f}".rstrip("0").rstrip(".")
+            except Exception:
+                return str(v)
+
+        def _fmt_pct(v):
+            if pd.isna(v):
+                return "-"
+            try:
+                return f"{float(v):+.2f}%"
+            except Exception:
+                return str(v)
+
+        header = "| trade_date | open | high | low | close | pct_chg |\n|---|---:|---:|---:|---:|---:|"
+        rows = []
+        for _, row in df.iterrows():
+            rows.append(
+                "| {date} | {open_p} | {high_p} | {low_p} | {close_p} | {pct} |".format(
+                    date=row.get("trade_date", "-"),
+                    open_p=_fmt_num(row.get("open_price")),
+                    high_p=_fmt_num(row.get("high_price")),
+                    low_p=_fmt_num(row.get("low_price")),
+                    close_p=_fmt_num(row.get("close_price")),
+                    pct=_fmt_pct(row.get("pct_chg")),
+                )
+            )
+
+        first_date = str(df.iloc[0].get("trade_date"))
+        last_date = str(df.iloc[-1].get("trade_date"))
+
+        if asset_type != "stock":
+            code_from_df = str(df.iloc[-1].get("ts_code") or display_code)
+            display_code = code_from_df
+
+        return (
+            f"📋 **{display_name} ({display_code}) 最近{len(df)}个交易日逐日明细**\n"
+            f"区间: {first_date} ~ {last_date}\n\n"
+            f"{header}\n" + "\n".join(rows)
+        )
+
+    except Exception as e:
+        print(f"最近交易日明细查询错误: {traceback.format_exc()}")
+        return f"❌ 查询最近交易日明细出错: {e}"
 
 
 # ==========================================
