@@ -1266,6 +1266,7 @@ if st.session_state.get('game_started') and 'game_data' in st.session_state:
             font-weight: 700;
             letter-spacing: .2px;
         }}
+        .indicator-label .label-short {{ display: none; }}
         .toggle-chip {{
             display: inline-flex;
             align-items: center;
@@ -1549,8 +1550,46 @@ if st.session_state.get('game_started') and 'game_data' in st.session_state:
             }}
             .indicator-panel {{
                 width: 100%;
-                flex-wrap: wrap;
+                flex-wrap: nowrap;
                 gap: 6px;
+                overflow-x: auto;
+                overflow-y: hidden;
+                -webkit-overflow-scrolling: touch;
+                scrollbar-width: none;
+            }}
+            .indicator-panel::-webkit-scrollbar {{
+                display: none;
+            }}
+            .indicator-panel .indicator-label,
+            .indicator-panel .toggle-chip,
+            .indicator-panel .segmented {{
+                flex-shrink: 0;
+            }}
+            .indicator-panel .indicator-label {{
+                font-size: 11px;
+            }}
+            .indicator-label .label-full {{
+                display: none;
+            }}
+            .indicator-label .label-short {{
+                display: inline;
+            }}
+            .indicator-panel .toggle-chip {{
+                padding: 3px 7px;
+                font-size: 11px;
+                gap: 4px;
+            }}
+            .indicator-panel .toggle-chip input {{
+                width: 12px;
+                height: 12px;
+            }}
+            .indicator-panel .segmented {{
+                padding: 2px;
+                gap: 2px;
+            }}
+            .indicator-panel .seg-btn {{
+                font-size: 11px;
+                padding: 4px 8px;
             }}
             .chart-info-panel {{
                 top: 10px;
@@ -1711,12 +1750,12 @@ if st.session_state.get('game_started') and 'game_data' in st.session_state:
                 <div class="info-badge">每手: <span>1,000元</span></div>
             </div>
             <div class="indicator-panel">
-                <span class="indicator-label">指标</span>
+                <span class="indicator-label"><span class="label-full">指标</span><span class="label-short">指</span></span>
                 <label class="toggle-chip" for="toggle-ma">
                     <input type="checkbox" id="toggle-ma" onchange="setShowMA(this.checked)">
                     <span>MA(5/20/60)</span>
                 </label>
-                <span class="indicator-label">副图</span>
+                <span class="indicator-label"><span class="label-full">副图</span><span class="label-short">副</span></span>
                 <div class="segmented" id="subpane-switch">
                     <button type="button" class="seg-btn active" data-mode="volume" onclick="setSubpaneMode('volume')">成交量</button>
                     <button type="button" class="seg-btn" data-mode="macd" onclick="setSubpaneMode('macd')">MACD</button>
