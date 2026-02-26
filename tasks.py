@@ -18,6 +18,9 @@ from knowledge_tools import search_knowledge_structured
 from tools.oss_utils import generate_signed_get_url
 import re
 
+ATTACHMENT_MIN_SCORE = 0.3
+ATTACHMENT_RELATIVE_RATIO = 0.85
+
 
 def _normalize_knowledge_query(text: str) -> str:
     if not text:
@@ -25,6 +28,28 @@ def _normalize_knowledge_query(text: str) -> str:
     cleaned = re.sub(r"【用户上传图信息】：[\s\S]*?----------------", " ", text)
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
     return cleaned[:400]
+
+
+def _filter_image_hits_for_attachments(image_hits, top_k: int):
+    scored = []
+    for hit in image_hits or []:
+        try:
+            score_val = float(hit.get("score", 0.0))
+        except Exception:
+            continue
+        if score_val < ATTACHMENT_MIN_SCORE:
+            continue
+        scored.append((score_val, hit))
+
+    if not scored:
+        return []
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    top_score = scored[0][0]
+    relative_floor = top_score * ATTACHMENT_RELATIVE_RATIO
+
+    filtered = [hit for score, hit in scored if score >= relative_floor]
+    return filtered[:top_k]
 
 
 def _build_image_attachments(query: str, top_k: int = 3):
@@ -38,9 +63,9 @@ def _build_image_attachments(query: str, top_k: int = 3):
             query=normalized_query,
             limit=8,
             image_limit=top_k,
-            min_score=0.2,
+            min_score=ATTACHMENT_MIN_SCORE,
         )
-        image_hits = data.get("image_hits", [])[:top_k]
+        image_hits = _filter_image_hits_for_attachments(data.get("image_hits", []), top_k=top_k)
         if not image_hits:
             return attachments
 
