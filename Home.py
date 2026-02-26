@@ -31,8 +31,12 @@ from dotenv import load_dotenv
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.outputs import LLMResult
 # --- AI 相关导入 ---
-from langchain_community.chat_models import ChatTongyi
+from llm_compat import ChatTongyiCompat as ChatTongyi
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
+
+# Streamlit 运行时/第三方组件仍可能访问旧别名，提前映射以避免弃用日志噪音。
+if hasattr(st, "user"):
+    st.experimental_user = st.user
 
 
 
@@ -787,6 +791,8 @@ if 'is_logged_in' not in st.session_state:
 # 初始化聊天记录
 if "messages" not in st.session_state:
     st.session_state.messages = []
+if "conversation_id" not in st.session_state:
+    st.session_state.conversation_id = str(uuid.uuid4())
 
 # 🔥 [新增] 图片上传器的动态 key，用于清除图片
 if "uploader_key" not in st.session_state:
@@ -811,7 +817,7 @@ def get_agent(current_user="访客", user_query=""):
 
     # 2. ⚖️ 专才 (Plus): 性价比高、能力均衡 -> 用于技术分析、数据总结
     llm_plus = ChatTongyi(
-        model="qwen-plus",
+        model="qwen3.5-plus",
         temperature=0.2,  # 稍微增加一点创造性
         api_key=api_key
     )
@@ -1016,6 +1022,113 @@ def fast_router_check(user_query):
 
     return False, None
 
+
+FOLLOWUP_KEYWORDS = (
+    "刚刚", "刚才", "上一个", "上一条", "上次", "前面",
+    "继续", "接着", "承接", "基于刚才", "刚聊到", "上一轮"
+)
+
+
+def _extract_similarity_tokens(text: str):
+    """轻量语义相关度分词（中英文混合）"""
+    if not text:
+        return set()
+    normalized = re.sub(r"[^0-9a-zA-Z\u4e00-\u9fff]+", " ", str(text).lower())
+    tokens = set()
+    for word in normalized.split():
+        if len(word) >= 2:
+            tokens.add(word)
+        if re.search(r"[\u4e00-\u9fff]", word) and len(word) >= 2:
+            for i in range(len(word) - 1):
+                tokens.add(word[i : i + 2])
+    return tokens
+
+
+def _is_semantically_related(prompt_text: str, recent_turns, threshold: float = 0.18) -> bool:
+    """基于 Jaccard 的轻量语义相关判定"""
+    current_tokens = _extract_similarity_tokens(prompt_text)
+    if not current_tokens:
+        return False
+
+    best_score = 0.0
+    for turn in recent_turns:
+        turn_tokens = _extract_similarity_tokens(turn.get("content", ""))
+        if not turn_tokens:
+            continue
+        union = current_tokens | turn_tokens
+        if not union:
+            continue
+        score = len(current_tokens & turn_tokens) / len(union)
+        best_score = max(best_score, score)
+    return best_score >= threshold
+
+
+def _build_recent_context_text(recent_turns, max_chars: int = 1200) -> str:
+    role_map = {"user": "用户", "assistant": "AI", "ai": "AI"}
+    lines = []
+    for turn in recent_turns:
+        role = role_map.get(turn.get("role", ""), turn.get("role", ""))
+        content = str(turn.get("content", "")).strip()
+        if not content:
+            continue
+        lines.append(f"{role}: {content[:260]}")
+    return "\n".join(lines)[:max_chars]
+
+
+def _build_memory_record(ai_response: str, max_chars: int = 900) -> str:
+    """将回答压缩成结构化摘要+片段，提升后续召回稳定性"""
+    if not ai_response:
+        return ""
+    cleaned = re.sub(r"```[\s\S]*?```", " ", ai_response)
+    cleaned = re.sub(r"[#>*`]+", " ", cleaned)
+    lines = [ln.strip() for ln in cleaned.splitlines() if ln.strip()]
+    summary = "；".join(lines[:3]) if lines else cleaned[:220]
+    summary = summary[:240]
+    snippet = ai_response[:max_chars]
+    return f"【结构化摘要】{summary}\n【回答片段】{snippet}"
+
+
+def build_context_payload(prompt_text: str, current_user: str):
+    """构建连续对话上下文载荷（会话+长期记忆）"""
+    all_messages = list(st.session_state.get("messages", []))
+    recent_turns = [
+        {"role": msg.get("role", ""), "content": str(msg.get("content", ""))}
+        for msg in all_messages[-4:]  # 最近两轮（user+ai）
+    ]
+    recent_context = _build_recent_context_text(recent_turns)
+
+    is_followup = any(kw in prompt_text for kw in FOLLOWUP_KEYWORDS)
+    semantic_related = _is_semantically_related(prompt_text, recent_turns)
+    should_load_long_memory = is_followup or semantic_related
+
+    memory_context = ""
+    if current_user != "访客" and should_load_long_memory:
+        try:
+            found = mem.retrieve_relevant_memory(
+                user_id=current_user,
+                query=prompt_text,
+                k=2
+            )
+            if found:
+                memory_context = found[:1500]
+        except Exception as e:
+            print(f"❌ 长期记忆检索失败: {e}")
+
+    conversation_id = st.session_state.get("conversation_id")
+    if not conversation_id:
+        conversation_id = str(uuid.uuid4())
+        st.session_state["conversation_id"] = conversation_id
+
+    return {
+        "is_followup": bool(is_followup),
+        "recent_turns": recent_turns,
+        "recent_context": recent_context,
+        "memory_context": memory_context,
+        "semantic_related": bool(semantic_related),
+        "conversation_id": conversation_id
+    }
+
+
 # ==========================================
 #  5. 核心逻辑处理函数 [修改点：封装成函数以便复用]
 # ==========================================
@@ -1036,42 +1149,12 @@ def process_user_input(prompt_text):
             with st.chat_message("ai"):
                 st.caption(f"已识别图片内容：\n{vision_result[:100]}...")
 
+    current_user = st.session_state.get('user_id', "访客")
+    # 在追加当前问题前构造上下文，避免本轮内容混进历史
+    context_payload = build_context_payload(prompt_text=prompt_text, current_user=current_user)
+
     # --- 2. 显示用户提问 (保留) ---
     st.session_state.messages.append({"role": "user", "content": prompt_text})
-
-    related_memories = "暂无相关历史记忆"
-    try:
-        # 获取当前用户ID (如果没登录就用 default)
-        current_user = st.session_state.get("user_id", "guest")
-
-        # 调用 memory_utils 里的函数
-        # 注意：这里会自动去向量库找和 prompt 相似的历史对话
-        found_mem = mem.retrieve_relevant_memory(
-            user_id=current_user,
-            query=prompt,
-            k=3  # 只找最近3条最相关的
-        )
-
-        MAX_CHARS = 2000
-
-        if found_mem:
-            if len(found_mem) > MAX_CHARS:
-                found_mem = found_mem[:MAX_CHARS] + "...(已截断)"
-            related_memories = found_mem
-
-    except Exception as e:
-        print(f"❌ 记忆检索失败: {e}")
-
-    # ---------------------------------------------------------
-    # 构造输入 (注入 memory_context)
-    # ---------------------------------------------------------
-    inputs = {
-        "user_query": prompt,
-        "messages": [HumanMessage(content=prompt)],
-        "is_complex_task": False,
-        # 🔥 把搜到的记忆传给 Agent
-        "memory_context": related_memories
-    }
 
     # 构造最终 Prompt
     final_prompt = image_context + prompt_text
@@ -1090,43 +1173,14 @@ def process_user_input(prompt_text):
     # 🔥🔥🔥 [修正区域]：LangGraph + 记忆检索 (RAG)
     # ============================================================
 
-    current_user = st.session_state.get('user_id', "访客")
-
-    # 🧠 [恢复功能 1]：检索历史记忆 & 用户画像
-    # 只有涉及用户自身情况时，才加载画像和记忆，节省 Token
-    personal_keywords = ["之前", "持仓", "账户", "买", "卖", "建议", "仓位", "风险", "风格", "推荐"]
-    need_personal_context = any(k in final_prompt for k in personal_keywords)
-
-    system_instruction = ""  # 初始化为空
-    #[关键修复]：必须在这里先定义默认值，防止跳过 if 块后报错！
+    # 读取用户画像（风险偏好）
     risk = "稳健型"
-
-    if current_user != "访客" and need_personal_context:
+    if current_user != "访客":
         try:
-            # A. 检索向量库记忆
-            found = mem.retrieve_relevant_memory(current_user, final_prompt, k=2)
-            memory_context = f"\n【🔍 参考历史记忆】\n{found}" if found else ""
-
-            # B. 获取用户画像 (风险偏好)
             user_profile = de.get_user_profile(current_user)
-            risk = user_profile.get('risk_preference', '未知')
-
-            # C. 组合成 System Prompt
-            system_instruction = f"""
-            【当前用户档案】
-            - 用户名：{current_user}
-            - 风险偏好：{risk}
-            {memory_context}
-
-            【回答要求】
-            请结合上述记忆和当前问题进行回答。如果记忆里有相关持仓信息，请主动提及。
-            """
-            print(f"🧠 已注入记忆上下文 (风险偏好: {risk})")
+            risk = user_profile.get('risk_preference', '稳健型')
         except Exception as e:
-            print(f"记忆检索失败: {e}")
-
-    # 初始化 Graph Agent
-    app = get_agent(current_user, user_query=final_prompt)
+            print(f"读取用户画像失败: {e}")
 
 
     # ==========================================
@@ -1146,7 +1200,8 @@ def process_user_input(prompt_text):
         prompt=final_prompt,
         image_context=image_context,
         risk_preference=risk,
-        history_messages=history_for_task
+        history_messages=history_for_task,
+        context_payload=context_payload
     )
 
     # 🔥 [新增] 保存任务信息
@@ -1155,6 +1210,7 @@ def process_user_input(prompt_text):
         "prompt": final_prompt,
         "image_context": image_context,
         "risk": risk,
+        "context_payload": context_payload,
         "start_time": time.time()
     }
 
@@ -1542,6 +1598,7 @@ with st.sidebar:
             st.markdown("⚠️ **确定要删除所有聊天记录吗？**\n\n此操作无法撤销。")
             if st.button("🚨 确认删除", type="primary", use_container_width=True, key="btn_clear_chat"):
                 st.session_state.messages = []
+                st.session_state.conversation_id = str(uuid.uuid4())
                 # 🔥 [修改] 清空上传的图片，通过增加 key 计数器实现
                 st.session_state.uploader_key += 1
                 st.rerun()
@@ -1794,7 +1851,8 @@ if "pending_task" in st.session_state and st.session_state.pending_task:
                     # 保存记忆
                     if current_user != "访客":
                         try:
-                            mem.save_interaction(current_user, task_info["prompt"], final_response_md)
+                            memory_record = _build_memory_record(final_response_md)
+                            mem.save_interaction(current_user, task_info["prompt"], memory_record)
                         except Exception as e:
                             print(f"记忆存储失败: {e}")
 

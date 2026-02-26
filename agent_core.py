@@ -57,6 +57,9 @@ class AgentState(TypedDict):
     risk_preference: str
     knowledge_context: str
     memory_context: str
+    is_followup: bool
+    recent_context: str
+    conversation_id: str
 
     news_summary: str  # 情报员填入：新闻摘要 (CPI/非农/美联储)
     macro_view: str  # 宏观分析师填入：宏观定调 (宽松/紧缩)
@@ -161,16 +164,21 @@ def supervisor_node(state: AgentState, llm):
     """
     query = state["user_query"]
     messages = state.get("messages", [])
-    history_text = ""
-    if len(messages) > 1:  # 如果有历史消息
+    is_followup = bool(state.get("is_followup", False))
+    recent_context = str(state.get("recent_context", "") or "").strip()
+    memory_context = str(state.get("memory_context", "") or "").strip()
+
+    history_text = recent_context
+    if not history_text and len(messages) > 1:
+        # 兜底：若前端未传 recent_context，退回到消息列表抽取最近两条
         history_lines = []
-        for msg in messages[:-1]:  # 排除最后一条（当前问题）
+        for msg in messages[:-1]:
             if isinstance(msg, HumanMessage):
-                history_lines.append(f"用户: {msg.content[:200]}")  # 截取防止太长
+                history_lines.append(f"用户: {msg.content[:220]}")
             elif isinstance(msg, AIMessage):
-                history_lines.append(f"AI: {msg.content[:150]}...")
+                history_lines.append(f"AI: {msg.content[:220]}")
         if history_lines:
-            history_text = "\n".join(history_lines[-2:])  # 只取最近 2 条
+            history_text = "\n".join(history_lines[-2:])
 
     system_prompt = """
     你是交易团队的主管，根据问题制定计划。
@@ -206,9 +214,24 @@ def supervisor_node(state: AgentState, llm):
     10.如果客户要画图，派 `['generalist']` 。
     """
 
-    # 🔥 [修改] 将历史对话也包含在 query 中
+    if is_followup:
+        system_prompt += """
+
+    【连续追问模式（强约束）】
+    1. 当前问题是对上一轮的追问，必须先承接上一轮关键结论，再回答当前问题。
+    2. 承接问题优先派 `generalist`；若上下文不足则派 `chatter` 先澄清，不得编造。
+    3. 禁止把“知识库命中为空”当作默认回答模板。
+        """
+
     full_query = query
-    if history_text:
+    if is_followup:
+        full_query = (
+            f"【连续追问模式】是\n"
+            f"【近期对话历史】\n{history_text if history_text else '无'}\n\n"
+            f"【相关长期记忆】\n{memory_context if memory_context else '无'}\n\n"
+            f"【当前问题】\n{query}"
+        )
+    elif history_text:
         full_query = f"【近期对话历史】\n{history_text}\n\n【当前问题】\n{query}"
 
     # 使用 structured_output 强制输出 JSON
@@ -235,6 +258,21 @@ def supervisor_node(state: AgentState, llm):
     # 回测问题 -> 直接交给通才处理，避免无关节点
     if "回测" in query or "策略回测" in query:
         final_plan = ["generalist"]
+
+    if is_followup:
+        if not history_text and not memory_context:
+            final_plan = ["chatter"]
+        elif not final_plan:
+            final_plan = ["generalist"]
+        elif final_plan[0] not in ["generalist", "chatter"]:
+            final_plan = ["generalist"] + [p for p in final_plan if p != "generalist"]
+
+    # 去重并保持顺序，避免路由重复
+    deduped_plan = []
+    for p in final_plan:
+        if p not in deduped_plan:
+            deduped_plan.append(p)
+    final_plan = deduped_plan
     final_symbol = str(result.symbol).strip()
 
     # 简单的正则判断是否为 A 股个股代码 (6开头沪市主板/科创, 0开头深市, 3开头创业板, 8/4开头北交所)
@@ -269,7 +307,23 @@ def supervisor_node(state: AgentState, llm):
 def generalist_node(state: AgentState, llm):
     query = state["user_query"]
     symbol_input = state.get("symbol", "")
+    is_followup = bool(state.get("is_followup", False))
+    recent_context = str(state.get("recent_context", "") or "").strip()
+    mem_context = str(state.get("memory_context", "") or "").strip()
     current_date = datetime.now().strftime("%Y年%m月%d日 %A")
+    context_parts = []
+    if recent_context:
+        context_parts.append(f"【最近两轮会话】\n{recent_context}")
+    if mem_context:
+        context_parts.append(f"【相关长期记忆】\n{mem_context}")
+    followup_context_block = "\n\n".join(context_parts) if context_parts else "无"
+
+    if is_followup and not context_parts:
+        return {
+            "messages": [HumanMessage(content="【王牌分析】未检索到上一轮关键结论。请贴出上一轮结论（方向、关键位或策略），我再承接展开。")],
+            "chart_img": ""
+        }
+
     tools = [
         analyze_kline_pattern, search_investment_knowledge, get_market_snapshot, get_commodity_iv_info,
         search_broker_holdings_on_date, tool_analyze_position_change,
@@ -289,6 +343,9 @@ def generalist_node(state: AgentState, llm):
         【当前日期】：{current_date}。
         客户需求：{query}。
         分析品种：{symbol_input}。
+        【连续追问模式】：{"是" if is_followup else "否"}。
+        【历史承接上下文】：
+        {followup_context_block}
    
         
         【工具使用表】
@@ -320,6 +377,7 @@ def generalist_node(state: AgentState, llm):
         2. 不要简单复述，要有深度洞察。
         3. 禁止空谈，必须用工具获取的数据说话。
         4. 不要编造数据，如果没查到数据就说不知道。
+        5. 若处于连续追问模式，第一段必须先承接上一轮关键结论，再回答当前问题。
         """
 
     general_agent = create_react_agent(llm, tools, prompt=prompt)
@@ -988,13 +1046,27 @@ def chatter_node(state: AgentState, llm=None):
     优先使用内部知识库，必要时辅以网络搜索
     """
     user_query = state["user_query"]
-    mem_context = state.get("memory_context", "")
+    is_followup = bool(state.get("is_followup", False))
+    recent_context = str(state.get("recent_context", "") or "").strip()
+    mem_context = str(state.get("memory_context", "") or "").strip()
     current_date = datetime.now().strftime("%Y年%m月%d日")
+    context_parts = []
+    if recent_context:
+        context_parts.append(f"【最近两轮会话】\n{recent_context}")
+    if mem_context:
+        context_parts.append(f"【相关长期记忆】\n{mem_context}")
+    combined_context = "\n\n".join(context_parts) if context_parts else "无"
+
+    if is_followup and combined_context == "无":
+        return {
+            "messages": [HumanMessage(content="【知识问答】\n我这轮没有检索到上一轮关键结论，暂时无法安全承接。请补充上一轮的核心结论（例如方向、关键位、策略），我立刻继续。")],
+            "knowledge_context": ""
+        }
 
     # 判断是否是简单问候（不需要工具）
     is_greeting = len(user_query) < 5 and any(x in user_query for x in ["你好", "嗨", "早", "谢", "hello", "hi", "嘿", "晚上好", "早上好", "早安", "中午好", "下午好"])
 
-    if is_greeting:
+    if is_greeting and not is_followup:
         # 简单问候直接回复，不启动 ReAct
         response = llm.invoke(f"用户说：{user_query}。请热情回应，并引导用户询问行情、策略或金融知识。")
         return {
@@ -1015,19 +1087,33 @@ def chatter_node(state: AgentState, llm=None):
 
     ]
 
-    # === 🔥 ReAct Prompt - 强调知识库优先 ===
-    prompt = f"""
-        你是一位热情、博学的**金融导师**，负责解答用户的金融知识问题和闲聊。
-
-        【当前日期】：{current_date}
-        【用户问题】：{user_query}
-        【历史对话记录】{mem_context}
-
+    core_rules = """
         【⚠️ 核心原则：知识库优先】
         1. **第一步必须**：先用 `search_investment_knowledge` 检索内部知识库
         2. **第二步可选**：如果知识库信息不足或需要最新数据，再用其他工具补充
            - `get_financial_news`：获取财经新闻
            - `get_market_snapshot`：获取实时行情
+    """
+    if is_followup:
+        core_rules = """
+        【⚠️ 核心原则：连续承接优先】
+        1. 第一段必须先引用上一轮关键结论（1-2句），再回答当前问题。
+        2. 承接说明要具体，不得只说“根据上文”。
+        3. 仅在需要补充事实时再调用工具；可以查知识库，但不是必须第一步。
+        4. 禁止把“知识库命中为空”当作默认模板回答。
+        """
+
+    # === 🔥 ReAct Prompt - 按模式切换规则 ===
+    prompt = f"""
+        你是一位热情、博学的**金融导师**，负责解答用户的金融知识问题和闲聊。
+
+        【当前日期】：{current_date}
+        【用户问题】：{user_query}
+        【连续追问模式】：{"是" if is_followup else "否"}
+        【历史承接上下文】：
+        {combined_context}
+
+        {core_rules}
 
         【回答风格】
         1. 语气要轻松、易懂，像朋友聊天一样
@@ -1082,7 +1168,15 @@ def chatter_node(state: AgentState, llm=None):
         print(f"⚠️ chatter_node 错误: {e}")
         try:
             # 尝试不用工具直接回答
-            simple_response = llm.invoke(f"用户问：{user_query}。请基于你的知识回答，语气轻松友好。")
+            fallback_prompt = f"用户问：{user_query}。请基于你的知识回答，语气轻松友好。"
+            if is_followup and combined_context != "无":
+                fallback_prompt = (
+                    f"用户在连续追问。\n"
+                    f"历史上下文：\n{combined_context}\n\n"
+                    f"当前问题：{user_query}\n"
+                    f"请先承接上一轮关键结论，再回答当前问题。"
+                )
+            simple_response = llm.invoke(fallback_prompt)
             return {
                 "messages": [HumanMessage(content=f"【闲聊】\n{simple_response.content}")],
                 "knowledge_context": ""

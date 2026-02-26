@@ -17,7 +17,14 @@ USER_TASK_PREFIX = "user_pending_task:"  # 🔥 [新增] 用于存储用户待�
 class TaskManager:
 
     @staticmethod
-    def create_task(user_id, prompt, image_context="", risk_preference="稳健型", history_messages=None):
+    def create_task(
+        user_id,
+        prompt,
+        image_context="",
+        risk_preference="稳健型",
+        history_messages=None,
+        context_payload=None,
+    ):
         """创建后台任务"""
         # 延迟导入避免循环依赖
         from tasks import process_ai_query
@@ -27,7 +34,8 @@ class TaskManager:
             prompt=prompt,
             image_context=image_context,
             risk_preference=risk_preference,
-            history_messages=history_messages or []
+            history_messages=history_messages or [],
+            context_payload=context_payload or {},
         )
 
         task_meta = {
@@ -36,6 +44,7 @@ class TaskManager:
             "prompt": prompt,
             "image_context": image_context,
             "risk_preference": risk_preference,
+            "context_payload": context_payload or {},
             "status": "pending",
             "created_at": datetime.now().isoformat(),
             "start_time": datetime.now().timestamp()  # 🔥 [新增] 用于超时检查

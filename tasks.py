@@ -11,21 +11,29 @@ for key in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"]:
     if key in os.environ:
         del os.environ[key]
 
-from langchain_community.chat_models import ChatTongyi
+from llm_compat import ChatTongyiCompat as ChatTongyi
 from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
 from agent_core import build_trading_graph
 import re
 
 
 @celery_app.task(bind=True, name='tasks.process_ai_query')
-def process_ai_query(self, user_id, prompt, image_context="", risk_preference="稳健型", history_messages=None):
+def process_ai_query(
+    self,
+    user_id,
+    prompt,
+    image_context="",
+    risk_preference="稳健型",
+    history_messages=None,
+    context_payload=None,
+):
     """后台处理 AI 查询"""
     try:
         self.update_state(state='PROCESSING', meta={'progress': '正在初始化 AI 模型...'})
 
         # 初始化 LLM
         fast_llm = ChatTongyi(model="qwen-turbo", streaming=False, temperature=0.1)
-        mid_llm = ChatTongyi(model="qwen-plus", streaming=False, temperature=0.2)
+        mid_llm = ChatTongyi(model="qwen3.5-plus", streaming=False, temperature=0.2)
         smart_llm = ChatTongyi(model="qwen-max", streaming=False, temperature=0.4)
 
         self.update_state(state='PROCESSING', meta={'progress': '正在构建分析团队...'})
@@ -45,10 +53,16 @@ def process_ai_query(self, user_id, prompt, image_context="", risk_preference="�
 
         input_messages.append(HumanMessage(content=final_prompt))
 
+        context_payload = context_payload or {}
+
         inputs = {
             "user_query": final_prompt,
             "messages": input_messages,
-            "risk_preference": risk_preference
+            "risk_preference": risk_preference,
+            "is_followup": bool(context_payload.get("is_followup", False)),
+            "recent_context": str(context_payload.get("recent_context", "")),
+            "memory_context": str(context_payload.get("memory_context", "")),
+            "conversation_id": str(context_payload.get("conversation_id", f"{user_id}-default")),
         }
 
         self.update_state(state='PROCESSING', meta={'progress': '团队正在协作分析...'})
