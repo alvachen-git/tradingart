@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 from langchain_community.embeddings import DashScopeEmbeddings
 from langchain_core.tools import tool
 from qdrant_client import QdrantClient
+from qdrant_client.http import models
 
 
 load_dotenv(override=True)
@@ -83,6 +84,22 @@ def _parse_hit(hit: Any) -> Dict[str, Any]:
     }
 
 
+def _query_points(
+    client: QdrantClient,
+    query_vector: List[float],
+    limit: int,
+    query_filter: Any = None,
+) -> List[Any]:
+    kwargs: Dict[str, Any] = {
+        "collection_name": COLLECTION_NAME,
+        "query": query_vector,
+        "limit": max(1, int(limit)),
+    }
+    if query_filter is not None:
+        kwargs["query_filter"] = query_filter
+    return client.query_points(**kwargs).points
+
+
 def search_knowledge_structured(
     query: str,
     limit: int = 6,
@@ -104,11 +121,6 @@ def search_knowledge_structured(
     try:
         client = QdrantClient(path=qdrant_path)
         query_vector = embeddings.embed_query(query)
-        hits = client.query_points(
-            collection_name=COLLECTION_NAME,
-            query=query_vector,
-            limit=max(limit, image_limit),
-        ).points
     except Exception as e:
         return {
             "query": query,
@@ -120,14 +132,62 @@ def search_knowledge_structured(
     text_hits: List[Dict[str, Any]] = []
     image_hits: List[Dict[str, Any]] = []
 
-    for hit in hits:
+    text_filter = models.Filter(
+        must_not=[models.FieldCondition(key="doc_type", match=models.MatchValue(value="image"))]
+    )
+    image_filter = models.Filter(
+        must=[models.FieldCondition(key="doc_type", match=models.MatchValue(value="image"))]
+    )
+
+    try:
+        text_raw_hits = _query_points(
+            client=client,
+            query_vector=query_vector,
+            limit=max(limit * 3, limit),
+            query_filter=text_filter,
+        )
+    except Exception:
+        text_raw_hits = []
+
+    try:
+        image_raw_hits = _query_points(
+            client=client,
+            query_vector=query_vector,
+            limit=max(image_limit * 5, image_limit),
+            query_filter=image_filter,
+        )
+    except Exception:
+        image_raw_hits = []
+
+    for hit in text_raw_hits:
         parsed = _parse_hit(hit)
         if parsed["score"] < min_score:
             continue
-        if parsed["doc_type"] == "image":
-            image_hits.append(parsed)
-        else:
-            text_hits.append(parsed)
+        text_hits.append(parsed)
+
+    for hit in image_raw_hits:
+        parsed = _parse_hit(hit)
+        if parsed["score"] < min_score:
+            continue
+        image_hits.append(parsed)
+
+    # 兜底：若图片过滤查询为空，回退全局查询再提取一次图片，兼容历史数据字段缺失。
+    if not image_hits:
+        try:
+            fallback_hits = _query_points(
+                client=client,
+                query_vector=query_vector,
+                limit=max(limit * 2, image_limit * 6),
+            )
+        except Exception:
+            fallback_hits = []
+
+        for hit in fallback_hits:
+            parsed = _parse_hit(hit)
+            if parsed["score"] < min_score:
+                continue
+            if parsed["doc_type"] == "image":
+                image_hits.append(parsed)
 
     text_hits = sorted(text_hits, key=lambda x: x["score"], reverse=True)[:limit]
     image_hits = sorted(image_hits, key=lambda x: x["score"], reverse=True)[:image_limit]
