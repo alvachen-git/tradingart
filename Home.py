@@ -460,6 +460,55 @@ def render_chart_by_filename(filename):
     # 如果文件不存在，静默失败（不显示报错），保持界面整洁
 
 
+def _parse_iso_datetime(value: str):
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+
+def render_knowledge_attachments(attachments):
+    """在回答末尾渲染知识库图片附件。"""
+    if not attachments:
+        return
+
+    valid_items = [item for item in attachments if isinstance(item, dict)]
+    if not valid_items:
+        return
+
+    st.markdown("#### 📚 参考图片")
+    for idx, item in enumerate(valid_items[:3], start=1):
+        title = str(item.get("title") or f"参考图片{idx}")
+        source = str(item.get("source") or "未知来源")
+        score = item.get("score")
+        url = str(item.get("url") or "").strip()
+        expires_at = str(item.get("expires_at") or "").strip()
+        exp_dt = _parse_iso_datetime(expires_at)
+
+        if exp_dt and datetime.now(exp_dt.tzinfo) > exp_dt:
+            st.info(f"🕒 {title}（图片链接已过期，请重新提问刷新）")
+            st.caption(f"来源: {source}")
+            continue
+
+        if url:
+            st.image(url, caption=f"{title} | 来源: {source}")
+            meta_parts = []
+            try:
+                if score is not None:
+                    meta_parts.append(f"匹配度: {float(score):.2f}")
+            except Exception:
+                pass
+            if expires_at:
+                meta_parts.append(f"有效期至: {expires_at}")
+            if meta_parts:
+                st.caption(" | ".join(meta_parts))
+        else:
+            st.info(f"📎 {title}（暂无可用链接）")
+            st.caption(f"来源: {source}")
+
+
 def clean_chart_tag(response_text):
     """清理 AI 乱加的图片链接和标记"""
     if not response_text:
@@ -1671,6 +1720,8 @@ else:
             # 如果这条消息里有 "chart" 字段，且不为空，就把它画出来
             if msg.get("chart"):
                 render_chart_by_filename(msg["chart"])
+            if msg.get("attachments"):
+                render_knowledge_attachments(msg["attachments"])
 
             # [关键修改]
             if msg["role"] == "ai":
@@ -1798,6 +1849,7 @@ if "pending_task" in st.session_state and st.session_state.pending_task:
                 if result and isinstance(result, dict):
                     final_response_md = result.get("response", "")
                     final_img_path = result.get("chart", "")
+                    attachments = result.get("attachments", [])
 
                     if not final_response_md:
                         final_response_md = "抱歉，AI 分析未返回有效结果。"
@@ -1840,11 +1892,15 @@ if "pending_task" in st.session_state and st.session_state.pending_task:
 
                             placeholder.markdown(full_response, unsafe_allow_html=True)
 
+                    if attachments:
+                        render_knowledge_attachments(attachments)
+
                     # 存入历史
                     message_data = {
                         "role": "ai",
                         "content": final_response_md,
-                        "chart": final_img_path
+                        "chart": final_img_path,
+                        "attachments": attachments,
                     }
                     st.session_state.messages.append(message_data)
 

@@ -14,7 +14,60 @@ for key in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"]:
 from llm_compat import ChatTongyiCompat as ChatTongyi
 from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
 from agent_core import build_trading_graph
+from knowledge_tools import search_knowledge_structured
+from tools.oss_utils import generate_signed_get_url
 import re
+
+
+def _normalize_knowledge_query(text: str) -> str:
+    if not text:
+        return ""
+    cleaned = re.sub(r"【用户上传图信息】：[\s\S]*?----------------", " ", text)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned[:400]
+
+
+def _build_image_attachments(query: str, top_k: int = 3):
+    attachments = []
+    normalized_query = _normalize_knowledge_query(query)
+    if not normalized_query:
+        return attachments
+
+    try:
+        data = search_knowledge_structured(
+            query=normalized_query,
+            limit=8,
+            image_limit=top_k,
+            min_score=0.2,
+        )
+        image_hits = data.get("image_hits", [])[:top_k]
+        if not image_hits:
+            return attachments
+
+        for hit in image_hits:
+            oss_key = str(hit.get("oss_key", "")).strip()
+            if not oss_key:
+                continue
+            signed = generate_signed_get_url(oss_key)
+            if not signed:
+                continue
+
+            score_val = float(hit.get("score", 0.0))
+            attachments.append(
+                {
+                    "type": "knowledge_image",
+                    "image_id": str(hit.get("image_id", "")),
+                    "title": str(hit.get("title", "图片知识")),
+                    "source": str(hit.get("source", "未知来源")),
+                    "score": round(score_val, 4),
+                    "url": signed["url"],
+                    "expires_at": signed["expires_at"],
+                }
+            )
+    except Exception as e:
+        print(f"[Attachment] 图片附件构建失败: {e}")
+
+    return attachments
 
 
 @celery_app.task(bind=True, name='tasks.process_ai_query')
@@ -250,10 +303,13 @@ def process_ai_query(
 
             final_response = final_response.strip()
 
+        attachments = _build_image_attachments(prompt, top_k=3)
+
         return {
             "status": "success",
             "response": final_response or "抱歉，暂时没有获取到有效分析结果",
             "chart": chart_img,
+            "attachments": attachments,
             "error": None
         }
 
@@ -266,5 +322,6 @@ def process_ai_query(
             "status": "error",
             "response": "分析过程中出现错误，请稍后重试",  # 🔥 [修复] 返回友好提示而非 None
             "chart": None,
+            "attachments": [],
             "error": error_msg
         }
