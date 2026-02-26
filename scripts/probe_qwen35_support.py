@@ -26,8 +26,26 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-# Auto-load project .env so online probes can read DASHSCOPE_API_KEY
-load_dotenv(dotenv_path=REPO_ROOT / ".env", override=True)
+
+def _load_dotenv_with_fallback() -> str:
+    """
+    Load .env from common deployment paths.
+    Priority:
+    1) <repo>/.env
+    2) <repo_parent>/.env
+    """
+    candidates = [
+        REPO_ROOT / ".env",
+        REPO_ROOT.parent / ".env",
+    ]
+    for path in candidates:
+        if path.exists():
+            load_dotenv(dotenv_path=path, override=False)
+            return str(path)
+    return "NOT_FOUND"
+
+
+LOADED_DOTENV_PATH = _load_dotenv_with_fallback()
 
 
 @dataclass
@@ -71,6 +89,7 @@ def _print_header(args: argparse.Namespace) -> None:
     print("=== Qwen3.5 Support Probe ===")
     print(f"Python: {sys.executable}")
     print(f"CWD: {os.getcwd()}")
+    print(f"Dotenv path: {LOADED_DOTENV_PATH}")
     print(f"Model under test: {args.model}")
     print(f"Baseline model: {args.baseline_model}")
     print(f"Mode: {'ONLINE' if args.online else 'OFFLINE'}")
@@ -224,7 +243,13 @@ def probe_chat_tongyi_compat(
 def run_online_probes(args: argparse.Namespace) -> list[ProbeResult]:
     key = os.getenv("DASHSCOPE_API_KEY", "").strip()
     if not key:
-        return [ProbeResult("online.precheck", "FAIL", "Missing DASHSCOPE_API_KEY")]
+        return [
+            ProbeResult(
+                "online.precheck",
+                "FAIL",
+                f"Missing DASHSCOPE_API_KEY (dotenv={LOADED_DOTENV_PATH})",
+            )
+        ]
 
     results: list[ProbeResult] = []
     targets = [args.model]
