@@ -20,6 +20,7 @@ import re
 
 ATTACHMENT_MIN_SCORE = 0.3
 ATTACHMENT_RELATIVE_RATIO = 0.85
+INLINE_IMAGE_TOKEN_PATTERN = re.compile(r"\[\[KNOWLEDGE_IMAGE_(\d+)\]\]")
 
 
 def _normalize_knowledge_query(text: str) -> str:
@@ -50,6 +51,62 @@ def _filter_image_hits_for_attachments(image_hits, top_k: int):
 
     filtered = [hit for score, hit in scored if score >= relative_floor]
     return filtered[:top_k]
+
+
+def _extract_attachment_keywords(item: dict):
+    text = f"{item.get('title', '')} {item.get('source', '')}"
+    zh_words = re.findall(r"[\u4e00-\u9fff]{2,}", text)
+    en_words = [w.lower() for w in re.findall(r"[A-Za-z0-9]{3,}", text)]
+    stopwords = {
+        "knowledge", "images", "image", "png", "jpg", "jpeg",
+        "docs", "doc", "future", "app", "source", "oss", "http", "https",
+    }
+    keywords = []
+    for w in zh_words + en_words:
+        if w.lower() in stopwords:
+            continue
+        if w not in keywords:
+            keywords.append(w)
+    return keywords[:8]
+
+
+def _inject_inline_attachment_tokens(response_text: str, attachments):
+    if not response_text or not attachments:
+        return response_text, attachments
+    if INLINE_IMAGE_TOKEN_PATTERN.search(response_text):
+        return response_text, attachments
+
+    paragraphs = [p.strip() for p in re.split(r"\n\s*\n", response_text) if p.strip()]
+    if not paragraphs:
+        return response_text, attachments
+
+    placement = {}
+    for idx, item in enumerate(attachments, start=1):
+        token = f"[[KNOWLEDGE_IMAGE_{idx}]]"
+        item["placeholder"] = token
+        keywords = _extract_attachment_keywords(item)
+
+        best_para = -1
+        best_score = 0
+        if keywords:
+            for p_idx, para in enumerate(paragraphs):
+                score = sum(1 for kw in keywords if kw in para or kw.lower() in para.lower())
+                if score > best_score:
+                    best_score = score
+                    best_para = p_idx
+
+        if best_para < 0:
+            best_para = min(len(paragraphs) - 1, max(0, idx - 1))
+        placement.setdefault(best_para, []).append(token)
+
+    rendered_parts = []
+    for p_idx, para in enumerate(paragraphs):
+        rendered_parts.append(para)
+        tokens = placement.get(p_idx, [])
+        if tokens:
+            rendered_parts.append("\n".join(tokens))
+
+    return "\n\n".join(rendered_parts).strip(), attachments
 
 
 def _build_image_attachments(query: str, top_k: int = 3):
@@ -329,6 +386,7 @@ def process_ai_query(
             final_response = final_response.strip()
 
         attachments = _build_image_attachments(prompt, top_k=3)
+        final_response, attachments = _inject_inline_attachment_tokens(final_response, attachments)
 
         return {
             "status": "success",

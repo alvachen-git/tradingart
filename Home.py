@@ -469,44 +469,90 @@ def _parse_iso_datetime(value: str):
         return None
 
 
-def render_knowledge_attachments(attachments):
-    """在回答末尾渲染知识库图片附件。"""
+INLINE_ATTACHMENT_PATTERN = re.compile(r"\[\[KNOWLEDGE_IMAGE_(\d+)\]\]")
+
+
+def _normalize_attachment_items(attachments):
     if not attachments:
+        return []
+    return [item for item in attachments if isinstance(item, dict)][:3]
+
+
+def _render_knowledge_attachment_item(item, idx: int):
+    title = str(item.get("title") or f"参考图片{idx}")
+    source = str(item.get("source") or "未知来源")
+    score = item.get("score")
+    url = str(item.get("url") or "").strip()
+    expires_at = str(item.get("expires_at") or "").strip()
+    exp_dt = _parse_iso_datetime(expires_at)
+
+    if exp_dt and datetime.now(exp_dt.tzinfo) > exp_dt:
+        st.info(f"🕒 {title}（图片链接已过期，请重新提问刷新）")
+        st.caption(f"来源: {source}")
         return
 
-    valid_items = [item for item in attachments if isinstance(item, dict)]
+    if url:
+        st.image(url, caption=f"{title} | 来源: {source}")
+        meta_parts = []
+        try:
+            if score is not None:
+                meta_parts.append(f"匹配度: {float(score):.2f}")
+        except Exception:
+            pass
+        if expires_at:
+            meta_parts.append(f"有效期至: {expires_at}")
+        if meta_parts:
+            st.caption(" | ".join(meta_parts))
+    else:
+        st.info(f"📎 {title}（暂无可用链接）")
+        st.caption(f"来源: {source}")
+
+
+def render_knowledge_attachments(attachments, exclude_indices=None):
+    """在回答末尾渲染知识库图片附件。"""
+    valid_items = _normalize_attachment_items(attachments)
     if not valid_items:
         return
 
+    excluded = set(exclude_indices or [])
+    remaining = [(idx, item) for idx, item in enumerate(valid_items, start=1) if idx not in excluded]
+    if not remaining:
+        return
+
     st.markdown("#### 📚 参考图片")
-    for idx, item in enumerate(valid_items[:3], start=1):
-        title = str(item.get("title") or f"参考图片{idx}")
-        source = str(item.get("source") or "未知来源")
-        score = item.get("score")
-        url = str(item.get("url") or "").strip()
-        expires_at = str(item.get("expires_at") or "").strip()
-        exp_dt = _parse_iso_datetime(expires_at)
+    for idx, item in remaining:
+        _render_knowledge_attachment_item(item, idx)
 
-        if exp_dt and datetime.now(exp_dt.tzinfo) > exp_dt:
-            st.info(f"🕒 {title}（图片链接已过期，请重新提问刷新）")
-            st.caption(f"来源: {source}")
-            continue
 
-        if url:
-            st.image(url, caption=f"{title} | 来源: {source}")
-            meta_parts = []
-            try:
-                if score is not None:
-                    meta_parts.append(f"匹配度: {float(score):.2f}")
-            except Exception:
-                pass
-            if expires_at:
-                meta_parts.append(f"有效期至: {expires_at}")
-            if meta_parts:
-                st.caption(" | ".join(meta_parts))
-        else:
-            st.info(f"📎 {title}（暂无可用链接）")
-            st.caption(f"来源: {source}")
+def render_response_with_inline_attachments(response_text: str, attachments, render_plain_when_no_token: bool = True):
+    """解析回答中的 [[KNOWLEDGE_IMAGE_n]] 占位符并在文中插图。"""
+    text = response_text or ""
+    valid_items = _normalize_attachment_items(attachments)
+    matches = list(INLINE_ATTACHMENT_PATTERN.finditer(text))
+
+    if not matches:
+        if render_plain_when_no_token:
+            st.markdown(text, unsafe_allow_html=True)
+        return {"has_inline": False, "used_indices": set()}
+
+    used_indices = set()
+    cursor = 0
+    for match in matches:
+        chunk = text[cursor:match.start()]
+        if chunk and chunk.strip():
+            st.markdown(chunk.strip(), unsafe_allow_html=True)
+
+        token_idx = int(match.group(1))
+        if 1 <= token_idx <= len(valid_items):
+            _render_knowledge_attachment_item(valid_items[token_idx - 1], token_idx)
+            used_indices.add(token_idx)
+        cursor = match.end()
+
+    tail = text[cursor:]
+    if tail and tail.strip():
+        st.markdown(tail.strip(), unsafe_allow_html=True)
+
+    return {"has_inline": True, "used_indices": used_indices}
 
 
 def clean_chart_tag(response_text):
@@ -1715,13 +1761,23 @@ else:
     st.markdown('<div style="height: 20px;"></div>', unsafe_allow_html=True)
     for i, msg in enumerate(st.session_state.messages):
         with st.chat_message(msg["role"]):
-            st.markdown(msg["content"], unsafe_allow_html=True)
+            inline_state = {"has_inline": False, "used_indices": set()}
+            msg_attachments = msg.get("attachments", [])
+
+            if msg["role"] in ["assistant", "ai"]:
+                inline_state = render_response_with_inline_attachments(
+                    msg.get("content", ""),
+                    msg_attachments,
+                    render_plain_when_no_token=True,
+                )
+            else:
+                st.markdown(msg["content"], unsafe_allow_html=True)
 
             # 如果这条消息里有 "chart" 字段，且不为空，就把它画出来
             if msg.get("chart"):
                 render_chart_by_filename(msg["chart"])
-            if msg.get("attachments"):
-                render_knowledge_attachments(msg["attachments"])
+            if msg_attachments:
+                render_knowledge_attachments(msg_attachments, exclude_indices=inline_state["used_indices"])
 
             # [关键修改]
             if msg["role"] == "ai":
@@ -1865,35 +1921,46 @@ if "pending_task" in st.session_state and st.session_state.pending_task:
                     final_response_md = clean_chart_tag(final_response_md)
 
                     # 打字机效果（优化：批量更新）
+                    inline_state = {"has_inline": False, "used_indices": set()}
                     if final_response_md and len(final_response_md) > 0:
-                        placeholder = content_placeholder.empty()
-                        full_response = ""
+                        if attachments:
+                            with content_placeholder.container():
+                                inline_state = render_response_with_inline_attachments(
+                                    final_response_md,
+                                    attachments,
+                                    render_plain_when_no_token=False,
+                                )
 
-                        # 🔥 [修复] 批量更新，减少 WebSocket 消息
-                        if len(final_response_md) > 800:
-                            # 长文本：每 50 个字符更新一次
-                            update_interval = 100
-                            chars = list(final_response_md)
+                        if not inline_state["has_inline"]:
+                            placeholder = content_placeholder.empty()
+                            full_response = ""
 
-                            for i in range(0, len(chars), update_interval):
-                                chunk = ''.join(chars[i:i+update_interval])
-                                full_response += chunk
-                                placeholder.markdown(full_response + "▌", unsafe_allow_html=True)
-                                time.sleep(0.05)  # 每批次延迟 50ms
+                            # 🔥 [修复] 批量更新，减少 WebSocket 消息
+                            if len(final_response_md) > 800:
+                                # 长文本：每 50 个字符更新一次
+                                update_interval = 100
+                                chars = list(final_response_md)
 
-                            placeholder.markdown(full_response, unsafe_allow_html=True)
-                        else:
-                            # 短文本：正常打字机效果
-                            delay_time = 0.01
+                                for i in range(0, len(chars), update_interval):
+                                    chunk = ''.join(chars[i:i+update_interval])
+                                    full_response += chunk
+                                    placeholder.markdown(full_response + "▌", unsafe_allow_html=True)
+                                    time.sleep(0.05)  # 每批次延迟 50ms
 
-                            for char in stream_text_generator(final_response_md, delay=delay_time):
-                                full_response += char
-                                placeholder.markdown(full_response + "▌", unsafe_allow_html=True)
+                                placeholder.markdown(full_response, unsafe_allow_html=True)
+                            else:
+                                # 短文本：正常打字机效果
+                                delay_time = 0.01
 
-                            placeholder.markdown(full_response, unsafe_allow_html=True)
+                                for char in stream_text_generator(final_response_md, delay=delay_time):
+                                    full_response += char
+                                    placeholder.markdown(full_response + "▌", unsafe_allow_html=True)
+
+                                placeholder.markdown(full_response, unsafe_allow_html=True)
 
                     if attachments:
-                        render_knowledge_attachments(attachments)
+                        with content_placeholder.container():
+                            render_knowledge_attachments(attachments, exclude_indices=inline_state["used_indices"])
 
                     # 存入历史
                     message_data = {
