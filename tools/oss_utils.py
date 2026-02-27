@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict
 
 
-DEFAULT_SIGNED_URL_TTL_SEC = 900
+DEFAULT_SIGNED_URL_TTL_SEC = 21600
 
 
 def _get_oss_config() -> Dict[str, str]:
@@ -57,7 +57,10 @@ def generate_signed_get_url(object_key: str, expires_sec: Optional[int] = None) 
     """
     ttl = expires_sec
     if ttl is None:
-        ttl = int(os.getenv("OSS_SIGNED_URL_TTL_SEC", str(DEFAULT_SIGNED_URL_TTL_SEC)))
+        try:
+            ttl = int(os.getenv("OSS_SIGNED_URL_TTL_SEC", str(DEFAULT_SIGNED_URL_TTL_SEC)))
+        except Exception:
+            ttl = DEFAULT_SIGNED_URL_TTL_SEC
 
     try:
         bucket = _build_bucket()
