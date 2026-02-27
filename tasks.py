@@ -22,6 +22,13 @@ ATTACHMENT_MIN_SCORE = 0.38
 ATTACHMENT_RELATIVE_RATIO = 0.85
 INLINE_IMAGE_TOKEN_PATTERN = re.compile(r"\[\[KNOWLEDGE_IMAGE_(\d+)\]\]")
 
+BULL_DIRECTION_TERMS = [
+    "牛市", "牛市价差", "看涨", "bull", "bull spread", "bull call spread", "bull put spread",
+]
+BEAR_DIRECTION_TERMS = [
+    "熊市", "熊市价差", "看跌", "bear", "bear spread", "bear call spread", "bear put spread",
+]
+
 
 def _normalize_knowledge_query(text: str) -> str:
     if not text:
@@ -31,7 +38,43 @@ def _normalize_knowledge_query(text: str) -> str:
     return cleaned[:400]
 
 
-def _filter_image_hits_for_attachments(image_hits, top_k: int):
+def _detect_direction_labels(text: str):
+    text_norm = str(text or "").lower()
+    labels = set()
+    if any(term in text_norm for term in BULL_DIRECTION_TERMS):
+        labels.add("bull")
+    if any(term in text_norm for term in BEAR_DIRECTION_TERMS):
+        labels.add("bear")
+    return labels
+
+
+def _is_direction_conflict(intent_labels, hit_labels) -> bool:
+    if not intent_labels or not hit_labels:
+        return False
+    if "bull" in intent_labels and "bear" in hit_labels and "bull" not in hit_labels:
+        return True
+    if "bear" in intent_labels and "bull" in hit_labels and "bear" not in hit_labels:
+        return True
+    return False
+
+
+def _build_hit_direction_text(hit: dict) -> str:
+    parts = [
+        str(hit.get("title", "")),
+        str(hit.get("source", "")),
+        str(hit.get("summary_text", "")),
+        str(hit.get("ocr_text", "")),
+        str(hit.get("content", "")),
+    ]
+    tags = hit.get("tags")
+    if isinstance(tags, list):
+        parts.extend(str(t) for t in tags)
+    elif tags:
+        parts.append(str(tags))
+    return " ".join(parts)
+
+
+def _filter_image_hits_for_attachments(image_hits, top_k: int, intent_labels=None):
     scored = []
     for hit in image_hits or []:
         try:
@@ -39,6 +82,10 @@ def _filter_image_hits_for_attachments(image_hits, top_k: int):
         except Exception:
             continue
         if score_val < ATTACHMENT_MIN_SCORE:
+            continue
+
+        hit_labels = _detect_direction_labels(_build_hit_direction_text(hit))
+        if _is_direction_conflict(intent_labels or set(), hit_labels):
             continue
         scored.append((score_val, hit))
 
@@ -130,6 +177,7 @@ def _build_image_attachments(query: str, top_k: int = 3):
     normalized_query = _normalize_knowledge_query(query)
     if not normalized_query:
         return attachments
+    intent_labels = _detect_direction_labels(normalized_query)
 
     try:
         data = search_knowledge_structured(
@@ -138,7 +186,11 @@ def _build_image_attachments(query: str, top_k: int = 3):
             image_limit=top_k,
             min_score=ATTACHMENT_MIN_SCORE,
         )
-        image_hits = _filter_image_hits_for_attachments(data.get("image_hits", []), top_k=top_k)
+        image_hits = _filter_image_hits_for_attachments(
+            data.get("image_hits", []),
+            top_k=top_k,
+            intent_labels=intent_labels,
+        )
         if not image_hits:
             return attachments
 
