@@ -17,9 +17,21 @@ TEMP_SWAP_TABLE = "commodity_option_basic_old"
 
 def _load_config():
     cfg = {}
-    env_path = os.path.join(os.path.dirname(__file__), ".env")
-    if os.path.exists(env_path):
-        cfg = dotenv_values(env_path)
+    script_dir = os.path.dirname(__file__)
+    env_candidates = [
+        os.getenv("FINANCE_APP_ENV"),  # 可选外部指定
+        os.path.join(script_dir, ".env"),
+        os.path.join(os.path.dirname(script_dir), ".env"),  # /root/finance_app/.env
+        "/root/finance_app/.env",  # 与现有部署约定对齐
+        os.path.join(os.getcwd(), ".env"),
+    ]
+    loaded_paths = []
+    for p in env_candidates:
+        if not p:
+            continue
+        if os.path.exists(p):
+            cfg.update(dotenv_values(p))
+            loaded_paths.append(p)
 
     def gv(key: str, default: str = "") -> str:
         v = os.getenv(key, cfg.get(key, default))
@@ -30,7 +42,7 @@ def _load_config():
     required = ["DB_USER", "DB_PASSWORD", "DB_HOST", "DB_PORT", "DB_NAME", "TUSHARE_TOKEN"]
     missing = [k for k in required if not gv(k)]
     if missing:
-        raise RuntimeError(f"缺少必要配置: {missing}")
+        raise RuntimeError(f"缺少必要配置: {missing}，已尝试env路径: {loaded_paths}")
 
     return {
         "db_user": gv("DB_USER"),
