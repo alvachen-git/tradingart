@@ -1,6 +1,7 @@
 import tushare as ts
 import pandas as pd
 import os
+import argparse
 from sqlalchemy import create_engine, text
 from dotenv import load_dotenv
 import time
@@ -19,6 +20,63 @@ DB_NAME = os.getenv("DB_NAME")
 
 db_url = f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
 engine = create_engine(db_url)
+
+
+def _normalize_trade_date(value):
+    """把数据库里的日期值规范成 YYYYMMDD 字符串。"""
+    if value is None:
+        return None
+    s = str(value).strip().replace("-", "")
+    if len(s) == 8 and s.isdigit():
+        return s
+    return None
+
+
+def get_latest_saved_trade_date():
+    """读取 sector_moneyflow 里已保存的最新交易日。"""
+    if engine is None:
+        return None
+    with engine.connect() as conn:
+        latest = conn.execute(text("SELECT MAX(trade_date) FROM sector_moneyflow")).scalar()
+    return _normalize_trade_date(latest)
+
+
+def build_target_trade_dates(recent_days=None, bootstrap_days=5, overlap_days=2):
+    """
+    默认增量更新：
+    - 若表里已有数据：从最新日期往回 overlap_days 天开始补到今天
+    - 若表为空：回补 bootstrap_days 天
+    也支持 --recent-days 强制只更新最近 N 天。
+    """
+    today = datetime.now().date()
+
+    if recent_days is not None:
+        recent_days = max(1, int(recent_days))
+        start_date = today - timedelta(days=recent_days - 1)
+        print(f"🗓️ 更新模式: recent_days={recent_days}, 区间 {start_date} ~ {today}")
+    else:
+        latest_str = get_latest_saved_trade_date()
+        if latest_str:
+            latest_dt = datetime.strptime(latest_str, "%Y%m%d").date()
+            start_date = latest_dt - timedelta(days=max(0, int(overlap_days)))
+            print(
+                f"🗓️ 更新模式: incremental(latest={latest_str}, overlap_days={overlap_days}), 区间 {start_date} ~ {today}"
+            )
+        else:
+            bootstrap_days = max(1, int(bootstrap_days))
+            start_date = today - timedelta(days=bootstrap_days - 1)
+            print(f"🗓️ 更新模式: bootstrap_days={bootstrap_days}, 区间 {start_date} ~ {today}")
+
+    if start_date > today:
+        start_date = today
+
+    dates = []
+    current = start_date
+    while current <= today:
+        if current.weekday() < 5:
+            dates.append(current.strftime('%Y%m%d'))
+        current += timedelta(days=1)
+    return dates
 
 
 def ensure_sector_moneyflow_schema():
@@ -164,16 +222,36 @@ def fetch_sector_moneyflow(trade_date):
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="更新行业/概念资金流数据")
+    parser.add_argument(
+        "--recent-days",
+        type=int,
+        default=None,
+        help="强制只更新最近 N 个自然日（包含今天）。例如 --recent-days 7",
+    )
+    parser.add_argument(
+        "--bootstrap-days",
+        type=int,
+        default=5,
+        help="当表为空时，首次回补天数（默认 5）",
+    )
+    parser.add_argument(
+        "--overlap-days",
+        type=int,
+        default=2,
+        help="增量更新时，从最新日期往回重叠更新天数（默认 2）",
+    )
+    args = parser.parse_args()
+
     ensure_sector_moneyflow_schema()
-
-    # 建议重跑最近1个月的数据，以便有完整的行业数据
-    end_date = datetime.now()
-    start_date = end_date - timedelta(days=60)
-
-    current = start_date
-    while current <= end_date:
-        d_str = current.strftime('%Y%m%d')
-        if current.weekday() < 5:
+    target_dates = build_target_trade_dates(
+        recent_days=args.recent_days,
+        bootstrap_days=args.bootstrap_days,
+        overlap_days=args.overlap_days,
+    )
+    if not target_dates:
+        print("⚠️ 当前区间无交易日，无需更新。")
+    else:
+        for d_str in target_dates:
             fetch_sector_moneyflow(d_str)
             time.sleep(1)
-        current += timedelta(days=1)
