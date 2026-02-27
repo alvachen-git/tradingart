@@ -18,7 +18,7 @@ from knowledge_tools import search_knowledge_structured
 from tools.oss_utils import generate_signed_get_url
 import re
 
-ATTACHMENT_MIN_SCORE = 0.32
+ATTACHMENT_MIN_SCORE = 0.38
 ATTACHMENT_RELATIVE_RATIO = 0.85
 INLINE_IMAGE_TOKEN_PATTERN = re.compile(r"\[\[KNOWLEDGE_IMAGE_(\d+)\]\]")
 
@@ -58,7 +58,7 @@ def _filter_image_hits_for_attachments(image_hits, top_k: int):
 
 
 def _dynamic_attachment_cap(top_score: float, hard_cap: int = 3) -> int:
-    if top_score < 0.32:
+    if top_score < ATTACHMENT_MIN_SCORE:
         cap = 0
     elif top_score < 0.5:
         cap = 1
