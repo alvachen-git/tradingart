@@ -814,18 +814,23 @@ def get_user_portfolio_positions_df(user_id: str) -> pd.DataFrame:
                last_seen_at, updated_at
         FROM user_portfolio_positions
         WHERE user_id = :uid
-          AND last_seen_at = (
-              SELECT MAX(last_seen_at)
-              FROM user_portfolio_positions
-              WHERE user_id = :uid
-          )
-        ORDER BY market_value DESC
+        ORDER BY last_seen_at DESC, market_value DESC
         """
     )
     with engine.connect() as conn:
         df = pd.read_sql(sql, conn, params={"uid": user_id})
     if df.empty:
         return df
+    if "last_seen_at" in df.columns:
+        seen_ts = pd.to_datetime(df["last_seen_at"], errors="coerce")
+        if seen_ts.notna().any():
+            latest_ts = seen_ts.max()
+            batch_df = df[seen_ts == latest_ts].copy()
+            if not batch_df.empty:
+                df = batch_df
+    if "market_value" in df.columns:
+        df["market_value"] = pd.to_numeric(df["market_value"], errors="coerce")
+        df = df.sort_values("market_value", ascending=False, na_position="last")
     if "index_corr_json" in df.columns:
         def _parse(v: Any) -> Dict[str, Any]:
             if not v:

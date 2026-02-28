@@ -2203,7 +2203,7 @@ if "pending_task" in st.session_state and st.session_state.pending_task:
 # ==========================================
 with st.container():
     # 使用 Expander 把上传控件收起来，避免占用太高空间
-    with st.expander("📸 可以上传持仓、K线等图", expanded=False):
+    with st.expander("📸 可以上传持仓图来做诊断", expanded=False):
         # 🔥 [修改] 使用动态 key，便于清除图片
         uploader_key = f"portfolio_uploader_{st.session_state.uploader_key}"
         uploaded_img = st.file_uploader("支持 JPG/PNG，截图越清晰越好", type=["jpg", "jpeg", "png"],

@@ -50,8 +50,9 @@ echo "========================================" >> "${LOG_FILE}"
 echo "⏰ 任务开始: $(date)" >> "${LOG_FILE}"
 echo "🐍 Python: ${PYTHON_BIN}" >> "${LOG_FILE}"
 
-run_step 1 2 "计算商品IV数据" "update_commodity_iv_daily_old.py" --auto-latest-common-date
-run_step 2 2 "更新港股数据" "update_hk_daily.py"
+run_step 1 3 "计算商品IV数据" "update_commodity_iv_daily_old.py" --auto-latest-common-date
+run_step 2 3 "更新港股数据" "update_hk_daily.py"
+run_step 3 3 "更新港股分数数据" "update_hk_score.py"
 
 if [ ${FAILED_STEPS} -gt 0 ]; then
   echo "⚠️ 本次任务失败步骤数: ${FAILED_STEPS}" >> "${LOG_FILE}"

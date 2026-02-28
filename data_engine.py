@@ -2548,18 +2548,27 @@ def get_user_portfolio_positions(user_id: str) -> pd.DataFrame:
                    last_seen_at, updated_at
             FROM user_portfolio_positions
             WHERE user_id = :uid
-              AND last_seen_at = (
-                  SELECT MAX(last_seen_at)
-                  FROM user_portfolio_positions
-                  WHERE user_id = :uid
-              )
-            ORDER BY market_value DESC
+            ORDER BY last_seen_at DESC, market_value DESC
             """
         )
         with engine.connect() as conn:
             df = pd.read_sql(sql, conn, params={"uid": user_id})
         if df.empty:
             return df
+
+        # 统一“当前态”口径：优先只保留最新 last_seen_at 批次；若筛选失败则回退全量。
+        if "last_seen_at" in df.columns:
+            seen_ts = pd.to_datetime(df["last_seen_at"], errors="coerce")
+            if seen_ts.notna().any():
+                latest_ts = seen_ts.max()
+                batch_df = df[seen_ts == latest_ts].copy()
+                if not batch_df.empty:
+                    df = batch_df
+
+        if "market_value" in df.columns:
+            df["market_value"] = pd.to_numeric(df["market_value"], errors="coerce")
+            df = df.sort_values("market_value", ascending=False, na_position="last")
+
         if "index_corr_json" in df.columns:
             def _parse_one(raw):
                 if not raw:
@@ -2573,6 +2582,25 @@ def get_user_portfolio_positions(user_id: str) -> pd.DataFrame:
     except Exception as e:
         print(f"获取用户持仓明细失败: {e}")
         return pd.DataFrame()
+
+
+def clear_user_portfolio_snapshot(user_id: str) -> bool:
+    """
+    清理用户持仓总览快照（不删除明细表）。
+    用于修复“快照存在但明细为空”的异常展示。
+    """
+    if engine is None or not user_id:
+        return False
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                text("DELETE FROM user_portfolio_snapshot WHERE user_id = :uid"),
+                {"uid": user_id},
+            )
+        return True
+    except Exception as e:
+        print(f"清理用户持仓快照失败: {e}")
+        return False
 
 
 def get_portfolio_momentum_scores(symbols, window_days: int = 10):

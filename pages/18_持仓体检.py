@@ -6,11 +6,13 @@ from datetime import datetime, timedelta
 import pandas as pd
 import plotly.express as px
 import streamlit as st
+import extra_streamlit_components as stx
 
 # 添加父目录到路径，便于导入 data_engine
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import data_engine as de
+import auth_utils as auth
 from task_manager import TaskManager
 
 
@@ -83,6 +85,63 @@ st.markdown(
         font-size: 14px;
         line-height: 1.6;
     }
+    .empty-state-box {
+        border: 1px solid #3b82f6;
+        border-radius: 12px;
+        background: rgba(30, 64, 175, 0.26);
+        padding: 12px 14px;
+        color: #f8fafc;
+        font-size: 15px;
+        font-weight: 600;
+        line-height: 1.6;
+        box-shadow: 0 0 0 1px rgba(59, 130, 246, 0.2) inset;
+    }
+    .empty-state-box .hint {
+        color: #bfdbfe;
+        font-weight: 500;
+    }
+    .alert-box {
+        border-radius: 12px;
+        padding: 12px 14px;
+        margin: 6px 0 10px 0;
+        border: 1px solid transparent;
+        font-size: 16px;
+        line-height: 1.7;
+        font-weight: 600;
+    }
+    .alert-box.error {
+        background: rgba(127, 29, 29, 0.35);
+        border-color: rgba(248, 113, 113, 0.75);
+        color: #fee2e2;
+    }
+    .alert-box.info {
+        background: rgba(30, 64, 175, 0.32);
+        border-color: rgba(96, 165, 250, 0.72);
+        color: #dbeafe;
+    }
+    /* 高对比按钮样式，避免深色背景下文字发灰看不清 */
+    div.stButton > button {
+        background: #1d4ed8 !important;
+        color: #ffffff !important;
+        border: 1px solid #93c5fd !important;
+        border-radius: 10px !important;
+        padding: 0.45rem 1rem !important;
+        font-weight: 700 !important;
+        font-size: 16px !important;
+        line-height: 1.2 !important;
+        box-shadow: 0 6px 16px rgba(15, 23, 42, 0.45) !important;
+    }
+    div.stButton > button:hover {
+        background: #2563eb !important;
+        color: #ffffff !important;
+        border-color: #bfdbfe !important;
+    }
+    div.stButton > button:disabled {
+        background: #334155 !important;
+        color: #f1f5f9 !important;
+        border-color: #64748b !important;
+        opacity: 0.95 !important;
+    }
     @keyframes pulse-ring {
         0% { box-shadow: 0 0 0 0 rgba(56, 189, 248, 0.75); }
         70% { box-shadow: 0 0 0 10px rgba(56, 189, 248, 0); }
@@ -93,6 +152,52 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+if "portfolio_cookie_retry_once" not in st.session_state:
+    st.session_state.portfolio_cookie_retry_once = False
+
+
+def _restore_login_with_cookie_state(cookies: dict):
+    cookies = cookies or {}
+    try:
+        restored = auth.restore_login_from_cookies(cookies)
+    except Exception:
+        return False, "error"
+
+    if restored:
+        return True, "ok"
+
+    c_user = str(cookies.get("username") or "").strip()
+    c_token = str(cookies.get("token") or "").strip()
+    if not c_user and not c_token:
+        return False, "empty"
+    if (c_user and not c_token) or (c_token and not c_user):
+        return False, "partial"
+    return False, "invalid"
+
+
+def _auto_restore_login_if_needed():
+    should_auto_login = (
+        not st.session_state.get("is_logged_in", False)
+        and not st.session_state.get("just_logged_out", False)
+    )
+    if not should_auto_login:
+        return
+
+    cm = stx.CookieManager(key="portfolio_page_cookie_manager")
+    cookies = cm.get_all() or {}
+    restored, state = _restore_login_with_cookie_state(cookies)
+    if restored:
+        st.session_state.portfolio_cookie_retry_once = False
+        st.rerun()
+
+    # 首次加载 cookie 组件偶发拿不到值，允许重试一次。
+    if state in {"empty", "partial", "error"} and not st.session_state.get("portfolio_cookie_retry_once", False):
+        st.session_state.portfolio_cookie_retry_once = True
+        time.sleep(0.15)
+        st.rerun()
+
+
+_auto_restore_login_if_needed()
 
 if not st.session_state.get("is_logged_in", False):
     st.warning("🔒 请先登录后查看持仓体检。")
@@ -121,6 +226,54 @@ if pending_meta and pending_meta.get("task_id"):
 
 snapshot = de.get_user_portfolio_snapshot(user_id)
 positions_df = de.get_user_portfolio_positions(user_id)
+
+
+def _to_int(value, default=0):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return int(default)
+
+
+snapshot_recognized_count = _to_int((snapshot or {}).get("recognized_count"), 0)
+snapshot_positions_mismatch = bool(snapshot) and snapshot_recognized_count > 0 and positions_df.empty
+if snapshot_positions_mismatch:
+    # 二次兜底：直接走服务层读取，避免页面层偶发查询异常造成“有图无表”。
+    try:
+        from portfolio_analysis_service import get_user_portfolio_positions_df as _svc_get_positions_df
+
+        retry_df = _svc_get_positions_df(user_id)
+        if retry_df is not None and not retry_df.empty:
+            positions_df = retry_df
+            snapshot_positions_mismatch = False
+    except Exception as e:
+        print(f"持仓体检二次拉取明细失败: {e}")
+
+if snapshot_positions_mismatch:
+    st.markdown(
+        """
+<div class="alert-box error">
+  检测到持仓快照与明细不一致（总览有数据，但明细为空）。为避免误导，已暂停渲染旧图表。
+</div>
+""",
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        """
+<div class="alert-box info">
+  请返回首页重新上传持仓截图。若该问题持续，可先点击下方按钮清理旧快照。
+</div>
+""",
+        unsafe_allow_html=True,
+    )
+    if st.button("清理当前旧快照"):
+        if de.clear_user_portfolio_snapshot(user_id):
+            st.success("已清理旧快照，请重新上传持仓截图。")
+            time.sleep(0.5)
+            st.rerun()
+        else:
+            st.warning("快照清理失败，请稍后重试。")
+    st.stop()
 
 if not positions_df.empty and "symbol" in positions_df.columns:
     momentum_map = de.get_portfolio_momentum_scores(positions_df["symbol"].tolist(), window_days=10)
@@ -168,7 +321,15 @@ if (not snapshot) and positions_df.empty:
         st.info("正在计算持仓数据，请稍候...")
         time.sleep(1.2)
         st.rerun()
-    st.info("暂无持仓体检数据。去首页上传持仓截图后会自动生成。")
+    st.markdown(
+        """
+<div class="empty-state-box">
+  暂无持仓体检数据。
+  <span class="hint">去首页上传持仓截图后会自动生成。</span>
+</div>
+""",
+        unsafe_allow_html=True,
+    )
     st.stop()
 
 summary_text = str(snapshot.get("summary_text") or "暂无总结")
