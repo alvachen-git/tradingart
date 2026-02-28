@@ -18,7 +18,7 @@ import threading
 from datetime import datetime, timedelta
 from auth_ui import show_auth_dialog, sidebar_user_menu
 from agent_core import build_trading_graph
-from vision_tools import analyze_financial_image
+from vision_tools import analyze_financial_image, analyze_portfolio_image
 from data_engine import get_commodity_iv_info
 import time
 import extra_streamlit_components as stx
@@ -807,6 +807,12 @@ if 'announcement_cookie_loaded' not in st.session_state:
 # 初始化待处理任务状态
 if "pending_task" not in st.session_state:
     st.session_state.pending_task = None
+if "pending_portfolio_task" not in st.session_state:
+    st.session_state.pending_portfolio_task = None
+if "portfolio_last_attempt_hash" not in st.session_state:
+    st.session_state.portfolio_last_attempt_hash = None
+if "portfolio_latest_result" not in st.session_state:
+    st.session_state.portfolio_latest_result = None
 
 # 尝试从 Cookie 恢复登录
 # 【关键修复 1】增加 'just_logged_out' 判断，如果刚点了登出，绝不执行自动登录
@@ -827,6 +833,7 @@ if should_auto_login:
 
         task_manager = TaskManager()
         pending_task_data = task_manager.get_user_pending_task(str(c_user))
+        pending_portfolio_data = task_manager.get_user_pending_portfolio_task(str(c_user))
 
         if pending_task_data:
             # 恢复任务信息到 Session State
@@ -848,6 +855,15 @@ if should_auto_login:
             print(f"✅ 自动登录后恢复任务: {pending_task_data['task_id']}")
         else:
             st.toast(f"欢迎回来，{c_user} (自动登录)")
+
+        if pending_portfolio_data:
+            st.session_state.pending_portfolio_task = {
+                "task_id": pending_portfolio_data["task_id"],
+                "start_time": pending_portfolio_data["start_time"],
+                "screenshot_hash": pending_portfolio_data.get("screenshot_hash", ""),
+                "positions_count": pending_portfolio_data.get("positions_count", 0),
+            }
+            print(f"✅ 自动登录后恢复持仓任务: {pending_portfolio_data['task_id']}")
 
         time.sleep(0.3)
         st.rerun()
@@ -1222,6 +1238,77 @@ def build_context_payload(prompt_text: str, current_user: str):
         "semantic_related": bool(semantic_related),
         "conversation_id": conversation_id
     }
+
+
+def _hash_uploaded_file(uploaded_file) -> str:
+    if uploaded_file is None:
+        return ""
+    try:
+        raw = uploaded_file.getvalue()
+        return hashlib.md5(raw).hexdigest()
+    except Exception:
+        try:
+            uploaded_file.seek(0)
+            raw = uploaded_file.read()
+            uploaded_file.seek(0)
+            return hashlib.md5(raw).hexdigest()
+        except Exception:
+            return ""
+
+
+def auto_submit_portfolio_task(uploaded_img):
+    """上传截图后自动触发持仓分析任务（仅登录用户）。"""
+    current_user = st.session_state.get("user_id", "访客")
+    if current_user == "访客":
+        return
+    if not uploaded_img:
+        return
+    if st.session_state.get("pending_portfolio_task"):
+        return
+
+    image_hash = _hash_uploaded_file(uploaded_img)
+    if not image_hash:
+        return
+    if st.session_state.get("portfolio_last_attempt_hash") == image_hash:
+        return
+
+    st.session_state.portfolio_last_attempt_hash = image_hash
+
+    with st.status("📊 正在识别持仓截图并自动启动体检...", expanded=True) as status:
+        vision_struct = analyze_portfolio_image(uploaded_img)
+        if not vision_struct.get("ok"):
+            status.update(label="❌ 持仓识别失败", state="error", expanded=False)
+            err_msg = vision_struct.get("error", "未识别到有效持仓")
+            st.warning(f"持仓识别失败：{err_msg}")
+            return
+
+        positions = vision_struct.get("positions", [])
+        if not positions:
+            status.update(label="❌ 未识别到有效持仓", state="error", expanded=False)
+            st.warning("未识别到有效持仓数据，请换一张更清晰的截图后重试。")
+            return
+
+        task_manager = TaskManager()
+        try:
+            task_id = task_manager.create_portfolio_task(
+                user_id=current_user,
+                positions=positions,
+                screenshot_hash=image_hash,
+                source_text=vision_struct.get("raw_text", ""),
+            )
+        except Exception as e:
+            status.update(label="❌ 任务创建失败", state="error", expanded=False)
+            st.error(f"持仓体检任务创建失败：{e}")
+            return
+        st.session_state.pending_portfolio_task = {
+            "task_id": task_id,
+            "start_time": time.time(),
+            "screenshot_hash": image_hash,
+            "positions_count": len(positions),
+        }
+        status.update(label="✅ 已自动提交持仓体检任务", state="complete", expanded=False)
+        st.toast(f"持仓体检任务已启动（识别到 {len(positions)} 只股票）")
+        st.rerun()
 
 
 # ==========================================
@@ -1668,11 +1755,20 @@ with st.sidebar:
             # 1. 使数据库中的 token 失效（关键！）
             if user != "访客":
                 auth.logout_user(user)
+                try:
+                    tm = TaskManager()
+                    tm.clear_user_pending_task(user)
+                    tm.clear_user_pending_portfolio_task(user)
+                except Exception as e:
+                    print(f"清理待处理任务失败: {e}")
 
             # 2. 清除 session state
             st.session_state['is_logged_in'] = False
             st.session_state['user_id'] = None
             st.session_state['just_logged_out'] = True
+            st.session_state['pending_task'] = None
+            st.session_state['pending_portfolio_task'] = None
+            st.session_state['portfolio_last_attempt_hash'] = None
             if 'token' in st.session_state:
                 del st.session_state['token']
 
@@ -1788,6 +1884,91 @@ else:
 
                 # 传入两个参数：问题 + 回答
                 native_share_button(user_question, msg["content"], key=f"share_history_{i}")
+
+# ==========================================
+# 🔥 [新增] 持仓体检任务恢复机制
+# ==========================================
+if "pending_portfolio_task" in st.session_state and st.session_state.pending_portfolio_task:
+    ptask = st.session_state.pending_portfolio_task
+    ptask_id = ptask["task_id"]
+    ptask_start = ptask["start_time"]
+    current_user = st.session_state.get("user_id", "访客")
+
+    if time.time() - ptask_start < 1800:
+        task_manager = TaskManager()
+        task_status = task_manager.get_task_status(ptask_id)
+        current_status = task_status["status"]
+
+        if current_status in ["pending", "processing"]:
+            progress_text = str(task_status.get("progress", "正在处理..."))
+            recognized_count = int(ptask.get("positions_count", 0) or 0)
+            st.markdown(
+                f"""
+<div style="
+    border:1px solid #38bdf8;
+    background:linear-gradient(135deg, rgba(15,23,42,0.95), rgba(30,41,59,0.92));
+    border-radius:12px;
+    padding:14px 16px;
+    box-shadow:0 0 0 1px rgba(56,189,248,0.12) inset;
+">
+  <div style="color:#f8fafc;font-size:18px;font-weight:700;line-height:1.4;">
+    📊 持仓体检进行中
+  </div>
+  <div style="color:#e2e8f0;font-size:16px;margin-top:6px;line-height:1.65;">
+    ⏳ {progress_text}（已识别 {recognized_count} 只）
+  </div>
+</div>
+""",
+                unsafe_allow_html=True,
+            )
+            time.sleep(1.2)
+            st.rerun()
+        elif current_status == "success":
+            result = task_status.get("result") or {}
+            payload = result.get("result") if isinstance(result, dict) else {}
+            summary = ""
+            if isinstance(payload, dict):
+                summary = str(payload.get("summary_text") or "")
+                st.session_state.portfolio_latest_result = payload
+            if not summary and isinstance(result, dict):
+                summary = str(result.get("response") or "")
+            if not summary:
+                summary = "持仓体检已完成。"
+            detail_hint = "完整分析请到左侧栏「持仓体检」页面查看。"
+            if detail_hint not in summary:
+                summary = f"{summary}\n\n{detail_hint}"
+
+            st.success("✅ 持仓体检完成")
+            st.markdown(summary)
+
+            if current_user != "访客":
+                try:
+                    retrieval_text = ""
+                    if isinstance(result, dict):
+                        retrieval_text = result.get("retrieval_summary", "")
+                    mem.save_interaction(current_user, "自动持仓体检", retrieval_text or summary)
+                except Exception as e:
+                    print(f"持仓体检记忆写入失败: {e}")
+
+            st.session_state.messages.append(
+                {"role": "ai", "content": f"📊 持仓体检完成\n\n{summary}"}
+            )
+
+            st.session_state.pending_portfolio_task = None
+            task_manager.clear_user_pending_portfolio_task(current_user)
+            st.session_state.uploader_key += 1
+            time.sleep(0.5)
+            st.rerun()
+        elif current_status == "error":
+            err = task_status.get("error", "未知错误")
+            st.error(f"持仓体检失败：{err[:120]}")
+            st.session_state.pending_portfolio_task = None
+            task_manager.clear_user_pending_portfolio_task(current_user)
+    else:
+        st.warning("⏱️ 持仓体检任务超时，请重新上传截图。")
+        st.session_state.pending_portfolio_task = None
+        if current_user != "访客":
+            TaskManager().clear_user_pending_portfolio_task(current_user)
 
 # ==========================================
 # 🔥 [新增] 任务恢复机制（正确位置）
@@ -2030,21 +2211,40 @@ with st.container():
 
         if uploaded_img:
             st.image(uploaded_img, caption="已加载截图", width=200)
-            # 🔥 [修改點] 使用自定義 HTML 替代 st.info，解決看不清的問題
-            st.markdown("""
-                        <div style="
-                            background-color: rgba(59, 130, 246, 0.2); /* 半透明亮藍底 */
-                            border: 1px solid #3b82f6;               /* 亮藍色邊框 */
-                            color: #ffffff !important;               /* 強制純白文字 */
-                            padding: 12px;
-                            border-radius: 8px;
-                            margin-top: 10px;
-                            line-height: 1.5;
-                        ">
-                            <strong style="color: #FFD700;">✅ 图片已就绪</strong><br>
-                            请在下方输入框输入问题 <span style="color: #cbd5e1; font-size: 13px;">(例如：'帮分析持仓风险')</span>
-                        </div>
-                        """, unsafe_allow_html=True)
+            current_user = st.session_state.get("user_id", "访客")
+            if current_user == "访客":
+                st.markdown("""
+                            <div style="
+                                background-color: rgba(239, 68, 68, 0.16);
+                                border: 1px solid rgba(239, 68, 68, 0.7);
+                                color: #ffffff !important;
+                                padding: 12px;
+                                border-radius: 8px;
+                                margin-top: 10px;
+                                line-height: 1.5;
+                            ">
+                                <strong style="color: #FCA5A5;">⚠ 请先登录</strong><br>
+                                登录后上传截图会自动启动持仓体检，并写入你的专属资料库。
+                            </div>
+                            """, unsafe_allow_html=True)
+            else:
+                st.markdown("""
+                            <div style="
+                                background-color: rgba(59, 130, 246, 0.2);
+                                border: 1px solid #3b82f6;
+                                color: #ffffff !important;
+                                padding: 12px;
+                                border-radius: 8px;
+                                margin-top: 10px;
+                                line-height: 1.5;
+                            ">
+                                <strong style="color: #FFD700;">✅ 图片已就绪</strong><br>
+                                系统将自动识别持仓并启动体检任务，完成后可在“持仓体检”页面查看图像化结果。
+                            </div>
+                            """, unsafe_allow_html=True)
+                auto_submit_portfolio_task(uploaded_img)
+        else:
+            st.session_state.portfolio_last_attempt_hash = None
 
 # 侧栏按钮样式最终兜底（只命中左上角侧栏开关，不影响右上角菜单）
 st.markdown("""

@@ -12,6 +12,7 @@ redis_client = redis.from_url(REDIS_URL, decode_responses=True)
 
 TASK_META_PREFIX = "task_meta:"
 USER_TASK_PREFIX = "user_pending_task:"  # 🔥 [新增] 用于存储用户待处理任务
+USER_PORTFOLIO_TASK_PREFIX = "user_pending_portfolio_task:"
 
 
 class TaskManager:
@@ -140,3 +141,67 @@ class TaskManager:
         key = f"{USER_TASK_PREFIX}{user_id}"
         redis_client.delete(key)
         print(f"🗑️ 已清除用户待处理任务: {user_id}")
+
+    @staticmethod
+    def create_portfolio_task(
+        user_id,
+        positions,
+        screenshot_hash="",
+        source_text="",
+    ):
+        """创建持仓分析后台任务。"""
+        from tasks import process_portfolio_snapshot_task
+
+        task = process_portfolio_snapshot_task.delay(
+            user_id=user_id,
+            positions=positions or [],
+            screenshot_hash=screenshot_hash or "",
+            source_text=source_text or "",
+        )
+
+        task_meta = {
+            "task_id": task.id,
+            "task_type": "portfolio",
+            "user_id": user_id,
+            "positions_count": len(positions or []),
+            "screenshot_hash": screenshot_hash or "",
+            "status": "pending",
+            "created_at": datetime.now().isoformat(),
+            "start_time": datetime.now().timestamp(),
+        }
+
+        redis_client.setex(
+            f"{TASK_META_PREFIX}{task.id}",
+            7200,
+            json.dumps(task_meta, ensure_ascii=False),
+        )
+        redis_client.setex(
+            f"{USER_PORTFOLIO_TASK_PREFIX}{user_id}",
+            7200,
+            json.dumps(task_meta, ensure_ascii=False),
+        )
+
+        print(f"✅ 持仓任务已创建: {task.id} | 用户: {user_id}")
+        return task.id
+
+    @staticmethod
+    def get_user_pending_portfolio_task(user_id):
+        """获取用户待处理持仓任务。"""
+        key = f"{USER_PORTFOLIO_TASK_PREFIX}{user_id}"
+        task_data = redis_client.get(key)
+        if task_data:
+            try:
+                task_meta = json.loads(task_data)
+                print(f"✅ 从 Redis 恢复持仓任务: {task_meta['task_id']} | 用户: {user_id}")
+                return task_meta
+            except Exception as e:
+                print(f"❌ 恢复持仓任务失败: {e}")
+                return None
+        return None
+
+    @staticmethod
+    def clear_user_pending_portfolio_task(user_id):
+        """清除用户待处理持仓任务。"""
+        key = f"{USER_PORTFOLIO_TASK_PREFIX}{user_id}"
+        redis_client.delete(key)
+        print(f"🗑️ 已清除用户待处理持仓任务: {user_id}")

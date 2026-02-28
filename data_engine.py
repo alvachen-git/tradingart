@@ -2,6 +2,7 @@ import pandas as pd
 import numpy as np
 from scipy import stats
 import re
+import json
 from symbol_match import sql_prefix_condition
 import os
 from sqlalchemy import create_engine, text
@@ -19,10 +20,15 @@ from langchain_community.chat_models import ChatTongyi
 from langchain_core.messages import HumanMessage
 
 # Tushare 初始化 (确保已配置 Token)
+pro = None
 ts_token = os.getenv("TUSHARE_TOKEN")
 if ts_token:
-    ts.set_token(ts_token)
-    pro = ts.pro_api()
+    try:
+        ts.set_token(ts_token)
+        pro = ts.pro_api()
+    except Exception as e:
+        print(f"⚠️ Tushare 初始化失败，已降级运行: {e}")
+        pro = None
 
 
 # 1. 初始化
@@ -49,6 +55,37 @@ def get_db_engine():
     return create_engine(db_url, pool_recycle=3600, pool_pre_ping=True)
 
 engine = get_db_engine()
+
+_TOOL_STARTUP_SELF_CHECK_LOGGED = False
+
+
+def _log_tool_startup_self_check():
+    """
+    启动自检日志（每个进程打印一次）：
+    用于确认当前进程加载的 data_engine/symbol_match 是否为最新代码。
+    """
+    global _TOOL_STARTUP_SELF_CHECK_LOGGED
+    if _TOOL_STARTUP_SELF_CHECK_LOGGED:
+        return
+
+    try:
+        lc_condition = sql_prefix_condition("LC")
+        m_condition = sql_prefix_condition("M")
+        like_percent_escaped = "LIKE 'LC%%'" in lc_condition
+
+        print(
+            f"[ToolSelfCheck] data_engine loaded | pid={os.getpid()} | file={__file__} | cwd={os.getcwd()}"
+        )
+        print(f"[ToolSelfCheck] sql_prefix_condition('LC') = {lc_condition}")
+        print(f"[ToolSelfCheck] sql_prefix_condition('M') = {m_condition}")
+        print(f"[ToolSelfCheck] like_percent_escaped = {'YES' if like_percent_escaped else 'NO'}")
+    except Exception as e:
+        print(f"[ToolSelfCheck] startup self-check failed: {e}")
+    finally:
+        _TOOL_STARTUP_SELF_CHECK_LOGGED = True
+
+
+_log_tool_startup_self_check()
 
 
 # --- 新增：定义查库工具 ---
@@ -2467,3 +2504,194 @@ def get_iv_range_stats(symbol: str, start_date: str = None, end_date: str = None
 
     except Exception as e:
         return f"❌ 查询IV区间统计时出错: {str(e)}"
+
+
+def get_user_portfolio_snapshot(user_id: str):
+    """
+    获取用户最新持仓分析总览快照。
+    返回 dict，字段包含 industry_allocation / portfolio_corr 等解析后的结构。
+    """
+    if engine is None or not user_id:
+        return {}
+    try:
+        sql = text("SELECT * FROM user_portfolio_snapshot WHERE user_id = :uid LIMIT 1")
+        with engine.connect() as conn:
+            row = conn.execute(sql, {"uid": user_id}).mappings().fetchone()
+        if not row:
+            return {}
+        data = dict(row)
+        try:
+            data["industry_allocation"] = json.loads(data.get("industry_allocation_json") or "[]")
+        except Exception:
+            data["industry_allocation"] = []
+        try:
+            data["portfolio_corr"] = json.loads(data.get("portfolio_corr_json") or "{}")
+        except Exception:
+            data["portfolio_corr"] = {}
+        return data
+    except Exception as e:
+        print(f"获取用户持仓快照失败: {e}")
+        return {}
+
+
+def get_user_portfolio_positions(user_id: str) -> pd.DataFrame:
+    """
+    获取用户当前持仓明细（结构化当前态）。
+    """
+    if engine is None or not user_id:
+        return pd.DataFrame()
+    try:
+        sql = text(
+            """
+            SELECT symbol, name, market, quantity, market_value, price, cost_price,
+                   industry, technical_grade, technical_reason, index_corr_json,
+                   last_seen_at, updated_at
+            FROM user_portfolio_positions
+            WHERE user_id = :uid
+              AND last_seen_at = (
+                  SELECT MAX(last_seen_at)
+                  FROM user_portfolio_positions
+                  WHERE user_id = :uid
+              )
+            ORDER BY market_value DESC
+            """
+        )
+        with engine.connect() as conn:
+            df = pd.read_sql(sql, conn, params={"uid": user_id})
+        if df.empty:
+            return df
+        if "index_corr_json" in df.columns:
+            def _parse_one(raw):
+                if not raw:
+                    return {}
+                try:
+                    return json.loads(raw)
+                except Exception:
+                    return {}
+            df["index_corr"] = df["index_corr_json"].apply(_parse_one)
+        return df
+    except Exception as e:
+        print(f"获取用户持仓明细失败: {e}")
+        return pd.DataFrame()
+
+
+def get_portfolio_momentum_scores(symbols, window_days: int = 10):
+    """
+    从 daily_stock_screener 读取每个持仓股票最近 N 条评分均值（动能分数）。
+    返回: { "601126.SH": 63.2, ... }
+    """
+    if engine is None:
+        return {}
+    try:
+        symbol_list = []
+        for raw in symbols or []:
+            code = str(raw or "").strip().upper()
+            if code:
+                symbol_list.append(code)
+        if not symbol_list:
+            return {}
+
+        # 同时兼容带后缀和不带后缀两种 ts_code 存储口径
+        candidates = []
+        for sym in symbol_list:
+            base = sym.split(".")[0]
+            for code in (sym, base):
+                if code and code not in candidates:
+                    candidates.append(code)
+
+        placeholders = []
+        params = {}
+        for i, code in enumerate(candidates):
+            k = f"c{i}"
+            placeholders.append(f":{k}")
+            params[k] = code
+
+        max_n = max(int(window_days or 10), 1)
+        with engine.connect() as conn:
+            recent_dates_df = pd.read_sql(
+                text(
+                    """
+                    SELECT DISTINCT trade_date
+                    FROM daily_stock_screener
+                    ORDER BY trade_date DESC
+                    LIMIT :n
+                    """
+                ),
+                conn,
+                params={"n": max_n},
+            )
+            if recent_dates_df.empty:
+                return {}
+            recent_dates = [str(x) for x in recent_dates_df["trade_date"].tolist() if str(x).strip()]
+            if not recent_dates:
+                return {}
+
+            date_placeholders = []
+            for i, d in enumerate(recent_dates):
+                k = f"d{i}"
+                date_placeholders.append(f":{k}")
+                params[k] = d
+
+            sql = text(
+                f"""
+                SELECT ts_code, trade_date, score
+                FROM daily_stock_screener
+                WHERE ts_code IN ({",".join(placeholders)})
+                  AND trade_date IN ({",".join(date_placeholders)})
+                ORDER BY trade_date DESC
+                """
+            )
+            df = pd.read_sql(sql, conn, params=params)
+        if df.empty:
+            return {}
+
+        df["score"] = pd.to_numeric(df["score"], errors="coerce")
+        df["trade_date"] = df["trade_date"].astype(str)
+        df = df.dropna(subset=["score"])
+        if df.empty:
+            return {}
+
+        out = {}
+        for sym in symbol_list:
+            base = sym.split(".")[0]
+            part = df[df["ts_code"].isin([sym, base])].sort_values("trade_date", ascending=False)
+            if part.empty:
+                continue
+            out[sym] = round(float(part["score"].head(max_n).mean()), 2)
+        return out
+    except Exception as e:
+        print(f"获取动能分数失败: {e}")
+        return {}
+
+
+def get_latest_hkd_cny_rate(default_rate: float = 0.92) -> float:
+    """
+    获取最新港币兑人民币汇率（HKDCNY）。
+    读取 macro_daily.indicator_code='HKDCNY' 的最新 close_value。
+    失败时返回 default_rate。
+    """
+    if engine is None:
+        return float(default_rate)
+    try:
+        sql = text(
+            """
+            SELECT close_value
+            FROM macro_daily
+            WHERE indicator_code = 'HKDCNY'
+            ORDER BY trade_date DESC
+            LIMIT 1
+            """
+        )
+        with engine.connect() as conn:
+            row = conn.execute(sql).mappings().fetchone()
+        if not row:
+            return float(default_rate)
+        val = row.get("close_value")
+        rate = float(val)
+        # 异常值保护，避免脏数据把总市值放大/缩小
+        if rate <= 0 or rate > 2:
+            return float(default_rate)
+        return rate
+    except Exception as e:
+        print(f"获取 HKDCNY 汇率失败: {e}")
+        return float(default_rate)

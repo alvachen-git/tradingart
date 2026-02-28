@@ -16,6 +16,7 @@ from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
 from agent_core import build_trading_graph
 from knowledge_tools import search_knowledge_structured
 from tools.oss_utils import generate_signed_get_url
+from portfolio_analysis_service import process_portfolio_snapshot as run_portfolio_snapshot
 import re
 
 ATTACHMENT_MIN_SCORE = 0.38
@@ -28,6 +29,59 @@ BULL_DIRECTION_TERMS = [
 BEAR_DIRECTION_TERMS = [
     "熊市", "熊市价差", "看跌", "bear", "bear spread", "bear call spread", "bear put spread",
 ]
+
+
+@celery_app.task(bind=True, name="tasks.process_portfolio_snapshot")
+def process_portfolio_snapshot_task(
+    self,
+    user_id,
+    positions,
+    screenshot_hash="",
+    source_text="",
+):
+    """后台处理持仓截图结构化分析与覆盖更新。"""
+    try:
+        self.update_state(state="PROCESSING", meta={"progress": "正在标准化持仓数据..."})
+        if not isinstance(positions, list):
+            return {
+                "status": "error",
+                "error": "positions 参数必须为数组",
+                "response": "持仓数据格式错误，请重试上传截图。",
+            }
+
+        self.update_state(state="PROCESSING", meta={"progress": "正在计算行业占比与相关度..."})
+        result = run_portfolio_snapshot(
+            user_id=str(user_id),
+            raw_positions=positions,
+            screenshot_hash=str(screenshot_hash or ""),
+            lookback_days=120,
+        )
+
+        if result.get("status") != "success":
+            err = result.get("error", "未知错误")
+            return {
+                "status": "error",
+                "error": err,
+                "response": f"持仓分析失败：{err}",
+            }
+
+        self.update_state(state="PROCESSING", meta={"progress": "正在整理持仓分析报告..."})
+        return {
+            "status": "success",
+            "response": result.get("summary_text", ""),
+            "result": result,
+            "retrieval_summary": result.get("retrieval_summary", ""),
+            "source_text": source_text or "",
+            "error": None,
+        }
+    except Exception as e:
+        import traceback
+
+        return {
+            "status": "error",
+            "response": "持仓分析过程中出现错误，请稍后重试。",
+            "error": f"{e}\n{traceback.format_exc()}",
+        }
 
 
 def _normalize_knowledge_query(text: str) -> str:

@@ -5,6 +5,7 @@ import os
 import time
 from datetime import datetime
 from dotenv import load_dotenv
+from typing import Optional
 
 # 1. 引入刚才新建的算法库
 import kline_algo
@@ -19,6 +20,17 @@ ts.set_token(os.getenv("TUSHARE_TOKEN"))
 pro = ts.pro_api()
 
 
+def _fetch_daily_with_retry(ts_code: str, end_date: str, limit: int = 100, retries: int = 2) -> Optional[pd.DataFrame]:
+    last_err = None
+    for i in range(retries + 1):
+        try:
+            return pro.daily(ts_code=ts_code, end_date=end_date, limit=limit)
+        except Exception as e:
+            last_err = e
+            time.sleep(0.2 * (i + 1))
+    raise last_err
+
+
 def run_daily_scan():
     print("🚀 [盘后作业] 开始全市场 K 线形态扫描...")
 
@@ -29,15 +41,21 @@ def run_daily_scan():
     stock_list = pro.stock_basic(exchange='', list_status='L', fields='ts_code,name,industry')
     #stock_list = stock_list.head(50) # <--- 测试时打开此注释
 
-    # 设定分析日期
-    # 如果是今天盘后跑，就用今天；如果是周末跑，需指定上一个交易日
+    # 设定分析目标日期：用“可获取到K线数据的最新交易日”，避免脚本在盘中/周末运行时整批跳过。
     today = datetime.now().strftime('%Y%m%d')
-    #today = '20251219' # 手动指定测试日期
+    target_date = today
+    try:
+        probe = pro.daily(ts_code='000001.SH', end_date=today, limit=1)
+        if probe is not None and (not probe.empty):
+            target_date = str(probe.iloc[0]['trade_date'])
+    except Exception as e:
+        print(f"⚠️ 探测最新交易日失败，回退使用系统日期 {today}: {e}")
 
-    print(f"🎯 目标日期: {today} | 目标数量: {len(stock_list)} 只")
+    print(f"🎯 目标日期: {target_date} | 目标数量: {len(stock_list)} 只")
 
     data_buffer = []
     error_count = 0
+    error_samples = []
 
     # 2. 循环处理每一只股票
     for index, row in stock_list.iterrows():
@@ -47,7 +65,8 @@ def run_daily_scan():
         try:
             # 拉取日线数据 (至少需要 60-80 天才能算准 MA60)
             # Tushare 接口频次有限制，注意流控
-            df = pro.daily(ts_code=ts_code, end_date=today, limit=100)
+            df = _fetch_daily_with_retry(ts_code=ts_code, end_date=target_date, limit=100, retries=2)
+            time.sleep(0.015)
 
             # 数据太少无法分析
             if df.empty or len(df) < 30:
@@ -73,7 +92,7 @@ def run_daily_scan():
             # 只有当最新数据的日期 == 目标日期，才入库
             # (防止停牌股票用旧数据充数)
             latest = df.iloc[-1]
-            if latest['trade_date'] != today:
+            if latest['trade_date'] != target_date:
                 continue
 
             # 准备入库数据
@@ -103,8 +122,19 @@ def run_daily_scan():
 
         except Exception as e:
             error_count += 1
-            # print(f"❌ {ts_code} 出错: {e}")
+            if len(error_samples) < 12:
+                error_samples.append(f"{ts_code}: {e}")
             continue
+
+    print(f"📌 扫描完成：成功 {len(data_buffer)} / {len(stock_list)}，失败 {error_count}")
+    if error_samples:
+        print("⚠️ 失败样例（最多12条）：")
+        for msg in error_samples:
+            print(f"   - {msg}")
+    if len(stock_list) > 0:
+        coverage = len(data_buffer) / len(stock_list)
+        if coverage < 0.8:
+            print(f"⚠️ 覆盖率偏低：{coverage:.1%}，可能存在 API 限流或网络问题。")
 
     # 3. 批量写入数据库 (升级版：带容错救援机制)
     if data_buffer:
@@ -114,7 +144,7 @@ def run_daily_scan():
         # 1. 清理旧数据
         try:
             with engine.connect() as conn:
-                conn.execute(text(f"DELETE FROM daily_stock_screener WHERE trade_date = '{today}'"))
+                conn.execute(text(f"DELETE FROM daily_stock_screener WHERE trade_date = '{target_date}'"))
                 conn.commit()
                 print("🗑️ 旧数据清理完成")
         except Exception as e:
