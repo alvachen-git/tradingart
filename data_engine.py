@@ -529,8 +529,30 @@ def update_user_memory_async(user_id, user_input):
         - 风险偏好：{old_risk}
         - 已关注品种：{old_assets}
 
+        【风险偏好判断标准】（必须严格遵守）：
+
+        ✅ **保守型** - 符合以下任一特征：
+        - 提到：稳妥、低风险、保本、止损严格、小仓位、怕亏、谨慎、安全第一
+        - 示例："我比较怕亏，想找低风险的"、"我只想做稳妥的套利"
+
+        ✅ **稳健型** - 符合以下任一特征：
+        - 提到：合理、适度、控制风险、对冲、保护、风险收益平衡、备兑
+        - 示例："我想做个对冲保护一下"、"有没有风险可控的策略"
+
+        ✅ **激进型** - 符合以下任一特征：
+        - 提到：梭哈、重仓、激进、all in、赌、翻倍、暴涨、买虚值期权、深虚、末日期权
+        - 示例："我想重仓做多翻倍！"、"给我推荐虚值期权"
+
+        ❓ **未知** - 如果这句话无法判断风险偏好（如纯查询型问题），返回"未知"
+
+        【情绪识别标准】：
+        - 贪婪：提到暴涨、暴富、翻倍、抄底、满仓
+        - 焦虑：提到被套、亏损、怎么办、救命、担心
+        - 愤怒：提到坑、骗、垃圾、又亏了、黑心
+        - 平静：正常询问，无明显情绪词
+
         請提取以下信息：
-        1. risk: 风险偏好（保守/稳健/激进/未知）
+        1. risk: 风险偏好（保守/稳健/激进/未知）- 必须根据上述标准严格判断
         2. mood: 當前情緒（焦虑/贪婪/平静/愤怒/开心/伤心/未知）
         3. assets: 用户本次对话提到的、感兴趣的品种（如果没提到就不填）
         4. style: 投资风格简评
@@ -549,9 +571,52 @@ def update_user_memory_async(user_id, user_input):
         import json
         data = json.loads(json_match.group())
 
-        # 5. 數據合併邏輯
-        new_risk = data.get('risk', old_risk)
-        if new_risk == '未知': new_risk = old_risk
+        # 5. 🔥【多轮积累】風險偏好判斷邏輯
+        current_risk_signal = data.get('risk', '未知')
+
+        # 從 Redis 讀取歷史風險信號 (最近5次)
+        risk_history_key = f"user_risk_signals:{user_id}"
+        try:
+            import redis
+            redis_client = redis.from_url(os.getenv("REDIS_URL", "redis://localhost:6379/0"), decode_responses=True)
+
+            # 獲取歷史信號列表
+            risk_signals = redis_client.lrange(risk_history_key, 0, 4)  # 最近5次
+
+            # 如果本次信號不是"未知"，則加入歷史
+            if current_risk_signal != '未知':
+                redis_client.lpush(risk_history_key, current_risk_signal)  # 左側推入（最新的在前）
+                redis_client.ltrim(risk_history_key, 0, 4)  # 只保留最近5次
+                redis_client.expire(risk_history_key, 2592000)  # 30天過期
+
+                # 重新獲取（包含本次）
+                risk_signals = redis_client.lrange(risk_history_key, 0, 4)
+
+            # 統計各類型的出現次數
+            from collections import Counter
+            if risk_signals:
+                signal_counts = Counter(risk_signals)
+                total_signals = len(risk_signals)
+
+                # 找出最多的類型及其占比
+                most_common_risk, count = signal_counts.most_common(1)[0]
+                ratio = count / total_signals
+
+                # 🔥 只有當某個類型占比 >= 60% 時，才更新風險偏好
+                if ratio >= 0.6:
+                    new_risk = most_common_risk
+                    print(f"📊 风险信号积累: {signal_counts} | 判定为: {new_risk} (占比{ratio:.0%})")
+                else:
+                    # 信號不一致，保留舊值
+                    new_risk = old_risk
+                    print(f"📊 风险信号不一致: {signal_counts} | 保留旧值: {old_risk}")
+            else:
+                # 沒有歷史信號，保留舊值
+                new_risk = old_risk
+
+        except Exception as e:
+            print(f"⚠️ Redis 風險信號存取失敗，使用单次判断: {e}")
+            new_risk = current_risk_signal if current_risk_signal != '未知' else old_risk
 
         new_mood = data.get('mood', '平靜')
         new_style = data.get('style', '')

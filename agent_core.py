@@ -31,6 +31,12 @@ from beta_tool import calculate_hedging_beta
 from knowledge_tools import search_investment_knowledge
 from stock_volume_tools import query_stock_volume, search_volume_anomalies
 from backtest_tools import run_option_backtest
+from portfolio_tools import (
+    get_user_portfolio_summary,
+    get_user_portfolio_details,
+    analyze_user_trading_style,
+    check_portfolio_risks
+)
 
 # ==========================================
 # 1. 定义共享记忆 (The State)
@@ -64,6 +70,15 @@ class AgentState(TypedDict):
     news_summary: str  # 情报员填入：新闻摘要 (CPI/非农/美联储)
     macro_view: str  # 宏观分析师填入：宏观定调 (宽松/紧缩)
     macro_chart: str  # 宏观分析师填入：生成的宏观对比图路径
+
+    # --- 持仓相关 (Portfolio Analyst) ---
+    user_id: str  # 用户ID
+    has_portfolio: bool  # 是否有持仓数据
+    portfolio_summary: str  # 持仓摘要
+    portfolio_risks: str  # 风险提示
+    trading_style: str  # 交易风格
+    portfolio_top_corr_index: str  # 最相关指数名称
+    portfolio_top_corr_value: str  # 最相关指数的相关系数
 
 
 # 期权合约乘数表（每张期权对应的标的数量）
@@ -152,7 +167,7 @@ def get_option_multiplier(symbol: str) -> str:
 # ==========================================
 # 定义输出结构，强制 LLM 返回 JSON 格式的任务列表
 class PlanningOutput(BaseModel):
-    plan: List[Literal["analyst", "researcher", "monitor", "strategist", "chatter", "generalist", "screener", "macro_analyst","roaster"]] = Field(
+    plan: List[Literal["analyst", "researcher", "monitor", "strategist", "chatter", "generalist", "screener", "macro_analyst","roaster", "portfolio_analyst"]] = Field(
         description="执行步骤列表。注意依赖关系：期权(strategist)必须排在分析(analyst)之后。"
     )
     symbol: str = Field(description="核心标的代码。如果是对比问题或无法提取单一标的，请留空或填'黄金'", default="")
@@ -167,6 +182,7 @@ def supervisor_node(state: AgentState, llm):
     is_followup = bool(state.get("is_followup", False))
     recent_context = str(state.get("recent_context", "") or "").strip()
     memory_context = str(state.get("memory_context", "") or "").strip()
+    has_portfolio = bool(state.get("has_portfolio", False))  # 🔥 新增：获取持仓状态
 
     history_text = recent_context
     if not history_text and len(messages) > 1:
@@ -180,15 +196,20 @@ def supervisor_node(state: AgentState, llm):
         if history_lines:
             history_text = "\n".join(history_lines[-2:])
 
-    system_prompt = """
+    # 🔥 新增：持仓状态提示
+    portfolio_status = f"\n【重要】用户{'已上传' if has_portfolio else '未上传'}持仓数据。" if has_portfolio else ""
+
+    system_prompt = f"""
     你是交易团队的主管，根据问题制定计划。
+    {portfolio_status}
 
     【可用员工】
     - analyst: 技术分析师 (看K线、定趋势),分析如何操作
     - monitor: 数据监控员 (看期货资金流、期货商持仓、查期货持仓量、查价格)
     - researcher: 情报研究员 (看新闻、宏观、热点、地缘政治、货币政策、Polymarket上的概率分析)
-    - strategist: 期权策略员 (给策略，**必须依赖 analyst**) 
+    - strategist: 期权策略员 (给策略，**必须依赖 analyst**)
     - screener: 股票大师 (协助"推荐股票"、"选股"、查股票成交量、资金流)
+    - portfolio_analyst: 持仓分析师 (分析用户持仓结构、风险、交易风格，给个性化建议) {'✅ 用户已上传持仓，可用' if has_portfolio else '❌ 用户未上传持仓，不可用'}
     - chatter: 知识问答和闲聊 (例如解释一下IV，什么是牛市价差，"最近美联储什么时候开会")
     - generalist: 【王牌分析师】处理对比(A和B谁强)、多品种分析、画价差图或深度复杂问题。
     - macro_analyst: 宏观策略师 (分析美联储、美债、美元、通胀、CPI、非农、画利率图)
@@ -197,6 +218,7 @@ def supervisor_node(state: AgentState, llm):
     【调度规则 (严格遵守)】
     1. **追求效率**: 问股票成交量就只派 `screener`；只问期货持仓量或价格就只派 `monitor`；只问新闻或热点就只派 `researcher`；只问技术分析就只派`analyst`；只问行情分析就只派`analyst`。
     2. **全套服务**: 如果用户问"全面分析"或"详细分析"，默认路径: ["analyst", "monitor", "researcher","strategist"]。
+    3. **持仓相关** (仅当用户已上传持仓时): 如果用户提到"我的持仓"、"我的股票"、"仓位"、"持仓风险"、"持仓分析"、"适合我"、"个性化建议"、"我的风格"、"持仓建议"、"调仓"、"加仓"、"减仓"等关键词，**必须**派 `portfolio_analyst`。
     3. **单品种期权问题**: "500ETF适合价差还是裸买"、"推荐白银期权策略" -> 
        - 只要标的明确(500ETF)，且涉及期权交易，一律走流水线。
        - Plan: `['analyst', 'strategist']` (必须先分析再出策略)。
@@ -748,6 +770,18 @@ def strategist_node(state: AgentState, llm):
     multiplier_str = get_option_multiplier(symbol)
     multiplier_hint = f"\n        【合约乘数】：{multiplier_str}（计算盈亏时必须乘以此数）" if multiplier_str else ""
 
+    # 🔥 [新增] 获取持仓上下文
+    portfolio_corr_index = state.get("portfolio_top_corr_index", "")
+    portfolio_corr_value = state.get("portfolio_top_corr_value", "")
+    portfolio_summary = state.get("portfolio_summary", "")
+
+    # 构建持仓上下文提示
+    portfolio_context = ""
+    if portfolio_corr_index and portfolio_corr_value:
+        portfolio_context = f"\n        【客户持仓信息】：客户持仓组合与{portfolio_corr_index}指数相关度最高（相关系数{portfolio_corr_value}）"
+        if portfolio_summary:
+            portfolio_context += f"\n        持仓概况：{portfolio_summary[:100]}"
+
     # === 🔥 期权策略专用工具集 ===
     tools = [
         # 期权数据工具
@@ -771,17 +805,18 @@ def strategist_node(state: AgentState, llm):
         【当前日期】：{current_date}
         【分析标的】：{symbol}{multiplier_hint}
         【客户问题】：{user_q}
-        【客户风险偏好】：{risk_pref} 
+        【客户风险偏好】：{risk_pref}
         【客户历史记忆】：{mem_context}
-        【技术面参考】：{trend} 、 {tech_view}
+        【技术面参考】：{trend} 、 {tech_view}{portfolio_context}
 
         【工作流程】
         **第一步：获取标的价格和波动率**
         - 用 `get_market_snapshot` 获取现价，用`get_commodity_iv_info` 看IV，用`check_option_expiry_status` 看到期日。
-              
+
         **第二步：设计策略**
         - **期权策略**：根据技术面趋势+IV+距离到期日+客户风险偏好来选择策略，可以查知识库辅助`search_investment_knowledge`。
         - **策略方向**：如果技术面参考是做多或看涨，就不要给做空策略，如果技术面参考是做空或看跌，就不要给做多策略。
+        - **持仓关联**：如果客户有持仓信息（见【客户持仓信息】），且当前标的与持仓相关指数有关，需要明确说明策略如何辅助或对冲现有持仓风险。例如："考虑到您的股票持仓与{portfolio_corr_index if portfolio_corr_index else 'XX指数'}高度相关，建议用该期权策略来..."
         
         **第三步：思考行权价合约 (Strikes)**
         - 如果客户有指定行权价合约，就直接根据客户需求，但可以给出合适的不同建议。
@@ -1637,7 +1672,7 @@ def finalizer_node(state: AgentState, llm):
     WORKER_TAGS = [
         "【技术分析】", "【数据监控】", "【期权策略】", "【情报与舆情】",
         "【宏观策略】", "【知识问答】", "【精选股票】", "【毒舌点评】",
-        "【王牌分析】", "【闲聊】", "【风控修正】"
+        "【王牌分析】", "【闲聊】", "【风控修正】", "【持仓分析】"
     ]
 
     worker_msgs = [
@@ -1694,6 +1729,12 @@ def finalizer_node(state: AgentState, llm):
     macro_view = state.get("macro_view", "无宏观分析")
     trend = state.get("trend_signal", "")  # 例如 "看涨"
     key_levels = state.get("key_levels", "")  # 例如 "压力3000"
+
+    # 🔥 [新增] 获取持仓上下文
+    portfolio_corr_index = state.get("portfolio_top_corr_index", "")
+    portfolio_corr_value = state.get("portfolio_top_corr_value", "")
+    portfolio_risks = state.get("portfolio_risks", "")
+
     is_single_source = len(worker_msgs) <= 1
     has_chart = "chart_" in context_text or "![" in context_text
     user_query = state.get("user_query", "")
@@ -1791,17 +1832,31 @@ def finalizer_node(state: AgentState, llm):
                 kb_context = search_investment_knowledge.invoke(enhanced_query)
             except Exception as e:
                 print(f"CIO知识库检索失败: {e}")
+            # 🔥 [新增] 构建持仓上下文提示
+            portfolio_context_prompt = ""
+            if portfolio_corr_index and portfolio_corr_value:
+                portfolio_context_prompt = f"""
+                【客户持仓关键信息】：
+                - 持仓组合与{portfolio_corr_index}指数相关度最高（相关系数{portfolio_corr_value}）
+                - 持仓风险：{portfolio_risks if portfolio_risks else "未提及"}
+
+                ⚠️ **重要**：如果团队报告中既有【持仓分析】又有【期权策略】，你必须在整合时明确说明两者的逻辑关联！
+                例如："考虑到您的持仓与{portfolio_corr_index}高度相关，策略团队建议的{symbol}期权策略可以作为对冲/增强工具..."
+                """
+
             cio_prompt = f"""
                 你是这家交易公司的**首席投资官 (CIO)**。
                 你的团队（分析师、策略员、监控员等）提交了多份分散的报告。
                 【当前日期】：{today_str}
                 【用户问题】：{user_query}
-                【分析标的】: {display_name} 
+                【分析标的】: {display_name}
 
                 【团队报告池，必须优先采用！】：
                 {context_text}
-                
+
                 【客户对话历史记忆】{mem_context}
+
+                {portfolio_context_prompt}
 
                 【📚 内部知识库 (基于"{enhanced_query}"检索)】：
                 {kb_context}
@@ -1810,8 +1865,9 @@ def finalizer_node(state: AgentState, llm):
                 请将上述零散报告整合成一份《深度投资决策书》，要求**排版精美、逻辑结构化**。
                 1. 技术面分析以K线为主，均线为辅。如果没有数据，技术面这区块就省略。
                 2. 知识要参考{kb_context}，但要根据当下市场情况，自己理解后输出。
-                3. 如果记忆{mem_context}有客户的持仓或偏好，在报告里可以针对性的写。               
+                3. 如果记忆{mem_context}有客户的持仓或偏好，在报告里可以针对性的写。
                 4. 所有价格数据（当前价、支撑位、压力位、均线值），必须使用来自【团队报告池】！
+                5. **【关键】**：如果报告池中包含持仓分析和策略建议，必须在整合时解释清楚策略如何服务于持仓管理（对冲/增强/风控），不要让两部分孤立存在。
                 
                 【注意事项】：
                 1. 中国的股票没有期权，客户问股票时，不要给期权策略，除非是用ETF期权来对冲股票。
@@ -1884,6 +1940,133 @@ def finalizer_node(state: AgentState, llm):
 
 
 # ==========================================
+# 📊 持仓分析师 (Portfolio Analyst)
+# ==========================================
+def portfolio_analyst_node(state: AgentState, llm):
+    """
+    持仓分析专家：分析用户持仓结构、风险特征和交易风格
+    """
+    query = state["user_query"]
+    user_id = state.get("user_id", "")
+    has_portfolio = state.get("has_portfolio", False)
+    current_date = datetime.now().strftime("%Y年%m月%d日 %A")
+
+    # 如果用户没有持仓数据，直接返回
+    if not has_portfolio or not user_id:
+        return {
+            "messages": [HumanMessage(content="【持仓分析】用户暂无持仓数据，无法提供持仓相关分析。")],
+            "portfolio_summary": "",
+            "portfolio_risks": "",
+            "trading_style": "",
+            "portfolio_top_corr_index": "",
+            "portfolio_top_corr_value": ""
+        }
+
+    # 配置工具
+    tools = [
+        get_user_portfolio_summary,
+        get_user_portfolio_details,
+        analyze_user_trading_style,
+        check_portfolio_risks
+    ]
+
+    persona_prompt = f"""
+    你是一位专业的持仓分析师，专注于：
+    1. 分析用户当前持仓结构和风险特征
+    2. 评估持仓与市场的相关度
+    3. 识别用户的交易风格和偏好
+    4. 结合用户实际持仓给出个性化建议
+
+    【当前日期】：{current_date}
+    【用户ID】：{user_id}
+    【客户需求】：{query}
+
+    【可调用工具】
+    1. get_user_portfolio_summary - 获取持仓摘要（轻量级）
+    2. get_user_portfolio_details - 获取持仓详情（完整数据）
+    3. analyze_user_trading_style - 分析交易风格
+    4. check_portfolio_risks - 检查持仓风险
+
+    【任务】：
+    1. 首先调用 get_user_portfolio_summary 了解用户持仓概况
+    2. 根据查询需求，选择性调用其他工具获取详细信息
+    3. 分析用户持仓特点、风险点和改进建议
+    4. 如果用户查询涉及特定标的，分析该标的在用户组合中的占比和作用
+    5. 提供专业、客观的分析，避免过度乐观或悲观
+    6. **重要**：如果工具返回了portfolio_corr（组合相关度），必须明确指出"您的持仓与XX指数相关度最高，达到X.XX"
+
+    【输出格式要求】：
+    - 如果涉及指数相关性，用这样的格式：【指数相关性】您的持仓组合与XX指数相关度最高，相关系数为X.XX
+    - 风险提示用：【风险提示】xxx
+    - 交易风格用：【交易风格】xxx
+
+    【注意】：
+    - 数据来自用户上传的持仓截图分析结果
+    - 如果持仓数据较旧（超过7天），提醒用户更新
+    - 风险提示要明确具体，避免模糊表述
+    """
+
+    portfolio_agent = create_react_agent(llm, tools, prompt=persona_prompt)
+
+    try:
+        result = portfolio_agent.invoke(
+            {"messages": state["messages"]},
+            {"recursion_limit": 20}
+        )
+
+        last_response = result["messages"][-1].content
+
+        # 提取关键信息（用于其他节点参考）
+        portfolio_summary = ""
+        portfolio_risks = ""
+        trading_style = ""
+        portfolio_top_corr_index = ""
+        portfolio_top_corr_value = ""
+
+        # 简单提取（可以更智能）
+        if "总市值" in last_response or "持仓" in last_response:
+            portfolio_summary = last_response[:200]  # 前200字作为摘要
+
+        if "风险" in last_response:
+            risk_match = re.search(r'【风险提示】(.*?)(?:【|$)', last_response, re.DOTALL)
+            if risk_match:
+                portfolio_risks = risk_match.group(1).strip()[:150]
+
+        if "风格" in last_response or "偏好" in last_response:
+            style_match = re.search(r'(稳健型|激进型|平衡型|保守型)', last_response)
+            if style_match:
+                trading_style = style_match.group(1)
+
+        # 🔥 提取指数相关性信息（用于策略推荐）
+        if "指数相关性" in last_response or "相关系数" in last_response:
+            corr_match = re.search(r'【指数相关性】.*?与(.+?)指数.*?相关系数为?([\d\.]+)', last_response)
+            if corr_match:
+                portfolio_top_corr_index = corr_match.group(1).strip()
+                portfolio_top_corr_value = corr_match.group(2).strip()
+                print(f"✅ 提取到指数相关性: {portfolio_top_corr_index} = {portfolio_top_corr_value}")
+
+        return {
+            "messages": [HumanMessage(content=f"【持仓分析】\n{last_response}")],
+            "portfolio_summary": portfolio_summary,
+            "portfolio_risks": portfolio_risks,
+            "trading_style": trading_style,
+            "portfolio_top_corr_index": portfolio_top_corr_index,
+            "portfolio_top_corr_value": portfolio_top_corr_value
+        }
+
+    except Exception as e:
+        print(f"Portfolio Analyst Node Error: {e}")
+        return {
+            "messages": [HumanMessage(content=f"【持仓分析】分析受阻: {e}")],
+            "portfolio_summary": "",
+            "portfolio_risks": "",
+            "trading_style": "",
+            "portfolio_top_corr_index": "",
+            "portfolio_top_corr_value": ""
+        }
+
+
+# ==========================================
 # 4. 构建图 (The Graph)
 # ==========================================
 
@@ -1911,6 +2094,8 @@ def build_trading_graph(fast_llm, mid_llm, smart_llm):
     workflow.add_node("screener", lambda state: screener_node(state, mid_llm))
     workflow.add_node("roaster", lambda state: roaster_node(state, mid_llm))
     workflow.add_node("macro_analyst", lambda state: macro_analyst_node(state, mid_llm))
+    # 持仓分析师 -> 用 Plus (均衡)
+    workflow.add_node("portfolio_analyst", lambda state: portfolio_analyst_node(state, mid_llm))
 
     # 2. 设置入口
     workflow.set_entry_point("supervisor")
@@ -1982,6 +2167,7 @@ def build_trading_graph(fast_llm, mid_llm, smart_llm):
             "roaster": "roaster",
             "screener": "screener",
             "macro_analyst": "macro_analyst",
+            "portfolio_analyst": "portfolio_analyst",
             "finalizer": "finalizer"
         }
     )
@@ -2008,7 +2194,7 @@ def build_trading_graph(fast_llm, mid_llm, smart_llm):
     # 流程变成：Manager(路由) -> Worker -> Manager_Pop(删除任务) -> Manager(路由)
 
     # 重新定义 Edge:
-    for node_name in ["analyst", "monitor", "strategist", "researcher", "generalist","screener","roaster", "macro_analyst"]:
+    for node_name in ["analyst", "monitor", "strategist", "researcher", "generalist","screener","roaster", "macro_analyst", "portfolio_analyst"]:
         workflow.add_edge(node_name, "manager_pop")
 
     workflow.add_edge("chatter", END)

@@ -25,6 +25,7 @@ class TaskManager:
         risk_preference="稳健型",
         history_messages=None,
         context_payload=None,
+        has_portfolio=False,
     ):
         """创建后台任务"""
         # 延迟导入避免循环依赖
@@ -37,6 +38,7 @@ class TaskManager:
             risk_preference=risk_preference,
             history_messages=history_messages or [],
             context_payload=context_payload or {},
+            has_portfolio=has_portfolio,
         )
 
         task_meta = {

@@ -17,6 +17,7 @@ from agent_core import build_trading_graph
 from knowledge_tools import search_knowledge_structured
 from tools.oss_utils import generate_signed_get_url
 from portfolio_analysis_service import process_portfolio_snapshot as run_portfolio_snapshot
+import data_engine as de
 import re
 
 ATTACHMENT_MIN_SCORE = 0.38
@@ -274,6 +275,59 @@ def _build_image_attachments(query: str, top_k: int = 3):
     return attachments
 
 
+@celery_app.task(bind=True, name='tasks.update_user_profile')
+def update_user_profile_task(self, user_id, user_input):
+    """
+    后台更新用户画像任务
+    分析用户输入，提取风险偏好、情绪、关注品种等特征
+    """
+    try:
+        # 🔥 双重防护：任务级别的去重检查
+        import hashlib
+        import redis
+        redis_client = redis.from_url(os.getenv("REDIS_URL", "redis://localhost:6379/0"), decode_responses=True)
+
+        msg_fingerprint = hashlib.md5(f"{user_id}:{user_input}".encode()).hexdigest()
+        exec_lock_key = f"profile_exec_lock:{msg_fingerprint}"
+
+        # 检查是否正在执行相同任务
+        if redis_client.exists(exec_lock_key):
+            print(f"⏭️ 跳过重复执行：相同消息正在处理中 ({user_id})")
+            return {
+                "status": "skipped",
+                "message": "重复任务已跳过"
+            }
+
+        # 设置执行锁（120秒过期，防止任务执行时间过长）
+        redis_client.setex(exec_lock_key, 120, "1")
+
+        self.update_state(state="PROCESSING", meta={"progress": "正在分析用户行为特征..."})
+
+        # 调用 data_engine 的用户画像更新函数
+        de.update_user_memory_async(user_id, user_input)
+
+        # 清除执行锁
+        redis_client.delete(exec_lock_key)
+
+        return {
+            "status": "success",
+            "message": f"用户 {user_id} 画像更新成功"
+        }
+
+    except Exception as e:
+        print(f"❌ 用户画像更新任务失败: {e}")
+        # 失败时也清除锁
+        try:
+            redis_client.delete(exec_lock_key)
+        except:
+            pass
+        return {
+            "status": "error",
+            "error": str(e),
+            "message": "用户画像更新失败"
+        }
+
+
 @celery_app.task(bind=True, name='tasks.process_ai_query')
 def process_ai_query(
     self,
@@ -283,6 +337,7 @@ def process_ai_query(
     risk_preference="稳健型",
     history_messages=None,
     context_payload=None,
+    has_portfolio=False,
 ):
     """后台处理 AI 查询"""
     try:
@@ -320,6 +375,8 @@ def process_ai_query(
             "recent_context": str(context_payload.get("recent_context", "")),
             "memory_context": str(context_payload.get("memory_context", "")),
             "conversation_id": str(context_payload.get("conversation_id", f"{user_id}-default")),
+            "user_id": user_id,
+            "has_portfolio": has_portfolio,
         }
 
         self.update_state(state='PROCESSING', meta={'progress': '团队正在协作分析...'})
@@ -343,6 +400,7 @@ def process_ai_query(
             "screener": "",
             "roaster": "",
             "macro_analyst": "",
+            "portfolio_analyst": "",  # 🔥 [新增] 添加 portfolio_analyst 键
             "chatter": "",        # 🔥 [修复] 添加 chatter 键
             "finalizer": ""
         }

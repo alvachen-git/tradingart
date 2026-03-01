@@ -1366,6 +1366,19 @@ def process_user_input(prompt_text):
 
 
     # ==========================================
+    # 🔥 [新增] 检查用户持仓状态
+    # ==========================================
+    has_portfolio = False
+    if current_user != "访客":
+        try:
+            from portfolio_analysis_service import get_user_portfolio_snapshot
+            portfolio_snapshot = get_user_portfolio_snapshot(current_user)
+            has_portfolio = bool(portfolio_snapshot and portfolio_snapshot.get('recognized_count', 0) > 0)
+        except Exception as e:
+            print(f"检查持仓状态失败: {e}")
+            has_portfolio = False
+
+    # ==========================================
     # 🔥 [修改] process_user_input 函数中的执行部分
     # ==========================================
     # 创建任务管理器
@@ -1383,8 +1396,70 @@ def process_user_input(prompt_text):
         image_context=image_context,
         risk_preference=risk,
         history_messages=history_for_task,
-        context_payload=context_payload
+        context_payload=context_payload,
+        has_portfolio=has_portfolio
     )
+
+    # 🔥 [新增] 异步更新用户画像（带防重复机制）
+    if current_user != "访客" and len(prompt_text) > 5:
+        try:
+            # 🔥🔥 第一道防线：Session State 防重复（防止 Streamlit rerun 导致的重复）
+            if "profile_update_fingerprints" not in st.session_state:
+                st.session_state.profile_update_fingerprints = set()
+
+            # 生成消息指纹
+            msg_fingerprint = hashlib.md5(f"{current_user}:{prompt_text}".encode()).hexdigest()
+
+            # 🔥 关键优化：先检查并立即标记，避免并发问题
+            if msg_fingerprint in st.session_state.profile_update_fingerprints:
+                print(f"⏭️ [Session] 跳过重复的画像更新任务: {current_user}")
+                # 直接跳过，不再执行后续逻辑
+            else:
+                # ✅ 立即标记（在任何异步操作之前）
+                st.session_state.profile_update_fingerprints.add(msg_fingerprint)
+
+                # 智能判断：只在特定情况下触发画像更新
+                PROFILE_UPDATE_KEYWORDS = [
+                    "做空", "做多", "梭哈", "保守", "激进", "风险", "止损",
+                    "持仓", "买入", "卖出", "看涨", "看跌", "策略", "建议",
+                    "怕亏", "对冲", "保护", "翻倍", "虚值"
+                ]
+                should_update = any(kw in prompt_text for kw in PROFILE_UPDATE_KEYWORDS)
+
+                # 或者：如果是长文本（超过20字），也触发更新
+                if len(prompt_text) > 20:
+                    should_update = True
+
+                if should_update:
+                    # 🔥🔥 第二道防线：Redis 防重复（跨 session 防护）
+                    import redis
+                    redis_client = redis.from_url(os.getenv("REDIS_URL", "redis://localhost:6379/0"), decode_responses=True)
+
+                    cache_key = f"profile_update_lock:{msg_fingerprint}"
+
+                    # 检查是否刚刚处理过（60秒内）
+                    if not redis_client.exists(cache_key):
+                        # 设置锁，60秒过期
+                        redis_client.setex(cache_key, 60, "1")
+
+                        # 触发任务
+                        from tasks import update_user_profile_task
+                        update_user_profile_task.delay(current_user, prompt_text)
+
+                        print(f"🧠 已触发用户画像更新任务: {current_user}")
+                    else:
+                        print(f"⏭️ [Redis] 跳过重复的画像更新任务（60秒内已处理）: {current_user}")
+                else:
+                    # 如果不满足触发条件，移除标记（让下次可以检查）
+                    st.session_state.profile_update_fingerprints.discard(msg_fingerprint)
+
+        except Exception as e:
+            print(f"⚠️ 触发用户画像更新失败（不影响主流程）: {e}")
+            # 发生异常时，移除标记
+            try:
+                st.session_state.profile_update_fingerprints.discard(msg_fingerprint)
+            except:
+                pass
 
     # 🔥 [新增] 保存任务信息
     st.session_state.pending_task = {
