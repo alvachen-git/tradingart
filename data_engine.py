@@ -5,6 +5,7 @@ import re
 import json
 from symbol_match import sql_prefix_condition
 import os
+import sys
 from sqlalchemy import create_engine, text
 from kline_tools import analyze_kline_pattern
 from dotenv import load_dotenv
@@ -74,13 +75,14 @@ def _log_tool_startup_self_check():
         like_percent_escaped = "LIKE 'LC%%'" in lc_condition
 
         print(
-            f"[ToolSelfCheck] data_engine loaded | pid={os.getpid()} | file={__file__} | cwd={os.getcwd()}"
+            f"[ToolSelfCheck] data_engine loaded | pid={os.getpid()} | file={__file__} | cwd={os.getcwd()}",
+            file=sys.stderr,
         )
-        print(f"[ToolSelfCheck] sql_prefix_condition('LC') = {lc_condition}")
-        print(f"[ToolSelfCheck] sql_prefix_condition('M') = {m_condition}")
-        print(f"[ToolSelfCheck] like_percent_escaped = {'YES' if like_percent_escaped else 'NO'}")
+        print(f"[ToolSelfCheck] sql_prefix_condition('LC') = {lc_condition}", file=sys.stderr)
+        print(f"[ToolSelfCheck] sql_prefix_condition('M') = {m_condition}", file=sys.stderr)
+        print(f"[ToolSelfCheck] like_percent_escaped = {'YES' if like_percent_escaped else 'NO'}", file=sys.stderr)
     except Exception as e:
-        print(f"[ToolSelfCheck] startup self-check failed: {e}")
+        print(f"[ToolSelfCheck] startup self-check failed: {e}", file=sys.stderr)
     finally:
         _TOOL_STARTUP_SELF_CHECK_LOGGED = True
 
