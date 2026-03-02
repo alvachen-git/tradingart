@@ -128,7 +128,7 @@ def show_navigation():
     # 个人中心（去掉icon）
     with st.expander("个人中心", expanded=False):
         st.page_link("pages/15_个人资料.py", label="个人资料")
-        st.page_link("pages/01_秘书.py", label="秘书")
+        # st.page_link("pages/01_秘书.py", label="秘书")  # 暂不上线
         st.page_link("pages/11_情报站.py", label="情报站")
 
     st.markdown("---")
