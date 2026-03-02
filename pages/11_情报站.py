@@ -20,6 +20,16 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+
+
+# 🔥 添加统一的侧边栏导航
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from sidebar_navigation import show_navigation
+with st.sidebar:
+    show_navigation()
+
 # ==========================================
 # 🎨 高级样式注入
 # ==========================================

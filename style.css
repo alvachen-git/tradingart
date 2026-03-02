@@ -50,12 +50,13 @@
         }
     }
 
-    /* === 桌面端侧边栏 === */
+    /* === 桌面端侧边栏（与情报站统一）=== */
     [data-testid="stSidebar"] {
-        background-color: #0b1121;
+        background-color: #0f172a !important;
+        border-right: 1px solid #1e293b !important;
     }
     [data-testid="stSidebar"] * {
-        color: #E0E0E0 !important;
+        color: #cbd5e1 !important;
     }
     [data-testid="stSidebar"] h1 {
         color: #FF4B4B !important;

@@ -8,6 +8,16 @@ from backtest_engine import engine, run_etf_roll_backtest, get_etf_underlyings, 
 
 
 st.set_page_config(page_title="策略回测", layout="wide")
+
+
+# 🔥 添加统一的侧边栏导航
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from sidebar_navigation import show_navigation
+with st.sidebar:
+    show_navigation()
+
 st.title("策略回测（MVP）")
 st.caption("日线回测：ETF 近月滚动。双卖/深虚值看跌策略（固定合约布局，滚动换月）。")
 
@@ -27,9 +37,9 @@ st.markdown(
         background: #0f172a !important;
         border-right: 1px solid rgba(148, 163, 184, 0.15) !important;
     }
-    [data-testid="stSidebar"] * { color: #e2e8f0 !important; }
+    [data-testid="stSidebar"] * { color: #cbd5e1 !important; }
     [data-testid="stSidebarNav"] span {
-        color: #e2e8f0 !important;
+        color: #cbd5e1 !important;
         font-weight: 600;
     }
     [data-testid="stSidebarNav"] a:hover {

@@ -28,6 +28,12 @@ css_path = os.path.join(root_dir, 'style.css')
 with open(css_path, encoding='utf-8') as f:
     st.markdown(f'<style>{f.read()}</style>', unsafe_allow_html=True)
 
+# 🔥 添加统一的侧边栏导航
+sys.path.insert(0, root_dir)
+from sidebar_navigation import show_navigation
+with st.sidebar:
+    show_navigation()
+
 
 # --- 页面逻辑 ---
 st.markdown('<div class="mobile-top-container">', unsafe_allow_html=True)

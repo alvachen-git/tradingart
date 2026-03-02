@@ -9,6 +9,15 @@ import os
 # 注意：这行代码必须放在所有 st 命令之前！
 st.set_page_config(layout="wide", page_title="美股K线")
 
+
+
+# 🔥 添加统一的侧边栏导航
+import sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from sidebar_navigation import show_navigation
+with st.sidebar:
+    show_navigation()
+
 current_dir = os.path.dirname(os.path.abspath(__file__))
 root_dir = os.path.dirname(current_dir)
 sys.path.append(root_dir)

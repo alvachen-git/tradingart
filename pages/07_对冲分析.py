@@ -43,6 +43,15 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+
+
+# 🔥 添加统一的侧边栏导航
+import sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from sidebar_navigation import show_navigation
+with st.sidebar:
+    show_navigation()
+
 # 2. 样式升级：全中文沉浸式暗黑风 (字体优化版)
 st.markdown("""
 <style>
@@ -59,11 +68,11 @@ st.markdown("""
     }
 
     /* 侧边栏 */
-    section[data-testid="stSidebar"] { 
-        background-color: #020617; 
+    section[data-testid="stSidebar"] {
+        background-color: #0f172a !important;
         border-right: 1px solid #1e293b;
     }
-    section[data-testid="stSidebar"] * { color: #94a3b8 !important; }
+    section[data-testid="stSidebar"] * { color: #cbd5e1 !important; }
 
     /* 输入框样式 */
     div[data-testid="stTextInput"] input, 

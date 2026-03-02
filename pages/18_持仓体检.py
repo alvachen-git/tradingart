@@ -23,6 +23,15 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+
+
+# 🔥 添加统一的侧边栏导航
+import sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from sidebar_navigation import show_navigation
+with st.sidebar:
+    show_navigation()
+
 st.markdown(
     """
 <style>
@@ -39,7 +48,7 @@ st.markdown(
         border-right: 1px solid #1e293b;
     }
     [data-testid="stSidebarNav"] * {
-        color: #dbeafe !important;
+        color: #cbd5e1 !important;
         opacity: 1 !important;
     }
     [data-testid="stSidebarNav"] a:hover {

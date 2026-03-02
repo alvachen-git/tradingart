@@ -10,6 +10,15 @@ from macro_data import get_dashboard_metrics
 from ui_components import inject_sidebar_toggle_style
 st.set_page_config(page_title="宏观全景", layout="wide")
 
+
+
+# 🔥 添加统一的侧边栏导航
+import sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from sidebar_navigation import show_navigation
+with st.sidebar:
+    show_navigation()
+
 current_dir = os.path.dirname(os.path.abspath(__file__))
 root_dir = os.path.dirname(current_dir)
 sys.path.append(root_dir)

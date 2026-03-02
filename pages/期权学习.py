@@ -21,6 +21,15 @@ st.set_page_config(
     layout="wide"
 )
 
+
+
+# 🔥 添加统一的侧边栏导航
+import sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from sidebar_navigation import show_navigation
+with st.sidebar:
+    show_navigation()
+
 # ==========================================
 #  简约深色主题 CSS
 # ==========================================
