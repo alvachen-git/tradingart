@@ -117,13 +117,13 @@ def show_navigation():
         st.page_link("pages/07_对冲分析.py", label="对冲分析")
         st.page_link("pages/08_股票资金.py", label="股票资金")
         st.page_link("pages/18_持仓体检.py", label="持仓体检")
-        st.page_link("pages/美股.py", label="美股")
+        # st.page_link("pages/美股.py", label="美股")  # 暂不上线
 
     # K线游戏（去掉icon）
     with st.expander("K线游戏", expanded=False):
-        st.page_link("pages/16_K线卡牌MVP.py", label="K线卡牌")
+        # st.page_link("pages/16_K线卡牌MVP.py", label="K线卡牌")  # 暂不上线
         st.page_link("pages/K线训练.py", label="K线训练")
-        st.page_link("pages/期权学习.py", label="期权学习")
+        # st.page_link("pages/期权学习.py", label="期权学习")  # 暂不上线
 
     # 个人中心（去掉icon）
     with st.expander("个人中心", expanded=False):
