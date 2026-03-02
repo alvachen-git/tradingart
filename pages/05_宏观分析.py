@@ -46,6 +46,17 @@ st.markdown("""
         background-color: #0b1121 !important;
     }
 
+    /* --- 侧边栏样式（与首页一致）--- */
+    [data-testid="stSidebar"] {
+        background-color: #0f172a !important;
+        border-right: 1px solid #1e293b !important;
+    }
+    [data-testid="stSidebar"] p,
+    [data-testid="stSidebar"] span,
+    [data-testid="stSidebar"] div {
+        color: #cbd5e1 !important;
+    }
+
     /* --- Header & 侧边栏按钮交互修复 --- */
 
     /* 1. Header 背景透明 */
@@ -58,23 +69,23 @@ st.markdown("""
     /* 隐藏装饰条 */
     header[data-testid="stHeader"] .stAppDeployButton { display: none; }
 
-    /* --- 折叠栏 (Expander) --- */
-    div[data-testid="stExpander"] details summary p {
+    /* --- 折叠栏 (Expander) - 仅应用于主内容区域 --- */
+    .main div[data-testid="stExpander"] details summary p {
         color: #ffffff !important;
         font-size: 16px !important;
         font-weight: bold !important;
     }
-    div[data-testid="stExpander"] details {
+    .main div[data-testid="stExpander"] details {
         border: 1px solid #333;
         border-radius: 5px;
-        background-color: #111; 
+        background-color: #111;
         margin-bottom: 10px;
     }
-    div[data-testid="stExpander"] svg {
+    .main div[data-testid="stExpander"] svg {
         fill: #ffffff !important;
         color: #ffffff !important;
     }
-    div[data-testid="stExpander"] div[role="group"] {
+    .main div[data-testid="stExpander"] div[role="group"] {
         background-color: #000000 !important;
         padding: 10px;
     }
