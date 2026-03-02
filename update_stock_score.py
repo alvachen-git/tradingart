@@ -20,14 +20,14 @@ ts.set_token(os.getenv("TUSHARE_TOKEN"))
 pro = ts.pro_api()
 
 
-def _fetch_daily_with_retry(ts_code: str, end_date: str, limit: int = 100, retries: int = 2) -> Optional[pd.DataFrame]:
+def _fetch_daily_with_retry(ts_code: str, end_date: str, limit: int = 100, retries: int = 3) -> Optional[pd.DataFrame]:
     last_err = None
     for i in range(retries + 1):
         try:
             return pro.daily(ts_code=ts_code, end_date=end_date, limit=limit)
         except Exception as e:
             last_err = e
-            time.sleep(0.2 * (i + 1))
+            time.sleep(1.0 * (i + 1))  # 1s / 2s / 3s 递增退避，应对限流
     raise last_err
 
 
@@ -65,8 +65,8 @@ def run_daily_scan():
         try:
             # 拉取日线数据 (至少需要 60-80 天才能算准 MA60)
             # Tushare 接口频次有限制，注意流控
-            df = _fetch_daily_with_retry(ts_code=ts_code, end_date=target_date, limit=100, retries=2)
-            time.sleep(0.015)
+            df = _fetch_daily_with_retry(ts_code=ts_code, end_date=target_date, limit=100, retries=3)
+            time.sleep(0.35)  # ~170次/分钟，低于 TuShare 一般限制
 
             # 数据太少无法分析
             if df.empty or len(df) < 30:
