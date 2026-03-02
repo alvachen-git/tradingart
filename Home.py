@@ -415,6 +415,18 @@ st.markdown("""
         border: 1px solid rgba(255,255,255,0.1);
         border-radius: 8px;
     }
+
+    /* 🔥 隐藏 Streamlit 默认的页面导航（使用自定义分组导航） */
+    [data-testid="stSidebarNav"] {
+        display: none !important;
+    }
+
+    /* 自定义导航标题样式 */
+    .st-sidebar h3 {
+        color: #e2e8f0 !important;
+        font-size: 1.1rem !important;
+        margin-bottom: 0.5rem !important;
+    }
 </style>
 """, unsafe_allow_html=True)
 inject_sidebar_toggle_style(mode="high_contrast")
@@ -1650,6 +1662,10 @@ def show_welcome_screen():
 
 # A. 侧边栏：登录/设置 (折叠起来保持清爽)
 with st.sidebar:
+    # 🔥 [新增] 统一的分组导航菜单
+    from sidebar_navigation import show_navigation
+    show_navigation()
+
     if not st.session_state['is_logged_in']:
         # --- A. 未登录状态 ---
         tab1, tab2, tab3 = st.tabs(["🔐 登录", "📝 注册", "🔑 找回"])
