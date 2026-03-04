@@ -27,6 +27,12 @@ import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from sidebar_navigation import show_navigation
+
+# ==========================================
+# 🔧 自助订阅频道配置（点击即可自助开通，无需联系客服）
+# 如需新增自助订阅频道，直接往这个列表里加频道名称即可
+# ==========================================
+FREE_SELF_SUBSCRIBE_CHANNELS = ["复盘晚报", "末日期权晚报"]
 with st.sidebar:
     show_navigation()
 
@@ -721,7 +727,7 @@ with st.sidebar:
                     # 🔥🔥🔥 【核心修改逻辑开始】 🔥🔥🔥
 
                     # 场景 1: 针对 "复盘晚报" (或你可以添加其他允许自助订阅的频道)
-                    if channel['name'] == '复盘晚报':
+                    if channel['name'] in FREE_SELF_SUBSCRIBE_CHANNELS:
                         if is_subscribed:
                             # 已有权限 -> 显示“退订” (Secondary 灰色按钮)
                             if st.button("退订", key=f"unsub_{channel['id']}", type="secondary",
@@ -977,7 +983,7 @@ else:
                 current_content_channel = content.get('channel_name')
 
                 # 2. 判断是否为免费频道 (复盘晚报)
-                is_free_channel = current_content_channel == '复盘晚报'
+                is_free_channel = current_content_channel in FREE_SELF_SUBSCRIBE_CHANNELS
 
                 if is_free_channel:
                     # 场景 1: 免费/自助频道 -> 显示绿色/亮色按钮直接开通

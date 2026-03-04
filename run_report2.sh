@@ -63,8 +63,9 @@ if [ "$LATEST_DB_DATE" != "$TODAY" ]; then
 fi
 
 # 4. 顺序执行（任一步失败即中断）
-run_job "1/2" "fund_flow_report_generator.py"
-run_job "2/2" "broker_position_generator.py"
+run_job "1/3" "fund_flow_report_generator.py"
+run_job "2/3" "broker_position_generator.py"
+run_job "3/3" "expiry_option_generator.py"
 
 # 5. 结束
 log_line "✅ 任务结束: $(date)"
