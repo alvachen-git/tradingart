@@ -13,6 +13,7 @@ import auth_utils as auth
 import extra_streamlit_components as stx
 from html import escape
 from textwrap import dedent
+from ui_components import inject_sidebar_toggle_style
 
 # 1. 环境初始化
 load_dotenv(override=True)
@@ -206,6 +207,9 @@ st.markdown("""
     }
 </style>
 """, unsafe_allow_html=True)
+
+# 统一侧边栏折叠/展开箭头样式（与 Home 页一致）
+inject_sidebar_toggle_style(mode="high_contrast")
 
 # 3. 引入依赖
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))

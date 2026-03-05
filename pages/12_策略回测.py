@@ -3,6 +3,7 @@ import plotly.graph_objects as go
 import pandas as pd
 from datetime import datetime, timedelta
 from sqlalchemy import text
+from ui_components import inject_sidebar_toggle_style
 
 from backtest_engine import engine, run_etf_roll_backtest, get_etf_underlyings, get_etf_expiries, get_etf_strikes_for_expiry, get_etf_first_trade_date, get_etf_strikes_for_range
 
@@ -18,7 +19,7 @@ from sidebar_navigation import show_navigation
 with st.sidebar:
     show_navigation()
 
-st.title("策略回测（MVP）")
+st.title("策略回测")
 st.caption("日线回测：ETF 近月滚动。双卖/深虚值看跌策略（固定合约布局，滚动换月）。")
 
 st.markdown(
@@ -175,6 +176,9 @@ st.markdown(
 """,
     unsafe_allow_html=True,
 )
+
+# 统一侧边栏折叠/展开箭头样式（与 Home 页一致）
+inject_sidebar_toggle_style(mode="high_contrast")
 
 
 def _latest_trade_date(table: str) -> str:

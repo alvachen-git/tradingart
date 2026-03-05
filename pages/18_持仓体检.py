@@ -14,6 +14,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import data_engine as de
 import auth_utils as auth
 from task_manager import TaskManager
+from ui_components import inject_sidebar_toggle_style
 
 
 st.set_page_config(
@@ -160,6 +161,9 @@ st.markdown(
 """,
     unsafe_allow_html=True,
 )
+
+# 统一侧边栏折叠/展开箭头样式（与 Home 页一致）
+inject_sidebar_toggle_style(mode="high_contrast")
 
 if "portfolio_cookie_retry_once" not in st.session_state:
     st.session_state.portfolio_cookie_retry_once = False
