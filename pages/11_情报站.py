@@ -1,7 +1,9 @@
 import re
 import time
 import streamlit as st
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+
+BEIJING_TZ = timezone(timedelta(hours=8))
 import subscription_service as sub_svc
 import auth_utils as auth
 import extra_streamlit_components as stx
@@ -631,10 +633,13 @@ def get_current_user():
 
 
 def format_time(dt: datetime) -> str:
-    """格式化时间显示"""
+    """格式化时间显示（北京时间）"""
     if not dt:
         return ""
-    now = datetime.now()
+    now = datetime.now(BEIJING_TZ)
+    # 数据库存储UTC（MySQL NOW()），转换为北京时间再计算差值
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc).astimezone(BEIJING_TZ)
     delta = now - dt
 
     if delta.days == 0:
@@ -893,13 +898,19 @@ if not contents:
     </div>
     """, unsafe_allow_html=True)
 else:
-    today = datetime.now().date()
+    today = datetime.now(BEIJING_TZ).date()
     yesterday = today - timedelta(days=1)
     current_date = None
 
     for content in contents:
-        # 日期分隔
-        content_date = content['publish_time'].date() if content['publish_time'] else None
+        # 日期分隔（publish_time 是 UTC，转北京时间取日期）
+        pt = content['publish_time']
+        if pt:
+            if pt.tzinfo is None:
+                pt = pt.replace(tzinfo=timezone.utc).astimezone(BEIJING_TZ)
+            content_date = pt.date()
+        else:
+            content_date = None
         if content_date != current_date:
             current_date = content_date
             if content_date == today:

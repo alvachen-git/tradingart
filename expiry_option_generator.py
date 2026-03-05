@@ -102,8 +102,34 @@ COMMODITY_NAME_MAP = {
     "PK": "花生",
     "CJ": "红枣",
     "AP": "苹果",
+    "SI": "工业硅",
+    "PS": "多晶硅",
+    "LC": "碳酸锂",
+    "FG": "玻璃",
+    "UR": "尿素",
+    "ZC": "动力煤",
+    "PF": "短纤",
+    "PL": "丙烯",
+    "SN": "锡",
+    "RU": "橡胶",
+    "BR": "BR橡胶",
+    "JD": "鸡蛋",
+    "AO": "氧化铝",
+    "BZ": "纯苯",
+    "LG": "原木",
+    # 股指期权（中金所，存于 commodity_option_basic）
+    "IO": "沪深300股指",
+    "HO": "上证50股指",
+    "MO": "中证1000股指",
 }
 
+
+# 股指期权 → 对应期货代码（用于查现价和K线分析）
+INDEX_OPT_FUTURES_MAP = {
+    "IO": "IF",   # 沪深300股指期权 → 沪深300期货
+    "HO": "IH",   # 上证50股指期权  → 上证50期货
+    "MO": "IM",   # 中证1000股指期权 → 中证1000期货
+}
 
 # ==========================================
 # 工具函数 1：获取即将到期的期权列表
@@ -533,11 +559,16 @@ def get_expiring_underlying_list(days_ahead: int = 7) -> list[dict]:
         """
         df = pd.read_sql(sql, engine)
         for _, row in df.iterrows():
-            mat = datetime.strptime(str(row["maturity_date"]), "%Y%m%d").date()
+            mat_str = str(row["maturity_date"]).replace("-", "").replace(" ", "").split(".")[0][:8]
+            try:
+                mat = datetime.strptime(mat_str, "%Y%m%d").date()
+            except Exception:
+                continue
             items.append({
                 "underlying": str(row["underlying"]),
                 "option_type": "ETF期权",
-                "maturity_date": str(row["maturity_date"]),
+                "maturity_date": mat_str,
+                "contract_month": "",  # ETF无期货合约月份概念
                 "days_left": (mat - today).days,
                 "name": ETF_NAME_MAP.get(str(row["underlying"]), str(row["underlying"]))
             })
@@ -547,8 +578,9 @@ def get_expiring_underlying_list(days_ahead: int = 7) -> list[dict]:
     # 商品期权
     try:
         sql = f"""
-            SELECT DISTINCT 
+            SELECT DISTINCT
                 REGEXP_REPLACE(ts_code, '[0-9].*', '') AS product_code,
+                REGEXP_SUBSTR(ts_code, '[0-9]+') AS contract_month,
                 maturity_date
             FROM commodity_option_basic
             WHERE maturity_date >= '{today_str}' AND maturity_date <= '{cutoff_str}'
@@ -557,15 +589,22 @@ def get_expiring_underlying_list(days_ahead: int = 7) -> list[dict]:
         df = pd.read_sql(sql, engine)
         for _, row in df.iterrows():
             product = str(row["product_code"]).upper().strip()
-            mat_str = str(row["maturity_date"])
+            contract_month = str(row["contract_month"]).strip() if row["contract_month"] else ""
+            # ZCE期权用3位合约代码（如"604"），futures_price存4位（"2604"），统一补"2"
+            if len(contract_month) == 3:
+                contract_month = "2" + contract_month
+            # 规范化日期：兼容 "20250424"、"2025-04-24"、"2025-04-24 00:00:00" 等格式
+            mat_str = str(row["maturity_date"]).replace("-", "").replace(" ", "").split(".")[0][:8]
             try:
                 mat = datetime.strptime(mat_str, "%Y%m%d").date()
             except Exception:
+                print(f"  ⚠️ 无法解析到期日: {row['maturity_date']} → {mat_str}，跳过")
                 continue
             items.append({
                 "underlying": product,
                 "option_type": "商品期权",
                 "maturity_date": mat_str,
+                "contract_month": contract_month,  # 从ts_code提取的期货合约月份（如2504）
                 "days_left": (mat - today).days,
                 "name": COMMODITY_NAME_MAP.get(product, product)
             })
@@ -589,15 +628,20 @@ def get_expiring_underlying_list(days_ahead: int = 7) -> list[dict]:
 # 核心逻辑 3：获取标的现价（不通过tool，直接查库）
 # ==========================================
 
-def get_price_direct(underlying: str, option_type: str) -> float | None:
+def get_price_direct(underlying: str, option_type: str, contract_month: str = "") -> float | None:
     """
     直接从DB查标的现价，返回float或None。
-    【重要】SQL中不使用 LIKE '%xxx%' 语法，避免pymysql将%误作Python格式符报错。
-    改用REGEXP或精确匹配，TAS过滤在Python层完成。
+
+    contract_month: 从期权ts_code提取的标的期货合约月份（如 "2504"）。
+      - 商品/股指期权：优先查该月份合约，避免主力换月后价格错位。
+        注意：商品期权比期货提前结算，期权到期日是3月但标的是4月期货，
+        因此合约月份必须从期权ts_code取，而非从期权到期日推算。
+      - ETF期权：contract_month为空，直接查最新价。
+
+    【重要】SQL中不使用 LIKE '%xxx%'，改用REGEXP，TAS过滤在Python层完成。
     """
     try:
         if option_type == "ETF期权":
-            # 用REGEXP匹配前缀，不用LIKE，避免%符号问题
             sql = f"""
                 SELECT close_price, trade_date FROM stock_price
                 WHERE ts_code REGEXP '^{underlying}'
@@ -607,20 +651,47 @@ def get_price_direct(underlying: str, option_type: str) -> float | None:
             if not df.empty:
                 return float(df.iloc[0]["close_price"])
         else:
-            # 用REGEXP匹配，完全不使用LIKE，TAS过滤放到Python层
+            # 股指期权用对应期货查价（IO→IF, HO→IH, MO→IM）
+            query_symbol = INDEX_OPT_FUTURES_MAP.get(underlying.upper(), underlying.upper())
+
+            # ZCE期权ts_code用3位月份（如"604"），统一转4位（"2604"）
+            if len(contract_month) == 3:
+                contract_month = "2" + contract_month
+
+            # 优先：查对应月份期货（直接用从ts_code提取的合约月份）
+            if contract_month:
+                sql = f"""
+                    SELECT ts_code, close_price, trade_date, oi
+                    FROM futures_price
+                    WHERE UPPER(ts_code) REGEXP '^{query_symbol}{contract_month}'
+                    ORDER BY trade_date DESC
+                    LIMIT 5
+                """
+                df = pd.read_sql(sql, engine)
+                if not df.empty:
+                    df = df[~df["ts_code"].str.upper().str.contains("TAS")]
+                    if not df.empty:
+                        ts = df.iloc[0]["ts_code"]
+                        price = float(df.iloc[0]["close_price"])
+                        print(f"  ✅ 对应月份合约 {ts} 现价: {price}")
+                        return price
+
+            # 降级：主力合约（最高OI）
             sql = f"""
                 SELECT ts_code, close_price, trade_date, oi
                 FROM futures_price
-                WHERE UPPER(ts_code) REGEXP '^{underlying.upper()}[0-9]'
+                WHERE UPPER(ts_code) REGEXP '^{query_symbol}[0-9]'
                 ORDER BY trade_date DESC, oi DESC
                 LIMIT 10
             """
             df = pd.read_sql(sql, engine)
             if not df.empty:
-                # Python层过滤TAS合约，完全规避%格式符问题
                 df = df[~df["ts_code"].str.upper().str.contains("TAS")]
                 if not df.empty:
-                    return float(df.iloc[0]["close_price"])
+                    ts = df.iloc[0]["ts_code"]
+                    price = float(df.iloc[0]["close_price"])
+                    print(f"  ⚠️  未找到{contract_month}合约，降级使用主力 {ts} 现价: {price}")
+                    return price
     except Exception as e:
         print(f"查询 {underlying} 现价失败: {e}")
     return None
@@ -667,8 +738,16 @@ def collect_and_analyze():
         }
 
         # Step 1: K线分析
+        opt_contract_month = item.get("contract_month", "")  # 从ts_code提取的期货合约月份
         try:
-            kline_query = name if option_type == "商品期权" else name
+            # ETF：用中文名（无换月问题）
+            # 商品/股指：用具体合约代码（如 PL2504、IF2504），直接从ts_code取月份
+            if option_type == "ETF期权":
+                kline_query = name
+            else:
+                fut_symbol = INDEX_OPT_FUTURES_MAP.get(underlying.upper(), underlying.upper())
+                kline_query = f"{fut_symbol}{opt_contract_month}" if opt_contract_month else fut_symbol
+            print(f"  📊 K线查询: {kline_query}（合约月份来自ts_code: {opt_contract_month}）")
             kline_result = analyze_kline_pattern.invoke({"query": kline_query})
             section["kline_text"] = kline_result
             print(f"  ✅ K线分析完成")
@@ -682,8 +761,8 @@ def collect_and_analyze():
         section["strategy_reason"] = reason
         print(f"  💡 策略判断: {strategy} | {reason}")
 
-        # Step 3: 获取现价
-        price = get_price_direct(underlying, option_type)
+        # Step 3: 获取现价（用从ts_code提取的合约月份，而非期权到期日）
+        price = get_price_direct(underlying, option_type, opt_contract_month)
         section["current_price"] = price
         if price:
             print(f"  💰 标的现价: {price}")
@@ -748,7 +827,7 @@ def build_prompt(sections: list[dict]) -> str:
   body {{ margin:0; padding:0; background:#0f172a; font-family:'PingFang SC','Microsoft YaHei',sans-serif; color:#e2e8f0; }}
   .wrap {{ max-width:700px; margin:0 auto; padding:28px 20px; }}
   .header {{ text-align:center; padding:28px 20px; border-radius:16px; background:rgba(15,23,42,0.95); border:1px solid rgba(255,255,255,0.08); margin-bottom:24px; }}
-  .section-title {{ color:#fbbf24; font-size:17px; margin:0 0 12px 0; font-weight:600; display:flex; align-items:center; gap:8px; }}
+  .section-title {{ color:#fbbf24; font-size:17px; margin:0 0 12px 0; font-weight:600; display:flex; align-items:center; gap:8px; flex-wrap:wrap; }}
   .section-bar {{ width:3px; height:18px; background:#fbbf24; border-radius:2px; flex-shrink:0; }}
   .card {{ background:rgba(30,41,59,0.7); padding:18px; border-radius:14px; border:1px solid rgba(255,255,255,0.07); margin-bottom:16px; }}
   .tag {{ display:inline-block; padding:3px 12px; border-radius:10px; font-size:12px; font-weight:600; color:#fff; margin-left:8px; }}
@@ -760,8 +839,10 @@ def build_prompt(sections: list[dict]) -> str:
   .label {{ color:#94a3b8; font-size:12px; min-width:70px; display:inline-block; }}
   .value {{ color:#e2e8f0; font-size:13px; }}
   .contract-box {{ background:rgba(15,23,42,0.6); border-radius:10px; padding:12px 14px; margin-top:10px; border:1px solid rgba(251,191,36,0.15); }}
-  .contract-row {{ display:flex; justify-content:space-between; align-items:center; padding:4px 0; border-bottom:1px solid rgba(255,255,255,0.04); }}
+  .contract-row {{ padding:8px 0; border-bottom:1px solid rgba(255,255,255,0.04); }}
   .contract-row:last-child {{ border-bottom:none; }}
+  .contract-name {{ color:#e2e8f0; font-size:13px; word-break:break-all; margin-bottom:4px; }}
+  .contract-meta {{ display:flex; justify-content:space-between; align-items:center; }}
   .risk-box {{ background:rgba(239,68,68,0.08); border:1px solid rgba(239,68,68,0.25); border-radius:14px; padding:18px; margin-top:8px; }}
   .divider {{ border:none; border-top:1px solid rgba(255,255,255,0.06); margin:20px 0; }}
   .days-badge {{ background:rgba(251,191,36,0.15); color:#fbbf24; border:1px solid rgba(251,191,36,0.3); border-radius:8px; padding:2px 10px; font-size:12px; font-weight:600; }}
@@ -809,9 +890,11 @@ def build_prompt(sections: list[dict]) -> str:
       <div class="contract-box">
         <div style="color:#94a3b8; font-size:11px; margin-bottom:8px;">📌 推荐合约</div>
         <div class="contract-row">
-          <span style="color:#e2e8f0; font-size:13px;">M2506C3250（认购）</span>
-          <span style="color:#fbbf24; font-size:13px;">权利金 ≈ 42元</span>
-          <span style="color:#64748b; font-size:12px;">持仓 1,200手</span>
+          <div class="contract-name">M2506C3250（认购）</div>
+          <div class="contract-meta">
+            <span style="color:#fbbf24; font-size:13px;">权利金 ≈ 42元</span>
+            <span style="color:#64748b; font-size:12px;">持仓 1,200手</span>
+          </div>
         </div>
       </div>
     </div>
