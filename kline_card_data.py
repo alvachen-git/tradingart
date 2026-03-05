@@ -121,6 +121,14 @@ def _fallback_get_random_kline_data(bars=100, history_bars=20, _attempt=1, _max_
             )
             if df.empty or len(df) < total_bars:
                 return None, None, None, None
+
+            avg_vol = float(df["vol"].fillna(0).mean()) if "vol" in df.columns else 0.0
+            if avg_vol < 1000:
+                print(f"[FALLBACK] ❌ 成交量不足: avg(vol)={avg_vol:.2f} < 1000, 标的 {symbol}")
+                if _attempt < _max_attempts:
+                    return _fallback_get_random_kline_data(bars, history_bars, _attempt + 1, _max_attempts)
+                return None, None, None, None
+
             try:
                 df["trade_date"] = pd.to_datetime(df["trade_date"])
                 df.set_index("trade_date", inplace=True)

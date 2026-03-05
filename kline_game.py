@@ -918,8 +918,8 @@ def get_random_kline_data(bars=100, history_bars=60, _attempt=1, _max_attempts=1
                 return None, None, None, None
 
             avg_vol = float(df["vol"].fillna(0).mean()) if "vol" in df.columns else 0.0
-            if avg_vol < 500:
-                print(f"[GET_KLINE] ❌ 成交量不足: avg(vol)={avg_vol:.2f} < 500, 标的 {symbol}")
+            if avg_vol < 1000:
+                print(f"[GET_KLINE] ❌ 成交量不足: avg(vol)={avg_vol:.2f} < 1000, 标的 {symbol}")
                 if _attempt < _max_attempts:
                     return get_random_kline_data(bars, history_bars, _attempt + 1, _max_attempts)
                 print(f"[GET_KLINE] ❌ 已达到最大重试次数({_max_attempts})，放弃本次抽样")
