@@ -447,6 +447,56 @@ def analyze_kline_pattern(query: str, trade_date: str = None):
                         patterns.append(msg)
                         break
 
+        # ========== 破底翻检测 ==========
+        # 定义：前期摆动低点（swing low）被收盘跌破，后续K线收盘站回 = 止跌反弹确认
+        # 前置条件：必须处于空头趋势（MA5 < MA20），多头趋势中的破底不算破底翻
+        # 支撑必须是摆动低点（局部最低点，左右各2根K线的low都比它高），
+        # 代表价格曾在此获得支撑并反弹，不是滚动最低价。
+        # 注意：单根K线盘中刺破不算，须有收盘价在支撑下方才构成有效破底。
+        _pbt_found = False
+
+        # 前置条件：空头趋势（MA5 < MA20）
+        _is_bearish_trend = (not pd.isna(curr['MA5']) and not pd.isna(curr['MA20'])
+                             and curr['MA5'] < curr['MA20'])
+
+        # 在最近30根K线（不含今日和昨日）中寻找摆动低点
+        # 排除近2根是为了确保支撑是在本次破底行情之前已经形成的价格底部
+        if len(df) >= 10 and _is_bearish_trend:
+            _side = 2  # 左右各2根确认为局部低点
+            _win = df.iloc[max(-32, -len(df)):-2]['low_price'].values
+
+            _swing_lows = []
+            for _i in range(_side, len(_win) - _side):
+                _v = _win[_i]
+                if (all(_win[_i - j] > _v for j in range(1, _side + 1)) and
+                        all(_win[_i + j] > _v for j in range(1, _side + 1))):
+                    _swing_lows.append(_v)
+
+            if _swing_lows:
+                _sup = _swing_lows[-1]  # 最近的摆动低点 = 当前有效支撑
+
+                # 【两根破底翻】昨日收盘跌破摆动支撑，今日收盘站回 → 强信号
+                if (prev_close < _sup
+                        and (_sup - prev_close) / _sup > 0.001  # 有效跌破（至少0.1%）
+                        and close > _sup):
+                    patterns.append(
+                        f"【破底翻·两根确认】"
+                        f"(昨收{prev_close:.2f}跌破摆动支撑{_sup:.2f}，"
+                        f"今收{close:.2f}站回，止跌反弹信号！)"
+                    )
+                    _pbt_found = True
+
+                # 【三根破底翻】连续2日收盘在摆动支撑下方，今日收盘站回
+                elif (pprev_close < _sup
+                        and prev_close < _sup
+                        and close > _sup):
+                    patterns.append(
+                        f"【破底翻·三根确认】"
+                        f"(连续2日在摆动支撑{_sup:.2f}下蛰伏，"
+                        f"今收{close:.2f}站回，止跌信号成立)"
+                    )
+                    _pbt_found = True
+
         # --- 基础形态 ---
 
         # 3. 大阳/大阴

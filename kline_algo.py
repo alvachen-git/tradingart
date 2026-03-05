@@ -246,6 +246,31 @@ def calculate_kline_signals(df: pd.DataFrame):
                         score_change += 25
                         break
 
+    # 破底翻（前置：空头趋势 MA5 < MA20；支撑：摆动低点；确认：收盘站回）
+    _is_bearish = (not pd.isna(curr['MA5']) and not pd.isna(curr['MA20'])
+                   and curr['MA5'] < curr['MA20'])
+    if len(df) >= 10 and _is_bearish:
+        _side = 2
+        _win = df.iloc[max(-32, -len(df)):-2]['low_price'].values
+        _swing_lows = []
+        for _i in range(_side, len(_win) - _side):
+            _v = _win[_i]
+            if (all(_win[_i - j] > _v for j in range(1, _side + 1)) and
+                    all(_win[_i + j] > _v for j in range(1, _side + 1))):
+                _swing_lows.append(_v)
+        if _swing_lows:
+            _sup = _swing_lows[-1]
+            if (prev_close < _sup
+                    and (_sup - prev_close) / _sup > 0.001
+                    and close > _sup):
+                patterns.append("破底翻(两根确认)")
+                score_change += 50
+            elif (pprev_close < _sup
+                    and prev_close < _sup
+                    and close > _sup):
+                patterns.append("破底翻(三根确认)")
+                score_change += 50
+
     # 6. 大阳/大阴
     if body_pct > 0.8 and abs(chg_pct) > 0.03:
         if close > open_p:
