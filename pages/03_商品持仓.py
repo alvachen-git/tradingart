@@ -32,6 +32,47 @@ css_path = os.path.join(root_dir, 'style.css')
 with open(css_path, encoding='utf-8') as f:
     st.markdown(f'<style>{f.read()}</style>', unsafe_allow_html=True)
 
+# 商品持仓页：主内容区文字对比度修复（兼容手机深色模式）
+st.markdown("""
+<style>
+[data-testid="stAppViewContainer"] .main {
+    color: #1f2937 !important;
+}
+
+[data-testid="stAppViewContainer"] .main h1,
+[data-testid="stAppViewContainer"] .main h2,
+[data-testid="stAppViewContainer"] .main h3,
+[data-testid="stAppViewContainer"] .main h4,
+[data-testid="stAppViewContainer"] .main h5,
+[data-testid="stAppViewContainer"] .main h6,
+[data-testid="stAppViewContainer"] .main p,
+[data-testid="stAppViewContainer"] .main li,
+[data-testid="stAppViewContainer"] .main label,
+[data-testid="stAppViewContainer"] .main [data-testid="stMarkdownContainer"],
+[data-testid="stAppViewContainer"] .main [data-testid="stMetricLabel"],
+[data-testid="stAppViewContainer"] .main [data-testid="stMetricValue"],
+[data-testid="stAppViewContainer"] .main [data-testid="stMetricDelta"],
+[data-testid="stAppViewContainer"] .main [data-testid="stCaptionContainer"] {
+    color: #1f2937 !important;
+}
+
+[data-testid="stAppViewContainer"] .main [data-testid="stCaptionContainer"] {
+    opacity: 0.9;
+}
+
+[data-testid="stAppViewContainer"] .main [data-baseweb="select"] label,
+[data-testid="stAppViewContainer"] .main .stSelectbox label {
+    color: #374151 !important;
+}
+
+@media (prefers-color-scheme: dark) {
+    [data-testid="stAppViewContainer"] .main {
+        background-color: #f5f7f9 !important;
+    }
+}
+</style>
+""", unsafe_allow_html=True)
+
 # --- 3. 侧边栏逻辑 (Desktop 显示 / Mobile 收起) ---
 with st.sidebar:
 
@@ -510,6 +551,5 @@ try:
 
 except Exception as e:
     st.error(f"讀取對決數據失敗: {e}")
-
 
 
