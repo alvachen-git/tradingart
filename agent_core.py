@@ -1743,6 +1743,27 @@ def finalizer_node(state: AgentState, llm):
 
     display_name = f"{symbol_name}({symbol})" if symbol_name else symbol
 
+    def _normalize_symbol_text(text: str) -> str:
+        return re.sub(r'[^A-Z0-9]', '', (text or "").upper())
+
+    def _build_symbol_aliases(raw_symbol: str) -> set[str]:
+        aliases = set()
+        normalized = _normalize_symbol_text(raw_symbol)
+        if not normalized:
+            return aliases
+        aliases.add(normalized)
+        alpha_prefix = re.match(r'^[A-Z]+', normalized)
+        if alpha_prefix:
+            aliases.add(alpha_prefix.group(0))
+        if normalized.isdigit() and len(normalized) == 6:
+            aliases.add(f"{normalized}ETF")
+            if normalized.startswith("51"):
+                try:
+                    aliases.add(f"{int(normalized[-3:])}ETF")
+                except ValueError:
+                    pass
+        return {item for item in aliases if len(item) >= 2}
+
     # 获取当前最后一次执行的计划（用于判断是不是王牌）
     # (由于 state plan 被 pop 了，我们用简单的长度判断通常够用，或者看 context)
 
@@ -1750,6 +1771,19 @@ def finalizer_node(state: AgentState, llm):
     if is_single_source and not has_chart and not is_complex_task:
         # === 模式 A：质检员 (Audit Mode) ===
         # 目标：保留原汁原味的排版，只查错
+        symbol_aliases = _build_symbol_aliases(symbol)
+        if not symbol_aliases:
+            # symbol 兜底：尝试从单信源报告中抓标题代码
+            match = re.search(r'([A-Za-z]{1,6}\d{0,4}|\d{6}(?:ETF)?)\s*(?:技术面|技术分析|走势)', context_text, re.IGNORECASE)
+            if match:
+                symbol_aliases = _build_symbol_aliases(match.group(1))
+        source_norm = _normalize_symbol_text(context_text)
+        enforce_symbol_lock = bool(symbol_aliases) and any(alias in source_norm for alias in symbol_aliases)
+        symbol_lock_hint = (
+            f"\n        5. **标的锁定**：本报告标的是 {symbol or '/'.join(sorted(symbol_aliases))}。"
+            f" 你不能改成其他标的。若无法确认，请输出 DIRECT_PASS。"
+            if enforce_symbol_lock else ""
+        )
         audit_prompt = f"""
         你是一位交易风控官。团队提交了一份分析报告（如下）。
 
@@ -1761,6 +1795,7 @@ def finalizer_node(state: AgentState, llm):
         2. **如果报告无误**：请直接输出四个字 "DIRECT_PASS" (不要输出其他符号)。这意味着直接采用原报告，保留其完美的 Markdown 排版。
         3. **如果有致命错误**：请修改错误后，重写一份正确的报告。
         4. 如果发生数据缺失或语法错误，不要把错误写出来。
+        {symbol_lock_hint}
         """
         response = llm.invoke(audit_prompt)
 
@@ -1770,9 +1805,18 @@ def finalizer_node(state: AgentState, llm):
                 "messages": [HumanMessage(content=context_text)]
             }
         else:
+            revised_text = response.content or ""
+            if enforce_symbol_lock:
+                revised_norm = _normalize_symbol_text(revised_text)
+                keep_symbol = any(alias in revised_norm for alias in symbol_aliases)
+                if not keep_symbol:
+                    print(f"⚠️ finalizer 审校疑似串标，回退原报告。locked={symbol_aliases}")
+                    return {
+                        "messages": [HumanMessage(content=context_text)]
+                    }
             # 如果有错被重写了，就返回重写的内容
             return {
-                "messages": [HumanMessage(content=f"【风控修正】\n{response.content}")]
+                "messages": [HumanMessage(content=f"【风控修正】\n{revised_text}")]
             }
 
     else:

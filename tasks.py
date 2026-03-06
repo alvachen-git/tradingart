@@ -136,7 +136,68 @@ def _build_hit_direction_text(hit: dict) -> str:
     return " ".join(parts)
 
 
-def _filter_image_hits_for_attachments(image_hits, top_k: int, intent_labels=None):
+def _normalize_symbol_token(token: str) -> str:
+    return re.sub(r"[^A-Z0-9\u4e00-\u9fff]", "", str(token or "").upper())
+
+
+def _build_symbol_aliases(symbol_hint: str = "", symbol_name_hint: str = "", query_text: str = ""):
+    aliases = set()
+    raw_tokens = []
+
+    for src in [symbol_hint, symbol_name_hint]:
+        if src:
+            raw_tokens.extend(re.split(r"[,\s，、/]+", str(src)))
+
+    if query_text:
+        raw_tokens.extend(
+            re.findall(r"(?<![A-Za-z0-9])[A-Za-z]{1,4}\d{0,4}(?![A-Za-z0-9])", query_text)
+        )
+        raw_tokens.extend(re.findall(r"(?<!\d)\d{6}(?!\d)", query_text))
+
+    for token in raw_tokens:
+        norm = _normalize_symbol_token(token)
+        if not norm:
+            continue
+        aliases.add(norm)
+
+        alpha_prefix = re.match(r"^[A-Z]{1,6}", norm)
+        if alpha_prefix:
+            aliases.add(alpha_prefix.group(0))
+
+        if norm.isdigit() and len(norm) == 6:
+            aliases.add(f"{norm}ETF")
+            if norm.startswith(("510", "159", "588")):
+                try:
+                    aliases.add(f"{int(norm[-3:])}ETF")
+                except ValueError:
+                    pass
+        elif norm.endswith("ETF"):
+            digits_match = re.search(r"(\d{3,6})ETF$", norm)
+            if digits_match:
+                aliases.add(digits_match.group(1))
+
+    product_map = getattr(de, "PRODUCT_MAP", {}) or {}
+    for code in list(aliases):
+        if re.fullmatch(r"[A-Z]{1,4}", code):
+            name = str(product_map.get(code, "")).strip()
+            name_norm = _normalize_symbol_token(name)
+            if name_norm:
+                aliases.add(name_norm)
+
+    blacklist = {"ETF", "OPTION", "OPTIONS", "期权", "技术分析", "技术面", "行情"}
+    return {item for item in aliases if len(item) >= 2 and item not in blacklist}
+
+
+def _is_symbol_consistent(hit: dict, symbol_aliases) -> bool:
+    if not symbol_aliases:
+        return True
+    hit_text = _normalize_symbol_token(_build_hit_direction_text(hit))
+    if not hit_text:
+        return False
+    return any(alias in hit_text for alias in symbol_aliases)
+
+
+def _filter_image_hits_for_attachments(image_hits, top_k: int, intent_labels=None, symbol_aliases=None):
     scored = []
     for hit in image_hits or []:
         try:
@@ -148,6 +209,8 @@ def _filter_image_hits_for_attachments(image_hits, top_k: int, intent_labels=Non
 
         hit_labels = _detect_direction_labels(_build_hit_direction_text(hit))
         if _is_direction_conflict(intent_labels or set(), hit_labels):
+            continue
+        if symbol_aliases and not _is_symbol_consistent(hit, symbol_aliases):
             continue
         scored.append((score_val, hit))
 
@@ -234,12 +297,17 @@ def _inject_inline_attachment_tokens(response_text: str, attachments):
     return "\n\n".join(rendered_parts).strip(), attachments
 
 
-def _build_image_attachments(query: str, top_k: int = 3):
+def _build_image_attachments(query: str, top_k: int = 3, symbol_hint: str = "", symbol_name_hint: str = ""):
     attachments = []
     normalized_query = _normalize_knowledge_query(query)
     if not normalized_query:
         return attachments
     intent_labels = _detect_direction_labels(normalized_query)
+    symbol_aliases = _build_symbol_aliases(
+        symbol_hint=symbol_hint,
+        symbol_name_hint=symbol_name_hint,
+        query_text=normalized_query,
+    )
 
     try:
         data = search_knowledge_structured(
@@ -252,6 +320,7 @@ def _build_image_attachments(query: str, top_k: int = 3):
             data.get("image_hits", []),
             top_k=top_k,
             intent_labels=intent_labels,
+            symbol_aliases=symbol_aliases,
         )
         if not image_hits:
             return attachments
@@ -572,7 +641,12 @@ def process_ai_query(
 
             final_response = final_response.strip()
 
-        attachments = _build_image_attachments(prompt, top_k=3)
+        attachments = _build_image_attachments(
+            prompt,
+            top_k=3,
+            symbol_hint=str(final_state.get("symbol", "") or ""),
+            symbol_name_hint=str(final_state.get("symbol_name", "") or ""),
+        )
         final_response, attachments = _inject_inline_attachment_tokens(final_response, attachments)
 
         return {
