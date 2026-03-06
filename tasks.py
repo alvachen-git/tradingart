@@ -7,7 +7,14 @@ from dotenv import load_dotenv
 load_dotenv(override=True)
 
 # 清理代理
-for key in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"]:
+for key in [
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+]:
     if key in os.environ:
         del os.environ[key]
 
