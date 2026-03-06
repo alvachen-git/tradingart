@@ -160,10 +160,10 @@ def analyze_kline_pattern(query: str, trade_date: str = None):
 
                 # 步骤1：找出主力合约（持仓量最大的）
                 sql_main = f"""
-                        SELECT ts_code FROM futures_price 
+                        SELECT UPPER(SUBSTRING_INDEX(ts_code, '.', 1)) AS contract_code
+                        FROM futures_price 
                         WHERE UPPER(ts_code) REGEXP '{pattern}' 
                           AND ts_code NOT LIKE '%%TAS%%'
-                          AND ts_code REGEXP '[0-9]{{4}}$'
                         ORDER BY trade_date DESC, oi DESC 
                         LIMIT 1
                     """
@@ -172,13 +172,13 @@ def analyze_kline_pattern(query: str, trade_date: str = None):
                 if df_main.empty:
                     return f"未找到 {query} 的主力合约"
 
-                main_contract = df_main.iloc[0]['ts_code']
+                main_contract = str(df_main.iloc[0]['contract_code']).upper()
 
                 # 步骤2：只查主力合约的K线数据
                 sql = f"""
                         SELECT trade_date, open_price, high_price, low_price, close_price 
                         FROM futures_price
-                        WHERE ts_code = '{main_contract}'
+                        WHERE UPPER(SUBSTRING_INDEX(ts_code, '.', 1)) = '{main_contract}'
                         {date_condition}
                         ORDER BY trade_date DESC LIMIT 60
                     """

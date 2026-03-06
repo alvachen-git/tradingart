@@ -197,7 +197,13 @@ def fetch_realtime_snapshot(exchange):
 
     # 6. 字段清洗与重命名
     output = pd.DataFrame()
-    output['ts_code'] = df_merged['ts_code']
+    output['ts_code'] = (
+        df_merged['ts_code']
+        .astype(str)
+        .str.split('.')
+        .str[0]
+        .str.upper()
+    )
     output['trade_date'] = datetime.now().strftime('%Y%m%d')
 
     output['open_price'] = pd.to_numeric(df_merged['open'])
