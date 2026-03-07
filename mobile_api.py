@@ -115,6 +115,10 @@ class EmailLoginRequest(BaseModel):
     code: str
 
 
+class SendCodeRequest(BaseModel):
+    email: str
+
+
 class ChatSubmitRequest(BaseModel):
     prompt: str
     history: List[dict] = []    # [{role: "user"/"assistant", content: "..."}]
@@ -136,6 +140,22 @@ def health():
 # ════════════════════════════════════════════════════════════
 #  AUTH
 # ════════════════════════════════════════════════════════════
+
+@app.post("/api/auth/send-code", tags=["认证"])
+def send_code(body: SendCodeRequest):
+    """发送邮箱登录验证码（60 秒内限发一次）。"""
+    from email_utils import send_login_code
+    try:
+        result = send_login_code(body.email)
+        success, msg = (result[0], result[1]) if isinstance(result, tuple) else (bool(result), "验证码已发送")
+        if not success:
+            raise HTTPException(status_code=400, detail=msg)
+        return {"message": msg}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"发送失败: {e}")
+
 
 @app.post("/api/auth/login", tags=["认证"])
 def login(body: LoginRequest):

@@ -1,0 +1,74 @@
+{
+  "pages": [
+    {
+      "path": "pages/login/index",
+      "style": {
+        "navigationBarTitleText": "登录",
+        "navigationBarBackgroundColor": "#0d0d0d",
+        "navigationBarTextStyle": "white",
+        "backgroundColor": "#0d0d0d"
+      }
+    },
+    {
+      "path": "pages/index/index",
+      "style": {
+        "navigationBarTitleText": "爱波塔 AI",
+        "navigationBarBackgroundColor": "#0d0d0d",
+        "navigationBarTextStyle": "white",
+        "backgroundColor": "#0d0d0d"
+      }
+    },
+    {
+      "path": "pages/intel/index",
+      "style": {
+        "navigationBarTitleText": "情报站",
+        "navigationBarBackgroundColor": "#0d0d0d",
+        "navigationBarTextStyle": "white",
+        "backgroundColor": "#0d0d0d"
+      }
+    },
+    {
+      "path": "pages/intel/detail",
+      "style": {
+        "navigationBarTitleText": "晚报详情",
+        "navigationBarBackgroundColor": "#0d0d0d",
+        "navigationBarTextStyle": "white",
+        "backgroundColor": "#0d0d0d"
+      }
+    },
+    {
+      "path": "pages/market/index",
+      "style": {
+        "navigationBarTitleText": "行情快照",
+        "navigationBarBackgroundColor": "#0d0d0d",
+        "navigationBarTextStyle": "white",
+        "backgroundColor": "#0d0d0d"
+      }
+    },
+    {
+      "path": "pages/health/index",
+      "style": {
+        "navigationBarTitleText": "持仓体检",
+        "navigationBarBackgroundColor": "#0d0d0d",
+        "navigationBarTextStyle": "white",
+        "backgroundColor": "#0d0d0d"
+      }
+    },
+    {
+      "path": "pages/profile/index",
+      "style": {
+        "navigationBarTitleText": "我的",
+        "navigationBarBackgroundColor": "#0d0d0d",
+        "navigationBarTextStyle": "white",
+        "backgroundColor": "#0d0d0d"
+      }
+    }
+  ],
+  "globalStyle": {
+    "navigationBarBackgroundColor": "#0d0d0d",
+    "navigationBarTitleText": "爱波塔",
+    "navigationBarTextStyle": "white",
+    "backgroundColor": "#0d0d0d",
+    "backgroundTextStyle": "light"
+  }
+}
