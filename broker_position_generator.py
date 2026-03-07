@@ -763,7 +763,7 @@ def main():
     material = collect_broker_position_data()
 
     if len(material) < 100:
-        print("❌ 素材过少")
+        print(f"❌ 素材过少（{len(material)}字），内容：{repr(material[:300])}")
         return
 
     with open("broker_material_debug.txt", "w", encoding="utf-8") as f:

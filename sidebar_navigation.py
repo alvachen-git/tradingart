@@ -101,6 +101,7 @@ def show_navigation():
     # 首页
     with st.expander("首页", expanded=False):
         st.page_link("Home.py", label="AI对话")
+        st.page_link("pages/09_全球风险地图.py", label="全球风险地图")
 
     # 期权数据（去掉icon）
     with st.expander("期权数据", expanded=False):

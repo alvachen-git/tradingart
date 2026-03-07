@@ -15,6 +15,7 @@ from langgraph.graph import StateGraph, END
 
 # --- 引入你的工具库 ---
 # 请确保这些文件名和你项目里的一致
+from chart_annotation_tools import draw_pattern_annotation_chart, draw_forecast_chart
 from kline_tools import analyze_kline_pattern
 from screener_tool import search_top_stocks, get_available_patterns
 from news_tools import get_financial_news
@@ -475,7 +476,9 @@ def analyst_node(state: AgentState, llm):
         analyze_kline_pattern,  # 核心：形态与趋势
         get_market_snapshot,
         get_price_statistics,  # 辅助：历史波动数据
-        draw_chart_tool
+        draw_chart_tool,
+        draw_pattern_annotation_chart,  # 形态标注图（破底翻/吞噬/晨星等）
+        draw_forecast_chart,            # 关键价位图（支撑/压力/目标价）
     ]
 
     target_option_etfs = [
@@ -530,9 +533,14 @@ def analyst_node(state: AgentState, llm):
             【可调用工具】
             1. 技术面分析-> `analyze_kline_pattern` ，获取K线形态和趋势。
             2. 获取标的一段时间价格-> `get_price_statistics` 。
-            3. 分析的品种如果只有1个，只能调用1次`analyze_kline_pattern` 
-            4. 客户没要求画图，就不要用`draw_chart_tool`
-            5. 获取股票名字和价格用 get_market_snapshotz
+            3. 分析的品种如果只有1个，只能调用1次`analyze_kline_pattern`
+            4. 获取股票名字和价格用 `get_market_snapshot`
+
+            【画图规则（重要，必须遵守优先级）】
+            - 优先级1：用户要求画图，且 `analyze_kline_pattern` 返回了形态信号 → 必须调用 `draw_pattern_annotation_chart`，禁止用 `draw_chart_tool`
+            - 优先级2：用户明确给出支撑/压力/目标价，或你做完分析后算出了关键价位 → 调用 `draw_forecast_chart`
+            - 优先级3：用户只要求看K线走势图、没有形态信号、也没有价位数据 → 才用 `draw_chart_tool`
+            - 用户没有要求画图时，三个画图工具都不调用
 
             【任务】：
             1. 描述K线和技术面情况
