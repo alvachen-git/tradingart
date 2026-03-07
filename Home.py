@@ -1882,9 +1882,9 @@ with st.sidebar:
 
         # 🔥 登出回调函数
         def do_logout():
-            # 1. 使数据库中的 token 失效（关键！）
+            # 1. 使数据库中的 token 失效（只删当前设备，不影响其他设备）
             if user != "访客":
-                auth.logout_user(user)
+                auth.logout_user(user, st.session_state.get("token"))
                 try:
                     tm = TaskManager()
                     tm.clear_user_pending_task(user)

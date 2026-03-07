@@ -43,6 +43,32 @@ def generate_token():
 
 
 # ============================================
+# 多设备会话表（自动初始化）
+# ============================================
+
+def ensure_sessions_table():
+    """确保 user_sessions 表存在，支持同账号多设备并行登录"""
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS user_sessions (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    username VARCHAR(100) NOT NULL,
+                    session_token VARCHAR(100) NOT NULL,
+                    token_expire DATETIME NOT NULL,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE KEY uq_token (session_token),
+                    INDEX idx_username (username)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            """))
+    except Exception as e:
+        print(f"创建 user_sessions 表失败: {e}")
+
+
+ensure_sessions_table()
+
+
+# ============================================
 # 🔥 新用户注册（强制邮箱验证）
 # ============================================
 
@@ -166,26 +192,26 @@ def login_user(account: str, password: str):
             if not verify_password(password, stored_hash):
                 return False, "密码错误", None, None
 
-            # 生成Token
+            # 生成Token（每台设备独立，不覆盖其他设备）
             token = generate_token()
             expire_time = datetime.now() + timedelta(days=30)
+            now = datetime.now()
 
-            # 更新Token
-            update_sql = text("""
-                              UPDATE users
-                              SET session_token = :t,
-                                  token_expire  = :e,
-                                  last_login    = :now
-                              WHERE username = :u
-                              """)
-            conn.execute(update_sql, {
-                "t": token,
-                "e": expire_time,
-                "now": datetime.now(),
-                "u": username
-            })
+            # 插入新会话（支持多设备并行）
+            conn.execute(text("""
+                INSERT INTO user_sessions (username, session_token, token_expire, created_at)
+                VALUES (:u, :t, :e, :now)
+            """), {"u": username, "t": token, "e": expire_time, "now": now})
 
-            # 🔥 返回真正的 username
+            # 仅更新最后登录时间，不触碰 session_token
+            conn.execute(text("UPDATE users SET last_login = :now WHERE username = :u"),
+                         {"now": now, "u": username})
+
+            # 清理该用户已过期的旧会话
+            conn.execute(text("""
+                DELETE FROM user_sessions WHERE username = :u AND token_expire <= :now
+            """), {"u": username, "now": now})
+
             return True, "登录成功", token, username
 
     except Exception as e:
@@ -222,25 +248,23 @@ def login_with_email_code(email: str, email_code: str):
             if not is_active:
                 return False, "账号已被禁用", None, None
 
-            # 生成Token
+            # 生成Token（每台设备独立，不覆盖其他设备）
             token = generate_token()
             expire_time = datetime.now() + timedelta(days=30)
+            now = datetime.now()
 
-            update_sql = text("""
-                              UPDATE users
-                              SET session_token = :t,
-                                  token_expire  = :e,
-                                  last_login    = :now
-                              WHERE username = :u
-                              """)
-            conn.execute(update_sql, {
-                "t": token,
-                "e": expire_time,
-                "now": datetime.now(),
-                "u": username
-            })
+            conn.execute(text("""
+                INSERT INTO user_sessions (username, session_token, token_expire, created_at)
+                VALUES (:u, :t, :e, :now)
+            """), {"u": username, "t": token, "e": expire_time, "now": now})
 
-            # 🔥 返回真正的 username
+            conn.execute(text("UPDATE users SET last_login = :now WHERE username = :u"),
+                         {"now": now, "u": username})
+
+            conn.execute(text("""
+                DELETE FROM user_sessions WHERE username = :u AND token_expire <= :now
+            """), {"u": username, "now": now})
+
             return True, "登录成功", token, username
 
     except Exception as e:
@@ -269,14 +293,15 @@ def change_password_with_old(username: str, old_password: str, new_password: str
                 return False, "旧密码错误"
 
             new_hash = hash_password(new_password)
-            update_sql = text("""
-                              UPDATE users
-                              SET password_hash = :h,
-                                  session_token = NULL,
-                                  token_expire  = NULL
-                              WHERE username = :u
-                              """)
-            conn.execute(update_sql, {"h": new_hash, "u": username})
+            conn.execute(
+                text("UPDATE users SET password_hash = :h WHERE username = :u"),
+                {"h": new_hash, "u": username}
+            )
+            # 修改密码后踢出所有设备
+            conn.execute(
+                text("DELETE FROM user_sessions WHERE username = :u"),
+                {"u": username}
+            )
 
             return True, "密码修改成功，请重新登录"
 
@@ -306,14 +331,15 @@ def reset_password_with_email(email: str, email_code: str, new_password: str):
                 return False, "该邮箱未注册"
 
             new_hash = hash_password(new_password)
-            update_sql = text("""
-                              UPDATE users
-                              SET password_hash = :h,
-                                  session_token = NULL,
-                                  token_expire  = NULL
-                              WHERE email = :e
-                              """)
-            conn.execute(update_sql, {"h": new_hash, "e": email})
+            conn.execute(
+                text("UPDATE users SET password_hash = :h WHERE email = :e"),
+                {"h": new_hash, "e": email}
+            )
+            # 重置密码后踢出所有设备
+            conn.execute(
+                text("DELETE FROM user_sessions WHERE username = :u"),
+                {"u": check[0]}
+            )
 
             return True, "密码重置成功，请使用新密码登录"
 
@@ -371,19 +397,24 @@ def bind_email(username: str, email: str, email_code: str):
 # Token 验证
 # ============================================
 
-def logout_user(username: str):
+def logout_user(username: str, token: str = None):
     """
-    登出用户（使数据库中的token失效）
+    登出用户。
+    - 传入 token：只删除当前设备的会话，其他设备不受影响
+    - 不传 token：删除该用户所有会话（踢出所有设备）
     """
     try:
         with engine.begin() as conn:
-            sql = text("""
-                       UPDATE users
-                       SET session_token = NULL,
-                           token_expire  = NULL
-                       WHERE username = :u
-                       """)
-            conn.execute(sql, {"u": username})
+            if token:
+                conn.execute(
+                    text("DELETE FROM user_sessions WHERE username = :u AND session_token = :t"),
+                    {"u": username, "t": token}
+                )
+            else:
+                conn.execute(
+                    text("DELETE FROM user_sessions WHERE username = :u"),
+                    {"u": username}
+                )
             return True
     except Exception as e:
         print(f"登出失败: {e}")
@@ -391,18 +422,18 @@ def logout_user(username: str):
 
 
 def check_token(username, token):
-    """验证Token有效性"""
+    """验证Token有效性（查 user_sessions，支持多设备）"""
     if not username or not token:
         return False
 
     try:
         with engine.connect() as conn:
             sql = text("""
-                       SELECT token_expire, is_active
-                       FROM users
-                       WHERE username = :u
-                         AND session_token = :t
-                       """)
+                SELECT s.token_expire, u.is_active
+                FROM user_sessions s
+                JOIN users u ON u.username = s.username
+                WHERE s.username = :u AND s.session_token = :t
+            """)
             result = conn.execute(sql, {"u": username, "t": token}).fetchone()
 
             if not result:
@@ -416,14 +447,12 @@ def check_token(username, token):
             if expire_time and expire_time > datetime.now():
                 return True
             else:
+                # 清理当前过期 token
                 with engine.begin() as clean_conn:
-                    clean_sql = text("""
-                                     UPDATE users
-                                     SET session_token = NULL,
-                                         token_expire  = NULL
-                                     WHERE username = :u
-                                     """)
-                    clean_conn.execute(clean_sql, {"u": username})
+                    clean_conn.execute(
+                        text("DELETE FROM user_sessions WHERE session_token = :t"),
+                        {"t": token}
+                    )
                 return False
 
     except Exception as e:
