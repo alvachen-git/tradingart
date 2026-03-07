@@ -1743,6 +1743,7 @@ def finalizer_node(state: AgentState, llm):
     portfolio_corr_value = state.get("portfolio_top_corr_value", "")
     portfolio_risks = state.get("portfolio_risks", "")
 
+    risk_pref = state.get("risk_preference", "稳健型")
     is_single_source = len(worker_msgs) <= 1
     has_chart = "chart_" in context_text or "![" in context_text
     user_query = state.get("user_query", "")
@@ -1902,6 +1903,7 @@ def finalizer_node(state: AgentState, llm):
                 【当前日期】：{today_str}
                 【用户问题】：{user_query}
                 【分析标的】: {display_name}
+                【客户风险偏好】：{risk_pref}（请在【交易策略部署】和操作建议中，根据此风险偏好调整建议的激进程度）
 
                 【团队报告池，必须优先采用！】：
                 {context_text}
