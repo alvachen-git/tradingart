@@ -11,7 +11,7 @@ celery_app = Celery(
     'trading_ai_tasks',
     broker=REDIS_URL,
     backend=REDIS_URL,
-    include=['tasks', 'intel_tasks', 'global_risk_tasks']
+    include=['tasks']
 )
 
 celery_app.conf.update(
