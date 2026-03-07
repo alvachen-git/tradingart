@@ -763,15 +763,17 @@ else:
 
             st.markdown("---")
 
-            st.markdown(
-                f"""
-                <div style="background-color: #161b22; border-left: 3px solid #10b981; padding: 10px; border-radius: 4px;">
-                    <span style="color: #10b981; font-weight: bold;">🤖 AI 回答:</span>
-                    <div style="margin-top: 5px; color: #cbd5e1; font-size: 14px; line-height: 1.6;">
-                        {a_full if a_full else "(未解析到回答内容)"}
-                    </div>
-                </div>
-                """,
-                unsafe_allow_html=True
-            )
+            st.markdown("🤖 **AI 回答:**")
+            if a_full:
+                import re as _re
+                # 提取【回答片段】后面的内容，去掉内存标记噪声
+                if "【回答片段】" in a_full:
+                    a_full = a_full.split("【回答片段】", 1)[1].strip()
+                elif "【结构化摘要】" in a_full:
+                    a_full = a_full.split("【结构化摘要】", 1)[-1].strip()
+                # 清除可能残留的 HTML 标签，避免 </div> 等裸露显示
+                clean_answer = _re.sub(r'<[^>]+>', '', a_full).strip()
+                st.markdown(clean_answer)
+            else:
+                st.caption("(未解析到回答内容)")
             native_share_button(q_full, a_full, key=f"share_mem_{index}")

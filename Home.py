@@ -1198,7 +1198,7 @@ def _build_recent_context_text(recent_turns, max_chars: int = 1200) -> str:
     return "\n".join(lines)[:max_chars]
 
 
-def _build_memory_record(ai_response: str, max_chars: int = 900) -> str:
+def _build_memory_record(ai_response: str, max_chars: int = 4000) -> str:
     """将回答压缩成结构化摘要+片段，提升后续召回稳定性"""
     if not ai_response:
         return ""
