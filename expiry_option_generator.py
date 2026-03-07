@@ -165,7 +165,7 @@ def tool_get_expiring_options(days_ahead: int = 7) -> str:
             LEFT JOIN option_daily d 
                 ON b.ts_code = d.ts_code 
                 AND d.trade_date = (SELECT MAX(trade_date) FROM option_daily WHERE ts_code = b.ts_code)
-            WHERE b.delist_date >= '{today_str}'
+            WHERE b.delist_date > '{today_str}'
               AND b.delist_date <= '{cutoff_str}'
             ORDER BY b.underlying, b.delist_date, b.call_put, b.exercise_price
         """
@@ -191,7 +191,7 @@ def tool_get_expiring_options(days_ahead: int = 7) -> str:
             LEFT JOIN commodity_opt_daily d
                 ON b.ts_code = d.ts_code
                 AND d.trade_date = (SELECT MAX(trade_date) FROM commodity_opt_daily WHERE ts_code = b.ts_code)
-            WHERE b.maturity_date >= '{today_str}'
+            WHERE b.maturity_date > '{today_str}'
               AND b.maturity_date <= '{cutoff_str}'
             ORDER BY b.ts_code, b.call_put, b.exercise_price
         """
@@ -215,7 +215,7 @@ def tool_get_expiring_options(days_ahead: int = 7) -> str:
     df_all = pd.concat(results, ignore_index=True)
     df_all["maturity_date"] = pd.to_datetime(df_all["maturity_date"].astype(str), format="%Y%m%d", errors="coerce")
     df_all["days_left"] = (df_all["maturity_date"] - pd.Timestamp(today)).dt.days
-    df_all = df_all[df_all["days_left"] >= 0].copy()
+    df_all = df_all[df_all["days_left"] > 0].copy()
 
     if df_all.empty:
         return f"未找到 {days_ahead} 天内到期的期权合约。"
@@ -554,7 +554,7 @@ def get_expiring_underlying_list(days_ahead: int = 7) -> list[dict]:
         sql = f"""
             SELECT DISTINCT underlying, delist_date as maturity_date
             FROM option_basic
-            WHERE delist_date >= '{today_str}' AND delist_date <= '{cutoff_str}'
+            WHERE delist_date > '{today_str}' AND delist_date <= '{cutoff_str}'
             ORDER BY delist_date, underlying
         """
         df = pd.read_sql(sql, engine)
@@ -583,7 +583,7 @@ def get_expiring_underlying_list(days_ahead: int = 7) -> list[dict]:
                 REGEXP_SUBSTR(ts_code, '[0-9]+') AS contract_month,
                 maturity_date
             FROM commodity_option_basic
-            WHERE maturity_date >= '{today_str}' AND maturity_date <= '{cutoff_str}'
+            WHERE maturity_date > '{today_str}' AND maturity_date <= '{cutoff_str}'
             ORDER BY maturity_date
         """
         df = pd.read_sql(sql, engine)
