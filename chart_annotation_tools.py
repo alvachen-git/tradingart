@@ -512,7 +512,7 @@ def _annotate_generic(df: pd.DataFrame, pattern_name: str):
 # ==========================================
 
 @tool
-def draw_pattern_annotation_chart(query: str, trade_date: str = None) -> str:
+def draw_pattern_annotation_chart(query: str, trade_date: str = None, pattern_name: str = "") -> str:
     """
     AI识别到K线形态后，生成带真实着色 + 价格气泡标注的K线图。
     适用：用户说"画出今日形态"、"图解一下这个信号"，或你识别到明显形态时主动调用。
@@ -521,6 +521,8 @@ def draw_pattern_annotation_chart(query: str, trade_date: str = None) -> str:
     Args:
         query: 品种名称，如"豆粕"、"螺纹钢"、"沪深300"
         trade_date: 截止日期（可选），格式"YYYY-MM-DD"或"YYYYMMDD"
+        pattern_name: analyze_kline_pattern 已识别到的形态名称（可选）。
+                      传入后直接使用，跳过内部重复检测，避免两套算法不一致。
 
     Returns:
         形态摘要 + IMAGE_CREATED:{filename}（若有形态）
@@ -531,13 +533,17 @@ def draw_pattern_annotation_chart(query: str, trade_date: str = None) -> str:
     if len(df) < 10:
         return f"{query} 数据不足（{len(df)}根），无法识别形态。"
 
-    signals = calculate_kline_signals(df)
-    patterns = signals.get('patterns', [])
-    if not patterns:
-        last_price = df['close_price'].iloc[-1]
-        return f"今日暂无明显形态信号，不生成图表。（{query} 当前价：{last_price:.2f}）"
-
-    primary = patterns[0]
+    # 优先使用 analyst 传入的形态名，避免重复跑一遍检测
+    if pattern_name:
+        primary = pattern_name
+        patterns = [pattern_name]
+    else:
+        signals = calculate_kline_signals(df)
+        patterns = signals.get('patterns', [])
+        if not patterns:
+            last_price = df['close_price'].iloc[-1]
+            return f"今日暂无明显形态信号，不生成图表。（{query} 当前价：{last_price:.2f}）"
+        primary = patterns[0]
 
     # 路由到对应标注函数
     if "破底翻" in primary:

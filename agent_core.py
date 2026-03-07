@@ -538,6 +538,7 @@ def analyst_node(state: AgentState, llm):
 
             【画图规则（重要，必须遵守优先级）】
             - 优先级1：用户要求画图，且 `analyze_kline_pattern` 返回了形态信号 → 必须调用 `draw_pattern_annotation_chart`，禁止用 `draw_chart_tool`
+              ⚠️ 调用时必须把 `analyze_kline_pattern` 识别到的形态名称填入 `pattern_name` 参数（如 pattern_name="5日平台突破"），不要留空
             - 优先级2：用户明确给出支撑/压力/目标价，或你做完分析后算出了关键价位 → 调用 `draw_forecast_chart`
             - 优先级3：用户只要求看K线走势图、没有形态信号、也没有价位数据 → 才用 `draw_chart_tool`
             - 用户没有要求画图时，三个画图工具都不调用
