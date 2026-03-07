@@ -162,6 +162,18 @@
         margin-bottom: 5px;
     }
 
+    /* 确保正文区域标题颜色可见（防止手机深色模式导致文字与浅色背景混淆） */
+    .main .block-container h1,
+    .main .block-container h2,
+    .main .block-container h3,
+    .main .block-container h4,
+    [data-testid="stAppViewContainer"] h1,
+    [data-testid="stAppViewContainer"] h2,
+    [data-testid="stAppViewContainer"] h3,
+    [data-testid="stAppViewContainer"] h4 {
+        color: #1a1a2e !important;
+    }
+
     /* 按钮优化 */
     .stButton button {
         width: 100%;
