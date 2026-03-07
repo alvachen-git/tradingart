@@ -122,7 +122,7 @@ if __name__ == "__main__":
 
     # 2. 個股 (茅台在這裡！)
     STOCK_TARGETS = [
-        "300478.SZ","300479.SZ","300480.SZ","300481.SZ",
+        "300417.SZ",
 
     ]
     for code in STOCK_TARGETS:
