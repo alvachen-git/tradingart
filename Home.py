@@ -49,27 +49,31 @@ for key in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"]:
         del os.environ[key]
 
 # ==================== 公告配置区 ====================
-ENABLE_HOME_ANNOUNCEMENT = False  # 临时关闭首页公告，恢复时改为 True
+ENABLE_HOME_ANNOUNCEMENT = True  # 临时关闭首页公告，恢复时改为 True
 
 ANNOUNCEMENT_CONTENT = {
     "title": "🎉 最新动态",
     "sections": [
         {
-            "title": "🚀 功能介绍",
+            "title": "🚀 新功能上线",
             "items": [
-                "✨ 左侧栏的情报站里有复盘晚报，免费订阅",
-                "✨ 历史对话记录都可以在个人资料页查看",
+                "**期货商持仓分析晚报** — 多家期货商净持仓汇总，每晚 6:30 自动更新，在左侧「情报站」查看",
+                "**末日期权晚报** — 快到期的期权策略操作建议，每晚 6:30 自动更新，在左侧「情报站」查看",
+                "**持仓体检** — 把你的股票持仓截图上传给爱波塔，AI 一键分析持仓健康度、集中度与风险敞口",
             ]
         },
         {
-            "title": "📢 近期活动",
+            "title": "💎 VIP 交流群",
             "items": [
-                "💎 期权重剑班3月8日，详情可咨询客服，微信号trader-sec",
-                "🎁 秘密....."
-            ]
+                "盘前语音 — 每日开盘前市场解读",
+                "盘中交流 — 实时行情讨论",
+                "盘后复盘 — 每日收盘复盘分析",
+                "每周 VIP 视频 — 深度策略讲解",
+            ],
+            "vip_link": "https://mp.weixin.qq.com/s/hZ4jooECvBg5SV6_NeSFHA"
         }
     ],
-    "update_date": "2025-02-12"
+    "update_date": "2026-03-07"
 }
 
 
@@ -87,7 +91,42 @@ def show_announcement():
     for section in ANNOUNCEMENT_CONTENT["sections"]:
         st.markdown(f"### {section['title']}")
         for item in section["items"]:
-            st.write(f"- {item}")
+            st.markdown(f"- {item}")
+        # VIP 区块：显示可点击的图片横幅
+        if "vip_link" in section:
+            vip_link = section["vip_link"]
+            st.markdown(
+                f"""
+                <div style="margin-top:12px;">
+                  <a href="{vip_link}" target="_blank" style="text-decoration:none;">
+                    <div style="
+                      background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+                      border: 1px solid #e94560;
+                      border-radius: 12px;
+                      padding: 24px 20px;
+                      text-align: center;
+                      cursor: pointer;
+                    ">
+                      <div style="font-size:36px; margin-bottom:8px;">👑</div>
+                      <div style="color:#f5c518; font-size:20px; font-weight:bold; margin-bottom:6px;">加入 VIP 交流群</div>
+                      <div style="color:#cccccc; font-size:13px; margin-bottom:14px;">
+                        盘前语音 · 盘中交流 · 盘后复盘 · 每周VIP视频
+                      </div>
+                      <div style="
+                        display:inline-block;
+                        background:#e94560;
+                        color:white;
+                        padding:8px 28px;
+                        border-radius:20px;
+                        font-size:14px;
+                        font-weight:bold;
+                      ">点击了解详情 →</div>
+                    </div>
+                  </a>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
         st.write("")
 
     st.caption(f"📅 更新时间：{ANNOUNCEMENT_CONTENT['update_date']}")
