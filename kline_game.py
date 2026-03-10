@@ -25,6 +25,7 @@ import traceback  # 【新增】用于打印详细错误
 
 # 导入数据库引擎
 from data_engine import engine
+import kline_trade_analyzer as trade_analyzer
 
 # ==========================================
 # 成就配置
@@ -68,6 +69,11 @@ _TRADE_API_STATE = {
     "same_domain_path": "/api/kline/trades/batch",
 }
 
+# 一期先用硬编码教练白名单
+REVIEW_COACH_USER_IDS = {
+    "admin",
+}
+
 
 def _to_int(v, default=0):
     try:
@@ -81,6 +87,33 @@ def _to_float(v, default=0.0):
         return float(v)
     except Exception:
         return default
+
+
+def _format_direction_reason_label(reason_code: str) -> str:
+    code = str(reason_code or "").strip()
+    reason_map = {
+        "up_breakout_long_plus": "上破形态，做多加分",
+        "up_breakout_short_minus": "上破形态，做空扣分",
+        "down_breakout_short_plus": "下破形态，做空加分",
+        "down_breakout_long_minus": "下破形态，做多扣分",
+        "bull_trend_bearish_engulf_long_minus": "多头趋势遇空头吞噬，做多扣分",
+        "bull_trend_bearish_engulf_defense_plus": "多头趋势遇空头吞噬，平多/做空加分",
+        "bear_trend_bullish_engulf_short_minus": "空头趋势遇多头吞噬，做空扣分",
+        "bear_trend_bullish_engulf_cover_or_long_minus": "空头趋势遇多头吞噬，平空/做多扣分",
+        "bear_trend_bullish_engulf_cover_plus": "空头趋势遇多头吞噬，平空应对加分",
+    }
+    return reason_map.get(code, code or "未命中方向规则")
+
+
+def _need_refresh_direction_eval(evals: list) -> bool:
+    for ev in (evals or []):
+        action = str((ev or {}).get("action") or "").strip().lower()
+        tags = list((ev or {}).get("violation_tags") or [])
+        reasons = list((ev or {}).get("direction_reasons") or [])
+        if action in trade_analyzer.OPEN_LONG_ACTIONS.union(trade_analyzer.OPEN_SHORT_ACTIONS):
+            if "counter_trend_entry" in tags and not reasons:
+                return True
+    return False
 
 
 def _parse_trade_time(v):
@@ -918,8 +951,8 @@ def get_random_kline_data(bars=100, history_bars=60, _attempt=1, _max_attempts=1
                 return None, None, None, None
 
             avg_vol = float(df["vol"].fillna(0).mean()) if "vol" in df.columns else 0.0
-            if avg_vol < 1000:
-                print(f"[GET_KLINE] ❌ 成交量不足: avg(vol)={avg_vol:.2f} < 1000, 标的 {symbol}")
+            if avg_vol < 500:
+                print(f"[GET_KLINE] ❌ 成交量不足: avg(vol)={avg_vol:.2f} < 500, 标的 {symbol}")
                 if _attempt < _max_attempts:
                     return get_random_kline_data(bars, history_bars, _attempt + 1, _max_attempts)
                 print(f"[GET_KLINE] ❌ 已达到最大重试次数({_max_attempts})，放弃本次抽样")
@@ -1350,6 +1383,13 @@ def end_game(game_id, user_id, status, end_reason, profit, profit_rate,
             # 增加基础经验
             add_user_experience(user_id, BASE_EXP_PER_GAME)
 
+        # 结算后触发复盘分析（失败不影响主流程）
+        if status == "finished" and end_reason == "completed":
+            try:
+                analyze_game_trades(game_id=game_id, user_id=user_id, force=False)
+            except Exception as analyze_err:
+                print(f"[END_GAME] 复盘分析触发失败: {analyze_err}")
+
         print(f"[END_GAME] ✓ 游戏结束成功")
         return {
             "ok": True,
@@ -1619,6 +1659,523 @@ def get_user_stats(user_id):
             return None
     except:
         return None
+
+
+def is_review_coach(user_id: str) -> bool:
+    uid = str(user_id or "").strip()
+    return bool(uid) and uid in REVIEW_COACH_USER_IDS
+
+
+def _resolve_review_target_user(viewer_id: str, target_user: str = None):
+    viewer = str(viewer_id or "").strip()
+    if not viewer:
+        return None, {"ok": False, "message": "missing viewer_id"}
+
+    target = str(target_user or "").strip() or viewer
+    if target != viewer and (not is_review_coach(viewer)):
+        return None, {"ok": False, "message": "permission denied"}
+    return target, None
+
+
+def analyze_game_trades(
+    game_id: int,
+    user_id: str,
+    force: bool = False,
+    generate_ai: bool = False,
+    force_ai: bool = False,
+):
+    """按逐笔交易生成复盘分析（幂等）"""
+    try:
+        return trade_analyzer.analyze_game(
+            db_engine=engine,
+            game_id=int(game_id or 0),
+            user_id=str(user_id or "").strip(),
+            force=bool(force),
+            generate_ai=bool(generate_ai),
+            force_ai=bool(force_ai),
+            analysis_version=trade_analyzer.ANALYSIS_VERSION,
+        )
+    except Exception as e:
+        print(f"[REVIEW] analyze_game_trades failed: game_id={game_id}, user={user_id}, err={e}")
+        traceback.print_exc()
+        return {"ok": False, "message": str(e)}
+
+
+def get_game_analysis(game_id: int, viewer_id: str, target_user: str = None):
+    """获取单局复盘报告；若未生成则自动补算"""
+    target, err = _resolve_review_target_user(viewer_id, target_user)
+    if err:
+        return err
+
+    gid = _to_int(game_id, 0)
+    if gid <= 0:
+        return {"ok": False, "message": "invalid game_id"}
+
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(
+                text(
+                    """
+                    SELECT id, user_id, symbol, symbol_name, symbol_type, leverage,
+                           profit, profit_rate, trade_count, max_drawdown, game_end_time
+                    FROM kline_game_records
+                    WHERE id = :gid
+                    LIMIT 1
+                    """
+                ),
+                {"gid": gid},
+            ).mappings().fetchone()
+
+        if not row:
+            return {"ok": False, "message": "game not found"}
+
+        owner = str(row.get("user_id") or "")
+        if owner != target and not is_review_coach(viewer_id):
+            return {"ok": False, "message": "permission denied"}
+
+        report = trade_analyzer.fetch_report(engine, gid, trade_analyzer.ANALYSIS_VERSION)
+        if not report:
+            analyze_res = analyze_game_trades(gid, owner, force=False)
+            if not analyze_res.get("ok"):
+                return {"ok": False, "message": analyze_res.get("message", "analysis failed")}
+            report = trade_analyzer.fetch_report(engine, gid, trade_analyzer.ANALYSIS_VERSION)
+
+        if not report:
+            return {"ok": False, "message": "analysis report unavailable"}
+
+        return {
+            "ok": True,
+            "game_id": gid,
+            "owner": owner,
+            "game": dict(row),
+            "report": report,
+        }
+    except Exception as e:
+        print(f"[REVIEW] get_game_analysis failed: game_id={gid}, viewer={viewer_id}, err={e}")
+        traceback.print_exc()
+        return {"ok": False, "message": str(e)}
+
+
+def get_user_habit_profile(user_id: str, lookback_games: int = 20):
+    try:
+        return trade_analyzer.build_habit_profile(
+            db_engine=engine,
+            user_id=str(user_id or "").strip(),
+            lookback_games=max(1, _to_int(lookback_games, 20)),
+            analysis_version=trade_analyzer.ANALYSIS_VERSION,
+        )
+    except Exception as e:
+        print(f"[REVIEW] get_user_habit_profile failed: user={user_id}, err={e}")
+        traceback.print_exc()
+        return {"ok": False, "message": str(e)}
+
+
+def generate_review_ai(game_id: int, viewer_id: str, target_user: str = None, force: bool = False):
+    target, err = _resolve_review_target_user(viewer_id, target_user)
+    if err:
+        return err
+    gid = _to_int(game_id, 0)
+    if gid <= 0:
+        return {"ok": False, "message": "invalid game_id"}
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(
+                text(
+                    """
+                    SELECT id, user_id
+                    FROM kline_game_records
+                    WHERE id = :gid
+                    LIMIT 1
+                    """
+                ),
+                {"gid": gid},
+            ).mappings().fetchone()
+        if not row:
+            return {"ok": False, "message": "game not found"}
+        owner = str(row.get("user_id") or "")
+        if owner != target and not is_review_coach(viewer_id):
+            return {"ok": False, "message": "permission denied"}
+        return trade_analyzer.generate_game_ai_review(
+            db_engine=engine,
+            game_id=gid,
+            user_id=owner,
+            force=bool(force),
+            analysis_version=trade_analyzer.ANALYSIS_VERSION,
+        )
+    except Exception as e:
+        print(f"[REVIEW] generate_review_ai failed: game_id={gid}, viewer={viewer_id}, err={e}")
+        traceback.print_exc()
+        return {"ok": False, "message": str(e)}
+
+
+def get_user_global_review(viewer_id: str, target_user: str = None, max_trades: int = 2000):
+    target, err = _resolve_review_target_user(viewer_id, target_user)
+    if err:
+        return err
+    lim = max(1, min(2000, _to_int(max_trades, 2000)))
+    try:
+        report = trade_analyzer.fetch_user_global_report(
+            db_engine=engine,
+            user_id=target,
+            max_trades=lim,
+            analysis_version=trade_analyzer.ANALYSIS_VERSION,
+        )
+        if report:
+            return {"ok": True, "target_user": target, "cached": True, "report": report}
+
+        agg = trade_analyzer.build_user_trade_aggregate(
+            db_engine=engine,
+            user_id=target,
+            max_trades=lim,
+            analysis_version=trade_analyzer.ANALYSIS_VERSION,
+        )
+        if not agg.get("ok"):
+            return agg
+        radar = trade_analyzer.compute_user_radar_scores(agg)
+        return {
+            "ok": True,
+            "target_user": target,
+            "cached": False,
+            "report": {
+                "user_id": target,
+                "scope_type": "last_n_trades",
+                "scope_value": lim,
+                "metrics": agg.get("metrics") or {},
+                "radar": radar,
+                "habit_summary": agg.get("habit_summary") or {},
+                "ai_report": {},
+                "ai_status": "rule_only",
+                "source_trade_count": int(_to_int(agg.get("source_trade_count"), 0)),
+                "source_game_count": int(_to_int(agg.get("source_game_count"), 0)),
+            },
+        }
+    except Exception as e:
+        print(f"[REVIEW] get_user_global_review failed: viewer={viewer_id}, target={target}, err={e}")
+        traceback.print_exc()
+        return {"ok": False, "message": str(e)}
+
+
+def generate_user_global_review_ai(
+    viewer_id: str,
+    target_user: str = None,
+    max_trades: int = 2000,
+    force: bool = False,
+):
+    target, err = _resolve_review_target_user(viewer_id, target_user)
+    if err:
+        return err
+    lim = max(1, min(2000, _to_int(max_trades, 2000)))
+    try:
+        out = trade_analyzer.generate_user_global_ai_report(
+            db_engine=engine,
+            user_id=target,
+            max_trades=lim,
+            force=bool(force),
+            analysis_version=trade_analyzer.ANALYSIS_VERSION,
+        )
+        if not out.get("ok"):
+            return out
+        return {"ok": True, "target_user": target, "report": out.get("report") or {}, "cached": bool(out.get("cached"))}
+    except Exception as e:
+        print(f"[REVIEW] generate_user_global_review_ai failed: viewer={viewer_id}, target={target}, err={e}")
+        traceback.print_exc()
+        return {"ok": False, "message": str(e)}
+
+
+def list_review_games(
+    viewer_id: str,
+    target_user: str = None,
+    date_from: str = None,
+    date_to: str = None,
+    limit: int = 50,
+    offset: int = 0,
+    symbol_type: str = None,
+    profit_side: str = None,
+    score_min: float = None,
+    score_max: float = None,
+):
+    """复盘页列表查询（一期：默认只看本人，教练可切用户）"""
+    target, err = _resolve_review_target_user(viewer_id, target_user)
+    if err:
+        return err
+
+    lim = max(1, min(200, _to_int(limit, 50)))
+    ofs = max(0, _to_int(offset, 0))
+    where = ["r.status = 'finished'", "r.end_reason = 'completed'", "r.user_id = :uid"]
+    params = {"uid": target, "lim": lim, "ofs": ofs, "ver": trade_analyzer.ANALYSIS_VERSION}
+
+    d_from = trade_analyzer._normalize_date(date_from)
+    d_to = trade_analyzer._normalize_date(date_to)
+    if d_from:
+        where.append("DATE(r.game_end_time) >= :dfrom")
+        params["dfrom"] = d_from
+    if d_to:
+        where.append("DATE(r.game_end_time) <= :dto")
+        params["dto"] = d_to
+
+    stype = str(symbol_type or "").strip().lower()
+    if stype in {"stock", "index", "future"}:
+        where.append("LOWER(COALESCE(r.symbol_type, '')) = :stype")
+        params["stype"] = stype
+
+    side = str(profit_side or "").strip().lower()
+    if side == "profit":
+        where.append("COALESCE(r.profit, 0) > 0")
+    elif side == "loss":
+        where.append("COALESCE(r.profit, 0) < 0")
+    elif side == "flat":
+        where.append("COALESCE(r.profit, 0) = 0")
+
+    if score_min is not None:
+        where.append("COALESCE(ar.overall_score, 0) >= :smin")
+        params["smin"] = _to_float(score_min, 0.0)
+    if score_max is not None:
+        where.append("COALESCE(ar.overall_score, 0) <= :smax")
+        params["smax"] = _to_float(score_max, 100.0)
+
+    where_sql = " AND ".join(where)
+    try:
+        trade_analyzer.ensure_review_tables(engine)
+        with engine.connect() as conn:
+            total = conn.execute(
+                text(
+                    f"""
+                    SELECT COUNT(*)
+                    FROM kline_game_records r
+                    LEFT JOIN kline_game_analysis_reports ar
+                      ON ar.game_id = r.id
+                     AND ar.analysis_version = :ver
+                    WHERE {where_sql}
+                    """
+                ),
+                params,
+            ).scalar() or 0
+
+            rows = conn.execute(
+                text(
+                    f"""
+                    SELECT r.id, r.user_id, r.symbol, r.symbol_name, r.symbol_type,
+                           r.leverage, r.profit, r.profit_rate, r.trade_count, r.game_end_time,
+                           ar.overall_score, ar.ai_status, ar.mistakes_json
+                    FROM kline_game_records r
+                    LEFT JOIN kline_game_analysis_reports ar
+                      ON ar.game_id = r.id
+                     AND ar.analysis_version = :ver
+                    WHERE {where_sql}
+                    ORDER BY r.id DESC
+                    LIMIT :lim OFFSET :ofs
+                    """
+                ),
+                params,
+            ).mappings().fetchall()
+
+        items = []
+        for r in rows:
+            mistakes = trade_analyzer._json_load(r.get("mistakes_json"), [])
+            top_m = [str((m or {}).get("tag") or "") for m in mistakes if (m or {}).get("tag")]
+            items.append(
+                {
+                    "game_id": _to_int(r.get("id"), 0),
+                    "user_id": str(r.get("user_id") or ""),
+                    "symbol": str(r.get("symbol") or ""),
+                    "symbol_name": str(r.get("symbol_name") or ""),
+                    "symbol_type": str(r.get("symbol_type") or ""),
+                    "leverage": _to_int(r.get("leverage"), 1),
+                    "profit": _to_float(r.get("profit"), 0.0),
+                    "profit_rate": _to_float(r.get("profit_rate"), 0.0),
+                    "trade_count": _to_int(r.get("trade_count"), 0),
+                    "game_end_time": str(r.get("game_end_time") or ""),
+                    "overall_score": _to_float(r.get("overall_score"), 0.0),
+                    "ai_status": str(r.get("ai_status") or ""),
+                    "main_mistakes": top_m[:2],
+                }
+            )
+
+        return {"ok": True, "target_user": target, "total": int(total), "items": items}
+    except Exception as e:
+        print(f"[REVIEW] list_review_games failed: viewer={viewer_id}, target={target}, err={e}")
+        traceback.print_exc()
+        return {"ok": False, "message": str(e)}
+
+
+def get_review_detail(viewer_id: str, game_id: int, target_user: str = None):
+    """获取复盘详情：单局总览+逐笔判定+图表数据+习惯画像"""
+    target, err = _resolve_review_target_user(viewer_id, target_user)
+    if err:
+        return err
+
+    gid = _to_int(game_id, 0)
+    if gid <= 0:
+        return {"ok": False, "message": "invalid game_id"}
+
+    try:
+        with engine.connect() as conn:
+            game = conn.execute(
+                text("SELECT * FROM kline_game_records WHERE id = :gid LIMIT 1"),
+                {"gid": gid},
+            ).mappings().fetchone()
+        if not game:
+            return {"ok": False, "message": "game not found"}
+
+        owner = str(game.get("user_id") or "")
+        if owner != target and not is_review_coach(viewer_id):
+            return {"ok": False, "message": "permission denied"}
+
+        report = trade_analyzer.fetch_report(engine, gid, trade_analyzer.ANALYSIS_VERSION)
+        if not report:
+            analyze_res = analyze_game_trades(gid, owner, force=False)
+            if not analyze_res.get("ok"):
+                return {"ok": False, "message": analyze_res.get("message", "analysis failed")}
+            report = trade_analyzer.fetch_report(engine, gid, trade_analyzer.ANALYSIS_VERSION)
+
+        raw_evaluations = trade_analyzer.fetch_evaluations(engine, gid)
+        if _need_refresh_direction_eval(raw_evaluations):
+            refresh_res = analyze_game_trades(gid, owner, force=True)
+            if refresh_res.get("ok"):
+                report = trade_analyzer.fetch_report(engine, gid, trade_analyzer.ANALYSIS_VERSION) or report
+                raw_evaluations = trade_analyzer.fetch_evaluations(engine, gid)
+        evaluations = []
+        eval_map = {}
+        for raw_ev in raw_evaluations:
+            ev = dict(raw_ev or {})
+            reasons = list(ev.get("direction_reasons") or [])
+            points = _to_float(ev.get("direction_points"), 0.0)
+            if not reasons:
+                fallback_flags = trade_analyzer._pattern_flags(
+                    list(ev.get("evidence_patterns") or []),
+                    list(ev.get("evidence_trends") or []),
+                    str(ev.get("market_bias") or "neutral"),
+                )
+                fallback_points, fallback_reasons, _ = trade_analyzer._pattern_direction_adjustment(
+                    str(ev.get("action") or ""),
+                    fallback_flags,
+                )
+                if fallback_reasons:
+                    reasons = list(fallback_reasons)
+                    if abs(points) < 1e-9:
+                        points = _to_float(fallback_points, 0.0)
+            ev["direction_points"] = round(points, 2)
+            ev["direction_reasons"] = reasons
+            ev["direction_reason_labels"] = [_format_direction_reason_label(x) for x in reasons]
+            evaluations.append(ev)
+            eval_map[int(ev.get("trade_seq") or 0)] = ev
+
+        with engine.connect() as conn:
+            trade_rows = conn.execute(
+                text(
+                    """
+                    SELECT trade_seq, action, bar_index, bar_date, trade_time, price, lots, leverage,
+                           symbol, symbol_type,
+                           realized_pnl_after, floating_pnl_after, position_before, position_after
+                    FROM kline_game_trades
+                    WHERE game_id = :gid
+                      AND user_id = :uid
+                    ORDER BY trade_seq ASC, id ASC
+                    """
+                ),
+                {"gid": gid, "uid": owner},
+            ).mappings().fetchall()
+
+        trades = []
+        dates = []
+        for r in trade_rows:
+            one = dict(r)
+            one["position_before"] = trade_analyzer._json_load(one.get("position_before"), {})
+            one["position_after"] = trade_analyzer._json_load(one.get("position_after"), {})
+            d = trade_analyzer._normalize_date(one.get("bar_date"))
+            if d:
+                one["bar_date"] = d.strftime("%Y-%m-%d")
+                dates.append(d)
+            else:
+                one["bar_date"] = ""
+            trades.append(one)
+
+        start_d = min(dates) if dates else None
+        end_d = max(dates) if dates else None
+        bars = trade_analyzer.fetch_chart_bars(
+            engine,
+            symbol=str(game.get("symbol") or ""),
+            symbol_type=str(game.get("symbol_type") or ""),
+            start_date=start_d,
+            end_date=end_d,
+        )
+        if not bars:
+            seen = set()
+            for t in trades:
+                ts = str(t.get("symbol") or "").strip()
+                stp = str(t.get("symbol_type") or game.get("symbol_type") or "").strip()
+                key = (ts, stp)
+                if not ts or key in seen:
+                    continue
+                seen.add(key)
+                bars = trade_analyzer.fetch_chart_bars(
+                    engine,
+                    symbol=ts,
+                    symbol_type=stp,
+                    start_date=start_d,
+                    end_date=end_d,
+                )
+                if bars:
+                    break
+        bar_dates = {str(b.get("date") or "") for b in bars}
+
+        trade_markers = []
+        for t in trades:
+            d = str(t.get("bar_date") or "")
+            if bar_dates and d and d not in bar_dates:
+                continue
+            trade_markers.append(
+                {
+                    "trade_seq": _to_int(t.get("trade_seq"), 0),
+                    "date": d,
+                    "action": str(t.get("action") or ""),
+                    "price": _to_float(t.get("price"), 0.0),
+                    "lots": _to_int(t.get("lots"), 0),
+                }
+            )
+
+        error_markers = []
+        for tm in trade_markers:
+            ev = eval_map.get(int(tm.get("trade_seq") or 0), {})
+            tags = list(ev.get("violation_tags") or [])
+            if tags:
+                error_markers.append(
+                    {
+                        "trade_seq": int(tm.get("trade_seq") or 0),
+                        "date": tm.get("date"),
+                        "price": tm.get("price"),
+                        "tags": tags,
+                        "alignment": str(ev.get("alignment") or ""),
+                        "direction_points": _to_float(ev.get("direction_points"), 0.0),
+                        "direction_reason_labels": list(ev.get("direction_reason_labels") or []),
+                    }
+                )
+
+        habit = get_user_habit_profile(owner, lookback_games=20)
+        global_review = get_user_global_review(
+            viewer_id=viewer_id,
+            target_user=owner,
+            max_trades=2000,
+        )
+
+        return {
+            "ok": True,
+            "game": dict(game),
+            "report": report or {},
+            "evaluations": evaluations,
+            "trades": trades,
+            "chart": {
+                "bars": bars,
+                "trade_markers": trade_markers,
+                "error_markers": error_markers,
+            },
+            "habit_profile": habit,
+            "global_review": global_review,
+        }
+    except Exception as e:
+        print(f"[REVIEW] get_review_detail failed: game={gid}, viewer={viewer_id}, err={e}")
+        traceback.print_exc()
+        return {"ok": False, "message": str(e)}
 
 
 def check_unfinished_game(user_id):
