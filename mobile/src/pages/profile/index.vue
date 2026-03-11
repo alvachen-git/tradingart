@@ -163,7 +163,7 @@ function getRiskColor(risk: string) {
 </template>
 
 <style scoped>
-.page { background: #0d0d0d; min-height: 100vh; padding-bottom: 40rpx; }
+.page { background: #0b1121; min-height: 100vh; padding-bottom: 40rpx; }
 
 /* 用户头部 */
 .user-header {
@@ -171,8 +171,8 @@ function getRiskColor(risk: string) {
   align-items: center;
   gap: 24rpx;
   padding: 40rpx 32rpx 32rpx;
-  background: linear-gradient(180deg, #1a1a1a 0%, #0d0d0d 100%);
-  border-bottom: 1px solid #2a2a2a;
+  background: linear-gradient(180deg, #131c2e 0%, #0b1121 100%);
+  border-bottom: 1px solid #1e2d45;
 }
 
 .avatar {
@@ -186,7 +186,7 @@ function getRiskColor(risk: string) {
   flex-shrink: 0;
 }
 
-.avatar-text { font-size: 44rpx; font-weight: 900; color: #0d0d0d; }
+.avatar-text { font-size: 44rpx; font-weight: 900; color: #0b1121; }
 
 .user-info { flex: 1; }
 .username { display: block; font-size: 34rpx; font-weight: 700; color: #f0f0f0; }
@@ -205,8 +205,8 @@ function getRiskColor(risk: string) {
 /* 卡片通用 */
 .section-card {
   margin: 20rpx 24rpx 0;
-  background: #1a1a1a;
-  border: 1px solid #2a2a2a;
+  background: #131c2e;
+  border: 1px solid #1e2d45;
   border-radius: 20rpx;
   padding: 28rpx;
 }
@@ -225,7 +225,7 @@ function getRiskColor(risk: string) {
   justify-content: space-between;
   align-items: center;
   padding: 14rpx 0;
-  border-bottom: 1px solid #222222;
+  border-bottom: 1px solid #1a2540;
 }
 .profile-row:last-child { border-bottom: none; }
 .profile-label { font-size: 26rpx; color: #888888; }
@@ -237,7 +237,7 @@ function getRiskColor(risk: string) {
   align-items: center;
   justify-content: space-between;
   padding: 16rpx 0;
-  border-bottom: 1px solid #222222;
+  border-bottom: 1px solid #1a2540;
 }
 .channel-row:last-child { border-bottom: none; }
 
@@ -270,7 +270,7 @@ function getRiskColor(risk: string) {
   align-items: center;
   justify-content: space-between;
   padding: 14rpx 0;
-  border-bottom: 1px solid #222222;
+  border-bottom: 1px solid #1a2540;
 }
 .sub-row:last-child { border-bottom: none; }
 .sub-name { font-size: 26rpx; color: #cccccc; }
@@ -286,7 +286,7 @@ function getRiskColor(risk: string) {
 .inactive-badge {
   font-size: 22rpx;
   color: #666666;
-  background: #1e1e1e;
+  background: #162035;
   padding: 4rpx 16rpx;
   border-radius: 16rpx;
 }
@@ -295,7 +295,7 @@ function getRiskColor(risk: string) {
 .logout-section { padding: 40rpx 24rpx 0; }
 
 .logout-btn {
-  background: #1a1a1a;
+  background: #131c2e;
   border: 1px solid #3a1a1a;
   border-radius: 20rpx;
   padding: 28rpx 0;

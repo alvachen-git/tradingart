@@ -71,6 +71,22 @@ function formatDate(s: string) {
   if (!s) return ''
   return s.slice(0, 16).replace('T', ' ')
 }
+
+// 剥除 HTML 标签，只保留纯文字，用于列表摘要预览
+function stripHtml(html: string): string {
+  if (!html) return ''
+  return html
+    .replace(/<style[\s\S]*?<\/style>/gi, '')  // 移除 style 块
+    .replace(/<script[\s\S]*?<\/script>/gi, '') // 移除 script 块
+    .replace(/<[^>]+>/g, ' ')                   // 移除 HTML 标签
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&amp;/g, '&')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 120)                               // 最多显示 120 字
+}
 </script>
 
 <template>
@@ -103,7 +119,7 @@ function formatDate(s: string) {
           <text class="date-text">{{ formatDate(item.published_at) }}</text>
         </view>
         <text class="card-title">{{ item.title }}</text>
-        <text class="card-summary">{{ item.summary }}</text>
+        <text class="card-summary">{{ stripHtml(item.summary) }}</text>
       </view>
 
       <!-- 加载中 -->
@@ -130,14 +146,14 @@ function formatDate(s: string) {
 </template>
 
 <style scoped>
-.page { background: #0d0d0d; min-height: 100vh; }
+.page { background: #0b1121; min-height: 100vh; }
 
 .channel-bar {
   position: sticky;
   top: 0;
   z-index: 10;
-  background: #0d0d0d;
-  border-bottom: 1px solid #1e1e1e;
+  background: #0b1121;
+  border-bottom: 1px solid #162035;
   white-space: nowrap;
 }
 
@@ -153,8 +169,8 @@ function formatDate(s: string) {
   border-radius: 32rpx;
   font-size: 26rpx;
   color: #aaaaaa;
-  background: #1a1a1a;
-  border: 1px solid #2a2a2a;
+  background: #131c2e;
+  border: 1px solid #1e2d45;
 }
 
 .channel-tag.active {
@@ -167,8 +183,8 @@ function formatDate(s: string) {
 .list { padding: 20rpx 24rpx; }
 
 .report-card {
-  background: #1a1a1a;
-  border: 1px solid #2a2a2a;
+  background: #131c2e;
+  border: 1px solid #1e2d45;
   border-radius: 20rpx;
   padding: 28rpx;
   margin-bottom: 20rpx;

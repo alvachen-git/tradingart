@@ -4,71 +4,89 @@
       "path": "pages/login/index",
       "style": {
         "navigationBarTitleText": "登录",
-        "navigationBarBackgroundColor": "#0d0d0d",
+        "navigationBarBackgroundColor": "#0b1121",
         "navigationBarTextStyle": "white",
-        "backgroundColor": "#0d0d0d"
+        "backgroundColor": "#0b1121"
       }
     },
     {
       "path": "pages/index/index",
       "style": {
         "navigationBarTitleText": "爱波塔 AI",
-        "navigationBarBackgroundColor": "#0d0d0d",
+        "navigationBarBackgroundColor": "#0b1121",
         "navigationBarTextStyle": "white",
-        "backgroundColor": "#0d0d0d"
+        "backgroundColor": "#0b1121"
       }
     },
     {
       "path": "pages/intel/index",
       "style": {
         "navigationBarTitleText": "情报站",
-        "navigationBarBackgroundColor": "#0d0d0d",
+        "navigationBarBackgroundColor": "#0b1121",
         "navigationBarTextStyle": "white",
-        "backgroundColor": "#0d0d0d"
+        "backgroundColor": "#0b1121"
       }
     },
     {
       "path": "pages/intel/detail",
       "style": {
         "navigationBarTitleText": "晚报详情",
-        "navigationBarBackgroundColor": "#0d0d0d",
+        "navigationBarBackgroundColor": "#0b1121",
         "navigationBarTextStyle": "white",
-        "backgroundColor": "#0d0d0d"
+        "backgroundColor": "#0b1121"
       }
     },
     {
       "path": "pages/market/index",
       "style": {
-        "navigationBarTitleText": "行情快照",
-        "navigationBarBackgroundColor": "#0d0d0d",
+        "navigationBarTitleText": "行情",
+        "navigationBarBackgroundColor": "#0b1121",
         "navigationBarTextStyle": "white",
-        "backgroundColor": "#0d0d0d"
+        "backgroundColor": "#0b1121"
       }
     },
     {
-      "path": "pages/health/index",
+      "path": "pages/market/detail",
       "style": {
-        "navigationBarTitleText": "持仓体检",
-        "navigationBarBackgroundColor": "#0d0d0d",
+        "navigationBarTitleText": "合约详情",
+        "navigationBarBackgroundColor": "#0b1121",
         "navigationBarTextStyle": "white",
-        "backgroundColor": "#0d0d0d"
+        "backgroundColor": "#0b1121"
+      }
+    },
+    {
+      "path": "pages/market/broker",
+      "style": {
+        "navigationBarTitleText": "期货商持仓",
+        "navigationBarBackgroundColor": "#0b1121",
+        "navigationBarTextStyle": "white",
+        "backgroundColor": "#0b1121"
+      }
+    },
+    {
+      "path": "pages/kline/index",
+      "style": {
+        "navigationBarTitleText": "K线训练",
+        "navigationBarBackgroundColor": "#0b1121",
+        "navigationBarTextStyle": "white",
+        "backgroundColor": "#0b1121"
       }
     },
     {
       "path": "pages/profile/index",
       "style": {
         "navigationBarTitleText": "我的",
-        "navigationBarBackgroundColor": "#0d0d0d",
+        "navigationBarBackgroundColor": "#0b1121",
         "navigationBarTextStyle": "white",
-        "backgroundColor": "#0d0d0d"
+        "backgroundColor": "#0b1121"
       }
     }
   ],
   "globalStyle": {
-    "navigationBarBackgroundColor": "#0d0d0d",
+    "navigationBarBackgroundColor": "#0b1121",
     "navigationBarTitleText": "爱波塔",
     "navigationBarTextStyle": "white",
-    "backgroundColor": "#0d0d0d",
+    "backgroundColor": "#0b1121",
     "backgroundTextStyle": "light"
   }
 }

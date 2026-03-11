@@ -5,7 +5,7 @@ const tabs = [
   { key: 'index',   label: 'AI问答',  icon: '◈', path: '/pages/index/index' },
   { key: 'intel',   label: '情报站',  icon: '◉', path: '/pages/intel/index' },
   { key: 'market',  label: '行情',    icon: '◆', path: '/pages/market/index' },
-  { key: 'health',  label: '持仓体检', icon: '◎', path: '/pages/health/index' },
+  { key: 'kline',   label: 'K线训练',  icon: '◑', path: '/pages/kline/index' },
   { key: 'profile', label: '我的',    icon: '◍', path: '/pages/profile/index' },
 ]
 
@@ -36,8 +36,8 @@ function navigate(path: string) {
   left: 0;
   right: 0;
   height: 100rpx;
-  background: #111111;
-  border-top: 1px solid #2a2a2a;
+  background: #0d1829;
+  border-top: 1px solid #1e2d45;
   display: flex;
   align-items: center;
   padding-bottom: env(safe-area-inset-bottom);

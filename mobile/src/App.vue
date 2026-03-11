@@ -11,7 +11,7 @@ onLaunch(() => {
 <style>
 /* ── 全局重置 ── */
 page {
-  background-color: #0d0d0d;
+  background-color: #0b1121;
   color: #f0f0f0;
   font-family: -apple-system, 'PingFang SC', 'Helvetica Neue', 'Microsoft YaHei', sans-serif;
   font-size: 28rpx;
@@ -19,16 +19,16 @@ page {
 
 /* ── 设计 Token ── */
 :root {
-  --bg-base:       #0d0d0d;
-  --bg-card:       #1a1a1a;
-  --bg-input:      #222222;
+  --bg-base:       #0b1121;
+  --bg-card:       #131c2e;
+  --bg-input:      #1a2540;
   --gold:          #f5c518;
   --gold-dim:      #c9a227;
   --gold-bg:       rgba(245, 197, 24, 0.12);
   --text-primary:  #f0f0f0;
   --text-secondary:#aaaaaa;
   --text-muted:    #666666;
-  --border:        #2a2a2a;
+  --border:        #1e2d45;
   --red:           #e84040;
   --green:         #22c55e;
   --radius:        16rpx;

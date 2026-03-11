@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, nextTick, onMounted } from 'vue'
+import { ref, nextTick, computed } from 'vue'
 import { onShow } from '@dcloudio/uni-app'
 import { chatApi, type ChatMessage } from '../../api/index'
 import { useAuthStore } from '../../store/auth'
@@ -20,17 +20,25 @@ let msgCounter = 0
 let pollTimer: ReturnType<typeof setInterval> | null = null
 
 const HISTORY_KEY = computed(() => `chat_history_${auth.username}`)
+const PENDING_KEY = computed(() => `chat_pending_${auth.username}`)
 
-// ── 初始化 ──────────────────────────────────────
-onMounted(loadHistory)
-onShow(() => {
-  if (!auth.isLoggedIn) uni.reLaunch({ url: '/pages/login/index' })
+// ── 初始化：onShow 统一处理，避免 onMounted/onShow 时序竞争 ──
+onShow(async () => {
+  if (!auth.isLoggedIn) { uni.reLaunch({ url: '/pages/login/index' }); return }
+  loadHistory()
+  await nextTick()
+  resumePendingTask()
 })
 
 function loadHistory() {
   try {
     const saved = uni.getStorageSync(HISTORY_KEY.value)
-    if (saved) messages.value = JSON.parse(saved)
+    if (saved) {
+      const loaded: UIMessage[] = JSON.parse(saved)
+      messages.value = loaded
+      // 从已加载消息中初始化 msgCounter，避免新消息 ID 与历史 ID 重复导致 v-for 渲染错乱
+      msgCounter = loaded.reduce((max, m) => Math.max(max, m.id || 0), 0)
+    }
   } catch { /* 忽略 */ }
   if (messages.value.length === 0) {
     messages.value = [{
@@ -55,6 +63,7 @@ async function send() {
   sending.value = true
 
   messages.value.push({ id: ++msgCounter, role: 'user', content: text })
+  saveHistory() // 立即保存用户消息，切页后不会丢失
   const loadingId = ++msgCounter
   messages.value.push({ id: loadingId, role: 'loading', content: '' })
   scrollToBottom()
@@ -67,6 +76,8 @@ async function send() {
 
   try {
     const { task_id } = await chatApi.submit(text, history)
+    // 存储待处理任务，切换页面后可恢复
+    uni.setStorageSync(PENDING_KEY.value, JSON.stringify({ task_id }))
     pollStatus(task_id, loadingId)
   } catch (e: any) {
     replaceLoading(loadingId, `请求失败：${e.message}`)
@@ -74,28 +85,49 @@ async function send() {
   }
 }
 
+// 回到页面时恢复未完成的轮询
+function resumePendingTask() {
+  if (sending.value || pollTimer) return
+  try {
+    const raw = uni.getStorageSync(PENDING_KEY.value)
+    if (!raw) return
+    const { task_id } = JSON.parse(raw)
+    // 重新加一个 loading 气泡（切页后原气泡已丢失）
+    const newLoadingId = ++msgCounter
+    messages.value.push({ id: newLoadingId, role: 'loading', content: '' })
+    sending.value = true
+    scrollToBottom()
+    pollStatus(task_id, newLoadingId)
+  } catch {
+    uni.removeStorageSync(PENDING_KEY.value)
+  }
+}
+
 function pollStatus(taskId: string, loadingId: number) {
+  stopPoll()
   pollTimer = setInterval(async () => {
     try {
       const res = await chatApi.status(taskId)
       if (res.status === 'success') {
         stopPoll()
+        uni.removeStorageSync(PENDING_KEY.value)
         const aiText = res.result?.response || res.result?.answer || JSON.stringify(res.result)
         replaceLoading(loadingId, aiText)
         saveHistory()
         sending.value = false
       } else if (res.status === 'error') {
         stopPoll()
+        uni.removeStorageSync(PENDING_KEY.value)
         replaceLoading(loadingId, `分析失败：${res.error || '请稍后重试'}`)
         sending.value = false
       }
-      // pending / processing 继续等待
     } catch {
       stopPoll()
+      uni.removeStorageSync(PENDING_KEY.value)
       replaceLoading(loadingId, '网络异常，请稍后重试')
       sending.value = false
     }
-  }, 2500)
+  }, 1000)
 }
 
 function stopPoll() {
@@ -130,7 +162,6 @@ function clearChat() {
   })
 }
 
-import { computed } from 'vue'
 </script>
 
 <template>
@@ -200,7 +231,7 @@ import { computed } from 'vue'
 
 <style scoped>
 .page {
-  background: #0d0d0d;
+  background: #0b1121;
   min-height: 100vh;
   padding-bottom: 0;
 }
@@ -209,8 +240,8 @@ import { computed } from 'vue'
   position: sticky;
   top: 0;
   z-index: 10;
-  background: #0d0d0d;
-  border-bottom: 1px solid #1e1e1e;
+  background: #0b1121;
+  border-bottom: 1px solid #162035;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -248,8 +279,8 @@ import { computed } from 'vue'
 }
 
 .ai-bubble {
-  background: #1e1e1e;
-  border: 1px solid #2a2a2a;
+  background: #162035;
+  border: 1px solid #1e2d45;
   border-bottom-left-radius: 6rpx;
 }
 
@@ -258,12 +289,12 @@ import { computed } from 'vue'
   border-bottom-right-radius: 6rpx;
 }
 
-.user-bubble .msg-text { color: #0d0d0d; font-weight: 600; }
+.user-bubble .msg-text { color: #0b1121; font-weight: 600; }
 .ai-bubble .msg-text { color: #f0f0f0; line-height: 1.7; white-space: pre-wrap; }
 
 .loading-bubble {
-  background: #1e1e1e;
-  border: 1px solid #2a2a2a;
+  background: #162035;
+  border: 1px solid #1e2d45;
   border-bottom-left-radius: 6rpx;
   padding: 24rpx 28rpx;
 }
@@ -291,8 +322,8 @@ import { computed } from 'vue'
   bottom: 100rpx;
   left: 0;
   right: 0;
-  background: #111111;
-  border-top: 1px solid #2a2a2a;
+  background: #0d1829;
+  border-top: 1px solid #1e2d45;
   display: flex;
   align-items: flex-end;
   padding: 16rpx 20rpx;
@@ -303,8 +334,8 @@ import { computed } from 'vue'
 
 .input-area {
   flex: 1;
-  background: #1e1e1e;
-  border: 1px solid #2a2a2a;
+  background: #162035;
+  border: 1px solid #1e2d45;
   border-radius: 20rpx;
   padding: 18rpx 24rpx;
   font-size: 28rpx;
@@ -319,7 +350,7 @@ import { computed } from 'vue'
   width: 72rpx;
   height: 72rpx;
   border-radius: 50%;
-  background: #2a2a2a;
+  background: #1e2d45;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -335,5 +366,5 @@ import { computed } from 'vue'
   font-weight: 700;
 }
 
-.send-btn.active .send-icon { color: #0d0d0d; }
+.send-btn.active .send-icon { color: #0b1121; }
 </style>

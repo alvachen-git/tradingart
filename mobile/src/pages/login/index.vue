@@ -161,7 +161,7 @@ async function sendCode() {
 <style scoped>
 .page {
   min-height: 100vh;
-  background: #0d0d0d;
+  background: #0b1121;
   padding: 0 48rpx;
   display: flex;
   flex-direction: column;
@@ -189,7 +189,7 @@ async function sendCode() {
 
 .tab-switch {
   display: flex;
-  background: #1a1a1a;
+  background: #131c2e;
   border-radius: 16rpx;
   padding: 6rpx;
   margin-bottom: 40rpx;
@@ -207,7 +207,7 @@ async function sendCode() {
 
 .switch-item.active {
   background: #f5c518;
-  color: #0d0d0d;
+  color: #0b1121;
   font-weight: 700;
 }
 
@@ -225,8 +225,8 @@ async function sendCode() {
 .field-input {
   width: 100%;
   height: 88rpx;
-  background: #1e1e1e;
-  border: 1px solid #2a2a2a;
+  background: #162035;
+  border: 1px solid #1e2d45;
   border-radius: 16rpx;
   padding: 0 28rpx;
   font-size: 30rpx;
@@ -268,7 +268,7 @@ async function sendCode() {
 
 .login-btn {
   background: #f5c518 !important;
-  color: #0d0d0d !important;
+  color: #0b1121 !important;
   font-weight: 700 !important;
   font-size: 32rpx !important;
   border-radius: 16rpx !important;

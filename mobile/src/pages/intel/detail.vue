@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, computed } from 'vue'
 import { onLoad } from '@dcloudio/uni-app'
 import { intelApi } from '../../api/index'
 
@@ -23,6 +23,12 @@ function formatDate(s: string) {
   if (!s) return ''
   return s.slice(0, 16).replace('T', ' ')
 }
+
+// 判断是否为 HTML 内容
+const isHtml = computed(() => {
+  const c = content.value?.content || ''
+  return c.trimStart().startsWith('<')
+})
 </script>
 
 <template>
@@ -48,15 +54,23 @@ function formatDate(s: string) {
       <text class="article-title">{{ content.title }}</text>
       <view class="divider" />
 
-      <!-- 正文（保留换行） -->
-      <text class="article-body selectable">{{ content.content }}</text>
+      <!-- HTML 正文：H5 使用 v-html 渲染 -->
+      <!-- #ifdef H5 -->
+      <view v-if="isHtml" class="html-body" v-html="content.content" />
+      <!-- #endif -->
+
+      <!-- 纯文本正文（非 HTML 内容，或小程序环境用 rich-text） -->
+      <!-- #ifndef H5 -->
+      <rich-text v-if="isHtml" :nodes="content.content" class="rich-body" />
+      <!-- #endif -->
+      <text v-if="!isHtml" class="article-body selectable">{{ content.content }}</text>
     </view>
   </view>
 </template>
 
 <style scoped>
 .page {
-  background: #0d0d0d;
+  background: #0b1121;
   min-height: 100vh;
   padding: 32rpx 32rpx 80rpx;
 }
@@ -69,8 +83,6 @@ function formatDate(s: string) {
 }
 
 .error-text { color: #e84040; font-size: 28rpx; }
-
-.content-wrap {}
 
 .meta {
   display: flex;
@@ -101,7 +113,7 @@ function formatDate(s: string) {
 
 .divider {
   height: 1px;
-  background: #2a2a2a;
+  background: #1e2d45;
   margin: 20rpx 0 30rpx;
 }
 
@@ -112,4 +124,61 @@ function formatDate(s: string) {
   line-height: 1.85;
   white-space: pre-wrap;
 }
+
+.rich-body {
+  font-size: 29rpx;
+  color: #cccccc;
+  line-height: 1.85;
+}
+</style>
+
+<!-- HTML 渲染深层样式（覆盖晚报自带样式，适配深色主题） -->
+<style>
+.html-body {
+  color: #cccccc;
+  font-size: 28rpx;
+  line-height: 1.85;
+  word-break: break-word;
+  overflow-x: hidden;
+}
+
+/* 覆盖晚报 HTML 内的白色背景和黑色文字 */
+.html-body body,
+.html-body .main-container,
+.html-body table,
+.html-body td,
+.html-body th,
+.html-body div,
+.html-body p,
+.html-body span {
+  background-color: transparent !important;
+  color: inherit !important;
+  max-width: 100% !important;
+}
+
+.html-body h1, .html-body h2, .html-body h3 {
+  color: #f5c518 !important;
+  font-size: 1em !important;
+  margin: 16px 0 8px !important;
+}
+
+.html-body table {
+  width: 100% !important;
+  border-collapse: collapse !important;
+  font-size: 24rpx !important;
+}
+
+.html-body td, .html-body th {
+  border: 1px solid #1e2d45 !important;
+  padding: 8px !important;
+  text-align: left !important;
+}
+
+.html-body tr:nth-child(even) td {
+  background-color: rgba(255,255,255,0.03) !important;
+}
+
+.html-body a { color: #f5c518 !important; }
+
+.html-body img { max-width: 100% !important; }
 </style>

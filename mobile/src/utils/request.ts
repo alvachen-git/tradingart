@@ -3,7 +3,8 @@
  * Bearer Token 格式: "username:raw_uuid"
  */
 
-export const API_BASE = 'https://api.aiprota.com'
+// 本地开发用 localhost，上线前改回 'https://api.aiprota.com'
+export const API_BASE = 'http://localhost:8001'
 
 function getToken(): string {
   return uni.getStorageSync('token') || ''
