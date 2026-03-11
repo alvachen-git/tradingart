@@ -9,10 +9,11 @@
 import pandas as pd
 import os
 import time
+import re
 from datetime import datetime
 from sqlalchemy import create_engine, text
 from dotenv import load_dotenv
-from langchain_community.chat_models import ChatTongyi
+from llm_compat import ChatTongyiCompat as ChatTongyi
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.prebuilt import create_react_agent
 
@@ -43,6 +44,126 @@ engine = create_engine(db_url)
 
 # 初始化 LLM
 llm = ChatTongyi(model="qwen-plus", api_key=os.getenv("DASHSCOPE_API_KEY"))
+
+# 商品卡片发布前校验配置（仅校验“商品期货全景”中的支撑/压力口径）
+COMMODITY_VALIDATION_RULES = {
+    "黄金": {"min": 200, "max": 2000, "units": ["元", "元/克", "元/千克"]},
+    "白银": {"min": 2000, "max": 50000, "units": ["元", "元/千克", "元/公斤"]},
+    "原油": {"min": 100, "max": 1500, "units": ["元", "元/桶"]},
+    "铜": {"min": 20000, "max": 150000, "units": ["元", "元/吨"]},
+    "碳酸锂": {"min": 30000, "max": 500000, "units": ["元", "万元", "元/吨", "万元/吨"]},
+    "铁矿石": {"min": 200, "max": 3000, "units": ["元", "元/吨"]},
+    "豆粕": {"min": 1500, "max": 10000, "units": ["元", "元/吨"]},
+    "橡胶": {"min": 5000, "max": 30000, "units": ["元", "元/吨"]},
+    "棉花": {"min": 8000, "max": 30000, "units": ["元", "元/吨"]},
+    "PTA": {"min": 2500, "max": 15000, "units": ["元", "元/吨"]},
+}
+COMMODITY_INVALID_UNIT_TOKENS = ["美元", "美金", "usd", "US$", "$"]
+MAX_REWRITE_ROUNDS = 2
+
+
+def _extract_first_price(value_text: str):
+    """从文本中提取第一个价格数字；支持逗号与“万”单位。"""
+    if not value_text:
+        return None
+    m = re.search(r"(-?\d[\d,]*(?:\.\d+)?)", value_text)
+    if not m:
+        return None
+    try:
+        price = float(m.group(1).replace(",", ""))
+        if "万" in value_text:
+            price *= 10000
+        return price
+    except Exception:
+        return None
+
+
+def _check_unit_valid(value_text: str, allowed_units: list) -> bool:
+    """单位白名单校验：必须是人民币口径，且不能含美元相关描述。"""
+    if not value_text:
+        return False
+    lower_text = value_text.lower()
+    if any(token.lower() in lower_text for token in COMMODITY_INVALID_UNIT_TOKENS):
+        return False
+    return any(unit in value_text for unit in allowed_units)
+
+
+def validate_commodity_cards(html: str):
+    """
+    校验商品卡片的支撑/压力字段是否合理：
+    1) 单位白名单（人民币口径）；
+    2) 价格范围；
+    3) 支撑 < 压力；
+    """
+    anomalies = []
+    if not html:
+        return False, ["HTML为空"]
+
+    for commodity, rule in COMMODITY_VALIDATION_RULES.items():
+        pattern = re.compile(
+            rf"{re.escape(commodity)}(.{{0,450}}?)支撑[：:]\s*(?P<support>[^<\n|｜]+)\s*[|｜]\s*压力[：:]\s*(?P<pressure>[^<\n]+)",
+            re.S
+        )
+        m = pattern.search(html)
+        if not m:
+            anomalies.append(f"{commodity} 缺少“支撑|压力”字段")
+            continue
+
+        support_text = m.group("support").strip()
+        pressure_text = m.group("pressure").strip()
+
+        if not _check_unit_valid(support_text, rule["units"]):
+            anomalies.append(f"{commodity} 支撑单位异常: {support_text}")
+        if not _check_unit_valid(pressure_text, rule["units"]):
+            anomalies.append(f"{commodity} 压力单位异常: {pressure_text}")
+
+        support_price = _extract_first_price(support_text)
+        pressure_price = _extract_first_price(pressure_text)
+
+        if support_price is None:
+            anomalies.append(f"{commodity} 支撑价无法解析: {support_text}")
+            continue
+        if pressure_price is None:
+            anomalies.append(f"{commodity} 压力价无法解析: {pressure_text}")
+            continue
+
+        if not (rule["min"] <= support_price <= rule["max"]):
+            anomalies.append(f"{commodity} 支撑价超范围: {support_price:.2f}")
+        if not (rule["min"] <= pressure_price <= rule["max"]):
+            anomalies.append(f"{commodity} 压力价超范围: {pressure_price:.2f}")
+        if support_price >= pressure_price:
+            anomalies.append(
+                f"{commodity} 支撑/压力关系异常: 支撑={support_price:.2f}, 压力={pressure_price:.2f}"
+            )
+
+    return len(anomalies) == 0, anomalies
+
+
+def _rewrite_report_after_validation(raw_material: str, html: str, anomalies: list, round_idx: int) -> str:
+    """当商品卡片校验失败时，提醒 LLM 定向重写整份 HTML。"""
+    anomaly_text = "\n".join([f"- {x}" for x in anomalies])
+    rewrite_prompt = f"""
+你生成的《每日深度复盘》HTML存在商品卡片数据错误，请完整重写并修复。
+
+【第{round_idx}轮校验发现的问题】
+{anomaly_text}
+
+【强制要求】
+1. 必须是完整HTML（无Markdown代码块）。
+2. 商品期货全景必须保留10个商品卡片，且每个卡片都含“支撑：X | 压力：Y”。
+3. 单位必须为中国内盘人民币口径（元/元/吨/元/克/万元），严禁出现美元/美金/USD。
+4. 每个商品必须满足“支撑 < 压力”，且价位要落在合理区间。
+5. 趋势判断（看多/看空/震荡）仍由你根据素材自主判断。
+6. 其他板块风格与结构尽量保持原有质量。
+
+【记者素材】
+{raw_material}
+
+【你上一次输出的HTML】
+{html}
+"""
+    res = llm.invoke([HumanMessage(content=rewrite_prompt)])
+    return res.content.replace("```html", "").replace("```", "").strip()
 
 
 # ==========================================
@@ -439,6 +560,24 @@ def draft_report(raw_material):
 
     res = llm.invoke([HumanMessage(content=prompt)])
     html = res.content.replace("```html", "").replace("```", "").strip()
+
+    # 发布前商品卡片校验：异常则提醒 LLM 重写
+    is_valid, anomalies = validate_commodity_cards(html)
+    for i in range(1, MAX_REWRITE_ROUNDS + 1):
+        if is_valid:
+            break
+        print(f"⚠️ [发布前校验] 商品卡片异常，触发重写（第{i}轮）")
+        for a in anomalies[:8]:
+            print(f"   - {a}")
+        html = _rewrite_report_after_validation(raw_material, html, anomalies, i)
+        is_valid, anomalies = validate_commodity_cards(html)
+
+    if not is_valid:
+        print("❌ [发布前校验] 商品卡片校验仍未通过，终止发布。")
+        for a in anomalies[:12]:
+            print(f"   - {a}")
+        return ""
+
     return html
 
 
