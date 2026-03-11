@@ -908,6 +908,7 @@ if st.session_state.get('settlement_pending') and not st.session_state.get('sett
     st.session_state['just_finished_game_id'] = game_id
 
     new_achievements = []
+    review_summary = {}
     try:
         if game_id:
             game_info = kg.get_game_info(game_id)
@@ -928,6 +929,24 @@ if st.session_state.get('settlement_pending') and not st.session_state.get('sett
                         max_drawdown=max_drawdown,
                         leverage=leverage_used
                     ) or []
+                    try:
+                        analysis_payload = kg.get_game_analysis(
+                            game_id=game_id,
+                            viewer_id=game_info['user_id'],
+                            target_user=game_info['user_id'],
+                        )
+                        if analysis_payload.get("ok"):
+                            report = analysis_payload.get("report") or {}
+                            review_summary = {
+                                "overall_score": float(report.get("overall_score") or 0),
+                                "direction_score": float(report.get("direction_score") or 0),
+                                "risk_score": float(report.get("risk_score") or 0),
+                                "execution_score": float(report.get("execution_score") or 0),
+                                "mistakes": list(report.get("mistakes") or []),
+                                "ai_status": str(report.get("ai_status") or ""),
+                            }
+                    except Exception as review_err:
+                        print(f"读取复盘摘要失败: {review_err}")
     except Exception as e:
         print(f"结算游戏失败: {e}")
 
@@ -941,6 +960,7 @@ if st.session_state.get('settlement_pending') and not st.session_state.get('sett
         'symbol_name': symbol_name,
         'symbol_type': symbol_type,
         'new_achievements': new_achievements,
+        'review_summary': review_summary,
     }
     st.session_state['settlement_pending'] = None
     # 避免“处理中动画”和“结算页”出现在同一轮渲染中
@@ -958,6 +978,7 @@ if st.session_state.get('settlement_view'):
     symbol_name = view.get('symbol_name', '未知')
     symbol_type = view.get('symbol_type', 'stock')
     new_achievements = view.get('new_achievements') or []
+    review_summary = view.get('review_summary') or {}
     uid = st.session_state.get('user_id')
     saved_games = st.session_state.get('feedback_saved_games') or []
     feedback_done = str(game_id) in saved_games
@@ -992,7 +1013,32 @@ if st.session_state.get('settlement_view'):
         else:
             st.caption("本局暂无新成就解锁。")
 
-        col_feedback, col_replay = st.columns(2)
+        if review_summary:
+            score_text = f"{float(review_summary.get('overall_score', 0)):.1f}"
+            ds = float(review_summary.get('direction_score', 0))
+            rs = float(review_summary.get('risk_score', 0))
+            es = float(review_summary.get('execution_score', 0))
+            mistakes = review_summary.get('mistakes') or []
+            top_mistakes = "、".join([str((m or {}).get('title') or (m or {}).get('tag') or '') for m in mistakes[:2]]) or "暂无"
+            ai_status = str(review_summary.get('ai_status') or "")
+            st.markdown(
+                f"""
+                <div class="game-guide-card" style="margin-top:12px;">
+                    <div class="game-guide-title">🧠 体系复盘摘要</div>
+                    <div style="display:flex;gap:22px;flex-wrap:wrap;">
+                        <div><span style="color:#94a3b8;">总分</span><div style="font-size:22px;font-weight:800;color:#e5e7eb;">{score_text}</div></div>
+                        <div><span style="color:#94a3b8;">方向分</span><div style="font-size:20px;font-weight:700;color:#e5e7eb;">{ds:.1f}</div></div>
+                        <div><span style="color:#94a3b8;">风险分</span><div style="font-size:20px;font-weight:700;color:#e5e7eb;">{rs:.1f}</div></div>
+                        <div><span style="color:#94a3b8;">执行分</span><div style="font-size:20px;font-weight:700;color:#e5e7eb;">{es:.1f}</div></div>
+                    </div>
+                    <div style="margin-top:10px;color:#cbd5e1;">主要问题：{top_mistakes}</div>
+                    <div style="margin-top:6px;color:#64748b;font-size:12px;">AI状态：{ai_status or 'rule_only'}（按需生成）</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+        col_feedback, col_review, col_replay = st.columns(3)
         with col_feedback:
             feedback_label = "反馈已提交" if feedback_done else "反馈建议"
             if st.button(feedback_label, use_container_width=True, disabled=feedback_done):
@@ -1001,6 +1047,10 @@ if st.session_state.get('settlement_view'):
                 else:
                     st.session_state['feedback_inline_open'] = True
                     st.rerun()
+        with col_review:
+            if st.button("📋 数据复盘", use_container_width=True):
+                st.session_state["kline_review_focus_game_id"] = int(game_id or 0)
+                st.switch_page("pages/19_K线复盘.py")
 
         if st.session_state.get('feedback_inline_open') and not feedback_done:
             with st.form(f"feedback_form_inline_{game_id}"):
