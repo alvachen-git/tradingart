@@ -45,96 +45,62 @@ engine = create_engine(db_url)
 # 初始化 LLM
 llm = ChatTongyi(model="qwen-plus", api_key=os.getenv("DASHSCOPE_API_KEY"))
 
-# 商品卡片发布前校验配置（仅校验“商品期货全景”中的支撑/压力口径）
-COMMODITY_VALIDATION_RULES = {
-    "黄金": {"min": 200, "max": 2000, "units": ["元", "元/克", "元/千克"]},
-    "白银": {"min": 2000, "max": 50000, "units": ["元", "元/千克", "元/公斤"]},
-    "原油": {"min": 100, "max": 1500, "units": ["元", "元/桶"]},
-    "铜": {"min": 20000, "max": 150000, "units": ["元", "元/吨"]},
-    "碳酸锂": {"min": 30000, "max": 500000, "units": ["元", "万元", "元/吨", "万元/吨"]},
-    "铁矿石": {"min": 200, "max": 3000, "units": ["元", "元/吨"]},
-    "豆粕": {"min": 1500, "max": 10000, "units": ["元", "元/吨"]},
-    "橡胶": {"min": 5000, "max": 30000, "units": ["元", "元/吨"]},
-    "棉花": {"min": 8000, "max": 30000, "units": ["元", "元/吨"]},
-    "PTA": {"min": 2500, "max": 15000, "units": ["元", "元/吨"]},
-}
-COMMODITY_INVALID_UNIT_TOKENS = ["美元", "美金", "usd", "US$", "$"]
+# 商品卡片发布前校验配置（仅校验“商品期货全景”中的隐含波动率口径）
+COMMODITY_CARD_LIST = [
+    "黄金", "白银", "原油", "铜", "碳酸锂",
+    "铁矿石", "豆粕", "橡胶", "棉花", "PTA",
+]
+COMMODITY_IV_LEVEL_TOKENS = ["极低", "低", "偏低", "中", "中等", "偏高", "高", "极高"]
+COMMODITY_IV_INVALID_TOKENS = ["无数据", "N/A", "未知", "None", "--"]
 MAX_REWRITE_ROUNDS = 2
 
 
-def _extract_first_price(value_text: str):
-    """从文本中提取第一个价格数字；支持逗号与“万”单位。"""
+def _extract_first_percent(value_text: str):
+    """从文本中提取第一个百分比数值（如 42.5% -> 42.5）。"""
     if not value_text:
         return None
-    m = re.search(r"(-?\d[\d,]*(?:\.\d+)?)", value_text)
+    m = re.search(r"(-?\d+(?:\.\d+)?)\s*%", value_text)
     if not m:
         return None
     try:
-        price = float(m.group(1).replace(",", ""))
-        if "万" in value_text:
-            price *= 10000
-        return price
+        return float(m.group(1))
     except Exception:
         return None
 
 
-def _check_unit_valid(value_text: str, allowed_units: list) -> bool:
-    """单位白名单校验：必须是人民币口径，且不能含美元相关描述。"""
-    if not value_text:
-        return False
-    lower_text = value_text.lower()
-    if any(token.lower() in lower_text for token in COMMODITY_INVALID_UNIT_TOKENS):
-        return False
-    return any(unit in value_text for unit in allowed_units)
-
-
 def validate_commodity_cards(html: str):
     """
-    校验商品卡片的支撑/压力字段是否合理：
-    1) 单位白名单（人民币口径）；
-    2) 价格范围；
-    3) 支撑 < 压力；
+    校验商品卡片的隐含波动率字段是否合理：
+    1) 必须包含“隐含波动率/隐波/IV”字段；
+    2) 必须给出高/中/低等级描述；
+    3) 若给出百分比，必须在 0%~300% 区间。
     """
     anomalies = []
     if not html:
         return False, ["HTML为空"]
 
-    for commodity, rule in COMMODITY_VALIDATION_RULES.items():
+    for commodity in COMMODITY_CARD_LIST:
         pattern = re.compile(
-            rf"{re.escape(commodity)}(.{{0,450}}?)支撑[：:]\s*(?P<support>[^<\n|｜]+)\s*[|｜]\s*压力[：:]\s*(?P<pressure>[^<\n]+)",
-            re.S
+            rf"{re.escape(commodity)}(.{{0,500}}?)(?:隐含波动率|隐波|IV)[：:]\s*(?P<iv_text>[^<\n]+)",
+            re.S | re.I
         )
         m = pattern.search(html)
         if not m:
-            anomalies.append(f"{commodity} 缺少“支撑|压力”字段")
+            anomalies.append(f"{commodity} 缺少“隐含波动率”字段")
             continue
 
-        support_text = m.group("support").strip()
-        pressure_text = m.group("pressure").strip()
+        iv_text = m.group("iv_text").strip()
+        lower_text = iv_text.lower()
 
-        if not _check_unit_valid(support_text, rule["units"]):
-            anomalies.append(f"{commodity} 支撑单位异常: {support_text}")
-        if not _check_unit_valid(pressure_text, rule["units"]):
-            anomalies.append(f"{commodity} 压力单位异常: {pressure_text}")
+        if any(token.lower() in lower_text for token in COMMODITY_IV_INVALID_TOKENS):
+            anomalies.append(f"{commodity} IV字段无效: {iv_text}")
 
-        support_price = _extract_first_price(support_text)
-        pressure_price = _extract_first_price(pressure_text)
+        if not any(token in iv_text for token in COMMODITY_IV_LEVEL_TOKENS):
+            anomalies.append(f"{commodity} IV缺少等级描述(高/中/低): {iv_text}")
 
-        if support_price is None:
-            anomalies.append(f"{commodity} 支撑价无法解析: {support_text}")
-            continue
-        if pressure_price is None:
-            anomalies.append(f"{commodity} 压力价无法解析: {pressure_text}")
-            continue
-
-        if not (rule["min"] <= support_price <= rule["max"]):
-            anomalies.append(f"{commodity} 支撑价超范围: {support_price:.2f}")
-        if not (rule["min"] <= pressure_price <= rule["max"]):
-            anomalies.append(f"{commodity} 压力价超范围: {pressure_price:.2f}")
-        if support_price >= pressure_price:
-            anomalies.append(
-                f"{commodity} 支撑/压力关系异常: 支撑={support_price:.2f}, 压力={pressure_price:.2f}"
-            )
+        iv_percent = _extract_first_percent(iv_text)
+        if iv_percent is not None and not (0 <= iv_percent <= 300):
+            anomalies.append(f"{commodity} IV百分比超范围: {iv_percent:.2f}%")
 
     return len(anomalies) == 0, anomalies
 
@@ -150,11 +116,12 @@ def _rewrite_report_after_validation(raw_material: str, html: str, anomalies: li
 
 【强制要求】
 1. 必须是完整HTML（无Markdown代码块）。
-2. 商品期货全景必须保留10个商品卡片，且每个卡片都含“支撑：X | 压力：Y”。
-3. 单位必须为中国内盘人民币口径（元/元/吨/元/克/万元），严禁出现美元/美金/USD。
-4. 每个商品必须满足“支撑 < 压力”，且价位要落在合理区间。
-5. 趋势判断（看多/看空/震荡）仍由你根据素材自主判断。
-6. 其他板块风格与结构尽量保持原有质量。
+2. 商品期货全景必须保留10个商品卡片，且每个卡片都含“隐含波动率：X”字段。
+3. 隐含波动率字段必须体现“高/中/低”等级（可写成“偏高/偏低/中等/极高/极低”）。
+4. 若写具体数值，必须是百分比格式（例如 42.5%），并保持合理范围。
+5. 不要再写“支撑：... | 压力：...”这一行。
+6. 趋势判断（看多/看空/震荡）仍由你根据素材自主判断。
+7. 其他板块风格与结构尽量保持原有质量。
 
 【记者素材】
 {raw_material}
@@ -245,7 +212,7 @@ def collect_data_via_agent():
     对每个品种，记录：
     - 当前趋势（多/空/震荡）
     - K线形态（如大阳线、十字星、吞噬等）
-    - 关键支撑/压力位
+    - 通过 get_commodity_iv_info 获取并记录“当前隐含波动率水平（高/中/低）”
     - 你的短期判断
 
     ## 第六步：ETF期权分析 (Options)
@@ -277,7 +244,7 @@ def collect_data_via_agent():
         trigger_msg = """开始今天的市场扫描任务，请确保：
         1. 覆盖宏观、资金、期权和选股四个维度
         2. ⚠️ 必须完成 10 个商品期货的技术分析（黄金、白银、原油、铜、铁矿石、碳酸锂、豆粕、橡胶、棉花、PTA）
-        3. 每个商品都要给出趋势判断和关键点位
+        3. 每个商品都要给出趋势判断和隐含波动率水平（高/中/低）
         """
 
         result = reporter_agent.invoke(
@@ -456,7 +423,7 @@ def draft_report(raw_material):
               <span style="background:#dc2626; color:white; padding:3px 12px; border-radius:12px; font-size:12px; font-weight:500;">看多</span>
             </div>
             <p style="color:#94a3b8; font-size:12px; margin:0; line-height:1.6;">
-              形态：xxx<br>支撑：xxx | 压力：xxx
+              形态：xxx<br>隐含波动率：xx%（中）
             </p>
           </div>
         </td>
@@ -552,6 +519,8 @@ def draft_report(raw_material):
 
     ## 9. 内容要求
     - 商品期货全景：必须包含 10 个商品卡片（5行2列）
+    - 商品卡片第二行必须展示“隐含波动率：xx%（高/中/低）”或“隐含波动率：高/中/低”
+    - 商品卡片不要再出现“支撑/压力”字段
     - 期权IV：用进度条可视化
     - 每日选的牛股或风险警示股，除了说明基本面原因，也要搭配说明K线技术面
     - 数据必须来自素材，不要编造
