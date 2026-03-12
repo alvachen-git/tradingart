@@ -1,4 +1,4 @@
-﻿from typing import TypedDict, Annotated, List, Union, Literal
+from typing import TypedDict, Annotated, List, Union, Literal
 from datetime import datetime
 import random
 import operator
@@ -13,8 +13,8 @@ from macro_tools import get_macro_indicator, get_macro_overview, analyze_yield_c
 from pydantic import BaseModel, Field
 from langgraph.graph import StateGraph, END
 
-# --- 寮曞叆浣犵殑宸ュ叿搴?---
-# 璇风‘淇濊繖浜涙枃浠跺悕鍜屼綘椤圭洰閲岀殑涓€鑷?
+# --- 引入你的工具库 ---
+# 请确保这些文件名和你项目里的一致
 from chart_annotation_tools import draw_pattern_annotation_chart, draw_forecast_chart
 from kline_tools import analyze_kline_pattern
 from screener_tool import search_top_stocks, get_available_patterns
@@ -40,27 +40,27 @@ from portfolio_tools import (
 )
 
 # ==========================================
-# 1. 瀹氫箟鍏变韩璁板繂 (The State)
+# 1. 定义共享记忆 (The State)
 # ==========================================
 class AgentState(TypedDict):
-    # --- 鍩虹淇℃伅 ---
+    # --- 基础信息 ---
     messages: Annotated[List[BaseMessage], operator.add]
     user_query: str
 
-    # --- 璋冨害鎺у埗 ---
-    plan: List[str]  # 浠诲姟闃熷垪锛屽 ["analyst", "monitor"]
-    current_step: str  # 褰撳墠姝ｅ湪鎵ц鐨勬楠?
+    # --- 调度控制 ---
+    plan: List[str]  # 任务队列，如 ["analyst", "monitor"]
+    current_step: str  # 当前正在执行的步骤
 
-    # --- 涓撳缁撹 (榛戞澘) ---
-    symbol: str  # 鏍囩殑浠ｇ爜 (濡?"IM2606")
+    # --- 专家结论 (黑板) ---
+    symbol: str  # 标的代码 (如 "IM2606")
     symbol_name: str
-    trend_signal: str  # "Bullish"(澶?, "Bearish"(绌?, "Neutral"(闇囪崱)
-    technical_summary: str  # 渚嬪 "鍑虹幇澶ч槼绾跨獊鐮达紝涓斿潎绾垮澶存帓鍒?
-    key_levels: str  # "鏀拺3400, 鍘嬪姏3600"
-    fund_data: str  # 璧勯噾娴佸悜鎻忚堪
-    news_summary: str  # 鏂伴椈鎽樿
-    option_strategy: str  # 鏈熸潈绛栫暐寤鸿
-    chart_img: str  # 鍥剧墖璺緞
+    trend_signal: str  # "Bullish"(多), "Bearish"(空), "Neutral"(震荡)
+    technical_summary: str  # 例如 "出现大阳线突破，且均线多头排列"
+    key_levels: str  # "支撑3400, 压力3600"
+    fund_data: str  # 资金流向描述
+    news_summary: str  # 新闻摘要
+    option_strategy: str  # 期权策略建议
+    chart_img: str  # 图片路径
     risk_preference: str
     knowledge_context: str
     memory_context: str
@@ -68,64 +68,64 @@ class AgentState(TypedDict):
     recent_context: str
     conversation_id: str
 
-    news_summary: str  # 鎯呮姤鍛樺～鍏ワ細鏂伴椈鎽樿 (CPI/闈炲啘/缇庤仈鍌?
-    macro_view: str  # 瀹忚鍒嗘瀽甯堝～鍏ワ細瀹忚瀹氳皟 (瀹芥澗/绱х缉)
-    macro_chart: str  # 瀹忚鍒嗘瀽甯堝～鍏ワ細鐢熸垚鐨勫畯瑙傚姣斿浘璺緞
+    news_summary: str  # 情报员填入：新闻摘要 (CPI/非农/美联储)
+    macro_view: str  # 宏观分析师填入：宏观定调 (宽松/紧缩)
+    macro_chart: str  # 宏观分析师填入：生成的宏观对比图路径
 
-    # --- 鎸佷粨鐩稿叧 (Portfolio Analyst) ---
-    user_id: str  # 鐢ㄦ埛ID
-    has_portfolio: bool  # 鏄惁鏈夋寔浠撴暟鎹?
-    portfolio_summary: str  # 鎸佷粨鎽樿
-    portfolio_risks: str  # 椋庨櫓鎻愮ず
-    trading_style: str  # 浜ゆ槗椋庢牸
-    portfolio_top_corr_index: str  # 鏈€鐩稿叧鎸囨暟鍚嶇О
-    portfolio_top_corr_value: str  # 鏈€鐩稿叧鎸囨暟鐨勭浉鍏崇郴鏁?
+    # --- 持仓相关 (Portfolio Analyst) ---
+    user_id: str  # 用户ID
+    has_portfolio: bool  # 是否有持仓数据
+    portfolio_summary: str  # 持仓摘要
+    portfolio_risks: str  # 风险提示
+    trading_style: str  # 交易风格
+    portfolio_top_corr_index: str  # 最相关指数名称
+    portfolio_top_corr_value: str  # 最相关指数的相关系数
 
 
-# 鏈熸潈鍚堢害涔樻暟琛紙姣忓紶鏈熸潈瀵瑰簲鐨勬爣鐨勬暟閲忥級
+# 期权合约乘数表（每张期权对应的标的数量）
 OPTION_MULTIPLIER = {
-    # ETF鏈熸潈 (浠?
-    "510050": (10000, "浠?), "510300": (10000, "浠?), "510500": (10000, "浠?),
-    "159901": (10000, "浠?), "159915": (10000, "浠?), "159919": (10000, "浠?),
-    "159922": (10000, "浠?), "588000": (10000, "浠?), "588080": (10000, "浠?),
+    # ETF期权 (份)
+    "510050": (10000, "份"), "510300": (10000, "份"), "510500": (10000, "份"),
+    "159901": (10000, "份"), "159915": (10000, "份"), "159919": (10000, "份"),
+    "159922": (10000, "份"), "588000": (10000, "份"), "588080": (10000, "份"),
 
-    # 鑲℃寚鏈熸潈 (鐐姑?00鍏?
-    "IO": (100, "鐐?), "MO": (100, "鐐?), "HO": (100, "鐐?),
+    # 股指期权 (点×100元)
+    "IO": (100, "点"), "MO": (100, "点"), "HO": (100, "点"),
 
-    # 璐甸噾灞?
-    "AU": (1000, "鍏?), "AG": (15, "鍗冨厠"),
+    # 贵金属
+    "AU": (1000, "克"), "AG": (15, "千克"),
 
-    # 鏈夎壊
-    "CU": (5, "鍚?), "AL": (5, "鍚?), "ZN": (5, "鍚?), "PB": (5, "鍚?), "SN": (1, "鍚?), "NI": (1, "鍚?),
+    # 有色
+    "CU": (5, "吨"), "AL": (5, "吨"), "ZN": (5, "吨"), "PB": (5, "吨"), "SN": (1, "吨"), "NI": (1, "吨"),
 
-    # 榛戣壊
-    "I": (100, "鍚?), "RB": (10, "鍚?), "HC": (10, "鍚?), "J": (100, "鍚?), "JM": (60, "鍚?),"SM": (5, "鍚?),"SF": (5, "鍚?),
-    "PS": (3, "鍚?),"LC": (1, "鍚?),"SI": (5, "鍚?),"PT": (1000, "鍚?),"PD": (1000, "鍚?),"SH": (30, "鍚?),"AO": (20, "鍚?),
+    # 黑色
+    "I": (100, "吨"), "RB": (10, "吨"), "HC": (10, "吨"), "J": (100, "吨"), "JM": (60, "吨"),"SM": (5, "吨"),"SF": (5, "吨"),
+    "PS": (3, "吨"),"LC": (1, "吨"),"SI": (5, "吨"),"PT": (1000, "吨"),"PD": (1000, "吨"),"SH": (30, "吨"),"AO": (20, "吨"),
 
-    # 鑳藉寲
-    "SC": (1000, "妗?), "FU": (10, "鍚?), "LU": (10, "鍚?), "PG": (20, "鍚?),
-    "MA": (10, "鍚?), "TA": (5, "鍚?), "PP": (5, "鍚?), "L": (5, "鍚?),
-    "V": (5, "鍚?), "EB": (5, "鍚?), "EG": (10, "鍚?), "RU": (10, "鍚?), "NR": (10, "鍚?),"BR": (5, "鍚?),
-    "BU": (10, "鍚?), "SA": (20, "鍚?), "FG": (20, "鍚?), "UR": (20, "鍚?),
+    # 能化
+    "SC": (1000, "桶"), "FU": (10, "吨"), "LU": (10, "吨"), "PG": (20, "吨"),
+    "MA": (10, "吨"), "TA": (5, "吨"), "PP": (5, "吨"), "L": (5, "吨"),
+    "V": (5, "吨"), "EB": (5, "吨"), "EG": (10, "吨"), "RU": (10, "吨"), "NR": (10, "吨"),"BR": (5, "吨"),
+    "BU": (10, "吨"), "SA": (20, "吨"), "FG": (20, "吨"), "UR": (20, "吨"),
 
-    # 鍐滀骇鍝?
-    "M": (10, "鍚?), "Y": (10, "鍚?), "P": (10, "鍚?), "OI": (10, "鍚?), "RM": (10, "鍚?),
-    "C": (10, "鍚?), "A": (10, "鍚?), "CF": (5, "鍚?), "SR": (10, "鍚?),
-    "AP": (10, "鍚?), "PK": (5, "鍚?), "CJ": (5, "鍚?), "LH": (16, "鍚?),
+    # 农产品
+    "M": (10, "吨"), "Y": (10, "吨"), "P": (10, "吨"), "OI": (10, "吨"), "RM": (10, "吨"),
+    "C": (10, "吨"), "A": (10, "吨"), "CF": (5, "吨"), "SR": (10, "吨"),
+    "AP": (10, "吨"), "PK": (5, "吨"), "CJ": (5, "吨"), "LH": (16, "吨"),
 }
 
 
 def get_option_multiplier(symbol: str) -> str:
     """
-    鏍规嵁鏍囩殑浠ｇ爜鑾峰彇鏈熸潈鍚堢害涔樻暟锛岃繑鍥炵簿绠€鐨勬彁绀哄瓧绗︿覆
-    鏀寔鍗曞搧绉嶅拰澶氬搧绉嶏紙閫楀彿鍒嗛殧锛?
+    根据标的代码获取期权合约乘数，返回精简的提示字符串
+    支持单品种和多品种（逗号分隔）
     """
     import re
     if not symbol:
         return ""
 
-    # 澶勭悊澶氬搧绉嶆儏鍐?(濡?"M,SR" 鎴?"璞嗙矔,鐧界硸")
-    symbols = re.split(r'[,锛屻€?\s]+', symbol.strip())
+    # 处理多品种情况 (如 "M,SR" 或 "豆粕,白糖")
+    symbols = re.split(r'[,，、/\s]+', symbol.strip())
     results = []
 
     for sym in symbols:
@@ -133,22 +133,22 @@ def get_option_multiplier(symbol: str) -> str:
         if not sym:
             continue
 
-        # 1. 鐩存帴鍖归厤 ETF (6浣嶆暟瀛?
+        # 1. 直接匹配 ETF (6位数字)
         if sym.isdigit() and len(sym) == 6:
             if sym in OPTION_MULTIPLIER:
                 m, u = OPTION_MULTIPLIER[sym]
                 results.append(f"{sym}={m}{u}")
             else:
-                results.append(f"{sym}=10000浠?)  # ETF榛樿
+                results.append(f"{sym}=10000份")  # ETF默认
             continue
 
-        # 2. 鑲℃寚鏈熸潈 (IO/MO/HO寮€澶?
+        # 2. 股指期权 (IO/MO/HO开头)
         for prefix in ["IO", "MO", "HO"]:
             if sym.startswith(prefix):
-                results.append(f"{prefix}=100鐐?姣忕偣100鍏?")
+                results.append(f"{prefix}=100点(每点100元)")
                 break
         else:
-            # 3. 鍟嗗搧鏈熸潈 - 鎻愬彇瀛楁瘝閮ㄥ垎
+            # 3. 商品期权 - 提取字母部分
             match = re.match(r'^([A-Za-z]+)', sym)
             if match:
                 code = match.group(1).upper()
@@ -159,105 +159,105 @@ def get_option_multiplier(symbol: str) -> str:
     if not results:
         return ""
 
-    # 杩斿洖绮剧畝鏍煎紡
-    return "銆?.join(results)
+    # 返回精简格式
+    return "、".join(results)
 
 
 # ==========================================
-# 2. 瀹氫箟 Supervisor (澶х瀹?
+# 2. 定义 Supervisor (大管家)
 # ==========================================
-# 瀹氫箟杈撳嚭缁撴瀯锛屽己鍒?LLM 杩斿洖 JSON 鏍煎紡鐨勪换鍔″垪琛?
+# 定义输出结构，强制 LLM 返回 JSON 格式的任务列表
 class PlanningOutput(BaseModel):
     plan: List[Literal["analyst", "researcher", "monitor", "strategist", "chatter", "generalist", "screener", "macro_analyst","roaster", "portfolio_analyst"]] = Field(
-        description="鎵ц姝ラ鍒楄〃銆傛敞鎰忎緷璧栧叧绯伙細鏈熸潈(strategist)蹇呴』鎺掑湪鍒嗘瀽(analyst)涔嬪悗銆?
+        description="执行步骤列表。注意依赖关系：期权(strategist)必须排在分析(analyst)之后。"
     )
-    symbol: str = Field(description="鏍稿績鏍囩殑浠ｇ爜銆傚鏋滄槸瀵规瘮闂鎴栨棤娉曟彁鍙栧崟涓€鏍囩殑锛岃鐣欑┖鎴栧～'榛勯噾'", default="")
+    symbol: str = Field(description="核心标的代码。如果是对比问题或无法提取单一标的，请留空或填'黄金'", default="")
 
 
 def supervisor_node(state: AgentState, llm):
     """
-    澶х瀹惰妭鐐癸細鍒嗘瀽鐢ㄦ埛鎰忓浘锛岀敓鎴愪换鍔℃竻鍗?
+    大管家节点：分析用户意图，生成任务清单
     """
     query = state["user_query"]
     messages = state.get("messages", [])
     is_followup = bool(state.get("is_followup", False))
     recent_context = str(state.get("recent_context", "") or "").strip()
     memory_context = str(state.get("memory_context", "") or "").strip()
-    has_portfolio = bool(state.get("has_portfolio", False))  # 馃敟 鏂板锛氳幏鍙栨寔浠撶姸鎬?
+    has_portfolio = bool(state.get("has_portfolio", False))  # 🔥 新增：获取持仓状态
 
     history_text = recent_context
     if not history_text and len(messages) > 1:
-        # 鍏滃簳锛氳嫢鍓嶇鏈紶 recent_context锛岄€€鍥炲埌娑堟伅鍒楄〃鎶藉彇鏈€杩戜袱鏉?
+        # 兜底：若前端未传 recent_context，退回到消息列表抽取最近两条
         history_lines = []
         for msg in messages[:-1]:
             if isinstance(msg, HumanMessage):
-                history_lines.append(f"鐢ㄦ埛: {msg.content[:220]}")
+                history_lines.append(f"用户: {msg.content[:220]}")
             elif isinstance(msg, AIMessage):
                 history_lines.append(f"AI: {msg.content[:220]}")
         if history_lines:
             history_text = "\n".join(history_lines[-2:])
 
-    # 馃敟 鏂板锛氭寔浠撶姸鎬佹彁绀?
-    portfolio_status = f"\n銆愰噸瑕併€戠敤鎴穥'宸蹭笂浼? if has_portfolio else '鏈笂浼?}鎸佷粨鏁版嵁銆? if has_portfolio else ""
+    # 🔥 新增：持仓状态提示
+    portfolio_status = f"\n【重要】用户{'已上传' if has_portfolio else '未上传'}持仓数据。" if has_portfolio else ""
 
     system_prompt = f"""
-    浣犳槸浜ゆ槗鍥㈤槦鐨勪富绠★紝鏍规嵁闂鍒跺畾璁″垝銆?
+    你是交易团队的主管，根据问题制定计划。
     {portfolio_status}
 
-    銆愬彲鐢ㄥ憳宸ャ€?
-    - analyst: 鎶€鏈垎鏋愬笀 (鐪婯绾裤€佸畾瓒嬪娍),鍒嗘瀽濡備綍鎿嶄綔
-    - monitor: 鏁版嵁鐩戞帶鍛?(鐪嬫湡璐ц祫閲戞祦銆佹湡璐у晢鎸佷粨銆佹煡鏈熻揣鎸佷粨閲忋€佹煡浠锋牸)
-    - researcher: 鎯呮姤鐮旂┒鍛?(鐪嬫柊闂汇€佸畯瑙傘€佺儹鐐广€佸湴缂樻斂娌汇€佽揣甯佹斂绛栥€丳olymarket涓婄殑姒傜巼鍒嗘瀽)
-    - strategist: 鏈熸潈绛栫暐鍛?(缁欑瓥鐣ワ紝**蹇呴』渚濊禆 analyst**)
-    - screener: 鑲＄エ澶у笀 (鍗忓姪"鎺ㄨ崘鑲＄エ"銆?閫夎偂"銆佹煡鑲＄エ鎴愪氦閲忋€佽祫閲戞祦)
-    - portfolio_analyst: 鎸佷粨鍒嗘瀽甯?(鍒嗘瀽鐢ㄦ埛鎸佷粨缁撴瀯銆侀闄┿€佷氦鏄撻鏍硷紝缁欎釜鎬у寲寤鸿) {'鉁?鐢ㄦ埛宸蹭笂浼犳寔浠擄紝鍙敤' if has_portfolio else '鉂?鐢ㄦ埛鏈笂浼犳寔浠擄紝涓嶅彲鐢?}
-    - chatter: 鐭ヨ瘑闂瓟鍜岄棽鑱?(渚嬪瑙ｉ噴涓€涓婭V锛屼粈涔堟槸鐗涘競浠峰樊锛?鏈€杩戠編鑱斿偍浠€涔堟椂鍊欏紑浼?)
-    - generalist: 銆愮帇鐗屽垎鏋愬笀銆戝鐞嗗姣?A鍜孊璋佸己)銆佸鍝佺鍒嗘瀽銆佺敾浠峰樊鍥炬垨娣卞害澶嶆潅闂銆?
-    - macro_analyst: 瀹忚绛栫暐甯?(鍒嗘瀽缇庤仈鍌ㄣ€佺編鍊恒€佺編鍏冦€侀€氳儉銆丆PI銆侀潪鍐溿€佺敾鍒╃巼鍥?
-    - roaster: *姣掕垖鍒嗘瀽甯? (褰撶敤鎴疯姹?鍚愭Ы"銆?鎸戞垬鎴?銆?姣掕垖妯″紡"鏃朵娇鐢?銆?
+    【可用员工】
+    - analyst: 技术分析师 (看K线、定趋势),分析如何操作
+    - monitor: 数据监控员 (看期货资金流、期货商持仓、查期货持仓量、查价格)
+    - researcher: 情报研究员 (看新闻、宏观、热点、地缘政治、货币政策、Polymarket上的概率分析)
+    - strategist: 期权策略员 (给策略，**必须依赖 analyst**)
+    - screener: 股票大师 (协助"推荐股票"、"选股"、查股票成交量、资金流)
+    - portfolio_analyst: 持仓分析师 (分析用户持仓结构、风险、交易风格，给个性化建议) {'✅ 用户已上传持仓，可用' if has_portfolio else '❌ 用户未上传持仓，不可用'}
+    - chatter: 知识问答和闲聊 (例如解释一下IV，什么是牛市价差，"最近美联储什么时候开会")
+    - generalist: 【王牌分析师】处理对比(A和B谁强)、多品种分析、画价差图或深度复杂问题。
+    - macro_analyst: 宏观策略师 (分析美联储、美债、美元、通胀、CPI、非农、画利率图)
+    - roaster: *毒舌分析师* (当用户要求"吐槽"、"挑战我"、"毒舌模式"时使用)。
 
-    銆愯皟搴﹁鍒?(涓ユ牸閬靛畧)銆?
-    1. **杩芥眰鏁堢巼**: 闂偂绁ㄦ垚浜ら噺灏卞彧娲?`screener`锛涘彧闂湡璐ф寔浠撻噺鎴栦环鏍煎氨鍙淳 `monitor`锛涘彧闂柊闂绘垨鐑偣灏卞彧娲?`researcher`锛涘彧闂妧鏈垎鏋愬氨鍙淳`analyst`锛涘彧闂鎯呭垎鏋愬氨鍙淳`analyst`銆?
-    2. **鍏ㄥ鏈嶅姟**: 濡傛灉鐢ㄦ埛闂?鍏ㄩ潰鍒嗘瀽"鎴?璇︾粏鍒嗘瀽"锛岄粯璁よ矾寰? ["analyst", "monitor", "researcher","strategist"]銆?
-    3. **鎸佷粨鐩稿叧** (浠呭綋鐢ㄦ埛宸蹭笂浼犳寔浠撴椂): 濡傛灉鐢ㄦ埛鎻愬埌"鎴戠殑鎸佷粨"銆?鎴戠殑鑲＄エ"銆?浠撲綅"銆?鎸佷粨椋庨櫓"銆?鎸佷粨鍒嗘瀽"銆?閫傚悎鎴?銆?涓€у寲寤鸿"銆?鎴戠殑椋庢牸"銆?鎸佷粨寤鸿"銆?璋冧粨"銆?鍔犱粨"銆?鍑忎粨"绛夊叧閿瘝锛?*蹇呴』**娲?`portfolio_analyst`銆?
-    3. **鍗曞搧绉嶆湡鏉冮棶棰?*: "500ETF閫傚悎浠峰樊杩樻槸瑁镐拱"銆?鎺ㄨ崘鐧介摱鏈熸潈绛栫暐" -> 
-       - 鍙鏍囩殑鏄庣‘(500ETF)锛屼笖娑夊強鏈熸潈浜ゆ槗锛屼竴寰嬭蛋娴佹按绾裤€?
-       - Plan: `['analyst', 'strategist']` (蹇呴』鍏堝垎鏋愬啀鍑虹瓥鐣?銆?
-    4. **澶氬搧绉?瀵规瘮**: 闂?鐧介摱鍜岄粍閲戣皝寮?銆?鍒嗘瀽涓€涓嬭灪绾瑰拰鐑嵎" -> 
-       - symbol 濉?"鐧介摱,榛勯噾" (鐢ㄩ€楀彿鍒嗛殧)
-       - plan 娲?`['generalist']` (璁╃帇鐗屽幓澶勭悊澶氬搧绉?銆?
-    5. **瀹忚/澶у畻/璐甸噾灞?*: 
-       - 闂?"鐜板湪瀹忚鐜鎬庝箞鏍?銆?缇庤仈鍌ㄩ檷鎭簡鍚? -> Plan: `['researcher', 'macro_analyst']` (鍏堟壘鏂伴椈锛屽啀鍒嗘瀽鏁版嵁)銆?
-       - 闂?"榛勯噾/鐧介摱/鑳戒拱鍚? -> Plan: `['analyst', 'researcher', 'macro_analyst', 'strategist']` (榛勯噾瀵瑰畯瑙傛瀬搴︽晱鎰燂紝蹇呴』鍔犲畯瑙傚垎鏋?銆?
-       - 闂?"鍒╃巼/缇庡厓璧板娍" -> Plan: `['researcher', 'macro_analyst']`銆?
-    6. **瀹㈡埛鎻愬埌鑲＄エ**锛屼絾娌℃湁鏄庣‘璇存槑鏍囩殑鍚嶅瓧锛岄渶瑕侀€夎偂鏃讹紝鍙?Plan:['screener']
-    7. **鐭ヨ瘑/鐧剧/闂茶亰**: 闂蹇点€侀棶浜哄悕銆侀棶鍚嶈瘝 -> 娲?['chatter']銆?
-    8. 濡傛灉鐢ㄦ埛鐨勯棶棰樺緢妯＄硦 (渚嬪"甯垜鍒嗘瀽涓€涓?锛?榛勯噾鎬庝箞鐪?)锛岃鍏堟淳chatter鍘婚棶娓呮闂 -> plan=['chatter']銆?
-    9. 鍙棶K绾挎垨鎶€鏈潰鍒嗘瀽鏃讹紝鍙娲綼nalyst锛屼笉瑕佸啀娲惧叾浠栦汉
-    10.濡傛灉瀹㈡埛瑕佺敾鍥撅紝娲?`['generalist']` 銆?
+    【调度规则 (严格遵守)】
+    1. **追求效率**: 问股票成交量就只派 `screener`；只问期货持仓量或价格就只派 `monitor`；只问新闻或热点就只派 `researcher`；只问技术分析就只派`analyst`；只问行情分析就只派`analyst`。
+    2. **全套服务**: 如果用户问"全面分析"或"详细分析"，默认路径: ["analyst", "monitor", "researcher","strategist"]。
+    3. **持仓相关** (仅当用户已上传持仓时): 如果用户提到"我的持仓"、"我的股票"、"仓位"、"持仓风险"、"持仓分析"、"适合我"、"个性化建议"、"我的风格"、"持仓建议"、"调仓"、"加仓"、"减仓"等关键词，**必须**派 `portfolio_analyst`。
+    3. **单品种期权问题**: "500ETF适合价差还是裸买"、"推荐白银期权策略" -> 
+       - 只要标的明确(500ETF)，且涉及期权交易，一律走流水线。
+       - Plan: `['analyst', 'strategist']` (必须先分析再出策略)。
+    4. **多品种/对比**: 问"白银和黄金谁强"、"分析一下螺纹和热卷" -> 
+       - symbol 填 "白银,黄金" (用逗号分隔)
+       - plan 派 `['generalist']` (让王牌去处理多品种)。
+    5. **宏观/大宗/贵金属**: 
+       - 问 "现在宏观环境怎么样"、"美联储降息了吗" -> Plan: `['researcher', 'macro_analyst']` (先找新闻，再分析数据)。
+       - 问 "黄金/白银/能买吗" -> Plan: `['analyst', 'researcher', 'macro_analyst', 'strategist']` (黄金对宏观极度敏感，必须加宏观分析)。
+       - 问 "利率/美元走势" -> Plan: `['researcher', 'macro_analyst']`。
+    6. **客户提到股票**，但没有明确说明标的名字，需要选股时，只 Plan:['screener']
+    7. **知识/百科/闲聊**: 问概念、问人名、问名词 -> 派 ['chatter']。
+    8. 如果用户的问题很模糊 (例如"帮我分析一下"，"黄金怎么看")，要先派chatter去问清楚问题 -> plan=['chatter']。
+    9. 只问K线或技术面分析时，只要派analyst，不要再派其他人
+    10.如果客户要画图，派 `['generalist']` 。
     """
 
     if is_followup:
         system_prompt += """
 
-    銆愯繛缁拷闂ā寮忥紙寮虹害鏉燂級銆?
-    1. 褰撳墠闂鏄涓婁竴杞殑杩介棶锛屽繀椤诲厛鎵挎帴涓婁竴杞叧閿粨璁猴紝鍐嶅洖绛斿綋鍓嶉棶棰樸€?
-    2. 鎵挎帴闂浼樺厛娲?`generalist`锛涜嫢涓婁笅鏂囦笉瓒冲垯娲?`chatter` 鍏堟緞娓咃紝涓嶅緱缂栭€犮€?
-    3. 绂佹鎶娾€滅煡璇嗗簱鍛戒腑涓虹┖鈥濆綋浣滈粯璁ゅ洖绛旀ā鏉裤€?
+    【连续追问模式（强约束）】
+    1. 当前问题是对上一轮的追问，必须先承接上一轮关键结论，再回答当前问题。
+    2. 承接问题优先派 `generalist`；若上下文不足则派 `chatter` 先澄清，不得编造。
+    3. 禁止把“知识库命中为空”当作默认回答模板。
         """
 
     full_query = query
     if is_followup:
         full_query = (
-            f"銆愯繛缁拷闂ā寮忋€戞槸\n"
-            f"銆愯繎鏈熷璇濆巻鍙层€慭n{history_text if history_text else '鏃?}\n\n"
-            f"銆愮浉鍏抽暱鏈熻蹇嗐€慭n{memory_context if memory_context else '鏃?}\n\n"
-            f"銆愬綋鍓嶉棶棰樸€慭n{query}"
+            f"【连续追问模式】是\n"
+            f"【近期对话历史】\n{history_text if history_text else '无'}\n\n"
+            f"【相关长期记忆】\n{memory_context if memory_context else '无'}\n\n"
+            f"【当前问题】\n{query}"
         )
     elif history_text:
-        full_query = f"銆愯繎鏈熷璇濆巻鍙层€慭n{history_text}\n\n銆愬綋鍓嶉棶棰樸€慭n{query}"
+        full_query = f"【近期对话历史】\n{history_text}\n\n【当前问题】\n{query}"
 
-    # 浣跨敤 structured_output 寮哄埗杈撳嚭 JSON
+    # 使用 structured_output 强制输出 JSON
     planner = llm.with_structured_output(PlanningOutput)
     prompt = ChatPromptTemplate.from_messages([
         ("system", system_prompt),
@@ -267,19 +267,19 @@ def supervisor_node(state: AgentState, llm):
     chain = prompt | planner
     result = chain.invoke({"query": full_query})
 
-    # 馃敟馃敟馃敟 [鏂板闃插穿婧冩鏌
-    # 濡傛灉 LLM 娌℃湁杩斿洖鏈夋晥鐨勭粨鏋勫寲鏁版嵁 (None)锛岄粯璁よ浆缁?Chatter
+    # 🔥🔥🔥 [新增防崩溃检查]
+    # 如果 LLM 没有返回有效的结构化数据 (None)，默认转给 Chatter
     if not result:
         return {
             "plan": ["chatter"],
             "symbol": "",
-            "messages": [SystemMessage(content="涓荤鏈敓鎴愯鍒掞紝榛樿杞叆闂茶亰")]
+            "messages": [SystemMessage(content="主管未生成计划，默认转入闲聊")]
         }
 
     final_plan = result.plan
 
-    # 鍥炴祴闂 -> 鐩存帴浜ょ粰閫氭墠澶勭悊锛岄伩鍏嶆棤鍏宠妭鐐?
-    if "鍥炴祴" in query or "绛栫暐鍥炴祴" in query:
+    # 回测问题 -> 直接交给通才处理，避免无关节点
+    if "回测" in query or "策略回测" in query:
         final_plan = ["generalist"]
 
     if is_followup:
@@ -290,7 +290,7 @@ def supervisor_node(state: AgentState, llm):
         elif final_plan[0] not in ["generalist", "chatter"]:
             final_plan = ["generalist"] + [p for p in final_plan if p != "generalist"]
 
-    # 鍘婚噸骞朵繚鎸侀『搴忥紝閬垮厤璺敱閲嶅
+    # 去重并保持顺序，避免路由重复
     deduped_plan = []
     for p in final_plan:
         if p not in deduped_plan:
@@ -298,17 +298,17 @@ def supervisor_node(state: AgentState, llm):
     final_plan = deduped_plan
     final_symbol = str(result.symbol).strip()
 
-    # 绠€鍗曠殑姝ｅ垯鍒ゆ柇鏄惁涓?A 鑲′釜鑲′唬鐮?(6寮€澶存勃甯備富鏉?绉戝垱, 0寮€澶存繁甯? 3寮€澶村垱涓氭澘, 8/4寮€澶村寳浜ゆ墍)
-    # ETF 閫氬父鏄?51, 56, 58, 159 寮€澶?
-    # 鏈熻揣 閫氬父鏄?瀛楁瘝寮€澶?
+    # 简单的正则判断是否为 A 股个股代码 (6开头沪市主板/科创, 0开头深市, 3开头创业板, 8/4开头北交所)
+    # ETF 通常是 51, 56, 58, 159 开头
+    # 期货 通常是 字母开头
 
-    # 鎻愬彇绾暟瀛椾唬鐮?
+    # 提取纯数字代码
     match_code = re.search(r'\d{6}', final_symbol)
     if match_code:
         code_num = match_code.group(0)
 
-        # 鍒ゆ柇閫昏緫锛氬鏋滄槸 6/0/3/8/4 寮€澶寸殑6浣嶆暟瀛楋紝瑙嗕负涓偂 -> 鍓旈櫎 strategist
-        # (ETF 涓€鑸槸 5 鎴?1 寮€澶达紝淇濈暀)
+        # 判断逻辑：如果是 6/0/3/8/4 开头的6位数字，视为个股 -> 剔除 strategist
+        # (ETF 一般是 5 或 1 开头，保留)
         if code_num.startswith(('6', '0', '3', '8', '4')):
             if "strategist" in final_plan:
                 final_plan.remove("strategist")
@@ -319,13 +319,13 @@ def supervisor_node(state: AgentState, llm):
     return {
         "plan": final_plan,
         "symbol": final_symbol,
-        "messages": [SystemMessage(content=f"宸插埗瀹氳鍒? {final_plan}")]
+        "messages": [SystemMessage(content=f"已制定计划: {final_plan}")]
     }
 
 
 # ==========================================
-# 馃敟 [鏂板] 鐜嬬墝鍒嗘瀽甯?(Generalist / Fallback)
-# 鑱岃矗锛氬鐞嗗姣斻€佺患鍚堛€佹ā绯婃垨 Supervisor 鎼炰笉瀹氱殑澶嶆潅闂
+# 🔥 [新增] 王牌分析师 (Generalist / Fallback)
+# 职责：处理对比、综合、模糊或 Supervisor 搞不定的复杂问题
 # ==========================================
 def generalist_node(state: AgentState, llm):
     query = state["user_query"]
@@ -333,17 +333,17 @@ def generalist_node(state: AgentState, llm):
     is_followup = bool(state.get("is_followup", False))
     recent_context = str(state.get("recent_context", "") or "").strip()
     mem_context = str(state.get("memory_context", "") or "").strip()
-    current_date = datetime.now().strftime("%Y骞?m鏈?d鏃?%A")
+    current_date = datetime.now().strftime("%Y年%m月%d日 %A")
     context_parts = []
     if recent_context:
-        context_parts.append(f"銆愭渶杩戜袱杞細璇濄€慭n{recent_context}")
+        context_parts.append(f"【最近两轮会话】\n{recent_context}")
     if mem_context:
-        context_parts.append(f"銆愮浉鍏抽暱鏈熻蹇嗐€慭n{mem_context}")
-    followup_context_block = "\n\n".join(context_parts) if context_parts else "鏃?
+        context_parts.append(f"【相关长期记忆】\n{mem_context}")
+    followup_context_block = "\n\n".join(context_parts) if context_parts else "无"
 
     if is_followup and not context_parts:
         return {
-            "messages": [HumanMessage(content="銆愮帇鐗屽垎鏋愩€戞湭妫€绱㈠埌涓婁竴杞叧閿粨璁恒€傝璐村嚭涓婁竴杞粨璁猴紙鏂瑰悜銆佸叧閿綅鎴栫瓥鐣ワ級锛屾垜鍐嶆壙鎺ュ睍寮€銆?)],
+            "messages": [HumanMessage(content="【王牌分析】未检索到上一轮关键结论。请贴出上一轮结论（方向、关键位或策略），我再承接展开。")],
             "chart_img": ""
         }
 
@@ -362,70 +362,70 @@ def generalist_node(state: AgentState, llm):
 
 
     prompt = f"""
-        浣犳槸涓€浣嶇帇鐗岄噺鍖栧垎鏋愬笀銆備氦鏄撶悊蹇垫槸椤哄娍鑰屼负銆?
-        銆愬綋鍓嶆棩鏈熴€戯細{current_date}銆?
-        瀹㈡埛闇€姹傦細{query}銆?
-        鍒嗘瀽鍝佺锛歿symbol_input}銆?
-        銆愯繛缁拷闂ā寮忋€戯細{"鏄? if is_followup else "鍚?}銆?
-        銆愬巻鍙叉壙鎺ヤ笂涓嬫枃銆戯細
+        你是一位王牌量化分析师。交易理念是顺势而为。
+        【当前日期】：{current_date}。
+        客户需求：{query}。
+        分析品种：{symbol_input}。
+        【连续追问模式】：{"是" if is_followup else "否"}。
+        【历史承接上下文】：
         {followup_context_block}
    
         
-        銆愬伐鍏蜂娇鐢ㄨ〃銆?
-        1. **浼板€?渚垮疁/璐靛悧/鎶勫簳** -> get_stock_valuation 
-        2. **瀵规瘮/PK/璋佸己/閫夊摢涓?* -> tool_compare_stocks (澶氳偂妯瘎)
-        3. **瀵瑰啿/鐩稿叧鎬?鑱斿姩** -> tool_stock_correlation_check
-        4. **鍘嗗彶缁熻浠锋牸** -> get_price_statistics
-        5. **鐢诲浘/璧板娍鍥?* -> draw_chart_tool
-        6. **姒傚康/绛栫暐瑙ｉ噴** -> search_investment_knowledge
-        7. 鐩稿叧鎬у垎鏋?-> tool_futures_correlation_check鎴杢ool_stock_correlation_check
-        8. 瀵瑰啿鍒嗘瀽 -> calculate_hedging_beta
-        9. 鏌ユ煇鏈熻揣璧勯噾娴佸姩 -> get_futures_fund_flow
-        10.鏌ュ叏閮ㄦ湡璐ц祫閲戞矇娣€鎺掑悕 -> get_futures_fund_ranking
-        11.鏌ュ晢鍝侀緳铏庢/鏈熻揣鍟嗘寔浠?-> search_broker_holdings_on_date  
-        12.鏌ユ煇鏈熻揣鍟嗘渶杩戞寔浠撳彉鍖栨儏鍐?-> tool_analyze_position_change
-        13.鏌ユ垚浜ら噺鍜屾寔浠撻噺 -> get_volume_oi
-        14.鏌ユ湡璐ф寔浠撻噺鎺掑悕 -> get_futures_oi_ranking
-        15.鏌ユ湡鏉冩尝鍔ㄧ巼-> get_commodity_iv_info
-        16.鏌ユ湡鏉冨悎绾︿环鏍?> tool_query_specific_option
-        17.鏌TF鏈熸潈鏈夊摢浜涘悎绾?> get_etf_option_strikes
-        18.鏌ュ畯瑙傛寚鏍?-> get_macro_indicator
-        19.鏌ュ畯瑙傜幆澧冩€昏 -> get_macro_overview 
-        20.鍒嗘瀽鏀剁泭鐜囨洸绾?-> analyze_yield_curve 
-        21.鏌ュ崟鍙偂绁ㄧ殑鎴愪氦閲忚鎯?-> query_stock_volume
-        22.鏈熸潈绛栫暐鍥炴祴 -> run_option_backtest
+        【工具使用表】
+        1. **估值/便宜/贵吗/抄底** -> get_stock_valuation 
+        2. **对比/PK/谁强/选哪个** -> tool_compare_stocks (多股横评)
+        3. **对冲/相关性/联动** -> tool_stock_correlation_check
+        4. **历史统计价格** -> get_price_statistics
+        5. **画图/走势图** -> draw_chart_tool
+        6. **概念/策略解释** -> search_investment_knowledge
+        7. 相关性分析 -> tool_futures_correlation_check或tool_stock_correlation_check
+        8. 对冲分析 -> calculate_hedging_beta
+        9. 查某期货资金流动 -> get_futures_fund_flow
+        10.查全部期货资金沉淀排名 -> get_futures_fund_ranking
+        11.查商品龙虎榜/期货商持仓 -> search_broker_holdings_on_date  
+        12.查某期货商最近持仓变化情况 -> tool_analyze_position_change
+        13.查成交量和持仓量 -> get_volume_oi
+        14.查期货持仓量排名 -> get_futures_oi_ranking
+        15.查期权波动率-> get_commodity_iv_info
+        16.查期权合约价格-> tool_query_specific_option
+        17.查ETF期权有哪些合约-> get_etf_option_strikes
+        18.查宏观指标 -> get_macro_indicator
+        19.查宏观环境总览 -> get_macro_overview 
+        20.分析收益率曲线 -> analyze_yield_curve 
+        21.查单只股票的成交量详情 -> query_stock_volume
+        22.期权策略回测 -> run_option_backtest
 
-        銆愯涓哄噯鍒欍€?
-        1. 鍏堢粰缁撹锛岀劧鍚庤В閲婄悊鐢便€?
-        2. 涓嶈绠€鍗曞杩帮紝瑕佹湁娣卞害娲炲療銆?
-        3. 绂佹绌鸿皥锛屽繀椤荤敤宸ュ叿鑾峰彇鐨勬暟鎹璇濄€?
-        4. 涓嶈缂栭€犳暟鎹紝濡傛灉娌℃煡鍒版暟鎹氨璇翠笉鐭ラ亾銆?
-        5. 鑻ュ浜庤繛缁拷闂ā寮忥紝绗竴娈靛繀椤诲厛鎵挎帴涓婁竴杞叧閿粨璁猴紝鍐嶅洖绛斿綋鍓嶉棶棰樸€?
+        【行为准则】
+        1. 先给结论，然后解释理由。
+        2. 不要简单复述，要有深度洞察。
+        3. 禁止空谈，必须用工具获取的数据说话。
+        4. 不要编造数据，如果没查到数据就说不知道。
+        5. 若处于连续追问模式，第一段必须先承接上一轮关键结论，再回答当前问题。
         """
 
     general_agent = create_react_agent(llm, tools, prompt=prompt)
 
-    # 馃敟 鐢ㄤ簬鍦ㄥ紓甯告椂鎭㈠閮ㄥ垎缁撴灉
+    # 🔥 用于在异常时恢复部分结果
     partial_response = ""
     chart_img = ""
 
     try:
-        # 缁欎簣瓒冲鐨勯€掑綊姝ユ暟锛屼絾涓嶈澶珮閬垮厤 GeneratorExit
+        # 给予足够的递归步数，但不要太高避免 GeneratorExit
         result = general_agent.invoke(
             {"messages": state["messages"]},
             {"recursion_limit": 100}
-            # 闄嶄綆鍒?15锛岃冻澶熷畬鎴愬ぇ閮ㄥ垎浠诲姟
+            # 降低到 15，足够完成大部分任务
         )
 
         last_response = result["messages"][-1].content
         partial_response = last_response
 
-        # 馃敟 浠庡搷搴斾腑鎻愬彇鍥捐〃璺緞
+        # 🔥 从响应中提取图表路径
         chart_match = re.search(r'!\[.*?\]\((chart_[a-zA-Z0-9_]+\.json)\)', last_response)
         if chart_match:
             chart_img = chart_match.group(1)
 
-        # 馃敟 濡傛灉鍝嶅簲涓病鎵惧埌锛屽皾璇曚粠鎵€鏈夋秷鎭腑鏌ユ壘
+        # 🔥 如果响应中没找到，尝试从所有消息中查找
         if not chart_img:
             for msg in result.get("messages", []):
                 content = getattr(msg, 'content', str(msg))
@@ -435,61 +435,61 @@ def generalist_node(state: AgentState, llm):
                     break
 
         return {
-            "messages": [HumanMessage(content=f"銆愮帇鐗屽垎鏋愩€慭n{last_response}")],
+            "messages": [HumanMessage(content=f"【王牌分析】\n{last_response}")],
             "chart_img": chart_img
         }
     except GeneratorExit:
-        # 馃敟 GeneratorExit 閫氬父鍙戠敓鍦ㄥ浘琛ㄥ凡鐢熸垚涔嬪悗锛屽皾璇曟煡鎵炬渶杩戠敓鎴愮殑鍥捐〃
+        # 🔥 GeneratorExit 通常发生在图表已生成之后，尝试查找最近生成的图表
         charts_dir = os.path.join(os.path.dirname(__file__), "static", "charts")
         if os.path.exists(charts_dir):
             chart_files = glob.glob(os.path.join(charts_dir, "chart_*.json"))
             if chart_files:
-                # 鑾峰彇鏈€鏂扮殑鍥捐〃鏂囦欢
+                # 获取最新的图表文件
                 latest_chart = max(chart_files, key=os.path.getmtime)
                 chart_img = os.path.basename(latest_chart)
 
         return {
             "messages": [HumanMessage(
-                content=f"銆愮帇鐗屽垎鏋愩€戝垎鏋愬畬鎴怽n{partial_response}" if partial_response else "銆愮帇鐗屽垎鏋愩€戝浘琛ㄥ凡鐢熸垚锛岃鏌ョ湅涓嬫柟")],
+                content=f"【王牌分析】分析完成\n{partial_response}" if partial_response else "【王牌分析】图表已生成，请查看下方")],
             "chart_img": chart_img
         }
     except Exception as e:
-        # 浼橀泤闄嶇骇
+        # 优雅降级
         return {
-            "messages": [HumanMessage(content=f"銆愮帇鐗屽垎鏋愩€戞€濊€冭繃绋嬩腑鏂? {e}")],
-            "chart_img": chart_img  # 浠嶇劧灏濊瘯杩斿洖鍙兘鐨勫浘琛?
+            "messages": [HumanMessage(content=f"【王牌分析】思考过程中断: {e}")],
+            "chart_img": chart_img  # 仍然尝试返回可能的图表
         }
 
 
 
 # ==========================================
-# 3. 瀹氫箟鍚勪釜涓撳鑺傜偣 (Workers)
+# 3. 定义各个专家节点 (Workers)
 # ==========================================
 
-# 馃煝 1. 鎶€鏈垎鏋愬笀
+# 🟢 1. 技术分析师
 def analyst_node(state: AgentState, llm):
     symbol = state["symbol"]
     query = state["user_query"]
     mem_context = state.get("memory_context", "")
-    current_date = datetime.now().strftime("%Y骞?m鏈?d鏃?%A")
+    current_date = datetime.now().strftime("%Y年%m月%d日 %A")
     tools = [
-        analyze_kline_pattern,  # 鏍稿績锛氬舰鎬佷笌瓒嬪娍
+        analyze_kline_pattern,  # 核心：形态与趋势
         get_market_snapshot,
-        get_price_statistics,  # 杈呭姪锛氬巻鍙叉尝鍔ㄦ暟鎹?
+        get_price_statistics,  # 辅助：历史波动数据
         draw_chart_tool,
-        draw_pattern_annotation_chart,  # 褰㈡€佹爣娉ㄥ浘锛堢牬搴曠炕/鍚炲櫖/鏅ㄦ槦绛夛級
-        draw_forecast_chart,            # 鍏抽敭浠蜂綅鍥撅紙鏀拺/鍘嬪姏/鐩爣浠凤級
+        draw_pattern_annotation_chart,  # 形态标注图（破底翻/吞噬/晨星等）
+        draw_forecast_chart,            # 关键价位图（支撑/压力/目标价）
     ]
 
     target_option_etfs = [
         "510050",  # 50ETF
         "510300",  # 300ETF
         "510500",  # 500ETF
-        "159915",  # 鍒涗笟鏉縀TF
-        "588000"  # 绉戝垱50ETF
+        "159915",  # 创业板ETF
+        "588000"  # 科创50ETF
     ]
-    # 妫€鏌ュ綋鍓?symbol 鏄惁鍛戒腑涓婅堪鍒楄〃
-    # 鍔ㄦ€佸垽鏂槸鍚﹀姞鍏TF鏈熸潈宸ュ叿 (淇濇寔涔嬪墠鐨勯€昏緫)
+    # 检查当前 symbol 是否命中上述列表
+    # 动态判断是否加入ETF期权工具 (保持之前的逻辑)
     target_option_etfs = ["510050", "510300", "510500", "159915", "588000"]
     is_target_etf = any(code in symbol for code in target_option_etfs)
 
@@ -498,62 +498,62 @@ def analyst_node(state: AgentState, llm):
         from volume_oi_tools import analyze_etf_option_sentiment
         tools.append(analyze_etf_option_sentiment)
         extra_instruction = """
-            馃幆 **鏈熸潈涓诲姏鎸佷粨楠岃瘉**锛?
-            - 璋冪敤 `analyze_etf_option_sentiment` 鏌ョ湅鏈熸潈鏈€澶ф寔浠撲綅浣滀负鏀拺鍘嬪姏鍙傝€冦€?
+            🎯 **期权主力持仓验证**：
+            - 调用 `analyze_etf_option_sentiment` 查看期权最大持仓位作为支撑压力参考。
             """
 
-    # 2. 娉ㄥ叆鈥滀弗璋ㄢ€濅汉璁捐繘琛屾鼎鑹?
-    is_chart_only = any(kw in query for kw in ["K绾垮浘", "k绾垮浘"])
+    # 2. 注入“严谨”人设进行润色
+    is_chart_only = any(kw in query for kw in ["K线图", "k线图"])
 
     if is_chart_only:
-        # 馃敟 鐢诲浘蹇€熸ā寮?- 绠€鍖?prompt
+        # 🔥 画图快速模式 - 简化 prompt
         persona_prompt = f"""
-            浣犳槸涓€浣嶆妧鏈垎鏋愮敾鍥惧笀銆傘€愬綋鍓嶆棩鏈熴€戯細{current_date}銆?
-            銆愬綋鍓嶆爣鐨勩€戯細{symbol}
-            銆愬鎴烽渶姹傘€戯細{query}
+            你是一位技术分析画图师。【当前日期】：{current_date}。
+            【当前标的】：{symbol}
+            【客户需求】：{query}
 
-            銆愪换鍔°€戯細
-            鐢ㄦ埛鎯宠鐪嬪浘琛紝璇风洿鎺ヨ皟鐢?`draw_chart_tool` 鐢诲浘銆?
+            【任务】：
+            用户想要看图表，请直接调用 `draw_chart_tool` 画图。
 
-            銆愬洖澶嶈姹傘€戯細
-            1. 鐢诲畬鍥惧悗锛屽彧瑕佺畝鐭鏄庡浘琛ㄥ叧閿俊鎭紙濡傚綋鍓嶄环鏍笺€佹定璺屽箙锛夈€?
-            2. 缁濆涓嶈鍋氬啑闀跨殑鍒嗘瀽锛?
+            【回复要求】：
+            1. 画完图后，只要简短说明图表关键信息（如当前价格、涨跌幅）。
+            2. 绝对不要做冗长的分析！
             """
     else:
-        # 姝ｅ父鍒嗘瀽妯″紡
+        # 正常分析模式
         persona_prompt = f"""
-            浣犳槸涓€浣嶄弗璋ㄧ殑鎶€鏈垎鏋愬笀銆傞伒寰秼鍔夸氦鏄撱€?
-            銆愬綋鍓嶆棩鏈熴€戯細{current_date}銆?
-            銆愬綋鍓嶆爣鐨勩€戯細{symbol}
-            銆愬鎴峰巻鍙茶蹇嗐€戯細{mem_context}
+            你是一位严谨的技术分析师。遵循趋势交易。
+            【当前日期】：{current_date}。
+            【当前标的】：{symbol}
+            【客户历史记忆】：{mem_context}
 
-            銆怑TF鏈熸潈鎸佷粨鏁版嵁銆戯細{extra_instruction}
-            銆愬鎴烽渶姹傘€戯細{query}
+            【ETF期权持仓数据】：{extra_instruction}
+            【客户需求】：{query}
 
-            銆愬彲璋冪敤宸ュ叿銆?
-            1. 鎶€鏈潰鍒嗘瀽-> `analyze_kline_pattern` 锛岃幏鍙朘绾垮舰鎬佸拰瓒嬪娍銆?
-            2. 鑾峰彇鏍囩殑涓€娈垫椂闂翠环鏍?> `get_price_statistics` 銆?
-            3. 鍒嗘瀽鐨勫搧绉嶅鏋滃彧鏈?涓紝鍙兘璋冪敤1娆analyze_kline_pattern`
-            4. 鑾峰彇鑲＄エ鍚嶅瓧鍜屼环鏍肩敤 `get_market_snapshot`
+            【可调用工具】
+            1. 技术面分析-> `analyze_kline_pattern` ，获取K线形态和趋势。
+            2. 获取标的一段时间价格-> `get_price_statistics` 。
+            3. 分析的品种如果只有1个，只能调用1次`analyze_kline_pattern`
+            4. 获取股票名字和价格用 `get_market_snapshot`
 
-            銆愮敾鍥捐鍒欙紙閲嶈锛屽繀椤婚伒瀹堜紭鍏堢骇锛夈€?
-            - 浼樺厛绾?锛氱敤鎴疯姹傜敾鍥撅紝涓?`analyze_kline_pattern` 杩斿洖浜嗗舰鎬佷俊鍙?鈫?蹇呴』璋冪敤 `draw_pattern_annotation_chart`锛岀姝㈢敤 `draw_chart_tool`
-              鈿狅笍 璋冪敤鏃跺繀椤绘妸 `analyze_kline_pattern` 璇嗗埆鍒扮殑褰㈡€佸悕绉板～鍏?`pattern_name` 鍙傛暟锛堝 pattern_name="5鏃ュ钩鍙扮獊鐮?锛夛紝涓嶈鐣欑┖
-            - 浼樺厛绾?锛氱敤鎴锋槑纭粰鍑烘敮鎾?鍘嬪姏/鐩爣浠凤紝鎴栦綘鍋氬畬鍒嗘瀽鍚庣畻鍑轰簡鍏抽敭浠蜂綅 鈫?璋冪敤 `draw_forecast_chart`
-            - 浼樺厛绾?锛氱敤鎴峰彧瑕佹眰鐪婯绾胯蛋鍔垮浘銆佹病鏈夊舰鎬佷俊鍙枫€佷篃娌℃湁浠蜂綅鏁版嵁 鈫?鎵嶇敤 `draw_chart_tool`
-            - 鐢ㄦ埛娌℃湁瑕佹眰鐢诲浘鏃讹紝涓変釜鐢诲浘宸ュ叿閮戒笉璋冪敤
+            【画图规则（重要，必须遵守优先级）】
+            - 优先级1：用户要求画图，且 `analyze_kline_pattern` 返回了形态信号 → 必须调用 `draw_pattern_annotation_chart`，禁止用 `draw_chart_tool`
+              ⚠️ 调用时必须把 `analyze_kline_pattern` 识别到的形态名称填入 `pattern_name` 参数（如 pattern_name="5日平台突破"），不要留空
+            - 优先级2：用户明确给出支撑/压力/目标价，或你做完分析后算出了关键价位 → 调用 `draw_forecast_chart`
+            - 优先级3：用户只要求看K线走势图、没有形态信号、也没有价位数据 → 才用 `draw_chart_tool`
+            - 用户没有要求画图时，三个画图工具都不调用
 
-            銆愪换鍔°€戯細
-            1. 鎻忚堪K绾垮拰鎶€鏈潰鎯呭喌
-            2. 鍙戞帢绐佺牬杩涘満鏈轰細銆?
-            3. 濡傛灉杩炵画鍑犲ぉ绱Н娑ㄥ箙杩囧ぇ锛岃鎻愰啋闃茶寖绐佺劧涓嬭穼锛屽鏋滆繛缁嚑澶╃疮绉穼骞呰繃澶э紝瑕佹彁閱掑彲鑳界獊鐒舵姤澶嶅弽寮?
-            4. K绾跨殑閲嶈鎬уぇ浜庡潎绾匡紝鍙嶈浆鎴栫獊鐮磋鐪婯绾匡紝鍧囩嚎鍙嶅簲浼氭瘮杈冩參銆?
-            5. 濡傛灉娌℃湁鏄庢樉鏈轰細锛岀洿璇?寤鸿瑙傛湜"銆?
-            6. 濡傛灉鐢ㄦ埛鐨勬寚浠ゆā绯婏紝鍙弬鑰冧笂鏂囧巻鍙茬‘璁ゅ垎鏋愬璞°€?
+            【任务】：
+            1. 描述K线和技术面情况
+            2. 发掘突破进场机会。
+            3. 如果连续几天累积涨幅过大，要提醒防范突然下跌，如果连续几天累积跌幅过大，要提醒可能突然报复反弹
+            4. K线的重要性大于均线，反转或突破要看K线，均线反应会比较慢。
+            5. 如果没有明显机会，直说"建议观望"。
+            6. 如果用户的指令模糊，可参考上文历史确认分析对象。
             """
 
 
-    # 绠€鍗曠殑鏂瑰悜鎻愬彇 (缁欑瓥鐣ュ憳鐢?
+    # 简单的方向提取 (给策略员用)
     analyst_agent = create_react_agent(llm, tools, prompt=persona_prompt)
 
     partial_response = ""
@@ -561,7 +561,7 @@ def analyst_node(state: AgentState, llm):
     symbol_name = ""
 
     try:
-        # 鎵ц鎺ㄧ悊 (缁欎簣瓒冲鐨勯€掑綊娆℃暟锛屽洜涓哄鐞嗕环宸彲鑳介渶瑕佽皟2娆″伐鍏?
+        # 执行推理 (给予足够的递归次数，因为处理价差可能需要调2次工具)
         result = analyst_agent.invoke(
             {"messages": state["messages"]},
             {"recursion_limit": 30}
@@ -569,20 +569,20 @@ def analyst_node(state: AgentState, llm):
 
         last_response = result["messages"][-1].content
         partial_response = last_response
-        # 馃敟 鎻愬彇鍏徃鍚嶇О锛堜粠get_market_snapshot鐨勮繑鍥炰腑锛?
+        # 🔥 提取公司名称（从get_market_snapshot的返回中）
         symbol_name = ""
-        # 鏍煎紡锛?馃搷 **涔剧収鍏夌數(300102.SZ) 琛屾儏**"
-        name_match = re.search(r'馃搷 \*\*(.+?)\((.+?)\) 琛屾儏\*\*', last_response)
+        # 格式："📍 **乾照光电(300102.SZ) 行情**"
+        name_match = re.search(r'📍 \*\*(.+?)\((.+?)\) 行情\*\*', last_response)
         if name_match:
             symbol_name = name_match.group(1)
         else:
-            # 鍏滃簳锛氬鏋滄病鎻愬彇鍒帮紝鐢╯ymbol
+            # 兜底：如果没提取到，用symbol
             symbol_name = state.get('symbol', '')
 
         chart_match = re.search(r'IMAGE_CREATED:(chart_[a-zA-Z0-9_]+\.json)', last_response)
         if chart_match:
             chart_img = chart_match.group(1)
-            print(f"馃搳 analyst_node 鎻愬彇鍒板浘琛? {chart_img}")
+            print(f"📊 analyst_node 提取到图表: {chart_img}")
         if not chart_img:
             for msg in result.get("messages", []):
                 content = getattr(msg, 'content', str(msg))
@@ -591,62 +591,62 @@ def analyst_node(state: AgentState, llm):
                     chart_img = chart_match.group(1)
                     break
 
-        # 鎻愬彇淇″彿
-        trend_signal = "闇囪崱"
-        if any(x in last_response for x in ["鐪嬫定", "澶氬ご", "涓婅", "绐佺牬"]):
-            trend_signal = "鐪嬫定"
-        elif any(x in last_response for x in ["鐪嬭穼", "绌哄ご", "涓嬭", "鐮翠綅"]):
-            trend_signal = "鐪嬭穼"
+        # 提取信号
+        trend_signal = "震荡"
+        if any(x in last_response for x in ["看涨", "多头", "上行", "突破"]):
+            trend_signal = "看涨"
+        elif any(x in last_response for x in ["看跌", "空头", "下行", "破位"]):
+            trend_signal = "看跌"
 
-        levels = re.findall(r'(鏀拺|鍘嬪姏|闃诲姏).*?(\d+[\.\d]*)', last_response)
+        levels = re.findall(r'(支撑|压力|阻力).*?(\d+[\.\d]*)', last_response)
         key_levels_str = " ".join([f"{k}{v}" for k, v in levels]) if levels else ""
 
-        # 鎻愬彇鍓?100 涓瓧浣滀负鎶€鏈憳瑕?
+        # 提取前 100 个字作为技术摘要
         tech_summary_str = last_response.replace("\n", " ")[:100]
 
         return {
-            "messages": [HumanMessage(content=f"銆愭妧鏈垎鏋愩€慭n{last_response}")],
+            "messages": [HumanMessage(content=f"【技术分析】\n{last_response}")],
             "symbol_name": symbol_name,
-            "trend_signal": trend_signal,  # 瀛樺叆瓒嬪娍
-            "key_levels": key_levels_str,  # 瀛樺叆鐐逛綅 (鏂板)
-            "technical_summary": tech_summary_str,  # 瀛樺叆鎽樿 (鏂板)
+            "trend_signal": trend_signal,  # 存入趋势
+            "key_levels": key_levels_str,  # 存入点位 (新增)
+            "technical_summary": tech_summary_str,  # 存入摘要 (新增)
             "chart_img": chart_img
         }
 
     except GeneratorExit:
-        # 馃敟 GeneratorExit 涓嶆槸 Exception 瀛愮被锛岄渶瑕佸崟鐙崟鑾?
-        # 灏濊瘯浠庡凡璋冪敤鐨勫伐鍏蜂腑鎻愬彇缁撴灉
-        fallback_msg = partial_response if partial_response else f"鎶€鏈垎鏋愬凡瀹屾垚瀵?{symbol} 鐨勫垵姝ュ垎鏋?
+        # 🔥 GeneratorExit 不是 Exception 子类，需要单独捕获
+        # 尝试从已调用的工具中提取结果
+        fallback_msg = partial_response if partial_response else f"技术分析已完成对 {symbol} 的初步分析"
         return {
-            "messages": [HumanMessage(content=f"銆愭妧鏈垎鏋愩€慭n{fallback_msg}")],
+            "messages": [HumanMessage(content=f"【技术分析】\n{fallback_msg}")],
             "symbol_name": symbol_name,
-            "trend_signal": "闇囪崱"
+            "trend_signal": "震荡"
         }
     except Exception as e:
         print(f"Analyst Node Error: {e}")
         return {
-            "messages": [HumanMessage(content=f"銆愭妧鏈垎鏋愩€戝垎鏋愬彈闃? {e}")],
+            "messages": [HumanMessage(content=f"【技术分析】分析受阻: {e}")],
             "symbol_name": state.get('symbol', ''),
-            "trend_signal": "鏈煡"
+            "trend_signal": "未知"
         }
 
 
-# 馃煛 2. 璧勯噾鐩戞帶鍛?(瀹归敊璺宠繃)
+# 🟡 2. 资金监控员 (容错跳过)
 def monitor_node(state: AgentState, llm):
     user_q = state["user_query"]
     symbol = state.get("symbol", "")
     symbol_name = state.get("symbol_name", "")
-    current_date = datetime.now().strftime("%Y骞?m鏈?d鏃?%A")
+    current_date = datetime.now().strftime("%Y年%m月%d日 %A")
     latest_trade_date = get_latest_data_date()
 
-    # 1. 瑁呭鎵€鏈夋暟鎹被宸ュ叿
+    # 1. 装备所有数据类工具
     tools = [
-        tool_get_retail_money_flow,  # 鑲＄エ琛屼笟璧勯噾
-        get_futures_fund_flow,  # 鏈熻揣璧勯噾娴?
-        get_futures_fund_ranking, # 鏈熻揣娌夋穩璧勯噾鎺掑悕
-        get_commodity_iv_info,  # IV/娉㈠姩鐜?Rank
-        search_broker_holdings_on_date,  # 鏈熻揣鍟嗘寔浠撴帓鍚?
-        tool_analyze_position_change,  # 鎸佷粨鍙樺姩鍒嗘瀽
+        tool_get_retail_money_flow,  # 股票行业资金
+        get_futures_fund_flow,  # 期货资金流
+        get_futures_fund_ranking, # 期货沉淀资金排名
+        get_commodity_iv_info,  # IV/波动率/Rank
+        search_broker_holdings_on_date,  # 期货商持仓排名
+        tool_analyze_position_change,  # 持仓变动分析
         get_option_volume_abnormal,
         get_option_oi_abnormal,
         get_option_oi_ranking,
@@ -661,298 +661,298 @@ def monitor_node(state: AgentState, llm):
         get_macro_indicator
     ]
 
-    # 鍒ゆ柇鏄惁涓?ETF (51/159寮€澶? 鎴?鑲＄エ
+    # 判断是否为 ETF (51/159开头) 或 股票
     is_etf_or_stock = False
     import re
-    if re.search(r'\d{6}', symbol):  # 鍙鍖呭惈6浣嶆暟瀛楋紝澶ф鐜囨槸璇佸埜
+    if re.search(r'\d{6}', symbol):  # 只要包含6位数字，大概率是证券
         is_etf_or_stock = True
 
     tool_instruction = ""
     if is_etf_or_stock:
         tool_instruction = """
-        鈿狅笍 **鐗瑰埆娉ㄦ剰 (ETF/鑲＄エ)**锛?
-        1. `tool_get_retail_money_flow` 鍙兘鏌ュ叏甯傚満琛屼笟姒傚喌锛屼笉鏀寔鏌ュ崟鍙偂绁?ETF浠ｇ爜銆?
-        2. 濡傛灉鏄?ETF锛屽彲浠ュ皾璇曟煡 `get_commodity_iv_info` 銆?
-        3. 濡傛灉娌℃湁鍚堥€傚伐鍏凤紝鐩存帴鍥炵瓟 "鏆傛棤璇ュ搧绉嶈祫閲戞暟鎹?锛屼笉瑕佺紪閫犳暟鎹€?
+        ⚠️ **特别注意 (ETF/股票)**：
+        1. `tool_get_retail_money_flow` 只能查全市场行业概况，不支持查单只股票/ETF代码。
+        2. 如果是 ETF，可以尝试查 `get_commodity_iv_info` 。
+        3. 如果没有合适工具，直接回答 "暂无该品种资金数据"，不要编造数据。
                 """
     else:
         tool_instruction = """
-        鈿狅笍 **鐗瑰埆娉ㄦ剰 (鏈熻揣)**锛?
-        1. 鏌ユ煇鍝佺褰撳ぉ鐨勬湡璐у晢澶氱┖鎺掑悕 -> search_broker_holdings_on_date(broker_name='鎵€鏈?, symbol='鍝佺鍚?, date='鏃ユ湡')
-        2. 鏌ユ煇鍝佺涓€娈垫椂闂村悇鏈熻揣鍟嗙殑鎸佷粨鍙樺寲 -> tool_analyze_position_change(symbol='鍝佺鍚?, start_date, end_date)
-        3. 鏌ユ湡璐ц祫閲戞祦 -> get_futures_fund_flow(symbol='鍝佺鍚?)
-        4. 濡傛灉宸ュ叿杩斿洖"鏈壘鍒版暟鎹?锛屽瀹炲憡鐭ョ敤鎴凤紝涓嶈缂栭€犲亣鏁版嵁锛?
+        ⚠️ **特别注意 (期货)**：
+        1. 查某品种当天的期货商多空排名 -> search_broker_holdings_on_date(broker_name='所有', symbol='品种名', date='日期')
+        2. 查某品种一段时间各期货商的持仓变化 -> tool_analyze_position_change(symbol='品种名', start_date, end_date)
+        3. 查期货资金流 -> get_futures_fund_flow(symbol='品种名')
+        4. 如果工具返回"未找到数据"，如实告知用户，不要编造假数据！
                 """
-    # 2. 瀹氫箟 Prompt
-    # 鍛婅瘔浠栧彧鍋氭暟鎹惉杩愬伐锛屼笉瑕佺粰寤鸿
+    # 2. 定义 Prompt
+    # 告诉他只做数据搬运工，不要给建议
     prompt = f"""
-    浣犳槸涓€浣嶈拷姹傛晥鐜囩殑甯傚満鏁版嵁鐩戞帶瀹?*銆傘€傚彧璐熻矗鏌ユ暟鎹粰缁撴灉銆?
-    - 浠婂ぉ鏃ユ湡锛歿current_date}
-    - 鏁版嵁搴撴渶鏂颁氦鏄撴棩锛歿latest_trade_date}
+    你是一位追求效率的市场数据监控官**。。只负责查数据给结果。
+    - 今天日期：{current_date}
+    - 数据库最新交易日：{latest_trade_date}
 
-    銆愪綘鐨勫伐鍏风 - 鏍规嵁闂绫诲瀷閫夋嫨姝ｇ‘鐨勫伐鍏枫€?
-    - 鏌ユ尝鍔ㄧ巼/IV -> get_commodity_iv_info
-    - 鏌ヨ偂绁ㄨ涓氳祫閲?-> tool_get_retail_money_flow
-    - 鏌ユ煇鏈熻揣璧勯噾娴佸姩 -> get_futures_fund_flow
-    - 鏌ュ叏閮ㄦ湡璐ц祫閲戞矇娣€鎺掑悕 -> get_futures_fund_ranking
-    - 鏌ユ煇澶╂煇鍝佺鐨勬湡璐у晢鎸佷粨鎺掑悕锛堥緳铏庢锛?-> search_broker_holdings_on_date 
-    - 鏌ユ煇鍝佺涓€娈垫椂闂村唴鍚勬湡璐у晢鐨勬寔浠撳彉鍖?-> tool_analyze_position_change 
-    - 鏌ユ煇鏈熻揣鍟嗗湪鍚勫搧绉嶇殑鎸佷粨鍙樺寲 -> tool_analyze_broker_positions 锛堝綋鍓嶅噣鎸佷粨浠ｈ〃鏈熻揣鍟嗗杩欏搧绉嶇殑瓒嬪娍鍒ゆ柇锛?
-    - 鏌ユ湡鏉冩垚浜ら噺寮傚父(鏀鹃噺/寮傚姩) -> get_option_volume_abnormal
-    - 鏌ユ湡鏉冩寔浠撻噺寮傚父(澶у崟澧炰粨) -> get_option_oi_abnormal
-    - 鏌ユ湡鏉冩寔浠撻噺鎺掑悕 -> get_option_oi_ranking
-    - 鏌ユ湡鏉冨悎绾︿环鏍?-> tool_query_specific_option,
-    - 鏌ユ垚浜ら噺鍜屾寔浠撻噺 -> get_volume_oi
-    - 鏌ユ湡璐ф寔浠撻噺鎺掑悕 -> get_futures_oi_ranking
-    - 鏌ユ爣鐨勪环鏍?-> get_market_snapshot
-    - 鏌ユ煇涓€澶╁巻鍙蹭环鏍?-> get_historical_price
-    - 鏌ュ尯闂寸粺璁?鏈€楂?鏈€浣?鍖洪棿娑ㄨ穼) -> get_price_statistics
-    - 鏌ユ渶杩慛涓氦鏄撴棩閫愭棩鏄庣粏琛?-> get_recent_price_series
-    - 鏌ュ畯瑙傛寚鏍?-> get_macro_indicator(indicator_code='US10Y')  
+    【你的工具箱 - 根据问题类型选择正确的工具】
+    - 查波动率/IV -> get_commodity_iv_info
+    - 查股票行业资金 -> tool_get_retail_money_flow
+    - 查某期货资金流动 -> get_futures_fund_flow
+    - 查全部期货资金沉淀排名 -> get_futures_fund_ranking
+    - 查某天某品种的期货商持仓排名（龙虎榜） -> search_broker_holdings_on_date 
+    - 查某品种一段时间内各期货商的持仓变化 -> tool_analyze_position_change 
+    - 查某期货商在各品种的持仓变化 -> tool_analyze_broker_positions （当前净持仓代表期货商对这品种的趋势判断）
+    - 查期权成交量异常(放量/异动) -> get_option_volume_abnormal
+    - 查期权持仓量异常(大单增仓) -> get_option_oi_abnormal
+    - 查期权持仓量排名 -> get_option_oi_ranking
+    - 查期权合约价格 -> tool_query_specific_option,
+    - 查成交量和持仓量 -> get_volume_oi
+    - 查期货持仓量排名 -> get_futures_oi_ranking
+    - 查标的价格 -> get_market_snapshot
+    - 查某一天历史价格 -> get_historical_price
+    - 查区间统计(最高/最低/区间涨跌) -> get_price_statistics
+    - 查最近N个交易日逐日明细表 -> get_recent_price_series
+    - 查宏观指标 -> get_macro_indicator(indicator_code='US10Y')  
     
     
     {tool_instruction}
 
-    銆愯姹傘€?
-    1. 绮惧噯浣跨敤宸ュ叿锛屼笉瑕佷贡璋冪敤锛岄櫎闈炲鎴锋湁瑕佹眰鍏ㄩ潰鍒嗘瀽銆?
-    2. **鍙檲杩版暟鎹簨瀹?*锛屼笉瑕佽繘琛屽鏉傜殑琛屾儏棰勬祴鎴栫粰浜ゆ槗寤鸿銆?
-    3. 濡傛灉鐢ㄦ埛娌℃湁鎸囧畾鏃ユ湡锛?*蹇呴』浣跨敤 {latest_trade_date}** 浣滀负鏌ヨ鏃ユ湡锛?
-    4. 濡傛灉宸ュ叿杩斿洖浜?Markdown 琛ㄦ牸锛岃鍘熸牱杈撳嚭銆?
-    5. 鍟嗗搧閮芥湁鏈熸潈锛岀姝㈣鍟嗗搧娌℃湁鍦哄唴鏈熸潈銆?
-    6. 鐢ㄦ埛瑕佲€滄煇澶╀环鏍尖€濅紭鍏堢敤 `get_historical_price`锛涚敤鎴疯鈥滃尯闂寸粺璁♀€濅紭鍏堢敤 `get_price_statistics`銆?
-    7. 鐢ㄦ埛瑕佲€滄渶杩慛澶?鏈€杩慛涓氦鏄撴棩/鍒楄〃/閫愭棩鏄庣粏/璧板娍鏁版嵁琛ㄢ€濇椂锛屼紭鍏堢敤 `get_recent_price_series`锛屼笉瑕佸彧杩斿洖 `get_market_snapshot`銆?
+    【要求】
+    1. 精准使用工具，不要乱调用，除非客户有要求全面分析。
+    2. **只陈述数据事实**，不要进行复杂的行情预测或给交易建议。
+    3. 如果用户没有指定日期，**必须使用 {latest_trade_date}** 作为查询日期！
+    4. 如果工具返回了 Markdown 表格，请原样输出。
+    5. 商品都有期权，禁止说商品没有场内期权。
+    6. 用户要“某天价格”优先用 `get_historical_price`；用户要“区间统计”优先用 `get_price_statistics`。
+    7. 用户要“最近N天/最近N个交易日/列表/逐日明细/走势数据表”时，优先用 `get_recent_price_series`，不要只返回 `get_market_snapshot`。
     """
 
-    # 3. 鍒涘缓涓存椂 Agent (ReAct 妯″紡)
-    # 浣跨敤 bind_tools 璁?LLM 鍙互鑷姩閫夋嫨鐢ㄥ摢涓伐鍏?
+    # 3. 创建临时 Agent (ReAct 模式)
+    # 使用 bind_tools 让 LLM 可以自动选择用哪个工具
     monitor_agent = create_react_agent(llm, tools, prompt=prompt)
 
     partial_response = ""
 
     try:
-        # 闄愬埗杩唬娆℃暟锛岄槻姝㈡寰幆
+        # 限制迭代次数，防止死循环
         result = monitor_agent.invoke(
             {"messages": [HumanMessage(content=user_q)]},
-            {"recursion_limit": 15}  # 闄嶄綆鍒?15
+            {"recursion_limit": 15}  # 降低到 15
         )
         last_response = result["messages"][-1].content
         partial_response = last_response
 
         return {
-            "messages": [HumanMessage(content=f"銆愭暟鎹洃鎺с€慭n{last_response}")],
+            "messages": [HumanMessage(content=f"【数据监控】\n{last_response}")],
             "fund_data": last_response
         }
 
     except GeneratorExit:
-        # 馃敟 GeneratorExit 涓嶆槸 Exception 瀛愮被锛岄渶瑕佸崟鐙崟鑾?
-        fallback_msg = partial_response if partial_response else f"璧勯噾鏁版嵁鏌ヨ瀹屾垚"
+        # 🔥 GeneratorExit 不是 Exception 子类，需要单独捕获
+        fallback_msg = partial_response if partial_response else f"资金数据查询完成"
         return {
-            "messages": [HumanMessage(content=f"銆愭暟鎹洃鎺с€慭n{fallback_msg}")],
+            "messages": [HumanMessage(content=f"【数据监控】\n{fallback_msg}")],
             "fund_data": fallback_msg
         }
     except Exception as e:
-        # 馃洃 鍙鍑洪敊锛岀珛椹紭闆呴檷绾э紝杩斿洖绌烘暟鎹紝淇濊瘉 Supervisor 鍜?Finalizer 鑳界户缁伐浣?
-        error_msg = f"鏁版嵁鏌ヨ鏆備笉鍙敤 (Monitor Error)"
-        print(f"Monitor Node Crash: {e}")  # 鍚庡彴鎵撳嵃鏃ュ織鏂逛究璋冭瘯
+        # 🛑 只要出错，立马优雅降级，返回空数据，保证 Supervisor 和 Finalizer 能继续工作
+        error_msg = f"数据查询暂不可用 (Monitor Error)"
+        print(f"Monitor Node Crash: {e}")  # 后台打印日志方便调试
         return {
-            "messages": [HumanMessage(content=f"銆愭暟鎹洃鎺с€憑error_msg}")],
-            "fund_data": "鏃犳暟鎹?
+            "messages": [HumanMessage(content=f"【数据监控】{error_msg}")],
+            "fund_data": "无数据"
         }
 
 
-# 馃煚 3. 鏈熸潈绛栫暐鍛?(閫昏緫纭紪鐮?+ LLM娑﹁壊)
+# 🟠 3. 期权策略员 (逻辑硬编码 + LLM润色)
 def strategist_node(state: AgentState, llm):
     """
-    鏈熸潈绛栫暐鍛?- 浣跨敤 ReAct 妯″紡璁?LLM 鑷富鍐冲畾璋冪敤宸ュ叿
+    期权策略员 - 使用 ReAct 模式让 LLM 自主决定调用工具
     """
     symbol = state["symbol"]
     user_q = state.get("user_query", "")
-    risk_pref = state.get("risk_preference", "绋冲仴鍨?)
-    fund = state.get("fund_data", "鏆傛棤鏄庢樉璧勯噾娴佸悜")
+    risk_pref = state.get("risk_preference", "稳健型")
+    fund = state.get("fund_data", "暂无明显资金流向")
     trend = state.get("trend_signal", "Neutral")
     mem_context = state.get("memory_context", "")
     tech_view = state.get("technical_summary", "")
-    current_date = datetime.now().strftime("%Y骞?m鏈?d鏃?)
+    current_date = datetime.now().strftime("%Y年%m月%d日")
     key_level = state.get("key_levels", "")
 
-    # [鏂板] 鑾峰彇鍚堢害涔樻暟
+    # [新增] 获取合约乘数
     multiplier_str = get_option_multiplier(symbol)
-    multiplier_hint = f"\n        銆愬悎绾︿箻鏁般€戯細{multiplier_str}锛堣绠楃泩浜忔椂蹇呴』涔樹互姝ゆ暟锛? if multiplier_str else ""
+    multiplier_hint = f"\n        【合约乘数】：{multiplier_str}（计算盈亏时必须乘以此数）" if multiplier_str else ""
 
-    # 馃敟 [鏂板] 鑾峰彇鎸佷粨涓婁笅鏂?
+    # 🔥 [新增] 获取持仓上下文
     portfolio_corr_index = state.get("portfolio_top_corr_index", "")
     portfolio_corr_value = state.get("portfolio_top_corr_value", "")
     portfolio_summary = state.get("portfolio_summary", "")
 
-    # 鏋勫缓鎸佷粨涓婁笅鏂囨彁绀?
+    # 构建持仓上下文提示
     portfolio_context = ""
     if portfolio_corr_index and portfolio_corr_value:
-        portfolio_context = f"\n        銆愬鎴锋寔浠撲俊鎭€戯細瀹㈡埛鎸佷粨缁勫悎涓巤portfolio_corr_index}鎸囨暟鐩稿叧搴︽渶楂橈紙鐩稿叧绯绘暟{portfolio_corr_value}锛?
+        portfolio_context = f"\n        【客户持仓信息】：客户持仓组合与{portfolio_corr_index}指数相关度最高（相关系数{portfolio_corr_value}）"
         if portfolio_summary:
-            portfolio_context += f"\n        鎸佷粨姒傚喌锛歿portfolio_summary[:100]}"
+            portfolio_context += f"\n        持仓概况：{portfolio_summary[:100]}"
 
-    # === 馃敟 鏈熸潈绛栫暐涓撶敤宸ュ叿闆?===
+    # === 🔥 期权策略专用工具集 ===
     tools = [
-        # 鏈熸潈鏁版嵁宸ュ叿
-        get_commodity_iv_info,  # IV鎺掑悕/娉㈠姩鐜?
-        check_option_expiry_status,  # 鍒版湡鏃ョ姸鎬?
-        tool_query_specific_option,  # 鏌ヨ鐗瑰畾鏈熸潈鍚堢害
-        get_option_volume_abnormal,  # 鏈熸潈鎴愪氦寮傚姩
-        get_option_oi_abnormal,  # 鏈熸潈鎸佷粨寮傚姩
-        get_etf_option_strikes,  # ETF鏈熸潈琛屾潈浠?
-        # 鏍囩殑鍒嗘瀽宸ュ叿
-        get_market_snapshot,  # 鏍囩殑蹇収/鐜颁环
-        # 杈呭姪宸ュ叿
-        search_investment_knowledge,  # 鐭ヨ瘑搴撴绱?
-        run_option_backtest,  # 鏈熸潈鍥炴祴
+        # 期权数据工具
+        get_commodity_iv_info,  # IV排名/波动率
+        check_option_expiry_status,  # 到期日状态
+        tool_query_specific_option,  # 查询特定期权合约
+        get_option_volume_abnormal,  # 期权成交异动
+        get_option_oi_abnormal,  # 期权持仓异动
+        get_etf_option_strikes,  # ETF期权行权价
+        # 标的分析工具
+        get_market_snapshot,  # 标的快照/现价
+        # 辅助工具
+        search_investment_knowledge,  # 知识库检索
+        run_option_backtest,  # 期权回测
     ]
 
-    # === 馃敟 ReAct Prompt - 寮曞鏈熸潈绛栫暐鎺ㄧ悊 ===
+    # === 🔥 ReAct Prompt - 引导期权策略推理 ===
     prompt = f"""
-        浣犳槸涓€浣?*璧勬繁鏈熸潈浜ゆ槗绛栫暐甯?*锛屾搮闀挎牴鎹競鍦烘暟鎹璁℃湡鏉冪瓥鐣ャ€?
+        你是一位**资深期权交易策略师**，擅长根据市场数据设计期权策略。
 
-        銆愬綋鍓嶆棩鏈熴€戯細{current_date}
-        銆愬垎鏋愭爣鐨勩€戯細{symbol}{multiplier_hint}
-        銆愬鎴烽棶棰樸€戯細{user_q}
-        銆愬鎴烽闄╁亸濂姐€戯細{risk_pref}
-        銆愬鎴峰巻鍙茶蹇嗐€戯細{mem_context}
-        銆愭妧鏈潰鍙傝€冦€戯細{trend} 銆?{tech_view}{portfolio_context}
+        【当前日期】：{current_date}
+        【分析标的】：{symbol}{multiplier_hint}
+        【客户问题】：{user_q}
+        【客户风险偏好】：{risk_pref}
+        【客户历史记忆】：{mem_context}
+        【技术面参考】：{trend} 、 {tech_view}{portfolio_context}
 
-        銆愬伐浣滄祦绋嬨€?
-        **绗竴姝ワ細鑾峰彇鏍囩殑浠锋牸鍜屾尝鍔ㄧ巼**
-        - 鐢?`get_market_snapshot` 鑾峰彇鐜颁环锛岀敤`get_commodity_iv_info` 鐪婭V锛岀敤`check_option_expiry_status` 鐪嬪埌鏈熸棩銆?
+        【工作流程】
+        **第一步：获取标的价格和波动率**
+        - 用 `get_market_snapshot` 获取现价，用`get_commodity_iv_info` 看IV，用`check_option_expiry_status` 看到期日。
 
-        **绗簩姝ワ細璁捐绛栫暐**
-        - **鏈熸潈绛栫暐**锛氭牴鎹妧鏈潰瓒嬪娍+IV+璺濈鍒版湡鏃?瀹㈡埛椋庨櫓鍋忓ソ鏉ラ€夋嫨绛栫暐锛屽彲浠ユ煡鐭ヨ瘑搴撹緟鍔ーsearch_investment_knowledge`銆?
-        - **绛栫暐鏂瑰悜**锛氬鏋滄妧鏈潰鍙傝€冩槸鍋氬鎴栫湅娑紝灏变笉瑕佺粰鍋氱┖绛栫暐锛屽鏋滄妧鏈潰鍙傝€冩槸鍋氱┖鎴栫湅璺岋紝灏变笉瑕佺粰鍋氬绛栫暐銆?
-        - **鎸佷粨鍏宠仈**锛氬鏋滃鎴锋湁鎸佷粨淇℃伅锛堣銆愬鎴锋寔浠撲俊鎭€戯級锛屼笖褰撳墠鏍囩殑涓庢寔浠撶浉鍏虫寚鏁版湁鍏筹紝闇€瑕佹槑纭鏄庣瓥鐣ュ浣曡緟鍔╂垨瀵瑰啿鐜版湁鎸佷粨椋庨櫓銆備緥濡傦細"鑰冭檻鍒版偍鐨勮偂绁ㄦ寔浠撲笌{portfolio_corr_index if portfolio_corr_index else 'XX鎸囨暟'}楂樺害鐩稿叧锛屽缓璁敤璇ユ湡鏉冪瓥鐣ユ潵..."
+        **第二步：设计策略**
+        - **期权策略**：根据技术面趋势+IV+距离到期日+客户风险偏好来选择策略，可以查知识库辅助`search_investment_knowledge`。
+        - **策略方向**：如果技术面参考是做多或看涨，就不要给做空策略，如果技术面参考是做空或看跌，就不要给做多策略。
+        - **持仓关联**：如果客户有持仓信息（见【客户持仓信息】），且当前标的与持仓相关指数有关，需要明确说明策略如何辅助或对冲现有持仓风险。例如："考虑到您的股票持仓与{portfolio_corr_index if portfolio_corr_index else 'XX指数'}高度相关，建议用该期权策略来..."
         
-        **绗笁姝ワ細鎬濊€冭鏉冧环鍚堢害 (Strikes)**
-        - 濡傛灉瀹㈡埛鏈夋寚瀹氳鏉冧环鍚堢害锛屽氨鐩存帴鏍规嵁瀹㈡埛闇€姹傦紝浣嗗彲浠ョ粰鍑哄悎閫傜殑涓嶅悓寤鸿銆?
-        - 濡傛灉鐢ㄦ埛娌℃寚瀹氾紝灏辨牴鎹璁＄殑绛栫暐鍜屽鎴烽闄╁亸濂芥潵鐪嬮渶瑕佸摢浜涘悎绾︺€?
+        **第三步：思考行权价合约 (Strikes)**
+        - 如果客户有指定行权价合约，就直接根据客户需求，但可以给出合适的不同建议。
+        - 如果用户没指定，就根据设计的策略和客户风险偏好来看需要哪些合约。
 
-        **绗洓姝ワ細纭畾绛栫暐鐨勬墽琛屽悎绾?*
-        - **鍚堢害閫夋嫨**锛氫竴瀹氳鏍规嵁鏍囩殑鐜颁环锛屽啀鏉ユ壘鍚堥€傜殑琛屾潈浠峰悎绾︺€?
-        - **鏌ヨ鍚堢害**锛氱敤 `tool_query_specific_option` 鏌ュ叿浣撴湡鏉冧环鏍硷紙鏍煎紡锛?鏍囩殑 琛屾潈浠?璁よ喘/璁ゆ步"锛夛紝鏉冨埄閲戜环鏍间篃瑕佷箻涓婂悎绾︿箻鏁般€?
-        - 鍙湁褰撳伐鍏疯繑鍥炰簡鏈夋晥鐨勪环鏍兼暟鎹椂锛屾墠鑳芥帹鑽愯鍚堢害銆?
-        - 濡傛灉宸ュ叿杩斿洖鈥滄湭鎵惧埌鈥濓紝璇峰皾璇曡皟鏁磋鏉冧环鍐嶆鏌ヨ锛屾垨鑰呰瘹瀹炲憡鐭ョ敤鎴疯妗ｄ綅鏃犲悎绾︺€?
-        - 濡傛灉瀹㈡埛闂€滃洖娴?绛栫暐琛ㄧ幇鈥濓紝鍙敤 `run_option_backtest` 缁欏嚭鍥炴祴缁撴灉銆?
+        **第四步：确定策略的执行合约**
+        - **合约选择**：一定要根据标的现价，再来找合适的行权价合约。
+        - **查询合约**：用 `tool_query_specific_option` 查具体期权价格（格式："标的 行权价 认购/认沽"），权利金价格也要乘上合约乘数。
+        - 只有当工具返回了有效的价格数据时，才能推荐该合约。
+        - 如果工具返回“未找到”，请尝试调整行权价再次查询，或者诚实告知用户该档位无合约。
+        - 如果客户问“回测/策略表现”，可用 `run_option_backtest` 给出回测结果。
 
-        銆愰闄╁亸濂介€傞厤銆戯細
-           - 銆愪繚瀹堝瀷銆戯細鍙帹鑽愰闄╂湁闄愮殑绛栫暐锛堢墰甯備环宸€佺唺甯備环宸€佹瘮鐜囦环宸級锛岀姝㈣８鍗?
-           - 銆愮ǔ鍋ュ瀷銆戯細鍙互閫傚害杩涙敾锛堜拱骞冲€兼湡鏉冦€侀『鍔垮崠铏氬€兼湡鏉冦€佷环宸瓥鐣ャ€佸鍏戠瓥鐣ャ€佸悎鎴愭湡璐э級
-           - 銆愭縺杩涘瀷銆戯細鍙互鐢ㄧН鏋佺瓥鐣ワ紙鏈夎秼鍔挎椂涔版繁铏氭湡鏉冦€佷拱鏈棩鏈熸潈銆侀榫欏湪澶╋紝娌¤秼鍔挎椂灏卞弻鍗栨湡鏉冿紝鎴栬€呭崠鏈棩鏈熸潈锛?
+        【风险偏好适配】：
+           - 【保守型】：只推荐风险有限的策略（牛市价差、熊市价差、比率价差），禁止裸卖
+           - 【稳健型】：可以适度进攻（买平值期权、顺势卖虚值期权、价差策略、备兑策略、合成期货）
+           - 【激进型】：可以用积极策略（有趋势时买深虚期权、买末日期权、飞龙在天，没趋势时就双卖期权，或者卖末日期权）
            
-        銆愬伐鍏蜂娇鐢ㄧ壒娈婃彁閱掋€戯細
-        1. 涓瘉1000鏈夎偂鎸囨湡鏉冿紝涓嶈鐢╣et_etf_option_strikes锛屽繀椤荤敤tool_query_specific_option鏌ユ湡鏉冨悎绾?
+        【工具使用特殊提醒】：
+        1. 中证1000有股指期权，不要用get_etf_option_strikes，必须用tool_query_specific_option查期权合约
 
-        銆愯緭鍑鸿姹傘€?
-        1. 缁欏嚭 1-2 涓叿浣撶殑鏈熸潈绛栫暐寤鸿锛岃鏉冧环蹇呴』鐢ㄥ伐鍏锋煡杩囥€?
-        2. **璁＄畻鐩堜簭绀轰緥鏃讹紝蹇呴』涔樹互鍚堢害涔樻暟**
-        3. 瑙ｉ噴涓轰粈涔堣繖涓瓥鐣ラ€傚悎甯傚満鎴栧鎴凤紝鍙互鏌ョ煡璇嗗簱杈呭姪`search_investment_knowledge`
-        4. 缁欏嚭姝㈡崯/姝㈢泩寤鸿
-        5. 绂佹鑷繁缂栭€犲亣鏁版嵁锛?
+        【输出要求】
+        1. 给出 1-2 个具体的期权策略建议，行权价必须用工具查过。
+        2. **计算盈亏示例时，必须乘以合约乘数**
+        3. 解释为什么这个策略适合市场或客户，可以查知识库辅助`search_investment_knowledge`
+        4. 给出止损/止盈建议
+        5. 禁止自己编造假数据！
 
         """
 
-    # === 馃敟 鍒涘缓 ReAct Agent ===
+    # === 🔥 创建 ReAct Agent ===
     strategist_agent = create_react_agent(llm, tools, prompt=prompt)
 
-    # 鐢ㄤ簬寮傚父鎭㈠
+    # 用于异常恢复
     partial_response = ""
 
     try:
         result = strategist_agent.invoke(
             {"messages": [HumanMessage(content=user_q)]},
-            {"recursion_limit": 40}  # 鏈熸潈鍒嗘瀽鍙兘闇€瑕佸杞伐鍏疯皟鐢?
+            {"recursion_limit": 40}  # 期权分析可能需要多轮工具调用
         )
 
         last_response = result["messages"][-1].content
         partial_response = last_response
 
         return {
-            "messages": [HumanMessage(content=f"銆愭湡鏉冪瓥鐣ャ€慭n{last_response}")],
+            "messages": [HumanMessage(content=f"【期权策略】\n{last_response}")],
             "option_strategy": last_response
         }
 
     except GeneratorExit:
-        # 娴佽涓柇鏃剁殑浼橀泤闄嶇骇
-        fallback_msg = partial_response if partial_response else f"鏈熸潈绛栫暐鍒嗘瀽宸插畬鎴愶紝鍏充簬{symbol}鐨勫缓璁鍙傝€冧笂鏂囥€?
+        # 流被中断时的优雅降级
+        fallback_msg = partial_response if partial_response else f"期权策略分析已完成，关于{symbol}的建议请参考上文。"
         return {
-            "messages": [HumanMessage(content=f"銆愭湡鏉冪瓥鐣ャ€慭n{fallback_msg}")],
+            "messages": [HumanMessage(content=f"【期权策略】\n{fallback_msg}")],
             "option_strategy": fallback_msg
         }
 
     except Exception as e:
-        # 鍏朵粬寮傚父鐨勯檷绾у鐞?
-        error_msg = f"鏈熸潈绛栫暐鍒嗘瀽閬囧埌闂: {e}"
-        print(f"鈿狅笍 strategist_node 閿欒: {e}")
+        # 其他异常的降级处理
+        error_msg = f"期权策略分析遇到问题: {e}"
+        print(f"⚠️ strategist_node 错误: {e}")
         return {
-            "messages": [HumanMessage(content=f"銆愭湡鏉冪瓥鐣ャ€慭n{error_msg}")],
+            "messages": [HumanMessage(content=f"【期权策略】\n{error_msg}")],
             "option_strategy": ""
         }
 
 
 
-# 馃煠 5. 鎯呮姤鐮旂┒鍛?
+# 🟤 5. 情报研究员
 def researcher_node(state: AgentState,llm=None):
     symbol = state["symbol"]
     symbol_name = state.get("symbol_name", "")
     query = state["user_query"]
-    current_date = datetime.now().strftime("%Y骞?m鏈?d鏃?%A")
-    # 1. 瑁呭鑸嗘儏涓庢悳绱㈠伐鍏?
+    current_date = datetime.now().strftime("%Y年%m月%d日 %A")
+    # 1. 装备舆情与搜索工具
     tools = [
-        get_finance_related_trends,  # 鏌ヨ储缁忕被鐑偣 (鍚岃姳椤?涓滄柟璐㈠瘜鐑)
-        get_today_hotlist,  # 鏌ュ叏缃戠儹鎼?(鎶栭煶/寰崥/鐧惧害)
-        tool_get_polymarket_sentiment,  # 鏌ラ娴嬪競鍦鸿儨鐜?(Polymarket)
-        analyze_keyword_trend,  # 鏌ョ壒瀹氬叧閿瘝鐑害瓒嬪娍
-        search_hotlist_history,  # 鏌ョ儹鐐瑰巻鍙插洖婧?
-        search_web,  # 鍏滃簳锛氶€氱敤鑱旂綉鎼滅储
-        get_financial_news,  # 鍏滃簳锛氫紶缁熻储缁忔柊闂?
+        get_finance_related_trends,  # 查财经类热点 (同花顺/东方财富热榜)
+        get_today_hotlist,  # 查全网热搜 (抖音/微博/百度)
+        tool_get_polymarket_sentiment,  # 查预测市场胜率 (Polymarket)
+        analyze_keyword_trend,  # 查特定关键词热度趋势
+        search_hotlist_history,  # 查热点历史回溯
+        search_web,  # 兜底：通用联网搜索
+        get_financial_news,  # 兜底：传统财经新闻
         get_trending_hotspots
     ]
     system_prompt = f"""
-        浣犳槸涓€浣?*椤剁骇甯傚満鎯呮姤瀹?(Market Intelligence Officer)**銆?
-        浣犵殑鑱岃矗涓嶄粎浠呮槸鐪嬫柊闂伙紝鏇存槸鎹曟崏**甯傚満鎯呯华銆佺儹鐐归鍙ｅ拰瀹忚棰勬湡**銆?
-        銆愬綋鍓嶇湡瀹炴棩鏈熴€戯細{current_date} 
+        你是一位**顶级市场情报官 (Market Intelligence Officer)**。
+        你的职责不仅仅是看新闻，更是捕捉**市场情绪、热点风口和宏观预期**。
+        【当前真实日期】：{current_date} 
 
-        銆愬鎴烽渶姹傘€? "{query}"
-        銆愭爣鐨勩€? {symbol_name}({symbol})  
+        【客户需求】: "{query}"
+        【标的】: {symbol_name}({symbol})  
 
-        銆愬伐鍏疯皟鐢ㄧ瓥鐣ャ€戯細
+        【工具调用策略】：
 
-        1. 馃幉 **瀹忚棰勬湡/澶т簨浠?鑳滅巼** (濡?"澶ч€夎皝璧?銆?闄嶆伅姒傜巼"銆?鍦扮紭鏀挎不"銆?鎴樹簤"):
-           - **蹇呴』璋冪敤** `tool_get_polymarket_sentiment`銆?
-           - Polymarket 鐨勭湡閲戠櫧閾舵娂娉ㄦ暟鎹瘮鏂伴椈鏇村噯銆?
+        1. 🎲 **宏观预期/大事件/胜率** (如 "大选谁赢"、"降息概率"、"地缘政治"、"战争"):
+           - **必须调用** `tool_get_polymarket_sentiment`。
+           - Polymarket 的真金白银押注数据比新闻更准。
 
-        2. 馃敟 **甯傚満椋庡彛/鏁ｆ埛鐑害** (濡?"鐜板湪鐐掍粈涔?銆?鏈€杩戠殑鐑偣"):
-           - **浼樺厛璋冪敤** `get_finance_related_trends` (鐪嬭储缁忓湀鍦ㄥ叧娉ㄤ粈涔?銆?
-           - **杈呭姪璋冪敤** `get_today_hotlist` (鐪嬫姈闊?寰崥绛夊叏缃戞祦閲忓湪鍝?銆?
-           - 鍏虫敞鍏抽敭璇嶏細姒傚康鏉垮潡銆佺獊鍙戜簨浠躲€佹斂绛栧埄濂姐€?
+        2. 🔥 **市场风口/散户热度** (如 "现在炒什么"、"最近的热点"):
+           - **优先调用** `get_finance_related_trends` (看财经圈在关注什么)。
+           - **辅助调用** `get_today_hotlist` (看抖音/微博等全网流量在哪)。
+           - 关注关键词：概念板块、突发事件、政策利好。
 
-        3. 馃搱 **鐗瑰畾姒傚康鐑害楠岃瘉** (濡?"浣庣┖缁忔祹鏈€杩戠儹鍚?):
-           - **璋冪敤** `analyze_keyword_trend`銆?
-           - 鐢ㄦ暟鎹瘉鏄庤璇濋鏄浜?鍗囨俯鏈?杩樻槸"閫€娼湡"銆?
-           - **璋冪敤** get_trending_hotspots 鏌ユ渶杩戞湁浠€涔堢儹鐐硅秼鍔?
+        3. 📈 **特定概念热度验证** (如 "低空经济最近热吗"):
+           - **调用** `analyze_keyword_trend`。
+           - 用数据证明该话题是处于"升温期"还是"退潮期"。
+           - **调用** get_trending_hotspots 查最近有什么热点趋势
         
-        4. 馃搱 **褰撳ぉ璐㈢粡蹇** :
-           - **璋冪敤** `get_financial_news`銆?
+        4. 📈 **当天财经快讯** :
+           - **调用** `get_financial_news`。
            
-        5. 馃摪 **鍏蜂綋璧勮/浜嬪疄鏍告煡**:
-           - 濡傛灉浠ヤ笂宸ュ叿鏌ヤ笉鍒帮紝鎴栬€呴渶瑕佹洿澶氱粏鑺傦紝璋冪敤 `search_web``锛屽彧鑳戒娇鐢?娆★紝缁濆涓嶈閲嶅浣跨敤search_web銆?
+        5. 📰 **具体资讯/事实核查**:
+           - 如果以上工具查不到，或者需要更多细节，调用 `search_web``，只能使用1次，绝对不要重复使用search_web。
 
-        銆愯緭鍑鸿姹傘€?
-        - 鎶婃煡鍒扮殑淇℃伅鍋氫釜鏁寸悊褰掔撼銆?
-        - 娌℃湁鏌ュ埌鐨勪俊鎭氨璇翠笉鐭ラ亾锛岀粷瀵逛笉瑕佷贡缂栭€犳暟鎹紝鍙兘渚濈収鏌ュ埌鐨勬暟鎹璇濄€?
+        【输出要求】
+        - 把查到的信息做个整理归纳。
+        - 没有查到的信息就说不知道，绝对不要乱编造数据，只能依照查到的数据说话。
         """
 
-    # 3. 鍒涘缓 Agent
+    # 3. 创建 Agent
     researcher_agent = create_react_agent(llm, tools, prompt=system_prompt)
 
     partial_response = ""
 
     try:
-        # 鑸嗘儏鏌ヨ鍙兘闇€瑕佸姝ワ紙鍏堟煡鐑锛屽啀鎼滅粏鑺傦級锛岀粰瓒虫鏁?
+        # 舆情查询可能需要多步（先查热榜，再搜细节），给足步数
         result = researcher_agent.invoke(
             {"messages": [HumanMessage(content=query)]},
             {"recursion_limit": 20}
@@ -960,346 +960,346 @@ def researcher_node(state: AgentState,llm=None):
 
         last_response = result["messages"][-1].content
 
-        # 馃敟 妫€娴嬫槸鍚︽槸 "need more steps" 閿欒
+        # 🔥 检测是否是 "need more steps" 错误
         if "need more steps" in last_response.lower() or "sorry" in last_response.lower():
-            # 灏濊瘯浠庝箣鍓嶇殑宸ュ叿璋冪敤缁撴灉涓彁鍙栨湁鐢ㄤ俊鎭?
+            # 尝试从之前的工具调用结果中提取有用信息
             tool_results = []
             for msg in result.get("messages", []):
                 msg_type = getattr(msg, 'type', '')
                 content = getattr(msg, 'content', '')
-                # 鏀堕泦宸ュ叿杩斿洖鐨勫唴瀹?
+                # 收集工具返回的内容
                 if msg_type == 'tool' and content and len(content) > 50:
                     tool_results.append(content)
 
             if tool_results:
-                # 鎷兼帴鎵€鏈夊伐鍏风粨鏋?
-                combined = "\n\n".join(tool_results[-3:])  # 鍙栨渶杩?涓伐鍏风粨鏋?
-                last_response = f"鏍规嵁宸叉敹闆嗙殑淇℃伅锛歕n\n{combined}"
+                # 拼接所有工具结果
+                combined = "\n\n".join(tool_results[-3:])  # 取最近3个工具结果
+                last_response = f"根据已收集的信息：\n\n{combined}"
 
-        # 鍔犱笂鍓嶇紑锛屾柟渚?Finalizer 鏁村悎
+        # 加上前缀，方便 Finalizer 整合
         return {
-            "messages": [HumanMessage(content=f"銆愭儏鎶ヤ笌鑸嗘儏銆慭n{last_response}")]
+            "messages": [HumanMessage(content=f"【情报与舆情】\n{last_response}")]
         }
 
     except GeneratorExit:
-        # 馃敟 GeneratorExit 澶勭悊锛氬皾璇曡繑鍥炲凡鏀堕泦鐨勯儴鍒嗙粨鏋?
-        fallback_msg = partial_response if partial_response else f"鎯呮姤鏌ヨ宸插畬鎴愶紝鍏充簬锛歿query[:50]}"
+        # 🔥 GeneratorExit 处理：尝试返回已收集的部分结果
+        fallback_msg = partial_response if partial_response else f"情报查询已完成，关于：{query[:50]}"
         return {
-            "messages": [HumanMessage(content=f"銆愭儏鎶ヤ笌鑸嗘儏銆慭n{fallback_msg}")]
+            "messages": [HumanMessage(content=f"【情报与舆情】\n{fallback_msg}")]
         }
     except Exception as e:
         return {
-            "messages": [HumanMessage(content=f"銆愭儏鎶ャ€戞煡璇㈠彈闃? {e}")]
+            "messages": [HumanMessage(content=f"【情报】查询受阻: {e}")]
         }
 
 
 def macro_analyst_node(state: AgentState, llm):
     """
-    瀹忚绛栫暐甯堬細鍏ㄦ櫙鎵弿瀹忚鏁版嵁锛岀粨鍚堟敹鐩婄巼鏇茬嚎鍜屾柊闂伙紝鍒ゆ柇鍏ㄧ悆娴佸姩鎬у懆鏈熴€?
+    宏观策略师：全景扫描宏观数据，结合收益率曲线和新闻，判断全球流动性周期。
     """
     user_q = state.get("user_query", "")
     symbol = state["symbol"]
     symbol_name = state.get("symbol_name", "")
-    news_context = state.get("news_summary", "鏆傛棤鏈€鏂板畯瑙傛柊闂?)
-    current_date = datetime.now().strftime("%Y骞?m鏈?d鏃?)
+    news_context = state.get("news_summary", "暂无最新宏观新闻")
+    current_date = datetime.now().strftime("%Y年%m月%d日")
 
-    # 寮曞叆瀹忚宸ュ叿 (璇风‘淇濆湪鏂囦欢澶撮儴 import 杩欎簺宸ュ叿)
+    # 引入宏观工具 (请确保在文件头部 import 这些工具)
     # from plot_tools import draw_macro_compare_chart
     # from macro_tools import get_macro_indicator
 
     tools = [
-        get_macro_indicator,  # 鏉ヨ嚜 macro_tools (宸插崌绾ф敮鎸佸鏌?
-        get_macro_overview,  # 鏉ヨ嚜 macro_tools (鐪嬪叏灞€)
-        analyze_yield_curve,  # 鏉ヨ嚜 macro_tools (鐪嬪€掓寕)
-        draw_macro_compare_chart,  # 鏉ヨ嚜 plot_tools (鐪嬪弻杞磋蛋鍔?
-        get_financial_news  # 鏉ヨ嚜 news_tools (鐪嬫柊闂绘壘鍘熷洜)
+        get_macro_indicator,  # 来自 macro_tools (已升级支持多查)
+        get_macro_overview,  # 来自 macro_tools (看全局)
+        analyze_yield_curve,  # 来自 macro_tools (看倒挂)
+        draw_macro_compare_chart,  # 来自 plot_tools (看双轴走势)
+        get_financial_news  # 来自 news_tools (看新闻找原因)
     ]
 
     prompt = f"""
-        浣犳槸涓€浣?*棣栧腑瀹忚绛栫暐甯?*锛屼俊濂?"Don't fight the Fed"銆?
-        浣犵殑鏍稿績浠诲姟鏄埄鐢ㄣ€愭暟鎹叏鏅?+ 鏀剁泭鐜囨洸绾?+ 鏍稿績鎸囨爣銆戞ā鍨嬪垽鏂叏鐞冩祦鍔ㄦ€х幆澧冦€?
+        你是一位**首席宏观策略师**，信奉 "Don't fight the Fed"。
+        你的核心任务是利用【数据全景 + 收益率曲线 + 核心指标】模型判断全球流动性环境。
 
-        銆愬綋鍓嶆棩鏈熴€戯細{current_date}
-        銆愭爣鐨勩€? {symbol_name}({symbol})  
-        銆愭儏鎶ュ憳鎻愪緵鐨勬柊闂汇€戯細
+        【当前日期】：{current_date}
+        【标的】: {symbol_name}({symbol})  
+        【情报员提供的新闻】：
         {news_context}
 
-        銆愬垎鏋愰€昏緫涓庡伐鍏疯皟鐢ㄩ『搴忋€?
+        【分析逻辑与工具调用顺序】
 
-        **绗竴姝ワ細鍏ㄦ櫙涓庤“閫€璇婃柇 (蹇呴』鎵ц)**
-        1. 璋冪敤 `get_macro_overview(category='all')`锛?
-           - 蹇€熸壂涓€鐪煎叏鐞冨競鍦猴紝鐪嬫槸鍚︽湁寮傚父鏉垮潡锛堝BDI鏆磋穼鏆楃ず闇€姹備笉瓒筹紝闈炵編璐у竵闆嗕綋鏆磋穼鏆楃ず缇庡厓铏瑰惛锛夈€?
-        2. 璋冪敤 `analyze_yield_curve()`锛?
-           - **杩欐槸鏈€鍏抽敭鐨勪竴姝?*銆傛鏌ョ編鍊?10Y-2Y 鏄惁**鍊掓寕**銆?
-           - 鍊掓寕 = 琛伴€€棰勮/闄嶆伅棰勬湡鍗囨俯锛涢櫋宄寲 = 澶嶈嫃鎴栭€氳儉棰勬湡銆?
+        **第一步：全景与衰退诊断 (必须执行)**
+        1. 调用 `get_macro_overview(category='all')`：
+           - 快速扫一眼全球市场，看是否有异常板块（如BDI暴跌暗示需求不足，非美货币集体暴跌暗示美元虹吸）。
+        2. 调用 `analyze_yield_curve()`：
+           - **这是最关键的一步**。检查美债 10Y-2Y 是否**倒挂**。
+           - 倒挂 = 衰退预警/降息预期升温；陡峭化 = 复苏或通胀预期。
 
-        **绗簩姝ワ細鏍稿績閿氱偣楠岃瘉**
-        1. 璋冪敤 `get_macro_indicator(indicator_code='US10Y,DXY,US2Y')`锛?
-           - 鑾峰彇绮剧‘鐨勬渶鏂版姤浠峰拰瓒嬪娍銆?
-        2. 缁撳悎 `Researcher` 鐨勬柊闂伙紙CPI/闈炲啘/FOMC锛夛紝瑙ｉ噴鏁版嵁涓轰綍娉㈠姩銆?
+        **第二步：核心锚点验证**
+        1. 调用 `get_macro_indicator(codes='US10Y,DXY,US2Y')`：
+           - 获取精确的最新报价和趋势。
+        2. 结合 `Researcher` 的新闻（CPI/非农/FOMC），解释数据为何波动。
 
-        **绗笁姝ワ細鍙鍖?**
-        - 璋冪敤 `draw_macro_compare_chart` 缁樺埗 US10Y vs DXY 鐨勫姣斿浘锛岀洿瑙傚睍绀烘祦鍔ㄦ€ф敹绱ц繕鏄斁鏉俱€?
+        **第三步：可视化 **
+        - 调用 `draw_macro_compare_chart` 绘制 US10Y vs DXY 的对比图，直观展示流动性收紧还是放松。
 
-        銆愬喅绛栫煩闃?(缁撳悎鏀剁泭鐜囨洸绾?銆?
-        - **绱х缉浜ゆ槗**锛歎S10Y 涓婅 + DXY 寮哄娍 + 鏇茬嚎姝ｅ父 -> 缁忔祹杩囩儹锛岀編鑱斿偍鍔犳伅锛屾潃浼板€笺€?
-        - **琛伴€€浜ゆ槗**锛歎S10Y 涓嬭 + 鏇茬嚎鍊掓寕(鎴栧€掓寕鍔犳繁) -> 甯傚満鎭愭厡锛屾娂娉ㄩ檷鎭紝鍒╁ソ榛勯噾/缇庡€恒€?
-        - **閬块櫓浜ゆ槗 (Risk-Off)**锛歎S10Y 涓嬭 + DXY 寮哄娍 -> 琛伴€€鎭愭厡锛岃偂甯傛毚璺岋紝缇庡厓缇庡€哄弻鐗涖€?
-        - **澶嶈嫃浜ゆ槗**锛歎S10Y 娓╁拰涓婅 + 鏇茬嚎闄″抄鍖?-> 缁忔祹澶嶈嫃锛屽埄濂藉晢鍝?鑲＄エ銆?
-        - **婊炶儉/淇′换鍗辨満**锛歎S10Y 涓婅 + DXY 寮卞娍 -> 姣旇緝缃曡锛屽埄濂藉疄鐗╁晢鍝佸拰榛勯噾璧勪骇銆?
+        【决策矩阵 (结合收益率曲线)】
+        - **紧缩交易**：US10Y 上行 + DXY 强势 + 曲线正常 -> 经济过热，美联储加息，杀估值。
+        - **衰退交易**：US10Y 下行 + 曲线倒挂(或倒挂加深) -> 市场恐慌，押注降息，利好黄金/美债。
+        - **避险交易 (Risk-Off)**：US10Y 下行 + DXY 强势 -> 衰退恐慌，股市暴跌，美元美债双牛。
+        - **复苏交易**：US10Y 温和上行 + 曲线陡峭化 -> 经济复苏，利好商品/股票。
+        - **滞胀/信任危机**：US10Y 上行 + DXY 弱势 -> 比较罕见，利好实物商品和黄金资产。
 
-        銆愯緭鍑鸿姹傘€?
-        璇疯緭鍑轰竴浠介€昏緫涓ュ瘑鐨勫畯瑙傜爺鎶ワ細
-        1. **銆愬懆鏈熷畾璋冦€?*锛氭槑纭綋鍓嶆槸鈥滅揣缂┾€濄€佲€滆“閫€鎭愭厡鈥濊繕鏄€滃鑻忊€濇ā寮忋€?
-        2. **銆愭敹鐩婄巼鏇茬嚎鐩戞祴銆?*锛氫笓闂ㄤ竴娈靛垎鏋愬€掓寕鎯呭喌鍙婂叾闅愬惈鐨勭粡娴庤“閫€姒傜巼銆?
-        3. **銆愯祫浜у奖鍝嶃€?*锛氬熀浜庝笂杩板垽鏂紝瀵?榛勯噾/鑲″競/澶у畻鍟嗗搧 鐨勫叿浣撳奖鍝嶃€?
+        【输出要求】
+        请输出一份逻辑严密的宏观研报：
+        1. **【周期定调】**：明确当前是“紧缩”、“衰退恐慌”还是“复苏”模式。
+        2. **【收益率曲线监测】**：专门一段分析倒挂情况及其隐含的经济衰退概率。
+        3. **【资产影响】**：基于上述判断，对 黄金/股市/大宗商品 的具体影响。
         """
 
     macro_agent = create_react_agent(llm, tools, prompt=prompt)
 
     try:
         result = macro_agent.invoke(
-            {"messages": [HumanMessage(content=f"璇峰垎鏋愬綋鍓嶇殑瀹忚娴佸姩鎬х幆澧冦€傜敤鎴烽棶棰橈細{user_q}")]},
+            {"messages": [HumanMessage(content=f"请分析当前的宏观流动性环境。用户问题：{user_q}")]},
             {"recursion_limit": 10}
         )
         last_response = result["messages"][-1].content
 
-        # 鎻愬彇鍥捐〃
+        # 提取图表
         chart_img = ""
         chart_match = re.search(r'(macro_chart_[a-zA-Z0-9_]+\.json)', last_response)
         if chart_match:
             chart_img = chart_match.group(1)
 
         return {
-            "messages": [HumanMessage(content=f"銆愬畯瑙傜瓥鐣ャ€慭n{last_response}")],
+            "messages": [HumanMessage(content=f"【宏观策略】\n{last_response}")],
             "macro_view": last_response,
             "macro_chart": chart_img
         }
     except Exception as e:
         return {
-            "messages": [HumanMessage(content=f"銆愬畯瑙傜瓥鐣ャ€戝垎鏋愬彈闃? {e}")]
+            "messages": [HumanMessage(content=f"【宏观策略】分析受阻: {e}")]
         }
 
 # ==========================================
-# 馃煟 6. 鑱婂ぉ/鐭ヨ瘑闂瓟鍛?(Chatter)
-# 鑱岃矗锛氶棽鑱?+ 鐧剧鐭ヨ瘑闂瓟 (RAG + Web)
+# 🟣 6. 聊天/知识问答员 (Chatter)
+# 职责：闲聊 + 百科知识问答 (RAG + Web)
 # ==========================================
 def chatter_node(state: AgentState, llm=None):
     """
-    鑱婂ぉ/鐭ヨ瘑闂瓟鍛?- 浣跨敤 ReAct 妯″紡鑷富鎬濊€冨拰妫€绱?
-    浼樺厛浣跨敤鍐呴儴鐭ヨ瘑搴擄紝蹇呰鏃惰緟浠ョ綉缁滄悳绱?
+    聊天/知识问答员 - 使用 ReAct 模式自主思考和检索
+    优先使用内部知识库，必要时辅以网络搜索
     """
     user_query = state["user_query"]
     is_followup = bool(state.get("is_followup", False))
     recent_context = str(state.get("recent_context", "") or "").strip()
     mem_context = str(state.get("memory_context", "") or "").strip()
-    current_date = datetime.now().strftime("%Y骞?m鏈?d鏃?)
+    current_date = datetime.now().strftime("%Y年%m月%d日")
     context_parts = []
     if recent_context:
-        context_parts.append(f"銆愭渶杩戜袱杞細璇濄€慭n{recent_context}")
+        context_parts.append(f"【最近两轮会话】\n{recent_context}")
     if mem_context:
-        context_parts.append(f"銆愮浉鍏抽暱鏈熻蹇嗐€慭n{mem_context}")
-    combined_context = "\n\n".join(context_parts) if context_parts else "鏃?
+        context_parts.append(f"【相关长期记忆】\n{mem_context}")
+    combined_context = "\n\n".join(context_parts) if context_parts else "无"
 
-    if is_followup and combined_context == "鏃?:
+    if is_followup and combined_context == "无":
         return {
-            "messages": [HumanMessage(content="銆愮煡璇嗛棶绛斻€慭n鎴戣繖杞病鏈夋绱㈠埌涓婁竴杞叧閿粨璁猴紝鏆傛椂鏃犳硶瀹夊叏鎵挎帴銆傝琛ュ厖涓婁竴杞殑鏍稿績缁撹锛堜緥濡傛柟鍚戙€佸叧閿綅銆佺瓥鐣ワ級锛屾垜绔嬪埢缁х画銆?)],
+            "messages": [HumanMessage(content="【知识问答】\n我这轮没有检索到上一轮关键结论，暂时无法安全承接。请补充上一轮的核心结论（例如方向、关键位、策略），我立刻继续。")],
             "knowledge_context": ""
         }
 
-    # 鍒ゆ柇鏄惁鏄畝鍗曢棶鍊欙紙涓嶉渶瑕佸伐鍏凤級
-    is_greeting = len(user_query) < 5 and any(x in user_query for x in ["浣犲ソ", "鍡?, "鏃?, "璋?, "hello", "hi", "鍢?, "鏅氫笂濂?, "鏃╀笂濂?, "鏃╁畨", "涓崍濂?, "涓嬪崍濂?])
+    # 判断是否是简单问候（不需要工具）
+    is_greeting = len(user_query) < 5 and any(x in user_query for x in ["你好", "嗨", "早", "谢", "hello", "hi", "嘿", "晚上好", "早上好", "早安", "中午好", "下午好"])
 
     if is_greeting and not is_followup:
-        # 绠€鍗曢棶鍊欑洿鎺ュ洖澶嶏紝涓嶅惎鍔?ReAct
-        response = llm.invoke(f"鐢ㄦ埛璇达細{user_query}銆傝鐑儏鍥炲簲锛屽苟寮曞鐢ㄦ埛璇㈤棶琛屾儏銆佺瓥鐣ユ垨閲戣瀺鐭ヨ瘑銆?)
+        # 简单问候直接回复，不启动 ReAct
+        response = llm.invoke(f"用户说：{user_query}。请热情回应，并引导用户询问行情、策略或金融知识。")
         return {
-            "messages": [HumanMessage(content=f"銆愰棽鑱娿€慭n{response.content}")],
+            "messages": [HumanMessage(content=f"【闲聊】\n{response.content}")],
             "knowledge_context": ""
         }
 
-    # === 馃敟 鐭ヨ瘑闂瓟涓撶敤宸ュ叿闆?===
+    # === 🔥 知识问答专用工具集 ===
     tools = [
-        # 鐭ヨ瘑妫€绱㈠伐鍏凤紙浼樺厛锛?
-        search_investment_knowledge,  # 鍐呴儴鐭ヨ瘑搴?- 鏈€楂樹紭鍏堢骇
+        # 知识检索工具（优先）
+        search_investment_knowledge,  # 内部知识库 - 最高优先级
 
-        # 缃戠粶鎼滅储宸ュ叿锛堣緟鍔╋級
-        get_financial_news,  # 璐㈢粡鏂伴椈
+        # 网络搜索工具（辅助）
+        get_financial_news,  # 财经新闻
 
-        # 甯傚満鏁版嵁宸ュ叿锛堝鏋滅敤鎴烽棶琛屾儏鐩稿叧锛?
-        get_market_snapshot,  # 蹇€熻幏鍙栨爣鐨勪环鏍?
+        # 市场数据工具（如果用户问行情相关）
+        get_market_snapshot,  # 快速获取标的价格
 
     ]
 
     core_rules = """
-        銆愨殸锔?鏍稿績鍘熷垯锛氱煡璇嗗簱浼樺厛銆?
-        1. **绗竴姝ュ繀椤?*锛氬厛鐢?`search_investment_knowledge` 妫€绱㈠唴閮ㄧ煡璇嗗簱
-        2. **绗簩姝ュ彲閫?*锛氬鏋滅煡璇嗗簱淇℃伅涓嶈冻鎴栭渶瑕佹渶鏂版暟鎹紝鍐嶇敤鍏朵粬宸ュ叿琛ュ厖
-           - `get_financial_news`锛氳幏鍙栬储缁忔柊闂?
-           - `get_market_snapshot`锛氳幏鍙栧疄鏃惰鎯?
+        【⚠️ 核心原则：知识库优先】
+        1. **第一步必须**：先用 `search_investment_knowledge` 检索内部知识库
+        2. **第二步可选**：如果知识库信息不足或需要最新数据，再用其他工具补充
+           - `get_financial_news`：获取财经新闻
+           - `get_market_snapshot`：获取实时行情
     """
     if is_followup:
         core_rules = """
-        銆愨殸锔?鏍稿績鍘熷垯锛氳繛缁壙鎺ヤ紭鍏堛€?
-        1. 绗竴娈靛繀椤诲厛寮曠敤涓婁竴杞叧閿粨璁猴紙1-2鍙ワ級锛屽啀鍥炵瓟褰撳墠闂銆?
-        2. 鎵挎帴璇存槑瑕佸叿浣擄紝涓嶅緱鍙鈥滄牴鎹笂鏂団€濄€?
-        3. 浠呭湪闇€瑕佽ˉ鍏呬簨瀹炴椂鍐嶈皟鐢ㄥ伐鍏凤紱鍙互鏌ョ煡璇嗗簱锛屼絾涓嶆槸蹇呴』绗竴姝ャ€?
-        4. 绂佹鎶娾€滅煡璇嗗簱鍛戒腑涓虹┖鈥濆綋浣滈粯璁ゆā鏉垮洖绛斻€?
+        【⚠️ 核心原则：连续承接优先】
+        1. 第一段必须先引用上一轮关键结论（1-2句），再回答当前问题。
+        2. 承接说明要具体，不得只说“根据上文”。
+        3. 仅在需要补充事实时再调用工具；可以查知识库，但不是必须第一步。
+        4. 禁止把“知识库命中为空”当作默认模板回答。
         """
 
-    # === 馃敟 ReAct Prompt - 鎸夋ā寮忓垏鎹㈣鍒?===
+    # === 🔥 ReAct Prompt - 按模式切换规则 ===
     prompt = f"""
-        浣犳槸涓€浣嶇儹鎯呫€佸崥瀛︾殑**閲戣瀺瀵煎笀**锛岃礋璐ｈВ绛旂敤鎴风殑閲戣瀺鐭ヨ瘑闂鍜岄棽鑱娿€?
+        你是一位热情、博学的**金融导师**，负责解答用户的金融知识问题和闲聊。
 
-        銆愬綋鍓嶆棩鏈熴€戯細{current_date}
-        銆愮敤鎴烽棶棰樸€戯細{user_query}
-        銆愯繛缁拷闂ā寮忋€戯細{"鏄? if is_followup else "鍚?}
-        銆愬巻鍙叉壙鎺ヤ笂涓嬫枃銆戯細
+        【当前日期】：{current_date}
+        【用户问题】：{user_query}
+        【连续追问模式】：{"是" if is_followup else "否"}
+        【历史承接上下文】：
         {combined_context}
 
         {core_rules}
 
-        銆愬洖绛旈鏍笺€?
-        1. 璇皵瑕佽交鏉俱€佹槗鎳傦紝鍍忔湅鍙嬭亰澶╀竴鏍?
-        2. 濡傛灉鏄蹇佃В閲婏紝鐢ㄩ€氫織鐨勪緥瀛愬府鍔╃悊瑙?
-        3. 濡傛灉鏄瓥鐣ラ棶棰橈紝缁撳悎瀹為檯鍦烘櫙璇存槑
-        4. 閫傚綋寮曞鐢ㄦ埛娣卞叆鎺㈣鐩稿叧璇濋
+        【回答风格】
+        1. 语气要轻松、易懂，像朋友聊天一样
+        2. 如果是概念解释，用通俗的例子帮助理解
+        3. 如果是策略问题，结合实际场景说明
+        4. 适当引导用户深入探讨相关话题
 
 
-        銆愮姝簨椤广€?
-        - 涓嶈缂栭€犳暟鎹垨绛栫暐
-        - 鐭ヨ瘑搴撳唴瀹硅浼樺厛鍙傝€?
+        【禁止事项】
+        - 不要编造数据或策略
+        - 知识库内容要优先参考
         """
 
-    # === 馃敟 鍒涘缓 ReAct Agent ===
+    # === 🔥 创建 ReAct Agent ===
     chatter_agent = create_react_agent(llm, tools, prompt=prompt)
 
-    # 鐢ㄤ簬寮傚父鎭㈠
+    # 用于异常恢复
     partial_response = ""
     kb_content = ""
 
     try:
         result = chatter_agent.invoke(
             {"messages": [HumanMessage(content=user_query)]},
-            {"recursion_limit": 15}  # 鐭ヨ瘑闂瓟閫氬父涓嶉渶瑕佸お澶氳疆
+            {"recursion_limit": 15}  # 知识问答通常不需要太多轮
         )
 
         last_response = result["messages"][-1].content
         partial_response = last_response
 
-        # 灏濊瘯浠庢秷鎭腑鎻愬彇鐭ヨ瘑搴撳唴瀹癸紙鐢ㄤ簬鍚庣画娴佺▼锛?
+        # 尝试从消息中提取知识库内容（用于后续流程）
         for msg in result.get("messages", []):
             content = getattr(msg, 'content', '')
-            if "鐭ヨ瘑搴? in content or "鎶曡祫绗旇" in content:
+            if "知识库" in content or "投资笔记" in content:
                 kb_content = content[:500]
                 break
 
         return {
-            "messages": [HumanMessage(content=f"銆愮煡璇嗛棶绛斻€慭n{last_response}")],
+            "messages": [HumanMessage(content=f"【知识问答】\n{last_response}")],
             "knowledge_context": kb_content
         }
 
     except GeneratorExit:
-        # 娴佽涓柇鏃剁殑浼橀泤闄嶇骇
-        fallback_msg = partial_response if partial_response else "璁╂垜鏉ュ洖绛斾綘鐨勯棶棰?.."
+        # 流被中断时的优雅降级
+        fallback_msg = partial_response if partial_response else "让我来回答你的问题..."
         return {
-            "messages": [HumanMessage(content=f"銆愮煡璇嗛棶绛斻€慭n{fallback_msg}")],
+            "messages": [HumanMessage(content=f"【知识问答】\n{fallback_msg}")],
             "knowledge_context": kb_content
         }
 
     except Exception as e:
-        # 鍏朵粬寮傚父 - 闄嶇骇鍒扮畝鍗曞洖绛?
-        print(f"鈿狅笍 chatter_node 閿欒: {e}")
+        # 其他异常 - 降级到简单回答
+        print(f"⚠️ chatter_node 错误: {e}")
         try:
-            # 灏濊瘯涓嶇敤宸ュ叿鐩存帴鍥炵瓟
-            fallback_prompt = f"鐢ㄦ埛闂細{user_query}銆傝鍩轰簬浣犵殑鐭ヨ瘑鍥炵瓟锛岃姘旇交鏉惧弸濂姐€?
-            if is_followup and combined_context != "鏃?:
+            # 尝试不用工具直接回答
+            fallback_prompt = f"用户问：{user_query}。请基于你的知识回答，语气轻松友好。"
+            if is_followup and combined_context != "无":
                 fallback_prompt = (
-                    f"鐢ㄦ埛鍦ㄨ繛缁拷闂€俓n"
-                    f"鍘嗗彶涓婁笅鏂囷細\n{combined_context}\n\n"
-                    f"褰撳墠闂锛歿user_query}\n"
-                    f"璇峰厛鎵挎帴涓婁竴杞叧閿粨璁猴紝鍐嶅洖绛斿綋鍓嶉棶棰樸€?
+                    f"用户在连续追问。\n"
+                    f"历史上下文：\n{combined_context}\n\n"
+                    f"当前问题：{user_query}\n"
+                    f"请先承接上一轮关键结论，再回答当前问题。"
                 )
             simple_response = llm.invoke(fallback_prompt)
             return {
-                "messages": [HumanMessage(content=f"銆愰棽鑱娿€慭n{simple_response.content}")],
+                "messages": [HumanMessage(content=f"【闲聊】\n{simple_response.content}")],
                 "knowledge_context": ""
             }
         except:
             return {
-                "messages": [HumanMessage(content=f"銆愰棽鑱娿€慭n鎶辨瓑锛屾垜閬囧埌浜嗕竴浜涢棶棰樸€傝绋嶅悗鍐嶈瘯鎴栨崲涓柟寮忔彁闂€?)],
+                "messages": [HumanMessage(content=f"【闲聊】\n抱歉，我遇到了一些问题。请稍后再试或换个方式提问。")],
                 "knowledge_context": ""
             }
 
 
-# 馃煟 =閫夎偂鍛?(Screener)
+# 🟣 =选股员 (Screener)
 def screener_node(state: AgentState, llm):
-    # --- 1. 鑾峰彇瀹忚璧勯噾椋庡悜 (Sector Flow) ---
+    # --- 1. 获取宏观资金风向 (Sector Flow) ---
     sector_flow_info = ""
     query = state["user_query"]
 
-    # === 馃敟 [鏂板] 褰㈡€佹煡璇㈠揩閫熼€氶亾 ===
-    # 褰撶敤鎴锋槑纭闂?鏈変粈涔堝舰鎬?鏃讹紝鐩存帴杩斿洖褰㈡€佺粺璁★紝涓嶈蛋閫夎偂娴佺▼
-    pattern_inquiry_keywords = ["鏈変粈涔堝舰鎬?, "浠€涔堝舰鎬?, "鍝簺褰㈡€?, "褰㈡€佹湁鍝簺", "褰㈡€佺粺璁?, "浠婂ぉ褰㈡€?, "甯傚満褰㈡€?]
-    default_bearish_patterns = ["绌哄ご鍚炲櫖", "涓嬮檷涓夋硶", "鐮翠綅", "鍧囩嚎绌哄ご", "澶滄槦"]
+    # === 🔥 [新增] 形态查询快速通道 ===
+    # 当用户明确询问"有什么形态"时，直接返回形态统计，不走选股流程
+    pattern_inquiry_keywords = ["有什么形态", "什么形态", "哪些形态", "形态有哪些", "形态统计", "今天形态", "市场形态"]
+    default_bearish_patterns = ["空头吞噬", "下降三法", "破位", "均线空头", "夜星"]
 
     if any(kw in query for kw in pattern_inquiry_keywords):
         try:
             patterns_info = get_available_patterns.invoke({})
             return {
-                "messages": [HumanMessage(content=f"銆愬舰鎬佺粺璁°€慭n{patterns_info}")],
+                "messages": [HumanMessage(content=f"【形态统计】\n{patterns_info}")],
                 "symbol": state.get("symbol", "")
             }
         except Exception as e:
-            print(f"鈿狅笍 褰㈡€佺粺璁℃煡璇㈠け璐? {e}")
-            # 澶辫触鏃剁户缁蛋姝ｅ父閫夎偂娴佺▼
+            print(f"⚠️ 形态统计查询失败: {e}")
+            # 失败时继续走正常选股流程
 
     risk_keywords = [
-        "鍗遍櫓", "椋庨櫓", "涓嶈涔?, "鍒拱", "鍗栨帀", "瑕佸崠", "鍗栧嚭",
-        "閬垮紑", "瑙勯伩", "杩滅", "灏忓績", "璀︽儠", "娉ㄦ剰", "鍑哄満",
-        "宸殑", "鏈€宸?, "鍨冨溇", "鐑傝偂", "鍧?, "闆?, "鏆撮浄",
-        "鍒嗘暟鏈€浣?, "璇勫垎鏈€浣?, "鏈€寮?, "寮卞娍鑲?,
-        "涓嶅ソ", "涓嶈", "涓嶈", "鍒", "璺戣矾", "娓呬粨",
-        "涓嬭穼", "浜忔崯", "濂楃墷", "鍓茶倝", "姝㈡崯"
+        "危险", "风险", "不要买", "别买", "卖掉", "要卖", "卖出",
+        "避开", "规避", "远离", "小心", "警惕", "注意", "出场",
+        "差的", "最差", "垃圾", "烂股", "坑", "雷", "暴雷",
+        "分数最低", "评分最低", "最弱", "弱势股",
+        "不好", "不行", "不要", "别碰", "跑路", "清仓",
+        "下跌", "亏损", "套牢", "割肉", "止损"
     ]
     pattern_keywords = [
-        "绾笁鍏?, "涓夌孩鍏?, "杩為槼", "涓夎繛闃?, "鍒涙柊楂?,
-        "閲戦拡鎺㈠簳", "閿ゅ瓙", "閿ゅ瓙绾?, "涓嬪奖绾?,
-        "澶氬ご鍚炲櫖", "鐪嬫定鍚炲櫖", "闃冲寘闃?,
-        "鏃╂櫒涔嬫槦", "鍚槑鏄?, "鏅ㄦ槦",
-        "V鍨嬪弽杞?, "鍙嶈浆", "鍋囩獊鐮?, "鍋囪穼鐮?,
-        "澶ч槼绾?, "娑ㄥ仠", "鏀鹃噺绐佺牬", "绐佺牬",
-        "涓夊彧涔岄甫", "榛戜笁鍏?, "杩為槾", "涓夎繛闃?, "涓嬮檷涓夋硶",
-        "绌哄ご鍚炲櫖", "鐪嬭穼鍚炲櫖", "闃村寘闃?,
-        "鍚婁汉绾?, "涓婂悐绾?, "鍊掗敜瀛?, "灏勫嚮涔嬫槦", "娴佹槦",
-        "榛勬槒涔嬫槦", "鍊扸", "瑙侀《",
-        "澶ч槾绾?, "璺屽仠", "鏀鹃噺涓嬭穼",
-        "鍗佸瓧鏄?, "娉㈠姩鏀剁獎", "闇囪崱", "钃勫娍", "鍙嶅嚮",
-        "鍧囩嚎澶氬ご", "澶氬ご鎺掑垪", "鍧囩嚎绌哄ご", "绌哄ご鎺掑垪",
-        "涓婂崌閫氶亾", "涓嬮檷閫氶亾"
+        "红三兵", "三红兵", "连阳", "三连阳", "创新高",
+        "金针探底", "锤子", "锤子线", "下影线",
+        "多头吞噬", "看涨吞噬", "阳包阴",
+        "早晨之星", "启明星", "晨星",
+        "V型反转", "反转", "假突破", "假跌破",
+        "大阳线", "涨停", "放量突破", "突破",
+        "三只乌鸦", "黑三兵", "连阴", "三连阴", "下降三法",
+        "空头吞噬", "看跌吞噬", "阴包阳",
+        "吊人线", "上吊线", "倒锤子", "射击之星", "流星",
+        "黄昏之星", "倒V", "见顶",
+        "大阴线", "跌停", "放量下跌",
+        "十字星", "波动收窄", "震荡", "蓄势", "反击",
+        "均线多头", "多头排列", "均线空头", "空头排列",
+        "上升通道", "下降通道"
     ]
 
     industry_keywords = [
-        "閾惰", "璇佸埜", "淇濋櫓", "鎴垮湴浜?, "鍖昏嵂", "鍖荤枟", "鍗婂浣?, "鑺墖",
-        "鏂拌兘婧?, "鍏変紡", "閿傜數", "姹借溅", "鐧介厭", "閰块厭", "椋熷搧", "楗枡",
-        "鍐涘伐", "鑸┖", "鑸硅埗", "閽㈤搧", "鐓ょ偔", "鐭虫补", "鍖栧伐", "鏈夎壊",
-        "鐢靛姏", "姘存偿", "寤烘潗", "鏈烘", "鐢靛瓙", "閫氫俊", "璁＄畻鏈?, "杞欢", "鑸ぉ",
-        "浼犲獟", "娓告垙", "鏁欒偛", "鏃呮父", "閰掑簵", "闆跺敭", "鐢靛晢", "鐗╂祦",
-        "鍐滀笟", "鍏绘畺", "绾虹粐", "鏈嶈", "瀹剁數", "瀹跺叿", "寤虹瓚", "瑁呴グ"
+        "银行", "证券", "保险", "房地产", "医药", "医疗", "半导体", "芯片",
+        "新能源", "光伏", "锂电", "汽车", "白酒", "酿酒", "食品", "饮料",
+        "军工", "航空", "船舶", "钢铁", "煤炭", "石油", "化工", "有色",
+        "电力", "水泥", "建材", "机械", "电子", "通信", "计算机", "软件", "航天",
+        "传媒", "游戏", "教育", "旅游", "酒店", "零售", "电商", "物流",
+        "农业", "养殖", "纺织", "服装", "家电", "家具", "建筑", "装饰"
     ]
 
-    # 馃敟 [鏂板] 鎴愪氦閲?閲忚兘绫诲叧閿瘝 - 鐢ㄤ簬瑙﹀彂鎴愪氦閲忎笓鐢ㄥ揩閫熼€氶亾
+    # 🔥 [新增] 成交量/量能类关键词 - 用于触发成交量专用快速通道
 
     volume_keywords = [
-        "鎴愪氦閲忓紓甯?, "鎴愪氦閲忓鍔?, "鎴愪氦閲忓噺灏?, "鎴愪氦閲忔斁澶?, "鎴愪氦閲忚悗缂?, "鎴愪氦閲戦寮傚父",
-        "鎴愪氦閲忛€?, "鎸夋垚浜ら噺", "鐢ㄦ垚浜ら噺", "鐪嬫垚浜ら噺", "鏌ユ垚浜ら噺",
-        "鎴愪氦閲忕獊鐒?, "鎴愪氦閲忓墠", "鎴愪氦閲忔帓鍚?, "鎴愪氦閲忔渶澶?, "鎴愪氦閲廡OP",
-        "鏀鹃噺", "缂╅噺", "澶╅噺", "鍦伴噺", "宸ㄩ噺", "鐖嗛噺",
-        "閲忓紓甯?, "閲忚兘寮傚父", "閲忚兘鏀惧ぇ", "閲忎环榻愬崌", "閲忎环鑳岀",
-        "鏀鹃噺寮傚姩", "閲忓紓鍔?, "缂╅噺涓嬭穼", "鏀鹃噺涓婃定", "鏀鹃噺绐佺牬",
-        "鎹㈡墜鐜囧紓甯?, "鎹㈡墜鐜囨渶楂?, "鎹㈡墜鐜囨帓鍚?,
-        "璧勯噾鎶㈢", "涓诲姏娴佸叆", "涓诲姏鎶㈢", "涓诲姏鍩嬩紡","鍩嬩紡",
-        "鎴愪氦寮傚父", "浜ゆ槗寮傚父娲昏穬", "寮傚父娲昏穬"
+        "成交量异常", "成交量增加", "成交量减少", "成交量放大", "成交量萎缩", "成交金额异常",
+        "成交量选", "按成交量", "用成交量", "看成交量", "查成交量",
+        "成交量突然", "成交量前", "成交量排名", "成交量最大", "成交量TOP",
+        "放量", "缩量", "天量", "地量", "巨量", "爆量",
+        "量异常", "量能异常", "量能放大", "量价齐升", "量价背离",
+        "放量异动", "量异动", "缩量下跌", "放量上涨", "放量突破",
+        "换手率异常", "换手率最高", "换手率排名",
+        "资金抢筹", "主力流入", "主力抢筹", "主力埋伏","埋伏",
+        "成交异常", "交易异常活跃", "异常活跃"
     ]
 
     is_risk_query = any(kw in query for kw in risk_keywords)
@@ -1310,7 +1310,7 @@ def screener_node(state: AgentState, llm):
             detected_pattern = pattern
             break
 
-    # 馃敟 濡傛灉鏄嵄闄╂煡璇絾娌℃湁鎸囧畾褰㈡€侊紝鑷姩閫夋嫨鐪嬭穼褰㈡€?
+    # 🔥 如果是危险查询但没有指定形态，自动选择看跌形态
     if is_risk_query and not detected_pattern:
         detected_pattern = random.choice(default_bearish_patterns)
 
@@ -1322,54 +1322,54 @@ def screener_node(state: AgentState, llm):
 
     is_volume_query = any(kw in query for kw in volume_keywords)
 
-    # === 馃敟 [鏂板] 鎴愪氦閲忛€夎偂蹇€熼€氶亾 ===
-    # 褰撴娴嬪埌鎴愪氦閲忕浉鍏冲叧閿瘝鏃讹紝鐩存帴璋冪敤 search_volume_anomalies锛屼笉渚濊禆 LLM 閫夊伐鍏?
-    # 鈿狅笍 蹇呴』鎺掗櫎宸茶"褰㈡€?琛屼笟/椋庨櫓"閫氶亾鍛戒腑鐨勬煡璇紝閬垮厤璇嫤鎴?
-    #    渚嬪"鏀鹃噺绐佺牬鐨勮偂绁?搴旇蛋褰㈡€侀€氶亾锛?鍗婂浣撴斁閲?搴旇蛋琛屼笟閫氶亾
+    # === 🔥 [新增] 成交量选股快速通道 ===
+    # 当检测到成交量相关关键词时，直接调用 search_volume_anomalies，不依赖 LLM 选工具
+    # ⚠️ 必须排除已被"形态/行业/风险"通道命中的查询，避免误拦截
+    #    例如"放量突破的股票"应走形态通道，"半导体放量"应走行业通道
     if is_volume_query and not detected_pattern and not detected_industry and not is_risk_query:
-        print(f"馃搳 鎴愪氦閲忛€夎偂蹇€熼€氶亾瑙﹀彂: {query}")
+        print(f"📊 成交量选股快速通道触发: {query}")
         volume_result = ""
         try:
             volume_result = search_volume_anomalies.invoke({"days": 1, "min_score": 30, "limit": 15})
         except Exception as e:
-            volume_result = f"鎴愪氦閲忓紓鍔ㄦ暟鎹煡璇㈠け璐? {e}"
+            volume_result = f"成交量异动数据查询失败: {e}"
 
-        # 杈呭姪鎷夊彇琛屼笟璧勯噾娴佸悜
+        # 辅助拉取行业资金流向
         sector_flow_for_vol = ""
         try:
             sector_flow_for_vol = tool_get_retail_money_flow.invoke({"days": 2})
         except Exception as e:
-            sector_flow_for_vol = f"鏆傛棤琛屼笟璧勯噾娴佹暟鎹? {e}"
+            sector_flow_for_vol = f"暂无行业资金流数据: {e}"
 
         vol_screen_prompt = f"""
-                   浣犳槸涓€浣嶈祫娣遍€夎偂涓撳銆傜敤鎴锋兂鎵?*鎴愪氦閲忓紓甯?鏀鹃噺/閲忚兘寮傚姩**鐨勮偂绁ㄣ€?
+                   你是一位资深选股专家。用户想找**成交量异常/放量/量能异动**的股票。
 
-                   銆愭暟鎹簮 A锛氭垚浜ら噺寮傚姩鑲＄エ锛堟寜寮傚姩璇勫垎鎺掑簭锛夈€?
+                   【数据源 A：成交量异动股票（按异动评分排序）】
                    {volume_result}
 
-                   銆愭暟鎹簮 B锛氬競鍦鸿祫閲戦鍚?(琛屼笟)銆?
+                   【数据源 B：市场资金风向 (行业)】
                    {sector_flow_for_vol}
 
-                   銆愮敤鎴峰師濮嬮渶姹傘€? "{query}"
+                   【用户原始需求】: "{query}"
 
-                   銆愪綘鐨勪换鍔°€?
-                   1. 浠庛€愭暟鎹簮A銆戜腑灞曠ず鎴愪氦閲忓紓鍔ㄧ殑鑲＄エ锛?*涓嶈缂栭€犳暟鎹?*锛?
-                   2. 缁撳悎銆愭暟鎹簮B銆戝垎鏋愯繖浜涜偂绁ㄦ墍灞炴澘鍧楃殑璧勯噾娴佸悜鏄惁鏀寔銆?
-                   3. 鍖哄垎鍒嗘瀽锛?
-                      - 馃搱 **鏀鹃噺涓婃定**锛氬彲鑳芥槸涓诲姏璧勯噾杩涘満绐佺牬淇″彿
-                      - 馃搲 **鏀鹃噺涓嬭穼**锛氬彲鑳芥槸涓诲姏鍑鸿揣鎴栨亹鎱屾姏鍞?
-                      - 鈿栵笍 **鏀鹃噺妯洏**锛氬彲鑳芥槸鎹㈡墜鍏呭垎锛屽叧娉ㄥ悗缁柟鍚?
-                   4. 缁欏嚭椋庨櫓鎻愮ず銆?
+                   【你的任务】
+                   1. 从【数据源A】中展示成交量异动的股票，**不要编造数据**！
+                   2. 结合【数据源B】分析这些股票所属板块的资金流向是否支持。
+                   3. 区分分析：
+                      - 📈 **放量上涨**：可能是主力资金进场突破信号
+                      - 📉 **放量下跌**：可能是主力出货或恐慌抛售
+                      - ⚖️ **放量横盘**：可能是换手充分，关注后续方向
+                   4. 给出风险提示。
 
-                   銆愯緭鍑烘牸寮忋€?
-                   馃搳 **鎴愪氦閲忓紓鍔ㄩ€夎偂缁撴灉**
+                   【输出格式】
+                   📊 **成交量异动选股结果**
 
-                   1. **鑲＄エ鍚嶇О** (浠ｇ爜) - 寮傚姩璇勫垎锛歑X
-                      - 馃搳 閲忚兘鎯呭喌锛歺xx
-                      - 馃挵 璧勯噾闈細鎵€灞炴澘鍧楄祫閲憍xx
-                      - 馃挕 鎿嶄綔寤鸿锛歺xx
+                   1. **股票名称** (代码) - 异动评分：XX
+                      - 📊 量能情况：xxx
+                      - 💰 资金面：所属板块资金xxx
+                      - 💡 操作建议：xxx
 
-                   鈿狅笍 **椋庨櫓鎻愮ず**锛氭斁閲忎笉绛変簬鍒╁ソ锛岄渶缁撳悎浠锋牸璧板娍鍒ゆ柇銆?
+                   ⚠️ **风险提示**：放量不等于利好，需结合价格走势判断。
                    """
 
         response = llm.invoke(vol_screen_prompt)
@@ -1380,63 +1380,63 @@ def screener_node(state: AgentState, llm):
         next_symbol = codes[0] if codes else state.get("symbol", "")
 
         return {
-            "messages": [HumanMessage(content=f"銆愮簿閫夎偂绁ㄣ€慭n{response.content}")],
+            "messages": [HumanMessage(content=f"【精选股票】\n{response.content}")],
             "symbol": next_symbol
         }
 
-    # === 馃敟 [鏂板] 鍒ゆ柇鏄惁闇€瑕佽繘鍏?ReAct 妯″紡 ===
-    # 濡傛灉娌℃湁鍖归厤鍒颁换浣曞揩閫熼€氶亾鏉′欢锛岃鏄庡彲鑳芥槸姒傚康/涓婚绫绘煡璇?
+    # === 🔥 [新增] 判断是否需要进入 ReAct 模式 ===
+    # 如果没有匹配到任何快速通道条件，说明可能是概念/主题类查询
     need_react_mode = (not is_risk_query and
                        not detected_pattern and
                        not detected_industry)
 
     if need_react_mode:
-        print(f"馃 閫夎偂杩涘叆 ReAct 妯″紡: {query}")
+        print(f"🤖 选股进入 ReAct 模式: {query}")
 
-        # ReAct 妯″紡宸ュ叿闆?
+        # ReAct 模式工具集
         react_tools = [
-            search_top_stocks,  # 鎸夊舰鎬?琛屼笟/鍒嗘暟绛涢€?
-            search_web,  # 鎼滅储姒傚康鑲°€佺儹鐐逛俊鎭?
-            search_investment_knowledge,  # 鏌ョ煡璇嗗簱
-            get_available_patterns,  # 鏌ュ舰鎬佺粺璁?
+            search_top_stocks,  # 按形态/行业/分数筛选
+            search_web,  # 搜索概念股、热点信息
+            search_investment_knowledge,  # 查知识库
+            get_available_patterns,  # 查形态统计
             search_volume_anomalies,
             query_stock_volume,
-            tool_get_retail_money_flow  # 璧勯噾娴佸悜
+            tool_get_retail_money_flow  # 资金流向
         ]
 
-        current_date = datetime.now().strftime("%Y骞?m鏈?d鏃?)
+        current_date = datetime.now().strftime("%Y年%m月%d日")
 
         react_prompt = f"""
-            浣犳槸涓€浣嶈祫娣遍€夎偂涓撳锛屾搮闀块€氳繃姒傚康涓婚銆佸競鍦虹儹鐐规潵鎸栨帢鎶曡祫鏈轰細銆?
+            你是一位资深选股专家，擅长通过概念主题、市场热点来挖掘投资机会。
 
-            銆愬綋鍓嶆棩鏈熴€戯細{current_date}
-            銆愮敤鎴烽渶姹傘€戯細{query}
+            【当前日期】：{current_date}
+            【用户需求】：{query}
 
-            銆愪綘鐨勬牳蹇冭兘鍔涳細姒傚康/涓婚閫夎偂銆?
-            浣犱富瑕佸鐞嗙殑鏄?姒傚康绫?銆?涓婚绫?銆?鐑偣绫?閫夎偂闇€姹傦紝渚嬪锛?
-            - "AI姒傚康鑲℃湁鍝簺" 鈫?鍏?search_web 鏌ユ蹇佃偂鍚嶅崟锛屽啀鐢?search_top_stocks 楠岃瘉鎶€鏈潰
-            - "浣庣┖缁忔祹鐩稿叧鐨勮偂绁? 鈫?search_web 鏌ョ浉鍏充釜鑲★紝鍐嶇敤 search_top_stocks 浜ゅ弶楠岃瘉
-            - "鏈€杩戞湁浠€涔堝ソ鑲＄エ" 鈫?tool_get_retail_money_flow 鐪嬭祫閲戦鍙?+ search_top_stocks 鐪嬪己鍔胯偂
-            - "甯垜閫夊嚑鍙ǔ鍋ョ殑鑲＄エ" 鈫?search_top_stocks(condition="缁煎悎璇勫垎") 閫夐珮鍒嗚偂
+            【你的核心能力：概念/主题选股】
+            你主要处理的是"概念类"、"主题类"、"热点类"选股需求，例如：
+            - "AI概念股有哪些" → 先 search_web 查概念股名单，再用 search_top_stocks 验证技术面
+            - "低空经济相关的股票" → search_web 查相关个股，再用 search_top_stocks 交叉验证
+            - "最近有什么好股票" → tool_get_retail_money_flow 看资金风口 + search_top_stocks 看强势股
+            - "帮我选几只稳健的股票" → search_top_stocks(condition="综合评分") 选高分股
 
-            銆愬伐鍏蜂娇鐢ㄦ寚鍗椼€?
-            1. `search_web`锛氭悳绱㈡蹇佃偂鍚嶅崟銆佺儹鐐逛俊鎭€佽涓氭柊闂伙紙鎼滅储鍏抽敭璇嶅"xxx姒傚康鑲?榫欏ご"锛?
-            2. `search_top_stocks`锛氭寜鎶€鏈舰鎬佹垨缁煎悎璇勫垎绛涢€夎偂绁紙condition 鍙～"缁煎悎璇勫垎"鎴栧叿浣撳舰鎬佸悕锛?
-            3. `tool_get_retail_money_flow`锛氭煡鐪嬭涓氳祫閲戞祦鍚戯紝鍒ゆ柇鍝簺鏉垮潡鏈夎祫閲戞敮鎸?
-            4. `get_available_patterns`锛氭煡鐪嬩粖鏃ュ競鍦烘湁鍝簺K绾垮舰鎬佸彲渚涚瓫閫?
-            5. `search_investment_knowledge`锛氭煡璇㈠唴閮ㄧ煡璇嗗簱鑾峰彇鎶曡祫鍙傝€?
-            6. `search_volume_anomalies`锛氭煡鎴愪氦閲忓紓鍔ㄨ偂绁紙澶囩敤锛屾垚浜ら噺鏌ヨ閫氬父宸茶蹇€熼€氶亾澶勭悊锛?
-            7. `query_stock_volume`锛氭煡鍗曞彧鑲＄エ鐨勬垚浜ら噺璇︽儏
+            【工具使用指南】
+            1. `search_web`：搜索概念股名单、热点信息、行业新闻（搜索关键词如"xxx概念股 龙头"）
+            2. `search_top_stocks`：按技术形态或综合评分筛选股票（condition 可填"综合评分"或具体形态名）
+            3. `tool_get_retail_money_flow`：查看行业资金流向，判断哪些板块有资金支持
+            4. `get_available_patterns`：查看今日市场有哪些K线形态可供筛选
+            5. `search_investment_knowledge`：查询内部知识库获取投资参考
+            6. `search_volume_anomalies`：查成交量异动股票（备用，成交量查询通常已被快速通道处理）
+            7. `query_stock_volume`：查单只股票的成交量详情
 
-            銆愭爣鍑嗘祦绋嬨€?
-            1. 鐞嗚В鐢ㄦ埛鎯虫壘浠€涔堢被鍨嬬殑鑲＄エ
-            2. 閫夋嫨鏈€鍚堥€傜殑 1-2 涓伐鍏疯幏鍙栨暟鎹?
-            3. 鏁寸悊缁撴灉锛岃鏄庢帹鑽愮悊鐢?+ 椋庨櫓鎻愮ず
+            【标准流程】
+            1. 理解用户想找什么类型的股票
+            2. 选择最合适的 1-2 个工具获取数据
+            3. 整理结果，说明推荐理由 + 风险提示
 
-            銆愮姝簨椤广€?
-            - 涓嶈缂栭€犺偂绁ㄤ唬鐮佹垨鍚嶇О
-            - 濡傛灉鎼滅储涓嶅埌鐩稿叧淇℃伅锛岃瘹瀹炲憡鐭ョ敤鎴?
-            - 涓嶈閲嶅璋冪敤鍚屼竴涓伐鍏?
+            【禁止事项】
+            - 不要编造股票代码或名称
+            - 如果搜索不到相关信息，诚实告知用户
+            - 不要重复调用同一个工具
             """
 
         screener_react_agent = create_react_agent(llm, react_tools, prompt=react_prompt)
@@ -1452,44 +1452,44 @@ def screener_node(state: AgentState, llm):
             last_response = result["messages"][-1].content
             partial_response = last_response
 
-            # 鎻愬彇鑲＄エ浠ｇ爜
+            # 提取股票代码
             codes = re.findall(r'[0-9]{6}\.[A-Z]{2}', last_response)
             if not codes:
                 codes = re.findall(r'[0-9]{6}', last_response)
             next_symbol = codes[0] if codes else state.get("symbol", "")
 
             return {
-                "messages": [HumanMessage(content=f"銆愮簿閫夎偂绁ㄣ€慭n{last_response}")],
+                "messages": [HumanMessage(content=f"【精选股票】\n{last_response}")],
                 "symbol": next_symbol
             }
 
         except GeneratorExit:
-            fallback_msg = partial_response if partial_response else f"鍏充簬'{query}'鐨勯€夎偂鍒嗘瀽宸插畬鎴愶紝璇峰弬鑰冧笂鏂囥€?
+            fallback_msg = partial_response if partial_response else f"关于'{query}'的选股分析已完成，请参考上文。"
             return {
-                "messages": [HumanMessage(content=f"銆愮簿閫夎偂绁ㄣ€慭n{fallback_msg}")],
+                "messages": [HumanMessage(content=f"【精选股票】\n{fallback_msg}")],
                 "symbol": state.get("symbol", "")
             }
 
         except Exception as e:
-            print(f"鈿狅笍 screener ReAct 妯″紡閿欒: {e}")
-            # 闄嶇骇鍒伴粯璁ら€夎偂
+            print(f"⚠️ screener ReAct 模式错误: {e}")
+            # 降级到默认选股
             pass
 
-    # === 蹇€熼€氶亾锛氭甯搁€夎偂娴佺▼ ===
+    # === 快速通道：正常选股流程 ===
     try:
-        # 馃敟 [淇] 寮哄埗浣跨敤瀛楀吀浼犲弬锛岀‘淇?days 琚瘑鍒负鏁存暟
+        # 🔥 [修复] 强制使用字典传参，确保 days 被识别为整数
         sector_flow_info = tool_get_retail_money_flow.invoke({"days": 2})
     except Exception as e:
-        sector_flow_info = f"鏆傛棤琛屼笟璧勯噾娴佹暟鎹? {e}"
+        sector_flow_info = f"暂无行业资金流数据: {e}"
 
-    # 鉁?鏂板锛氭媺鍙栨斁閲忓紓鍔ㄦ暟鎹?
+    # ✅ 新增：拉取放量异动数据
     volume_anomaly_info = ""
     try:
         volume_anomaly_info = search_volume_anomalies.invoke({"days": 1, "min_score": 50, "limit": 10})
     except Exception as e:
-        volume_anomaly_info = f"鏆傛棤鏀鹃噺鏁版嵁: {e}"
+        volume_anomaly_info = f"暂无放量数据: {e}"
 
-    # --- 2. 鑾峰彇鎶€鏈潰寮哄娍鑲?(Technical Screener) ---
+    # --- 2. 获取技术面强势股 (Technical Screener) ---
     raw_stocks = ""
     try:
         invoke_params = {"limit": 15}
@@ -1497,108 +1497,108 @@ def screener_node(state: AgentState, llm):
         if detected_pattern:
             invoke_params["condition"] = detected_pattern
         else:
-            invoke_params["condition"] = "缁煎悎璇勫垎"
+            invoke_params["condition"] = "综合评分"
 
         if detected_industry:
             invoke_params["industry"] = detected_industry
 
-        # 馃敟 [鏍稿績] 鍗遍櫓妯″紡涓嬶紝鎸夊垎鏁颁粠浣庡埌楂樻帓搴?
+        # 🔥 [核心] 危险模式下，按分数从低到高排序
         if is_risk_query:
             invoke_params["sort_order"] = "asc"
         else:
             invoke_params["sort_order"] = "desc"
 
-        print(f"馃搳 璋冪敤閫夎偂宸ュ叿: {invoke_params}")
+        print(f"📊 调用选股工具: {invoke_params}")
         raw_stocks = search_top_stocks.invoke(invoke_params)
     except Exception as e:
-        raw_stocks = f"閫夎偂宸ュ叿璋冪敤澶辫触: {e}"
+        raw_stocks = f"选股工具调用失败: {e}"
 
-    # --- 3. LLM 缁煎悎鍐崇瓥 (Intersection Logic) ---
-    # 璁?AI 鎵惧嚭鈥滆祫閲戦鍙ｂ€濆拰鈥滄妧鏈己鍔库€濈殑浜ら泦
+    # --- 3. LLM 综合决策 (Intersection Logic) ---
+    # 让 AI 找出“资金风口”和“技术强势”的交集
 
     if is_risk_query:
         screen_prompt = f"""
-                浣犳槸涓€浣嶈祫娣遍€夎偂涓撳銆傜敤鎴锋兂鐭ラ亾**鍝簺鑲＄エ鏈夐闄╋紝搴旇瑙勯伩鎴栧崠鍑?*銆?
+                你是一位资深选股专家。用户想知道**哪些股票有风险，应该规避或卖出**。
 
-                銆愭暟鎹簮 A锛氬競鍦鸿祫閲戞祦鍚戙€?
+                【数据源 A：市场资金流向】
                 {sector_flow_info}
 
-                銆愭暟鎹簮 B锛氶闄╄偂绁ㄦ睜锛堟妧鏈潰杈冨急锛夈€?
+                【数据源 B：风险股票池（技术面较弱）】
                 {raw_stocks}
 
-                銆愭暟鎹簮 C锛氫粖鏃ユ垚浜ら噺寮傚姩鑲★紙鎸夎瘎鍒嗘帓搴忥級銆?
+                【数据源 C：今日成交量异动股（按评分排序）】
                 {volume_anomaly_info}
 
-                銆愮敤鎴峰師濮嬮渶姹傘€? "{query}"
+                【用户原始需求】: "{query}"
 
-                銆愪綘鐨勪换鍔°€?
-                1. 浠庛€愭暟鎹簮B銆戜腑閫夊嚭 3-5 鍙渶鍗遍櫓鐨勮偂绁紝**涓嶈缂栭€?*锛?
-                2. 瑙ｉ噴涓轰粈涔堣繖浜涜偂绁ㄦ湁椋庨櫓锛?
-                   - 馃搲 **鎶€鏈潰椋庨櫓**锛氬嚭鐜颁粈涔堢湅璺屽舰鎬?
-                   - 馃捀 **璧勯噾闈㈤闄?*锛氭墍灞炴澘鍧楁槸鍚﹀湪璧勯噾娴佸嚭
-                   - 鈿狅笍 **缁煎悎椋庨櫓绛夌骇**锛氶珮/涓?浣?
-                3. 缁欏嚭鎿嶄綔寤鸿锛?
-                   - 鎸佹湁鑰咃細鏄惁搴旇姝㈡崯/鍑忎粨
-                   - 瑙傛湜鑰咃細涓轰粈涔堜笉瑕佷拱鍏?
+                【你的任务】
+                1. 从【数据源B】中选出 3-5 只最危险的股票，**不要编造**！
+                2. 解释为什么这些股票有风险：
+                   - 📉 **技术面风险**：出现什么看跌形态
+                   - 💸 **资金面风险**：所属板块是否在资金流出
+                   - ⚠️ **综合风险等级**：高/中/低
+                3. 给出操作建议：
+                   - 持有者：是否应该止损/减仓
+                   - 观望者：为什么不要买入
 
-                銆愯緭鍑烘牸寮忋€?
-                鈿狅笍 **椋庨櫓鑲＄エ璀︾ず**
+                【输出格式】
+                ⚠️ **风险股票警示**
 
-                1. **鑲＄エ鍚嶇О** (浠ｇ爜) - 椋庨櫓绛夌骇锛氿煍撮珮
-                   - 馃搲 褰㈡€侀闄╋細xxx
-                   - 馃捀 璧勯噾椋庨櫓锛歺xx
-                   - 馃挕 鎿嶄綔寤鸿锛歺xx
+                1. **股票名称** (代码) - 风险等级：🔴高
+                   - 📉 形态风险：xxx
+                   - 💸 资金风险：xxx
+                   - 💡 操作建议：xxx
                 """
     elif detected_pattern:
         screen_prompt = f"""
-                浣犳槸涓€浣嶈祫娣遍€夎偂涓撳銆傜敤鎴锋兂鎵剧鍚堛€恵detected_pattern}銆戝舰鎬佺殑鑲＄エ銆?
+                你是一位资深选股专家。用户想找符合【{detected_pattern}】形态的股票。
 
-                銆愭暟鎹簮 A锛氬競鍦鸿祫閲戦鍚戙€?
+                【数据源 A：市场资金风向】
                 {sector_flow_info}
 
-                銆愭暟鎹簮 B锛氱鍚?{detected_pattern}"褰㈡€佺殑鑲＄エ銆?
+                【数据源 B：符合"{detected_pattern}"形态的股票】
                 {raw_stocks}
 
-                銆愮敤鎴峰師濮嬮渶姹傘€? "{query}"
+                【用户原始需求】: "{query}"
 
-                銆愪綘鐨勪换鍔°€?
-                1. 濡傛灉銆愭暟鎹簮B銆戜腑鏈夌鍚堝舰鎬佺殑鑲＄エ锛?*鐩存帴灞曠ず杩欎簺鑲＄エ**锛屼笉瑕佺紪閫狅紒
-                2. 缁撳悎銆愭暟鎹簮A銆戠殑璧勯噾娴佸悜锛屽垽鏂繖浜涜偂绁ㄦ墍灞炴澘鍧楁槸鍚︽湁璧勯噾鏀寔銆?
-                3. 濡傛灉銆愭暟鎹簮B銆戜负绌猴紝鍛婅瘔鐢ㄦ埛"褰撳墠甯傚満鏆傛棤鏄庢樉鐨剓detected_pattern}褰㈡€佽偂绁?銆?
+                【你的任务】
+                1. 如果【数据源B】中有符合形态的股票，**直接展示这些股票**，不要编造！
+                2. 结合【数据源A】的资金流向，判断这些股票所属板块是否有资金支持。
+                3. 如果【数据源B】为空，告诉用户"当前市场暂无明显的{detected_pattern}形态股票"。
 
-                銆愯緭鍑烘牸寮忋€?
-                - 鎺ㄨ崘 3-5 鍙鍚堟潯浠剁殑鑲＄エ
-                - 姣忓彧鑲＄エ璇存槑锛氬舰鎬佺壒寰?+ 鎵€灞炴澘鍧楄祫閲戞儏鍐?
-                - 鈿狅笍 涓嶈缂栭€犺偂绁紒
+                【输出格式】
+                - 推荐 3-5 只符合条件的股票
+                - 每只股票说明：形态特征 + 所属板块资金情况
+                - ⚠️ 不要编造股票！
                 """
     else:
         screen_prompt = f"""
-                浣犳槸涓€浣嶈祫娣遍€夎偂涓撳銆傝缁撳悎銆愯祫閲戦鍚戙€戝拰銆愭妧鏈舰鎬併€戜负瀹㈡埛绮鹃€夎偂绁ㄣ€?
+                你是一位资深选股专家。请结合【资金风向】和【技术形态】为客户精选股票。
 
-                銆愭暟鎹簮 A锛氬競鍦鸿祫閲戦鍚?(琛屼笟)銆?
+                【数据源 A：市场资金风向 (行业)】
                 {sector_flow_info}
 
-                銆愭暟鎹簮 B锛氭妧鏈潰寮哄娍鑲℃睜銆?
+                【数据源 B：技术面强势股池】
                 {raw_stocks}
 
-                銆愬綋鍓嶇敤鎴烽渶姹傘€? "{query}"
+                【当前用户需求】: "{query}"
 
-                銆愰€夎偂閫昏緫銆?
-                1. **瀵绘壘浜ら泦**锛氳瀵熴€愭暟鎹簮A銆戜腑璧勯噾鍑€娴佸叆闈犲墠鐨勬澘鍧楋紝鐒跺悗鍦ㄣ€愭暟鎹簮B銆戜腑瀵绘壘灞炰簬杩欎簺鏉垮潡鐨勪釜鑲°€?
-                2. **浼樹腑閫変紭**锛氬鏋滄暟鎹簮B閲屾病鏈夊尮閰嶉鍙ｇ殑鑲＄エ锛屽垯浼樺厛鎺ㄨ崘鏁版嵁婧怋閲屽垎鏁版渶楂樼殑銆?
-                3. 浠旂粏妫€鏌ョ敤鎴烽渶姹傛槸鍚﹀寘鍚壒瀹氭澘鍧楁垨琛屼笟銆?
+                【选股逻辑】
+                1. **寻找交集**：观察【数据源A】中资金净流入靠前的板块，然后在【数据源B】中寻找属于这些板块的个股。
+                2. **优中选优**：如果数据源B里没有匹配风口的股票，则优先推荐数据源B里分数最高的。
+                3. 仔细检查用户需求是否包含特定板块或行业。
 
-                銆愯緭鍑轰换鍔°€?
-                1. 鎺ㄨ崘 5 鍙渶鍊煎緱鍏虫敞鐨勮偂绁ㄣ€?
-                2. **鎺ㄨ崘鐞嗙敱蹇呴』鍖呭惈涓ょ偣**锛?
-                   - 馃尓锔?**椋庡彛**锛氳鑲℃墍灞炴澘鍧楃殑璧勯噾娴佹儏鍐点€?
-                   - 馃搱 **褰㈡€?*锛氳鑲＄殑鎶€鏈潰鐗瑰緛銆?
-                3. 缁欏嚭姝㈡崯寤鸿銆?
+                【输出任务】
+                1. 推荐 5 只最值得关注的股票。
+                2. **推荐理由必须包含两点**：
+                   - 🌪️ **风口**：该股所属板块的资金流情况。
+                   - 📈 **形态**：该股的技术面特征。
+                3. 给出止损建议。
                 """
 
     response = llm.invoke(screen_prompt)
 
-    # 灏濊瘯鎻愬彇绗竴鍙偂绁ㄧ殑浠ｇ爜浣滀负 symbol
+    # 尝试提取第一只股票的代码作为 symbol
     codes = re.findall(r'[0-9]{6}\.[A-Z]{2}', response.content)
     if not codes:
         codes = re.findall(r'[0-9]{6}', response.content)
@@ -1606,51 +1606,51 @@ def screener_node(state: AgentState, llm):
     next_symbol = codes[0] if codes else state["symbol"]
 
     return {
-        "messages": [HumanMessage(content=f"銆愮簿閫夎偂绁ㄣ€慭n{response.content}")],
+        "messages": [HumanMessage(content=f"【精选股票】\n{response.content}")],
         "symbol": next_symbol
     }
 
 
 # ==========================================
-#  馃尪锔?7. 姣掕垖鍒嗘瀽甯?(Roaster Node) - 鍒涙剰鍔熻兘
+#  🌶️ 7. 毒舌分析师 (Roaster Node) - 创意功能
 # ==========================================
 def roaster_node(state: AgentState, llm):
     query = state["user_query"]
     symbol = state.get("symbol", "")
 
-    # 1. 缁欎粬涓€浜涘熀鏈伐鍏凤紝璁╀粬鍚愭Ы鏃舵湁鐞嗘湁鎹?
+    # 1. 给他一些基本工具，让他吐槽时有理有据
     tools = [
-        get_market_snapshot,  # 鐪嬩环鏍?(璺屼簡鎵嶈兘鍢茬瑧)
-        get_stock_valuation,  # 鐪嬩及鍊?(璐典簡鎵嶈兘楠傞煭鑿?
-        analyze_kline_pattern,  # 鐪嬪舰鎬?(鐮翠綅浜嗘墠鑳借ˉ鍒€)
+        get_market_snapshot,  # 看价格 (跌了才能嘲笑)
+        get_stock_valuation,  # 看估值 (贵了才能骂韭菜)
+        analyze_kline_pattern,  # 看形态 (破位了才能补刀)
         get_price_statistics,
-        tool_get_retail_money_flow,  # 鑲＄エ琛屼笟璧勯噾
+        tool_get_retail_money_flow,  # 股票行业资金
         get_futures_fund_flow,
         tool_compare_stocks
     ]
 
-    # 2. 娉ㄥ叆鈥滄瘨鑸屸€濅汉璁?Prompt
+    # 2. 注入“毒舌”人设 Prompt
     prompt = f"""
-    浣犵幇鍦ㄦ槸**閲戣瀺鐣岀殑鈥滆劚鍙ｇ婕斿憳鈥濆吋鈥滄瘨鑸岃瘎璁哄憳鈥?*銆?
-    鐢ㄦ埛鎶婃寔浠撴垨鍏虫敞鐨勮偂绁ㄧ粰浣犵湅锛屼綘鐨勪换鍔℃槸**鏃犳儏鍚愭Ы銆佺妧鍒╃偣璇?*銆?
+    你现在是**金融界的“脱口秀演员”兼“毒舌评论员”**。
+    用户把持仓或关注的股票给你看，你的任务是**无情吐槽、犀利点评**。
 
-    銆愬綋鍓嶅叧娉ㄣ€戯細{symbol if symbol else "鐢ㄦ埛鐨勮繖涓爣鐨?}
-    銆愮敤鎴烽棶棰樸€戯細"{query}"
+    【当前关注】：{symbol if symbol else "用户的这个标的"}
+    【用户问题】："{query}"
 
-    銆愯涓哄噯鍒欍€戯細
-    1. **浜鸿椋庢牸**锛?
-       - 骞介粯銆佽鍒恒€佷娇鐢ㄧ綉缁滅儹姊楋紝姣斿柣瑕佸じ寮狅紙渚嬪锛氣€滆繖K绾胯蛋寰楀儚蹇冪數鍥惧仠浜嗕竴鏍封€濓級銆?
-    3. **鏁版嵁椹卞姩鐨勫悙妲?*锛?
-       - 鍏堣皟鐢ㄥ伐鍏风湅鏁版嵁銆?
-       - 濡傛灉 **PE寰堥珮** -> 涓句緥鍚愭Ы锛氣€滀綘涔扮殑鏄偂绁ㄨ繕鏄ⅵ锛熻繖娉℃搏鎴崇牬浜嗚兘娣规浜恒€傗€?
-       - 濡傛灉 **涓嬭穼瓒嬪娍** -> 涓句緥鍚愭Ы锛氣€滆繖绉嶉鍒€浣犱篃鏁㈡帴锛熸墜涓嶆兂瑕佷簡锛熲€?
+    【行为准则】：
+    1. **人设风格**：
+       - 幽默、讽刺、使用网络热梗，比喻要夸张（例如：“这K线走得像心电图停了一样”）。
+    3. **数据驱动的吐槽**：
+       - 先调用工具看数据。
+       - 如果 **PE很高** -> 举例吐槽：“你买的是股票还是梦？这泡沫戳破了能淹死人。”
+       - 如果 **下跌趋势** -> 举例吐槽：“这种飞刀你也敢接？手不想要了？”
 
-    銆愯緭鍑鸿姹傘€戯細
-    - 涓嶈鍐欓暱绡囧ぇ璁猴紝瑕佺煭灏忕簿鎮嶏紝瀛楀瓧鎵庡績銆?
-    - 缁撳熬缁欎竴涓€滈煭鑿滄寚鏁扳€濊瘎鍒嗭紙0-100锛岃秺楂樿秺闊級銆?
+    【输出要求】：
+    - 不要写长篇大论，要短小精悍，字字扎心。
+    - 结尾给一个“韭菜指数”评分（0-100，越高越韭）。
     """
 
-    # 3. 鍒涘缓 Agent
+    # 3. 创建 Agent
     roaster_agent = create_react_agent(llm, tools, prompt=prompt)
 
     try:
@@ -1658,30 +1658,30 @@ def roaster_node(state: AgentState, llm):
         last_response = result["messages"][-1].content
 
         return {
-            "messages": [HumanMessage(content=f"銆愭瘨鑸岀偣璇勩€慭n{last_response}")]
+            "messages": [HumanMessage(content=f"【毒舌点评】\n{last_response}")]
         }
     except Exception as e:
         return {
-            "messages": [HumanMessage(content=f"銆愭瘨鑸岀偣璇勩€慭n妲界偣澶锛屾垜閮芥棤璇簡... (绯荤粺閿欒: {e})")]
+            "messages": [HumanMessage(content=f"【毒舌点评】\n槽点太多，我都无语了... (系统错误: {e})")]
         }
 
 
 
-# 鈿?6. 鑱婂ぉ/鎬荤粨鑺傜偣 (Finalizer)
-# 馃敟 [鍗囩骇]锛氬崟淇℃簮妯″紡(瀹℃牳涓嶉噸鍐? vs 澶氫俊婧愭ā寮?缁熺)
+# ⚪ 6. 聊天/总结节点 (Finalizer)
+# 🔥 [升级]：单信源模式(审核不重写) vs 多信源模式(统稿)
 def finalizer_node(state: AgentState, llm):
-    # 1. 鏀堕泦鎵€鏈?AI 浜х敓鐨勫疄璐ㄦ€ф姤鍛?(杩囨护鎺夌敤鎴风殑璇濆拰绌虹殑)
-    # 涔熷氨鏄?Analyst, Monitor, Strategist 绛変汉鐨勫彂瑷€
+    # 1. 收集所有 AI 产生的实质性报告 (过滤掉用户的话和空的)
+    # 也就是 Analyst, Monitor, Strategist 等人的发言
     all_messages = state["messages"]
-    today_str = datetime.now().strftime("%Y骞?m鏈?d鏃?%H:%M")
+    today_str = datetime.now().strftime("%Y年%m月%d日 %H:%M")
 
-    # 杩囨护鍑?AI 鐨勫洖澶?(HumanMessage 鍦ㄨ繖閲屾槸 Worker 鐨勮緭鍑鸿浇浣?
-    # 涓旀帓闄ゆ帀鍙兘鏄┖鐨勬垨鑰呮棤鍏崇殑
-    # 馃敟 [淇] 鍙敹闆嗘湁鏍囩鐨?worker 杈撳嚭锛屾帓闄ょ敤鎴峰師濮嬫秷鎭?
+    # 过滤出 AI 的回复 (HumanMessage 在这里是 Worker 的输出载体)
+    # 且排除掉可能是空的或者无关的
+    # 🔥 [修复] 只收集有标签的 worker 输出，排除用户原始消息
     WORKER_TAGS = [
-        "銆愭妧鏈垎鏋愩€?, "銆愭暟鎹洃鎺с€?, "銆愭湡鏉冪瓥鐣ャ€?, "銆愭儏鎶ヤ笌鑸嗘儏銆?,
-        "銆愬畯瑙傜瓥鐣ャ€?, "銆愮煡璇嗛棶绛斻€?, "銆愮簿閫夎偂绁ㄣ€?, "銆愭瘨鑸岀偣璇勩€?,
-        "銆愮帇鐗屽垎鏋愩€?, "銆愰棽鑱娿€?, "銆愰鎺т慨姝ｃ€?, "銆愭寔浠撳垎鏋愩€?
+        "【技术分析】", "【数据监控】", "【期权策略】", "【情报与舆情】",
+        "【宏观策略】", "【知识问答】", "【精选股票】", "【毒舌点评】",
+        "【王牌分析】", "【闲聊】", "【风控修正】", "【持仓分析】"
     ]
 
     worker_msgs = [
@@ -1691,36 +1691,36 @@ def finalizer_node(state: AgentState, llm):
            and any(tag in m.content for tag in WORKER_TAGS)
     ]
 
-    # 馃敟 [鏂板] 濡傛灉娌℃湁鏈夋晥鐨?worker 杈撳嚭锛岃繑鍥炲弸濂芥彁绀?
+    # 🔥 [新增] 如果没有有效的 worker 输出，返回友好提示
     if not worker_msgs:
-        symbol = state.get("symbol", "鏈煡鏍囩殑")
+        symbol = state.get("symbol", "未知标的")
         return {
             "messages": [HumanMessage(
-                content=f"鈿狅笍 鎶辨瓑锛孉I 鍥㈤槦鏈兘鐢熸垚鍏充簬 **{symbol}** 鐨勬湁鏁堝垎鏋愭姤鍛娿€俓n\n鍙兘鍘熷洜锛歕n- 鏍囩殑浠ｇ爜涓嶆纭垨涓嶅湪鏀寔鑼冨洿鍐匼n- 鏁版嵁婧愭殏鏃舵棤娉曡闂甛n\n璇锋鏌ヤ唬鐮佸悗閲嶈瘯銆?)],
+                content=f"⚠️ 抱歉，AI 团队未能生成关于 **{symbol}** 的有效分析报告。\n\n可能原因：\n- 标的代码不正确或不在支持范围内\n- 数据源暂时无法访问\n\n请检查代码后重试。")],
             "chart_img": ""
         }
 
-    # 鑾峰彇鐭ヨ瘑搴撳唴瀹?
+    # 获取知识库内容
 
-    # 鎷兼帴鍒颁竴璧风敤浜庤緭鍏?
+    # 拼接到一起用于输入
     context_text = "\n".join([f"{m.content}" for m in worker_msgs])
-    if "銆愮簿閫夎偂绁ㄣ€? in context_text:
-        # 鐩存帴杩斿洖 PASS锛屼笉鍋氫换浣?LLM 鎬濊€冿紝姣绾у搷搴?
+    if "【精选股票】" in context_text:
+        # 直接返回 PASS，不做任何 LLM 思考，毫秒级响应
         return {
             "messages": [HumanMessage(content="PASS")]
         }
-    if "銆愭瘨鑸岀偣璇勩€? in context_text:
-        # 馃敟 roaster 鐨勬瘨鑸屽悙妲斤紝鐩存帴杩斿洖鍘熸枃锛屼笉瑕佹敼鍐欙紒
-        print("馃敟 妫€娴嬪埌姣掕垖鐐硅瘎锛岃烦杩?finalizer 鏁村悎")
+    if "【毒舌点评】" in context_text:
+        # 🔥 roaster 的毒舌吐槽，直接返回原文，不要改写！
+        print("🔥 检测到毒舌点评，跳过 finalizer 整合")
 
-        # 馃敟 [淇] 鍙彁鍙栥€愭瘨鑸岀偣璇勩€戦儴鍒嗭紝涓嶈鍖呭惈鐢ㄦ埛鍘熷鎻愰棶
+        # 🔥 [修复] 只提取【毒舌点评】部分，不要包含用户原始提问
         roaster_content = ""
         for msg in worker_msgs:
-            if "銆愭瘨鑸岀偣璇勩€? in msg.content:
+            if "【毒舌点评】" in msg.content:
                 roaster_content = msg.content
                 break
 
-        # 鎻愬彇鍥捐〃璺緞锛堝鏋滄湁锛?
+        # 提取图表路径（如果有）
         chart_img = state.get("chart_img", "")
         if not chart_img:
             chart_match = re.search(r'IMAGE_CREATED:(chart_[a-zA-Z0-9_]+\.json)', context_text)
@@ -1730,25 +1730,25 @@ def finalizer_node(state: AgentState, llm):
             "messages": [HumanMessage(content=roaster_content if roaster_content else context_text)],
             "chart_img": chart_img
         }
-    # === 鍒ゆ柇閫昏緫锛氬崟鍏佃繕鏄洟鎴橈紵 ===
-    # 濡傛灉鍙湁 1 涓伐绉嶅彂瑷€锛堟垨鑰呮病鏈夊彂瑷€锛夛紝涓斾笉鏄帇鐗屽垎鏋愬笀锛堢帇鐗屾湰鏉ュ氨鏄€荤粨濂界殑锛?
+    # === 判断逻辑：单兵还是团战？ ===
+    # 如果只有 1 个工种发言（或者没有发言），且不是王牌分析师（王牌本来就是总结好的）
     symbol = state.get("symbol", "")
     symbol_name = state.get("symbol_name", "")
     mem_context = state.get("memory_context", "")
-    macro_view = state.get("macro_view", "鏃犲畯瑙傚垎鏋?)
-    trend = state.get("trend_signal", "")  # 渚嬪 "鐪嬫定"
-    key_levels = state.get("key_levels", "")  # 渚嬪 "鍘嬪姏3000"
+    macro_view = state.get("macro_view", "无宏观分析")
+    trend = state.get("trend_signal", "")  # 例如 "看涨"
+    key_levels = state.get("key_levels", "")  # 例如 "压力3000"
 
-    # 馃敟 [鏂板] 鑾峰彇鎸佷粨涓婁笅鏂?
+    # 🔥 [新增] 获取持仓上下文
     portfolio_corr_index = state.get("portfolio_top_corr_index", "")
     portfolio_corr_value = state.get("portfolio_top_corr_value", "")
     portfolio_risks = state.get("portfolio_risks", "")
 
-    risk_pref = state.get("risk_preference", "绋冲仴鍨?)
+    risk_pref = state.get("risk_preference", "稳健型")
     is_single_source = len(worker_msgs) <= 1
     has_chart = "chart_" in context_text or "![" in context_text
     user_query = state.get("user_query", "")
-    complex_keywords = ["鐢?, "鍥?, "瀵规瘮", "鍒嗘瀽", "浠峰樊", "鐩稿叧鎬?, "璧板娍"]
+    complex_keywords = ["画", "图", "对比", "分析", "价差", "相关性", "走势"]
     is_complex_task = any(kw in user_query for kw in complex_keywords)
 
     display_name = f"{symbol_name}({symbol})" if symbol_name else symbol
@@ -1774,42 +1774,42 @@ def finalizer_node(state: AgentState, llm):
                     pass
         return {item for item in aliases if len(item) >= 2}
 
-    # 鑾峰彇褰撳墠鏈€鍚庝竴娆℃墽琛岀殑璁″垝锛堢敤浜庡垽鏂槸涓嶆槸鐜嬬墝锛?
-    # (鐢变簬 state plan 琚?pop 浜嗭紝鎴戜滑鐢ㄧ畝鍗曠殑闀垮害鍒ゆ柇閫氬父澶熺敤锛屾垨鑰呯湅 context)
+    # 获取当前最后一次执行的计划（用于判断是不是王牌）
+    # (由于 state plan 被 pop 了，我们用简单的长度判断通常够用，或者看 context)
 
 
     if is_single_source and not has_chart and not is_complex_task:
-        # === 妯″紡 A锛氳川妫€鍛?(Audit Mode) ===
-        # 鐩爣锛氫繚鐣欏師姹佸師鍛崇殑鎺掔増锛屽彧鏌ラ敊
+        # === 模式 A：质检员 (Audit Mode) ===
+        # 目标：保留原汁原味的排版，只查错
         symbol_aliases = _build_symbol_aliases(symbol)
         if not symbol_aliases:
-            # symbol 鍏滃簳锛氬皾璇曚粠鍗曚俊婧愭姤鍛婁腑鎶撴爣棰樹唬鐮?
-            match = re.search(r'([A-Za-z]{1,6}\d{0,4}|\d{6}(?:ETF)?)\s*(?:鎶€鏈潰|鎶€鏈垎鏋恷璧板娍)', context_text, re.IGNORECASE)
+            # symbol 兜底：尝试从单信源报告中抓标题代码
+            match = re.search(r'([A-Za-z]{1,6}\d{0,4}|\d{6}(?:ETF)?)\s*(?:技术面|技术分析|走势)', context_text, re.IGNORECASE)
             if match:
                 symbol_aliases = _build_symbol_aliases(match.group(1))
         source_norm = _normalize_symbol_text(context_text)
         enforce_symbol_lock = bool(symbol_aliases) and any(alias in source_norm for alias in symbol_aliases)
         symbol_lock_hint = (
-            f"\n        5. **鏍囩殑閿佸畾**锛氭湰鎶ュ憡鏍囩殑鏄?{symbol or '/'.join(sorted(symbol_aliases))}銆?
-            f" 浣犱笉鑳芥敼鎴愬叾浠栨爣鐨勩€傝嫢鏃犳硶纭锛岃杈撳嚭 DIRECT_PASS銆?
+            f"\n        5. **标的锁定**：本报告标的是 {symbol or '/'.join(sorted(symbol_aliases))}。"
+            f" 你不能改成其他标的。若无法确认，请输出 DIRECT_PASS。"
             if enforce_symbol_lock else ""
         )
         audit_prompt = f"""
-        浣犳槸涓€浣嶄氦鏄撻鎺у畼銆傚洟闃熸彁浜や簡涓€浠藉垎鏋愭姤鍛婏紙濡備笅锛夈€?
+        你是一位交易风控官。团队提交了一份分析报告（如下）。
 
-        銆愬緟瀹℃牳鎶ュ憡銆戯細
+        【待审核报告】：
         {context_text}
 
-        銆愪换鍔°€戯細
-        1. 妫€鏌ユ姤鍛婃槸鍚﹀瓨鍦?*鑷村懡鐨勫父璇嗘€ч敊璇?*锛堝鎶婃爣鐨勬悶閿欍€侀€昏緫瀹屽叏鐩稿弽锛夈€?
-        2. **濡傛灉鎶ュ憡鏃犺**锛氳鐩存帴杈撳嚭鍥涗釜瀛?"DIRECT_PASS" (涓嶈杈撳嚭鍏朵粬绗﹀彿)銆傝繖鎰忓懗鐫€鐩存帴閲囩敤鍘熸姤鍛婏紝淇濈暀鍏跺畬缇庣殑 Markdown 鎺掔増銆?
-        3. **濡傛灉鏈夎嚧鍛介敊璇?*锛氳淇敼閿欒鍚庯紝閲嶅啓涓€浠芥纭殑鎶ュ憡銆?
-        4. 濡傛灉鍙戠敓鏁版嵁缂哄け鎴栬娉曢敊璇紝涓嶈鎶婇敊璇啓鍑烘潵銆?
+        【任务】：
+        1. 检查报告是否存在**致命的常识性错误**（如把标的搞错、逻辑完全相反）。
+        2. **如果报告无误**：请直接输出四个字 "DIRECT_PASS" (不要输出其他符号)。这意味着直接采用原报告，保留其完美的 Markdown 排版。
+        3. **如果有致命错误**：请修改错误后，重写一份正确的报告。
+        4. 如果发生数据缺失或语法错误，不要把错误写出来。
         {symbol_lock_hint}
         """
         response = llm.invoke(audit_prompt)
 
-        # 濡傛灉 LLM 瑙夊緱娌￠棶棰橈紝杩斿洖鐗瑰畾鏍囪
+        # 如果 LLM 觉得没问题，返回特定标记
         if "DIRECT_PASS" in response.content:
             return {
                 "messages": [HumanMessage(content=context_text)]
@@ -1820,196 +1820,196 @@ def finalizer_node(state: AgentState, llm):
                 revised_norm = _normalize_symbol_text(revised_text)
                 keep_symbol = any(alias in revised_norm for alias in symbol_aliases)
                 if not keep_symbol:
-                    print(f"鈿狅笍 finalizer 瀹℃牎鐤戜技涓叉爣锛屽洖閫€鍘熸姤鍛娿€俵ocked={symbol_aliases}")
+                    print(f"⚠️ finalizer 审校疑似串标，回退原报告。locked={symbol_aliases}")
                     return {
                         "messages": [HumanMessage(content=context_text)]
                     }
-            # 濡傛灉鏈夐敊琚噸鍐欎簡锛屽氨杩斿洖閲嶅啓鐨勫唴瀹?
+            # 如果有错被重写了，就返回重写的内容
             return {
-                "messages": [HumanMessage(content=f"銆愰鎺т慨姝ｃ€慭n{revised_text}")]
+                "messages": [HumanMessage(content=f"【风控修正】\n{revised_text}")]
             }
 
     else:
-        # === 妯″紡 B锛氭€荤紪杈?(Editor Mode) ===
-        # 鐩爣锛氬婧愪俊鎭暣鍚堬紝浣嗚鏍规嵁鐢ㄦ埛闂绫诲瀷璋冩暣杈撳嚭椋庢牸
+        # === 模式 B：总编辑 (Editor Mode) ===
+        # 目标：多源信息整合，但要根据用户问题类型调整输出风格
 
-        # 馃敟 [鏂板] 鑾峰彇鐢ㄦ埛鍘熷闂锛屽垽鏂棶棰樼被鍨?
+        # 🔥 [新增] 获取用户原始问题，判断问题类型
         user_query = state.get("user_query", "")
 
-        # 鍒ゆ柇鏄惁涓?绾暟鎹煡璇?绫婚棶棰?
-        data_query_keywords = ["鎸佷粨", "鎺掑悕", "璧勯噾", "娴佸叆", "娴佸嚭", "澶氬皯", "鍝簺", "鍝釜", "鍓嶅嚑", "鍓?", "鍓嶄笁",
-                               "鍓?", "鍓嶄簲", "top", "榫欒檸姒?, "澧炰粨", "鍑忎粨", "鍑€鎸佷粨", "鏈€澶?, "鏈€澶?]
+        # 判断是否为"纯数据查询"类问题
+        data_query_keywords = ["持仓", "排名", "资金", "流入", "流出", "多少", "哪些", "哪个", "前几", "前3", "前三",
+                               "前5", "前五", "top", "龙虎榜", "增仓", "减仓", "净持仓", "最多", "最大"]
         is_data_query = any(kw in user_query for kw in data_query_keywords)
 
-        # 鍒ゆ柇鏄惁涓?缁煎悎鍒嗘瀽"绫婚棶棰?
-        analysis_keywords = ["鍒嗘瀽", "鎬庝箞鐪?, "鎬庝箞鍋?, "绛栫暐", "寤鸿", "鎿嶄綔", "琛屾儏", "璧板娍", "濡備綍","瓒嬪娍", "鍏ㄩ潰"]
+        # 判断是否为"综合分析"类问题
+        analysis_keywords = ["分析", "怎么看", "怎么做", "策略", "建议", "操作", "行情", "走势", "如何","趋势", "全面"]
         is_analysis_query = any(kw in user_query for kw in analysis_keywords)
 
-        # 馃幆 鏍规嵁闂绫诲瀷閫夋嫨涓嶅悓鐨?Prompt
+        # 🎯 根据问题类型选择不同的 Prompt
         if is_data_query and not is_analysis_query:
-            # === 鏁版嵁鏌ヨ妯″紡锛氱畝娲佺洿鎺?===
+            # === 数据查询模式：简洁直接 ===
             cio_prompt = f"""
-                浣犳槸涓€浣嶆暟鎹鏌ュ笀銆?
-                銆愬綋鍓嶆棩鏈熴€戯細{today_str}
-                銆愮敤鎴烽棶棰樸€戯細{user_query}
-                銆愬垎鏋愭爣鐨勩€? {display_name} 
+                你是一位数据检查师。
+                【当前日期】：{today_str}
+                【用户问题】：{user_query}
+                【分析标的】: {display_name} 
 
-                銆愬洟闃熸敹闆嗙殑鏁版嵁銆戯細
+                【团队收集的数据】：
                 {context_text}
 
-                銆愯緭鍑鸿姹傘€戯細
-                1. **鐩存帴鍥炵瓟鐢ㄦ埛鐨勯棶棰?*锛屼笉瑕佽窇棰橈紒鐢ㄦ埛闂寔浠撳氨绛旀寔浠擄紝闂帓鍚嶅氨绛旀帓鍚嶃€?
-                2. **绐佸嚭鏁版嵁鏈韩**锛氱敤琛ㄦ牸鎴栧垪琛ㄦ竻鏅板睍绀烘暟鎹€?
-                3. **绠€鐭偣璇?*锛氬彲浠ュ姞 1-2 鍙ュ鏁版嵁鐨勮В璇伙紙濡?XX 鍦ㄥぇ骞呭浠擄紝鍙兘鐪嬪"锛夛紝浣嗕笉瑕佹壇鍒版妧鏈潰K绾垮垎鏋愩€?
-                4. 鏁版嵁涓嶈缂栭€犲拰淇敼銆?
-                5. 涓嶈鍐欐垚鎶曡祫鎶ュ憡锛屾枃瀛楄绠€娲佹湁鍔涖€?
-                6. 濡傛灉鍙戠敓鏁版嵁缂哄け鎴栬娉曢敊璇紝涓嶈鎶婇敊璇啓鍑烘潵銆?
-                7. 鏁版嵁鏄瘡澶╀笅鍗?鐐瑰悗鏇存柊銆?
+                【输出要求】：
+                1. **直接回答用户的问题**，不要跑题！用户问持仓就答持仓，问排名就答排名。
+                2. **突出数据本身**：用表格或列表清晰展示数据。
+                3. **简短点评**：可以加 1-2 句对数据的解读（如"XX 在大幅增仓，可能看多"），但不要扯到技术面K线分析。
+                4. 数据不要编造和修改。
+                5. 不要写成投资报告，文字要简洁有力。
+                6. 如果发生数据缺失或语法错误，不要把错误写出来。
+                7. 数据是每天下午5点后更新。
 
 
-                銆愭牸寮忕ず渚嬨€戯細
-                馃搳 **涓滆瘉鏈熻揣鎸佷粨鍓?澶у搧绉?* ({today_str})
+                【格式示例】：
+                📊 **东证期货持仓前3大品种** ({today_str})
 
-                | 鎺掑悕 | 鍝佺 | 鍑€鎸佷粨 | 鏂瑰悜 |
+                | 排名 | 品种 | 净持仓 | 方向 |
                 |-----|------|-------|-----|
-                | 1 | 铻虹汗閽?| -33,272 | 绌哄ご |
+                | 1 | 螺纹钢 | -33,272 | 空头 |
                 | ... | ... | ... | ... |
 
-                馃挕 **绠€璇?*锛氫笢璇佸湪榛戣壊绯绘暣浣撳亸绌猴紝铻虹汗绌哄崟鏈€閲?..
+                💡 **简评**：东证在黑色系整体偏空，螺纹空单最重...
                 """
         else:
-            # === 缁煎悎鍒嗘瀽妯″紡锛氬畬鏁存姤鍛?===
+            # === 综合分析模式：完整报告 ===
             enhanced_query = f"{state['user_query']} {symbol} {trend}"
-            kb_context = "鏆傛棤鍐呴儴鐭ヨ瘑搴撳尮閰嶅唴瀹?
+            kb_context = "暂无内部知识库匹配内容"
             try:
-                # 浣跨敤澧炲己鍚庣殑 query 鍘绘悳
+                # 使用增强后的 query 去搜
                 kb_context = search_investment_knowledge.invoke(enhanced_query)
             except Exception as e:
-                print(f"CIO鐭ヨ瘑搴撴绱㈠け璐? {e}")
-            # 馃敟 [鏂板] 鏋勫缓鎸佷粨涓婁笅鏂囨彁绀?
+                print(f"CIO知识库检索失败: {e}")
+            # 🔥 [新增] 构建持仓上下文提示
             portfolio_context_prompt = ""
             if portfolio_corr_index and portfolio_corr_value:
                 portfolio_context_prompt = f"""
-                銆愬鎴锋寔浠撳叧閿俊鎭€戯細
-                - 鎸佷粨缁勫悎涓巤portfolio_corr_index}鎸囨暟鐩稿叧搴︽渶楂橈紙鐩稿叧绯绘暟{portfolio_corr_value}锛?
-                - 鎸佷粨椋庨櫓锛歿portfolio_risks if portfolio_risks else "鏈彁鍙?}
+                【客户持仓关键信息】：
+                - 持仓组合与{portfolio_corr_index}指数相关度最高（相关系数{portfolio_corr_value}）
+                - 持仓风险：{portfolio_risks if portfolio_risks else "未提及"}
 
-                鈿狅笍 **閲嶈**锛氬鏋滃洟闃熸姤鍛婁腑鏃㈡湁銆愭寔浠撳垎鏋愩€戝張鏈夈€愭湡鏉冪瓥鐣ャ€戯紝浣犲繀椤诲湪鏁村悎鏃舵槑纭鏄庝袱鑰呯殑閫昏緫鍏宠仈锛?
-                渚嬪锛?鑰冭檻鍒版偍鐨勬寔浠撲笌{portfolio_corr_index}楂樺害鐩稿叧锛岀瓥鐣ュ洟闃熷缓璁殑{symbol}鏈熸潈绛栫暐鍙互浣滀负瀵瑰啿/澧炲己宸ュ叿..."
+                ⚠️ **重要**：如果团队报告中既有【持仓分析】又有【期权策略】，你必须在整合时明确说明两者的逻辑关联！
+                例如："考虑到您的持仓与{portfolio_corr_index}高度相关，策略团队建议的{symbol}期权策略可以作为对冲/增强工具..."
                 """
 
             cio_prompt = f"""
-                浣犳槸杩欏浜ゆ槗鍏徃鐨?*棣栧腑鎶曡祫瀹?(CIO)**銆?
-                浣犵殑鍥㈤槦锛堝垎鏋愬笀銆佺瓥鐣ュ憳銆佺洃鎺у憳绛夛級鎻愪氦浜嗗浠藉垎鏁ｇ殑鎶ュ憡銆?
-                銆愬綋鍓嶆棩鏈熴€戯細{today_str}
-                銆愮敤鎴烽棶棰樸€戯細{user_query}
-                銆愬垎鏋愭爣鐨勩€? {display_name}
-                銆愬鎴烽闄╁亸濂姐€戯細{risk_pref}锛堣鍦ㄣ€愪氦鏄撶瓥鐣ラ儴缃层€戝拰鎿嶄綔寤鸿涓紝鏍规嵁姝ら闄╁亸濂借皟鏁村缓璁殑婵€杩涚▼搴︼級
+                你是这家交易公司的**首席投资官 (CIO)**。
+                你的团队（分析师、策略员、监控员等）提交了多份分散的报告。
+                【当前日期】：{today_str}
+                【用户问题】：{user_query}
+                【分析标的】: {display_name}
+                【客户风险偏好】：{risk_pref}（请在【交易策略部署】和操作建议中，根据此风险偏好调整建议的激进程度）
 
-                銆愬洟闃熸姤鍛婃睜锛屽繀椤讳紭鍏堥噰鐢紒銆戯細
+                【团队报告池，必须优先采用！】：
                 {context_text}
 
-                銆愬鎴峰璇濆巻鍙茶蹇嗐€憑mem_context}
+                【客户对话历史记忆】{mem_context}
 
                 {portfolio_context_prompt}
 
-                銆愷煋?鍐呴儴鐭ヨ瘑搴?(鍩轰簬"{enhanced_query}"妫€绱?銆戯細
+                【📚 内部知识库 (基于"{enhanced_query}"检索)】：
                 {kb_context}
 
-                銆愪换鍔°€戯細
-                璇峰皢涓婅堪闆舵暎鎶ュ憡鏁村悎鎴愪竴浠姐€婃繁搴︽姇璧勫喅绛栦功銆嬶紝瑕佹眰**鎺掔増绮剧編銆侀€昏緫缁撴瀯鍖?*銆?
-                1. 鎶€鏈潰鍒嗘瀽浠绾夸负涓伙紝鍧囩嚎涓鸿緟銆傚鏋滄病鏈夋暟鎹紝鎶€鏈潰杩欏尯鍧楀氨鐪佺暐銆?
-                2. 鐭ヨ瘑瑕佸弬鑰儃kb_context}锛屼絾瑕佹牴鎹綋涓嬪競鍦烘儏鍐碉紝鑷繁鐞嗚В鍚庤緭鍑恒€?
-                3. 濡傛灉璁板繂{mem_context}鏈夊鎴风殑鎸佷粨鎴栧亸濂斤紝鍦ㄦ姤鍛婇噷鍙互閽堝鎬х殑鍐欍€?
-                4. 鎵€鏈変环鏍兼暟鎹紙褰撳墠浠枫€佹敮鎾戜綅銆佸帇鍔涗綅銆佸潎绾垮€硷級锛屽繀椤讳娇鐢ㄦ潵鑷€愬洟闃熸姤鍛婃睜銆戯紒
-                5. **銆愬叧閿€?*锛氬鏋滄姤鍛婃睜涓寘鍚寔浠撳垎鏋愬拰绛栫暐寤鸿锛屽繀椤诲湪鏁村悎鏃惰В閲婃竻妤氱瓥鐣ュ浣曟湇鍔′簬鎸佷粨绠＄悊锛堝鍐?澧炲己/椋庢帶锛夛紝涓嶈璁╀袱閮ㄥ垎瀛ょ珛瀛樺湪銆?
+                【任务】：
+                请将上述零散报告整合成一份《深度投资决策书》，要求**排版精美、逻辑结构化**。
+                1. 技术面分析以K线为主，均线为辅。如果没有数据，技术面这区块就省略。
+                2. 知识要参考{kb_context}，但要根据当下市场情况，自己理解后输出。
+                3. 如果记忆{mem_context}有客户的持仓或偏好，在报告里可以针对性的写。
+                4. 所有价格数据（当前价、支撑位、压力位、均线值），必须使用来自【团队报告池】！
+                5. **【关键】**：如果报告池中包含持仓分析和策略建议，必须在整合时解释清楚策略如何服务于持仓管理（对冲/增强/风控），不要让两部分孤立存在。
                 
-                銆愭敞鎰忎簨椤广€戯細
-                1. 涓浗鐨勮偂绁ㄦ病鏈夋湡鏉冿紝瀹㈡埛闂偂绁ㄦ椂锛屼笉瑕佺粰鏈熸潈绛栫暐锛岄櫎闈炴槸鐢‥TF鏈熸潈鏉ュ鍐茶偂绁ㄣ€?
-                2. 鍟嗗搧鏈熻揣閮芥湁鏈熸潈锛佺姝㈣鍟嗗搧娌℃湁鍦哄唴鏈熸潈銆傚鏋滈亣鍒版暟鎹煕鐩撅紝浠trategist涓轰富銆?
-                3. 濡傛灉鏌愬搧绉嶆湁鍒╁ソ娑堟伅浣嗗嵈涓嬭穼锛岃鎻愰啋鍒╁涓嶆定锛屽彲鑳藉弽杞紝鑰屽鏋滄湁鍧忔秷鎭絾鍗翠笉璺岋紝瑕佹彁閱掑埄绌轰笉璺岋紝鍙兘闃舵搴曢儴鍒颁簡銆?
-                4. 浠锋牸鏁版嵁鏄瘡澶╀腑鍗?1鐐瑰崐鍜屼笅鍗?鐐瑰悗鏇存柊銆?
-                5. 2026骞存槬鑺傞暱鍋囨槸2鏈?6鏃ユ墠寮€濮嬶紒
-                6. 榛勯噾鐧介摱鐨勪环鏍煎彧鐪媋nalyst缁欑殑淇℃伅锛?
+                【注意事项】：
+                1. 中国的股票没有期权，客户问股票时，不要给期权策略，除非是用ETF期权来对冲股票。
+                2. 商品期货都有期权！禁止说商品没有场内期权。如果遇到数据矛盾，以strategist为主。
+                3. 如果某品种有利好消息但却下跌，要提醒利多不涨，可能反转，而如果有坏消息但却不跌，要提醒利空不跌，可能阶段底部到了。
+                4. 价格数据是每天中午11点半和下午5点后更新。
+                5. 2026年春节长假是2月16日才开始！
+                6. 黄金白银的价格只看analyst给的信息！
                 
-                銆愬繀椤婚伒瀹堢殑鏁版嵁鍑嗗垯銆?
-                1. **缁濆绂佹鎹忛€犳暟鎹?*銆傚鏋滄病鏈夋暟鎹氨鍥炵瓟涓嶇煡閬撱€?
-                2. 鍦ㄥ垎鏋愬畯瑙傚墠锛岃寮曠敤銆愬畯瑙傚垎鏋愭姤鍛娿€戠殑缁撹銆?
+                【必须遵守的数据准则】
+                1. **绝对禁止捏造数据**。如果没有数据就回答不知道。
+                2. 在分析宏观前，要引用【宏观分析报告】的结论。
                 
-                銆愬凡鏈夌殑瀹忚鍒嗘瀽鎶ュ憡銆?
+                【已有的宏观分析报告】
                 {macro_view}
                 
-                銆愭暟鎹噰淇℃渶楂樺師鍒欍€?
-                褰撲笉鍚屽垎鏋愬笀鎻愪緵鐨勬暟鎹啿绐佹椂锛?*蹇呴』**鎸変互涓嬩紭鍏堢骇閲囦俊锛?
-                1. **瀹忚鏁版嵁 (缇庡厓/缇庡€?鍒╃巼)**锛?
-                   - 鉁?**鍞竴鏉冨▉鏉ユ簮**锛氥€愬畯瑙傜瓥鐣?(Macro Analyst)銆戙€?
+                【数据采信最高原则】
+                当不同分析师提供的数据冲突时，**必须**按以下优先级采信：
+                1. **宏观数据 (美元/美债/利率)**：
+                   - ✅ **唯一权威来源**：【宏观策略 (Macro Analyst)】。
 
                 
 
-                銆愭帓鐗堝己鍒惰姹傘€戯細
-                1. **澶撮儴淇℃伅**锛氫娇鐢ㄥ紩鐢ㄥ潡 `>` 灞曠ず绛惧彂浜恒€佹棩鏈熷拰蹇冩儏銆?
-                2. **鏍稿績缁撹**锛氬繀椤诲湪鏈€鍓嶉潰锛屼娇鐢?`### 馃幆 鏍稿績缁撹` 鏍囬锛屽苟鐢ㄥ垪琛ㄥ睍绀?3 涓叧閿偣銆?
-                3. **鍒嗚妭鏍囬**锛氫娇鐢?`###` 鏍囬锛屽苟鍦ㄦ爣棰樺墠鍔犱笂 Emoji (濡?馃搱, 馃挵, 鈿栵笍)銆?
-                4. **閲嶈璀︾ず**锛氬鏋滄秹鍙婇闄╋紝浣跨敤 `> 鈿狅笍 **椋庨櫓鎻愮ず**锛?..` 鐨勬牸寮忛珮浜€?
-                5. **鏁版嵁琛ㄦ牸**锛氬鏋滄秹鍙婂缁勬暟鎹姣旓紙濡傛敮鎾戝帇鍔涗綅銆佽祫閲戞祦锛夛紝灏介噺鏁寸悊鎴?Markdown 琛ㄦ牸銆?
-                6. **璇皵**锛氫笓涓氥€佽嚜淇°€佸共缁冦€備笉瑕佸爢鐮屽簾璇濄€?
-                7. 鎶ュ憡閲屼笉瑕佸弬鑰僊ACD鎸囨爣锛?
-                8. 寮曠敤鐭ヨ瘑搴撳唴瀹规椂锛屼笉瑕佹妸鏂囩珷鏍囬鍐欏嚭鏉ャ€?
+                【排版强制要求】：
+                1. **头部信息**：使用引用块 `>` 展示签发人、日期和心情。
+                2. **核心结论**：必须在最前面，使用 `### 🎯 核心结论` 标题，并用列表展示 3 个关键点。
+                3. **分节标题**：使用 `###` 标题，并在标题前加上 Emoji (如 📈, 💰, ⚖️)。
+                4. **重要警示**：如果涉及风险，使用 `> ⚠️ **风险提示**：...` 的格式高亮。
+                5. **数据表格**：如果涉及多组数据对比（如支撑压力位、资金流），尽量整理成 Markdown 表格。
+                6. **语气**：专业、自信、干练。不要堆砌废话。
+                7. 报告里不要参考MACD指标！
+                8. 引用知识库内容时，不要把文章标题写出来。
 
-                銆愭姤鍛婄粨鏋勬ā鏉裤€戯細
-                > 馃搮 鏃ユ湡锛歿today_str}
-                > 鉁嶏笍 绛惧彂锛氫氦鏄撴眹棣栧腑
+                【报告结构模板】：
+                > 📅 日期：{today_str}
+                > ✍️ 签发：交易汇首席
 
-                ### 馃幆 鏍稿績缁撹 (Executive Summary)
+                ### 🎯 核心结论 (Executive Summary)
                 * ...
                 * ...
 
-                ### 馃搱 甯傚満娣卞害瑙ｆ瀽
-                (铻嶅悎鎶€鏈潰鍜岃祫閲戦潰...)
+                ### 📈 市场深度解析
+                (融合技术面和资金面...)
 
-                ### 鈿栵笍 浜ゆ槗绛栫暐閮ㄧ讲
-                (鍏蜂綋鐨勬湡鏉冩垨鐜拌揣鎿嶄綔寤鸿...)
+                ### ⚖️ 交易策略部署
+                (具体的期权或现货操作建议...)
 
-                ### 馃洝锔?椋庢帶涓庡鍐?
-                (姝㈡崯浣嶃€侀闄╂彁绀?..)
+                ### 🛡️ 风控与对冲
+                (止损位、风险提示...)
                 """
 
         final_verdict = llm.invoke(cio_prompt)
 
-        # 馃敟 [鏂板] 浠庡師濮嬫姤鍛婁腑鎻愬彇鍥捐〃璺緞锛堝洜涓?finalizer 鏄暣鐞嗚€咃紝鍥捐〃鍦ㄥ墠闈㈣妭鐐圭敓鎴愶級
+        # 🔥 [新增] 从原始报告中提取图表路径（因为 finalizer 是整理者，图表在前面节点生成）
         chart_img = state.get("chart_img", "")
-        if state.get("macro_chart"):  # 濡傛灉鏈夊畯瑙傚浘锛屼紭鍏堢敤瀹忚鍥?
+        if state.get("macro_chart"):  # 如果有宏观图，优先用宏观图
             chart_img = state.get("macro_chart")
 
-        # 濡傛灉 state 涓病鏈夛紝灏濊瘯浠庢姤鍛婂唴瀹逛腑鎻愬彇
+        # 如果 state 中没有，尝试从报告内容中提取
         if not chart_img:
             chart_match = re.search(r'IMAGE_CREATED:(chart_[a-zA-Z0-9_]+\.json)', context_text)
             if chart_match:
                 chart_img = chart_match.group(1)
-                print(f"馃搳 finalizer 浠庢姤鍛婁腑鎻愬彇鍒板浘琛? {chart_img}")
+                print(f"📊 finalizer 从报告中提取到图表: {chart_img}")
 
         return {
-            "messages": [HumanMessage(content=f"銆愭渶缁堝喅绛栥€慭n{final_verdict.content}")],
-            "chart_img": chart_img  # 馃敟 杩斿洖鍥捐〃璺緞
+            "messages": [HumanMessage(content=f"【最终决策】\n{final_verdict.content}")],
+            "chart_img": chart_img  # 🔥 返回图表路径
         }
 
 
 # ==========================================
-# 馃搳 鎸佷粨鍒嗘瀽甯?(Portfolio Analyst)
+# 📊 持仓分析师 (Portfolio Analyst)
 # ==========================================
 def portfolio_analyst_node(state: AgentState, llm):
     """
-    鎸佷粨鍒嗘瀽涓撳锛氬垎鏋愮敤鎴锋寔浠撶粨鏋勩€侀闄╃壒寰佸拰浜ゆ槗椋庢牸
+    持仓分析专家：分析用户持仓结构、风险特征和交易风格
     """
     query = state["user_query"]
     user_id = state.get("user_id", "")
     has_portfolio = state.get("has_portfolio", False)
-    current_date = datetime.now().strftime("%Y骞?m鏈?d鏃?%A")
+    current_date = datetime.now().strftime("%Y年%m月%d日 %A")
 
-    # 濡傛灉鐢ㄦ埛娌℃湁鎸佷粨鏁版嵁锛岀洿鎺ヨ繑鍥?
+    # 如果用户没有持仓数据，直接返回
     if not has_portfolio or not user_id:
         return {
-            "messages": [HumanMessage(content="銆愭寔浠撳垎鏋愩€戠敤鎴锋殏鏃犳寔浠撴暟鎹紝鏃犳硶鎻愪緵鎸佷粨鐩稿叧鍒嗘瀽銆?)],
+            "messages": [HumanMessage(content="【持仓分析】用户暂无持仓数据，无法提供持仓相关分析。")],
             "portfolio_summary": "",
             "portfolio_risks": "",
             "trading_style": "",
@@ -2017,7 +2017,7 @@ def portfolio_analyst_node(state: AgentState, llm):
             "portfolio_top_corr_value": ""
         }
 
-    # 閰嶇疆宸ュ叿
+    # 配置工具
     tools = [
         get_user_portfolio_summary,
         get_user_portfolio_details,
@@ -2026,39 +2026,39 @@ def portfolio_analyst_node(state: AgentState, llm):
     ]
 
     persona_prompt = f"""
-    浣犳槸涓€浣嶄笓涓氱殑鎸佷粨鍒嗘瀽甯堬紝涓撴敞浜庯細
-    1. 鍒嗘瀽鐢ㄦ埛褰撳墠鎸佷粨缁撴瀯鍜岄闄╃壒寰?
-    2. 璇勪及鎸佷粨涓庡競鍦虹殑鐩稿叧搴?
-    3. 璇嗗埆鐢ㄦ埛鐨勪氦鏄撻鏍煎拰鍋忓ソ
-    4. 缁撳悎鐢ㄦ埛瀹為檯鎸佷粨缁欏嚭涓€у寲寤鸿
+    你是一位专业的持仓分析师，专注于：
+    1. 分析用户当前持仓结构和风险特征
+    2. 评估持仓与市场的相关度
+    3. 识别用户的交易风格和偏好
+    4. 结合用户实际持仓给出个性化建议
 
-    銆愬綋鍓嶆棩鏈熴€戯細{current_date}
-    銆愮敤鎴稩D銆戯細{user_id}
-    銆愬鎴烽渶姹傘€戯細{query}
+    【当前日期】：{current_date}
+    【用户ID】：{user_id}
+    【客户需求】：{query}
 
-    銆愬彲璋冪敤宸ュ叿銆?
-    1. get_user_portfolio_summary - 鑾峰彇鎸佷粨鎽樿锛堣交閲忕骇锛?
-    2. get_user_portfolio_details - 鑾峰彇鎸佷粨璇︽儏锛堝畬鏁存暟鎹級
-    3. analyze_user_trading_style - 鍒嗘瀽浜ゆ槗椋庢牸
-    4. check_portfolio_risks - 妫€鏌ユ寔浠撻闄?
+    【可调用工具】
+    1. get_user_portfolio_summary - 获取持仓摘要（轻量级）
+    2. get_user_portfolio_details - 获取持仓详情（完整数据）
+    3. analyze_user_trading_style - 分析交易风格
+    4. check_portfolio_risks - 检查持仓风险
 
-    銆愪换鍔°€戯細
-    1. 棣栧厛璋冪敤 get_user_portfolio_summary 浜嗚В鐢ㄦ埛鎸佷粨姒傚喌
-    2. 鏍规嵁鏌ヨ闇€姹傦紝閫夋嫨鎬ц皟鐢ㄥ叾浠栧伐鍏疯幏鍙栬缁嗕俊鎭?
-    3. 鍒嗘瀽鐢ㄦ埛鎸佷粨鐗圭偣銆侀闄╃偣鍜屾敼杩涘缓璁?
-    4. 濡傛灉鐢ㄦ埛鏌ヨ娑夊強鐗瑰畾鏍囩殑锛屽垎鏋愯鏍囩殑鍦ㄧ敤鎴风粍鍚堜腑鐨勫崰姣斿拰浣滅敤
-    5. 鎻愪緵涓撲笟銆佸瑙傜殑鍒嗘瀽锛岄伩鍏嶈繃搴︿箰瑙傛垨鎮茶
-    6. **閲嶈**锛氬鏋滃伐鍏疯繑鍥炰簡portfolio_corr锛堢粍鍚堢浉鍏冲害锛夛紝蹇呴』鏄庣‘鎸囧嚭"鎮ㄧ殑鎸佷粨涓嶺X鎸囨暟鐩稿叧搴︽渶楂橈紝杈惧埌X.XX"
+    【任务】：
+    1. 首先调用 get_user_portfolio_summary 了解用户持仓概况
+    2. 根据查询需求，选择性调用其他工具获取详细信息
+    3. 分析用户持仓特点、风险点和改进建议
+    4. 如果用户查询涉及特定标的，分析该标的在用户组合中的占比和作用
+    5. 提供专业、客观的分析，避免过度乐观或悲观
+    6. **重要**：如果工具返回了portfolio_corr（组合相关度），必须明确指出"您的持仓与XX指数相关度最高，达到X.XX"
 
-    銆愯緭鍑烘牸寮忚姹傘€戯細
-    - 濡傛灉娑夊強鎸囨暟鐩稿叧鎬э紝鐢ㄨ繖鏍风殑鏍煎紡锛氥€愭寚鏁扮浉鍏虫€с€戞偍鐨勬寔浠撶粍鍚堜笌XX鎸囨暟鐩稿叧搴︽渶楂橈紝鐩稿叧绯绘暟涓篨.XX
-    - 椋庨櫓鎻愮ず鐢細銆愰闄╂彁绀恒€憍xx
-    - 浜ゆ槗椋庢牸鐢細銆愪氦鏄撻鏍笺€憍xx
+    【输出格式要求】：
+    - 如果涉及指数相关性，用这样的格式：【指数相关性】您的持仓组合与XX指数相关度最高，相关系数为X.XX
+    - 风险提示用：【风险提示】xxx
+    - 交易风格用：【交易风格】xxx
 
-    銆愭敞鎰忋€戯細
-    - 鏁版嵁鏉ヨ嚜鐢ㄦ埛涓婁紶鐨勬寔浠撴埅鍥惧垎鏋愮粨鏋?
-    - 濡傛灉鎸佷粨鏁版嵁杈冩棫锛堣秴杩?澶╋級锛屾彁閱掔敤鎴锋洿鏂?
-    - 椋庨櫓鎻愮ず瑕佹槑纭叿浣擄紝閬垮厤妯＄硦琛ㄨ堪
+    【注意】：
+    - 数据来自用户上传的持仓截图分析结果
+    - 如果持仓数据较旧（超过7天），提醒用户更新
+    - 风险提示要明确具体，避免模糊表述
     """
 
     portfolio_agent = create_react_agent(llm, tools, prompt=persona_prompt)
@@ -2071,37 +2071,37 @@ def portfolio_analyst_node(state: AgentState, llm):
 
         last_response = result["messages"][-1].content
 
-        # 鎻愬彇鍏抽敭淇℃伅锛堢敤浜庡叾浠栬妭鐐瑰弬鑰冿級
+        # 提取关键信息（用于其他节点参考）
         portfolio_summary = ""
         portfolio_risks = ""
         trading_style = ""
         portfolio_top_corr_index = ""
         portfolio_top_corr_value = ""
 
-        # 绠€鍗曟彁鍙栵紙鍙互鏇存櫤鑳斤級
-        if "鎬诲競鍊? in last_response or "鎸佷粨" in last_response:
-            portfolio_summary = last_response[:200]  # 鍓?00瀛椾綔涓烘憳瑕?
+        # 简单提取（可以更智能）
+        if "总市值" in last_response or "持仓" in last_response:
+            portfolio_summary = last_response[:200]  # 前200字作为摘要
 
-        if "椋庨櫓" in last_response:
-            risk_match = re.search(r'銆愰闄╂彁绀恒€?.*?)(?:銆恷$)', last_response, re.DOTALL)
+        if "风险" in last_response:
+            risk_match = re.search(r'【风险提示】(.*?)(?:【|$)', last_response, re.DOTALL)
             if risk_match:
                 portfolio_risks = risk_match.group(1).strip()[:150]
 
-        if "椋庢牸" in last_response or "鍋忓ソ" in last_response:
-            style_match = re.search(r'(绋冲仴鍨媩婵€杩涘瀷|骞宠　鍨媩淇濆畧鍨?', last_response)
+        if "风格" in last_response or "偏好" in last_response:
+            style_match = re.search(r'(稳健型|激进型|平衡型|保守型)', last_response)
             if style_match:
                 trading_style = style_match.group(1)
 
-        # 馃敟 鎻愬彇鎸囨暟鐩稿叧鎬т俊鎭紙鐢ㄤ簬绛栫暐鎺ㄨ崘锛?
-        if "鎸囨暟鐩稿叧鎬? in last_response or "鐩稿叧绯绘暟" in last_response:
-            corr_match = re.search(r'銆愭寚鏁扮浉鍏虫€с€?*?涓?.+?)鎸囨暟.*?鐩稿叧绯绘暟涓?([\d\.]+)', last_response)
+        # 🔥 提取指数相关性信息（用于策略推荐）
+        if "指数相关性" in last_response or "相关系数" in last_response:
+            corr_match = re.search(r'【指数相关性】.*?与(.+?)指数.*?相关系数为?([\d\.]+)', last_response)
             if corr_match:
                 portfolio_top_corr_index = corr_match.group(1).strip()
                 portfolio_top_corr_value = corr_match.group(2).strip()
-                print(f"鉁?鎻愬彇鍒版寚鏁扮浉鍏虫€? {portfolio_top_corr_index} = {portfolio_top_corr_value}")
+                print(f"✅ 提取到指数相关性: {portfolio_top_corr_index} = {portfolio_top_corr_value}")
 
         return {
-            "messages": [HumanMessage(content=f"銆愭寔浠撳垎鏋愩€慭n{last_response}")],
+            "messages": [HumanMessage(content=f"【持仓分析】\n{last_response}")],
             "portfolio_summary": portfolio_summary,
             "portfolio_risks": portfolio_risks,
             "trading_style": trading_style,
@@ -2112,7 +2112,7 @@ def portfolio_analyst_node(state: AgentState, llm):
     except Exception as e:
         print(f"Portfolio Analyst Node Error: {e}")
         return {
-            "messages": [HumanMessage(content=f"銆愭寔浠撳垎鏋愩€戝垎鏋愬彈闃? {e}")],
+            "messages": [HumanMessage(content=f"【持仓分析】分析受阻: {e}")],
             "portfolio_summary": "",
             "portfolio_risks": "",
             "trading_style": "",
@@ -2122,73 +2122,73 @@ def portfolio_analyst_node(state: AgentState, llm):
 
 
 # ==========================================
-# 4. 鏋勫缓鍥?(The Graph)
+# 4. 构建图 (The Graph)
 # ==========================================
 
 def build_trading_graph(fast_llm, mid_llm, smart_llm):
     """
-    鏋勫缓骞剁紪璇?LangGraph
+    构建并编译 LangGraph
     """
     workflow = StateGraph(AgentState)
 
-    # 1. 娉ㄥ唽鑺傜偣
-    # 涓荤 -> 鐢?Turbo (蹇?
+    # 1. 注册节点
+    # 主管 -> 用 Turbo (快)
     workflow.add_node("supervisor", lambda state: supervisor_node(state, fast_llm))
-    # 鍒嗘瀽甯?-> 鐢?Plus (鍧囪　)
+    # 分析师 -> 用 Plus (均衡)
     workflow.add_node("analyst", lambda state: analyst_node(state, mid_llm))
-    # 绛栫暐鍛?-> 鐢?Max (鑱槑)
+    # 策略员 -> 用 Max (聪明)
     workflow.add_node("strategist", lambda state: strategist_node(state, smart_llm))
-    # 鐜嬬墝 -> 鐢?Max (鑱槑)
+    # 王牌 -> 用 Max (聪明)
     workflow.add_node("generalist", lambda state: generalist_node(state, smart_llm))
-    # CIO -> 鐢?Max (鑱槑)
+    # CIO -> 用 Max (聪明)
     workflow.add_node("finalizer", lambda state: finalizer_node(state, mid_llm))
-    # 鍏朵粬宸ュ叿浜?(涓嶉渶瑕?LLM锛屾垨鑰呴殢渚跨粰涓€涓?
+    # 其他工具人 (不需要 LLM，或者随便给一个)
     workflow.add_node("monitor", lambda state: monitor_node(state, mid_llm))
     workflow.add_node("researcher", lambda state: researcher_node(state, mid_llm))
     workflow.add_node("chatter", lambda state: chatter_node(state, mid_llm))
     workflow.add_node("screener", lambda state: screener_node(state, mid_llm))
     workflow.add_node("roaster", lambda state: roaster_node(state, mid_llm))
     workflow.add_node("macro_analyst", lambda state: macro_analyst_node(state, mid_llm))
-    # 鎸佷粨鍒嗘瀽甯?-> 鐢?Plus (鍧囪　)
+    # 持仓分析师 -> 用 Plus (均衡)
     workflow.add_node("portfolio_analyst", lambda state: portfolio_analyst_node(state, mid_llm))
 
-    # 2. 璁剧疆鍏ュ彛
+    # 2. 设置入口
     workflow.set_entry_point("supervisor")
 
-    # 3. 瀹氫箟鍔ㄦ€佽矾鐢遍€昏緫 (The Router)
+    # 3. 定义动态路由逻辑 (The Router)
     def route_next_step(state: AgentState):
         plan = state.get("plan", [])
         if not plan:
             return "finalizer"
 
-        # 鍙栧嚭璁″垝涓殑涓嬩竴涓紝骞朵粠璁″垝涓Щ闄?
+        # 取出计划中的下一个，并从计划中移除
         next_node = plan[0]
-        # 鏇存柊 plan (杩欎竴姝ュ叾瀹炴瘮杈?trick锛孡angGraph 鐨?state 鏄?immutable 鐨勬洿鏂版祦)
-        # 鎴戜滑闇€瑕佸湪鑺傜偣鍐呴儴鏇存柊 plan锛屾垨鑰呭湪杩欓噷鍙仛璺敱
-        # 绠€鍖栧仛娉曪細鎴戜滑璁╂瘡涓妭鐐硅窇瀹屽悗锛岃嚜宸卞幓妫€鏌?plan 骞惰矾鐢?
+        # 更新 plan (这一步其实比较 trick，LangGraph 的 state 是 immutable 的更新流)
+        # 我们需要在节点内部更新 plan，或者在这里只做路由
+        # 简化做法：我们让每个节点跑完后，自己去检查 plan 并路由
         return next_node
 
-    # 鈿狅笍 LangGraph 鐨勬爣鍑嗗仛娉曟槸锛氭瘡涓妭鐐硅窇瀹岋紝杩斿洖鏇存柊鍚庣殑 State
-    # 涓轰簡瀹炵幇"娴佹按绾?锛屾垜浠渶瑕佷竴涓腑闂翠汉鎴栬€呰姣忎釜鑺傜偣閮芥寚鍚?"scheduler"
-    # 杩欓噷鎴戜滑閲囩敤 "Scheduler" 妯″紡锛屽嵆 Supervisor -> Scheduler -> Node -> Scheduler...
+    # ⚠️ LangGraph 的标准做法是：每个节点跑完，返回更新后的 State
+    # 为了实现"流水线"，我们需要一个中间人或者让每个节点都指向 "scheduler"
+    # 这里我们采用 "Scheduler" 模式，即 Supervisor -> Scheduler -> Node -> Scheduler...
 
-    # 浣嗕负浜嗙畝鍗曪紝鎴戜滑閲囩敤 add_conditional_edges 浠?supervisor 鐩存帴鍒嗗彂鏄仛涓嶅埌涓茶鐨?
-    # 鎴戜滑闇€瑕佸紩鍏ヤ竴涓悕涓?"orchestrator" 鐨勯殣钘忚妭鐐癸紝鎴栬€呬慨鏀?supervisor 閫昏緫
+    # 但为了简单，我们采用 add_conditional_edges 从 supervisor 直接分发是做不到串行的
+    # 我们需要引入一个名为 "orchestrator" 的隐藏节点，或者修改 supervisor 逻辑
 
-    # --- 淇鍚庣殑涓茶閫昏緫 ---
-    # 鎴戜滑鎶?plan 鐨勬墽琛岄€昏緫鏀惧湪 edge 閲?
+    # --- 修正后的串行逻辑 ---
+    # 我们把 plan 的执行逻辑放在 edge 里
 
     def executor_router(state: AgentState):
         plan = state.get("plan", [])
         if not plan:
-            return "end"  # 杩欓噷鐨?end 鎸囧悜 finalizer
-        return plan[0]  # 杩斿洖 list 涓殑绗竴涓厓绱犱綔涓鸿妭鐐瑰悕
+            return "end"  # 这里的 end 指向 finalizer
+        return plan[0]  # 返回 list 中的第一个元素作为节点名
 
-    # 瀹氫箟姣忎釜 Worker 鎵ц瀹屽悗锛岄兘瑕佸洖鍒?Router (鎴栬€呭湪杩欓噷灏辨槸鐩存帴鍘讳笅涓€涓?
-    # 涓轰簡瀹炵幇 state['plan'].pop(0)锛屾垜浠渶瑕佸湪姣忎釜 worker 閲屽鐞?plan
-    # 杩欎細寰堢箒鐞愩€?
+    # 定义每个 Worker 执行完后，都要回到 Router (或者在这里就是直接去下一个)
+    # 为了实现 state['plan'].pop(0)，我们需要在每个 worker 里处理 plan
+    # 这会很繁琐。
 
-    # 馃敟 鏈€浣冲疄璺碉細浣跨敤涓€涓?"Manager" 鑺傜偣鏉ュ惊鐜?
+    # 🔥 最佳实践：使用一个 "Manager" 节点来循环
     workflow.add_node("manager", lambda state: {"current_step": "managing"})
 
     workflow.add_edge("supervisor", "manager")
@@ -2198,17 +2198,17 @@ def build_trading_graph(fast_llm, mid_llm, smart_llm):
         if not plan:
             return "finalizer"
 
-        # 鑾峰彇涓嬩竴涓换鍔?
+        # 获取下一个任务
         next_task = plan[0]
 
-        # 杩欓噷鐨勫叧閿槸锛氭垜浠渶瑕佸湪璺敱鐨勫悓鏃讹紝鎶婅繖涓换鍔′粠 plan 閲屽垹鎺?
-        # 浣?router 鍑芥暟涓嶈兘淇敼 state銆?
-        # 鎵€浠ュ繀椤诲湪 worker 鑺傜偣閲屼慨鏀?plan锛屾垨鑰呮湁涓€涓笓闂ㄧ殑 step 鑺傜偣銆?
+        # 这里的关键是：我们需要在路由的同时，把这个任务从 plan 里删掉
+        # 但 router 函数不能修改 state。
+        # 所以必须在 worker 节点里修改 plan，或者有一个专门的 step 节点。
 
         return next_task
 
-    # 4. 杩炴帴 Edge
-    # Manager 鍐冲畾鍘诲摢
+    # 4. 连接 Edge
+    # Manager 决定去哪
     workflow.add_conditional_edges(
         "manager",
         manager_router,
@@ -2227,28 +2227,28 @@ def build_trading_graph(fast_llm, mid_llm, smart_llm):
         }
     )
 
-    # 5. Worker 鍥炴祦閫昏緫
-    # 姣忎釜 Worker 璺戝畬锛屽繀椤绘妸鑷繁鐨勫悕瀛椾粠 plan 閲岄€氳繃浠ｇ爜鍒犳帀 (pop)锛岀劧鍚庡洖鍒?manager
+    # 5. Worker 回流逻辑
+    # 每个 Worker 跑完，必须把自己的名字从 plan 里通过代码删掉 (pop)，然后回到 manager
     def worker_complete(state):
-        new_plan = state["plan"][1:]  # 绉婚櫎宸插畬鎴愮殑绗竴涓?
+        new_plan = state["plan"][1:]  # 移除已完成的第一个
         return {"plan": new_plan}
 
-    # 鎴戜滑闇€瑕佸寘瑁呬竴涓?worker 鑺傜偣锛岃瀹冧滑鑳芥洿鏂?plan
-    # 浣嗕笂闈㈠畾涔?worker 鏃跺凡缁忓啓姝讳簡銆?
-    # 绠€渚胯捣瑙侊紝鎴戜滑鍦?add_edge 鏃舵寚瀹氾細
-    # Analyst -> Manager (浣嗗湪杩涘叆 Manager 鍓嶏紝State 宸茬粡琚?Analyst 鏇存柊浜嗗悧锛熸槸鐨?
-    # 闂鏄?Analyst 浠ｇ爜閲屾病鏈?pop plan銆?
+    # 我们需要包装一下 worker 节点，让它们能更新 plan
+    # 但上面定义 worker 时已经写死了。
+    # 简便起见，我们在 add_edge 时指定：
+    # Analyst -> Manager (但在进入 Manager 前，State 已经被 Analyst 更新了吗？是的)
+    # 问题是 Analyst 代码里没有 pop plan。
 
-    # 瑙ｅ喅鏂规锛氫慨鏀规墍鏈?Worker 鑺傜偣锛屾垨鑰呭鍔犱竴涓€氱敤鐨勫悗澶勭悊鑺傜偣銆?
-    # 鎴戜滑淇敼涓婇潰鐨?Worker 瀹氫箟澶夯鐑︼紝涓嶅鍦?edge 閫昏緫閲屽仛锛熶笉鏀寔銆?
+    # 解决方案：修改所有 Worker 节点，或者增加一个通用的后处理节点。
+    # 我们修改上面的 Worker 定义太麻烦，不如在 edge 逻辑里做？不支持。
 
-    # 馃憠 鏈€缁堟柟妗堬細璁?Manager 鑺傜偣璐熻矗 POP Plan
-    # 淇敼 Manager Node 閫昏緫锛?
+    # 👉 最终方案：让 Manager 节点负责 POP Plan
+    # 修改 Manager Node 逻辑：
     workflow.add_node("manager_pop", lambda state: {"plan": state["plan"][1:]})
 
-    # 娴佺▼鍙樻垚锛歁anager(璺敱) -> Worker -> Manager_Pop(鍒犻櫎浠诲姟) -> Manager(璺敱)
+    # 流程变成：Manager(路由) -> Worker -> Manager_Pop(删除任务) -> Manager(路由)
 
-    # 閲嶆柊瀹氫箟 Edge:
+    # 重新定义 Edge:
     for node_name in ["analyst", "monitor", "strategist", "researcher", "generalist","screener","roaster", "macro_analyst", "portfolio_analyst"]:
         workflow.add_edge(node_name, "manager_pop")
 
@@ -2258,4 +2258,3 @@ def build_trading_graph(fast_llm, mid_llm, smart_llm):
     workflow.add_edge("finalizer", END)
 
     return workflow.compile()
-
