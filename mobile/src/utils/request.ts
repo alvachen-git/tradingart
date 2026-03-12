@@ -1,10 +1,14 @@
 /**
- * HTTP 请求工具（封装 uni.request / uni.uploadFile）
- * Bearer Token 格式: "username:raw_uuid"
+ * HTTP request helpers for uni-app mobile client.
  */
 
-// 本地开发用 localhost，上线前改回 'https://api.aiprota.com'
-export const API_BASE = 'http://localhost:8001'
+const ENV_API_BASE = (import.meta as any)?.env?.VITE_API_BASE || ''
+
+function normalizeBase(base: string): string {
+  return String(base || '').trim().replace(/\/+$/, '')
+}
+
+export const API_BASE = normalizeBase(ENV_API_BASE) || 'http://localhost:8001'
 
 function getToken(): string {
   return uni.getStorageSync('token') || ''
