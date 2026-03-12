@@ -56,6 +56,7 @@ from task_manager import TaskManager
 import subscription_service as sub_svc
 import data_engine as de
 from vision_tools import analyze_portfolio_image
+from mobile_trading_day import enrich_prices_payload_with_trading_day
 
 # ── Redis ─────────────────────────────────────────────────────
 _REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
@@ -67,6 +68,10 @@ _redis = redis.from_url(_REDIS_URL, decode_responses=True)
 
 _PRICES_KEY = "mobile:futures:prices"
 _PRICES_TTL = 30  # seconds
+_PRICES_REFRESH_INTERVAL = 10  # seconds
+_PRICES_REFRESH_LOCK_KEY = "mobile:futures:prices:refresh:lock"
+_PRICES_REFRESH_LOCK_TTL = 9  # seconds, must be < refresh interval
+_INSTANCE_ID = f"{os.getenv('HOSTNAME', 'local')}:{os.getpid()}"
 
 # 品种代码 → 交易所（决定新浪行情代码前缀和月份格式）
 _PRODUCT_EXCHANGE: dict[str, str] = {
@@ -252,18 +257,49 @@ def _fetch_sina_prices(contracts: list[str]) -> dict:
 _contract_cache: list[str] = []
 _contract_cache_ts: float = 0.0
 
+# last snapshot fallback when Redis read fails
+_last_prices_payload: dict = {"items": [], "is_trading": False, "refreshed_at": "", "contracts": {}}
+_last_prices_lock = threading.Lock()
+
+
+def _save_last_prices_payload(payload: dict) -> None:
+    global _last_prices_payload
+    with _last_prices_lock:
+        # JSON round-trip copy to avoid shared mutable references across threads
+        _last_prices_payload = json.loads(json.dumps(payload, ensure_ascii=False))
+
+
+def _load_last_prices_payload() -> dict:
+    with _last_prices_lock:
+        return json.loads(json.dumps(_last_prices_payload, ensure_ascii=False))
+
+
+def _try_acquire_prices_refresh_lock() -> bool:
+    """Singleflight lock across multi-worker or multi-instance deployment."""
+    try:
+        ok = _redis.set(_PRICES_REFRESH_LOCK_KEY, _INSTANCE_ID, nx=True, ex=_PRICES_REFRESH_LOCK_TTL)
+        return bool(ok)
+    except Exception:
+        # If Redis is unavailable, fallback to local refresh so service still works
+        return True
+
 
 def _prices_refresh_loop():
-    """后台线程：每 10 秒直连新浪接口刷新行情，结果写入 Redis。"""
+    """Background thread: refresh once every 10 seconds and write shared snapshot to Redis."""
     global _contract_cache, _contract_cache_ts
     while True:
         try:
+            # singleflight: only one instance fetches upstream data per refresh window
+            if not _try_acquire_prices_refresh_lock():
+                time.sleep(_PRICES_REFRESH_INTERVAL)
+                continue
+
             is_trading = _is_trading_hours()
             contracts: dict = {}
             items: list = []
 
             if is_trading:
-                # 每小时从 DB 刷新合约列表
+                # refresh active contracts from DB hourly
                 if time.time() - _contract_cache_ts > 3600 or not _contract_cache:
                     _contract_cache = _get_active_contracts()
                     _contract_cache_ts = time.time()
@@ -271,31 +307,44 @@ def _prices_refresh_loop():
                 if _contract_cache:
                     contracts = _fetch_sina_prices(_contract_cache)
 
-                    # 每品种取成交量最大的合约作为主力摘要
+                    # choose major contract per product by max volume
                     prod_best: dict = {}
                     for code, data in contracts.items():
-                        m = re.match(r'^([A-Z]+)\d+$', code)
+                        m = re.match(r"^([A-Z]+)\d+$", code)
                         if not m:
                             continue
                         prod = m.group(1).lower()
                         if prod not in prod_best or data["volume"] > prod_best[prod]["volume"]:
                             prod_best[prod] = {
-                                "code": prod, "name": code,
-                                "price": data["price"], "pct": data["pct"],
-                                "volume": data["volume"], "updated_at": "",
+                                "code": prod,
+                                "name": code,
+                                "price": data["price"],
+                                "pct": data["pct"],
+                                "volume": data["volume"],
+                                "updated_at": "",
                             }
                     items = sorted(prod_best.values(), key=lambda x: x["code"])
 
-            payload = json.dumps({
+            payload_obj = {
                 "items": items,
                 "is_trading": is_trading,
                 "refreshed_at": datetime.now().strftime("%H:%M:%S"),
                 "contracts": contracts,
-            })
-            _redis.setex(_PRICES_KEY, _PRICES_TTL, payload)
+            }
+            payload_obj = enrich_prices_payload_with_trading_day(payload_obj)
+            payload_raw = json.dumps(payload_obj, ensure_ascii=False)
+
+            try:
+                _redis.setex(_PRICES_KEY, _PRICES_TTL, payload_raw)
+            except Exception as e:
+                print(f"[prices_loop] REDIS_WRITE_FAIL: {e}", flush=True)
+
+            _save_last_prices_payload(payload_obj)
+
         except Exception as e:
             print(f"[prices_loop] CRASH: {e}", flush=True)
-        time.sleep(10)
+
+        time.sleep(_PRICES_REFRESH_INTERVAL)
 
 
 # ════════════════════════════════════════════════════════════
@@ -1111,16 +1160,30 @@ def market_chart(product: str, username: str = Depends(get_current_user)):
 @app.get("/api/market/prices", tags=["行情"])
 def market_prices(username: str = Depends(get_current_user)):
     """
-    实时期货价格（方案B缓存）。
-    后台线程每 10 秒从 akshare 拉取并写入 Redis；
-    此接口直接读 Redis，毫秒级响应。
-    交易时段外返回空列表 + is_trading=False。
+    Shared futures prices from server-side cache.
+    All users read the same Redis snapshot; no repeated upstream fetch per request.
     """
-    raw = _redis.get(_PRICES_KEY)
+    try:
+        raw = _redis.get(_PRICES_KEY)
+    except Exception as e:
+        print(f"[market_prices] REDIS_READ_FAIL: {e}", flush=True)
+        raw = None
+
     if raw:
-        return json.loads(raw)
-    # 缓存还没有（刚启动 / 非交易时段）
-    return {"items": [], "is_trading": _is_trading_hours(), "refreshed_at": ""}
+        try:
+            payload = json.loads(raw)
+            if isinstance(payload, dict):
+                _save_last_prices_payload(payload)
+                return payload
+        except Exception as e:
+            print(f"[market_prices] JSON_DECODE_FAIL: {e}", flush=True)
+
+    # Redis cold-start or temporary failure fallback
+    local_fallback = _load_last_prices_payload()
+    if local_fallback.get("items") or local_fallback.get("contracts"):
+        return local_fallback
+
+    return {"items": [], "is_trading": _is_trading_hours(), "refreshed_at": "", "contracts": {}}
 
 
 # ════════════════════════════════════════════════════════════

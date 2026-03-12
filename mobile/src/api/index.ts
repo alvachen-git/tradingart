@@ -112,6 +112,7 @@ export interface ContractLiveItem {
   pct: number        // 涨跌幅 %
   volume: number
   updated_at: string
+  trading_day?: string // YYYYMMDD, night-session trading day
 }
 
 export interface BrokerDetailRow {

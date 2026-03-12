@@ -29,6 +29,43 @@ function _todayStr() {
     + String(d.getDate()).padStart(2,'0')
 }
 
+function normalizeTradeDay(v: any): string {
+  if (typeof v !== 'string') return ''
+  const s = v.replace(/-/g, '').trim()
+  return /^\d{8}$/.test(s) ? s : ''
+}
+
+const NIGHT_SESSION_PRODUCTS = new Set([
+  'au','ag','cu','al','zn','pb','ni','sn','rb','hc','ss','fu','bu','ru','sp','sc','lu','bc','ao',
+  'a','b','m','y','p','c','cs','jd','l','pp','v','eb','eg','j','jm','i','rr','pg','lh',
+  'sr','cf','ta','ma','rm','oi','zc','fg','sa','ur','ap','cj','lc','si','ps','pr','sf','sm','pf','cy',
+])
+
+function getProductFromContract(contract: string): string {
+  const m = (contract || '').toUpperCase().match(/^([A-Z]+)\d+$/)
+  return m ? m[1].toLowerCase() : ''
+}
+
+function nextTradingDayApprox(dayStr: string): string {
+  const d = new Date(`${dayStr.slice(0,4)}-${dayStr.slice(4,6)}-${dayStr.slice(6,8)}T00:00:00`)
+  d.setDate(d.getDate() + 1)
+  while (d.getDay() === 0 || d.getDay() === 6) d.setDate(d.getDate() + 1)
+  return d.getFullYear().toString()
+    + String(d.getMonth() + 1).padStart(2, '0')
+    + String(d.getDate()).padStart(2, '0')
+}
+
+function resolveLiveTradingDay(contract: string): string {
+  const today = _todayStr()
+  const product = getProductFromContract(contract)
+  if (!NIGHT_SESSION_PRODUCTS.has(product)) return today
+
+  const now = new Date()
+  const hhmm = now.getHours() * 60 + now.getMinutes()
+  if (hhmm >= 21 * 60) return nextTradingDayApprox(today)
+  return today
+}
+
 async function fetchLiveCandle() {
   if (!chartData.value?.main_contract) return
   try {
@@ -41,13 +78,13 @@ async function fetchLiveCandle() {
     const code = chartData.value.main_contract.toUpperCase()
     const item = res.contracts[code]
     if (!item || item.price <= 0) return
-    const today = _todayStr()
-    // 日期变了（隔天）先清空旧数据
-    if (liveCandle.value && liveCandle.value.dt !== today) {
+
+    const tradingDay = normalizeTradeDay((item as any).trading_day) || resolveLiveTradingDay(code)
+    if (liveCandle.value && liveCandle.value.dt !== tradingDay) {
       liveCandle.value = null
     }
     liveCandle.value = {
-      dt: today,
+      dt: tradingDay,
       o: item.open,
       h: item.high,
       l: item.low,
@@ -91,21 +128,19 @@ const startIdx    = ref(0)
 const barCount    = ref(63)
 const activeRange = ref('3M')
 
-// 历史OHLC + 今日实时K线
-// 规则：只要有今日 liveCandle（交易中或收盘后保留），始终覆盖 DB 今日数据
-// 隔天后 liveCandle.dt !== today → 自动回退到纯 DB 历史
+// Historical OHLC + live daily bar merged by trading day (not natural day).
 const allOhlc = computed(() => {
   const hist: any[] = chartData.value?.ohlc ?? []
-  if (!liveCandle.value) return hist
-  // 日期不是今天则忽略（隔日遗留）
-  if (liveCandle.value.dt !== _todayStr()) return hist
-  const liveBar = { ...liveCandle.value, _live: true }
-  // DB 已有今日这根（11:40/18:00 DB更新后）→ 用实时覆盖
-  if (hist.length && hist[hist.length - 1].dt === liveCandle.value.dt) {
-    return [...hist.slice(0, -1), liveBar]
-  }
-  // DB 还没有今日数据 → 追加
-  return [...hist, liveBar]
+  const live = liveCandle.value
+  if (!live) return hist
+
+  const liveBar = { ...live, _live: true }
+  if (!hist.length) return [liveBar]
+
+  const last = hist[hist.length - 1]
+  if (live.dt === last.dt) return [...hist.slice(0, -1), liveBar]
+  if (live.dt > last.dt) return [...hist, liveBar]
+  return hist
 })
 const allIv      = computed(() => chartData.value?.iv       || [])
 const allDumb    = computed(() => chartData.value?.dumb     || [])
