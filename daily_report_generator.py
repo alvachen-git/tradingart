@@ -16,6 +16,7 @@ from dotenv import load_dotenv
 from llm_compat import ChatTongyiCompat as ChatTongyi
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.prebuilt import create_react_agent
+from symbol_match import sql_prefix_condition
 
 # ==========================================
 # 1. 引入全套工具 (Toolbox)
@@ -50,6 +51,18 @@ COMMODITY_CARD_LIST = [
     "黄金", "白银", "原油", "铜", "碳酸锂",
     "铁矿石", "豆粕", "橡胶", "棉花", "PTA",
 ]
+COMMODITY_IV_PREFIX_MAP = {
+    "黄金": ["AU"],
+    "白银": ["AG"],
+    "原油": ["SC"],
+    "铜": ["CU"],
+    "碳酸锂": ["LC"],
+    "铁矿石": ["I"],
+    "豆粕": ["M"],
+    "橡胶": ["RU", "NR", "BR"],
+    "棉花": ["CF"],
+    "PTA": ["TA"],
+}
 COMMODITY_IV_LEVEL_TOKENS = ["极低", "低", "偏低", "中", "中等", "偏高", "高", "极高"]
 COMMODITY_IV_INVALID_TOKENS = ["无数据", "N/A", "未知", "None", "--"]
 MAX_REWRITE_ROUNDS = 2
@@ -68,12 +81,123 @@ def _extract_first_percent(value_text: str):
         return None
 
 
-def validate_commodity_cards(html: str):
+def _calc_iv_level(iv_rank: float) -> str:
+    """将 IV Rank 映射为等级文本。"""
+    if iv_rank < 20:
+        return "低"
+    if iv_rank < 40:
+        return "偏低"
+    if iv_rank < 60:
+        return "中等"
+    if iv_rank < 80:
+        return "偏高"
+    return "高"
+
+
+def _fetch_programmatic_commodity_iv_snapshot():
+    """
+    程序端确定性抓取 10 个商品当前 IV 与等级，作为晚报卡片真值。
+    返回:
+      - snapshot_map: {商品: {iv, iv_rank, level, ts_code, trade_date}}
+      - snapshot_text: 可直接注入到 prompt 的说明文本
+    """
+    snapshot_map = {}
+    lines = []
+
+    for commodity in COMMODITY_CARD_LIST:
+        prefixes = COMMODITY_IV_PREFIX_MAP.get(commodity, [])
+        best = None
+
+        for prefix in prefixes:
+            try:
+                sql_main = f"""
+                    SELECT ts_code, REPLACE(trade_date, '-', '') AS trade_date, oi
+                    FROM futures_price
+                    WHERE {sql_prefix_condition(prefix)}
+                      AND ts_code NOT LIKE '%%TAS%%'
+                    ORDER BY trade_date DESC, oi DESC
+                    LIMIT 1
+                """
+                df_main = pd.read_sql(sql_main, engine)
+                if df_main.empty:
+                    continue
+
+                ts_code = str(df_main.iloc[0]["ts_code"])
+                sql_iv_latest = f"""
+                    SELECT REPLACE(trade_date, '-', '') AS trade_date, iv
+                    FROM commodity_iv_history
+                    WHERE ts_code = '{ts_code}'
+                    ORDER BY trade_date DESC
+                    LIMIT 1
+                """
+                df_latest = pd.read_sql(sql_iv_latest, engine)
+
+                if df_latest.empty:
+                    sql_iv_fallback = f"""
+                        SELECT ts_code, REPLACE(trade_date, '-', '') AS trade_date, iv
+                        FROM commodity_iv_history
+                        WHERE {sql_prefix_condition(prefix)}
+                        ORDER BY trade_date DESC
+                        LIMIT 1
+                    """
+                    df_fb = pd.read_sql(sql_iv_fallback, engine)
+                    if df_fb.empty:
+                        continue
+                    ts_code = str(df_fb.iloc[0]["ts_code"])
+                    latest_trade_date = str(df_fb.iloc[0]["trade_date"])
+                    curr_iv = float(df_fb.iloc[0]["iv"])
+                else:
+                    latest_trade_date = str(df_latest.iloc[0]["trade_date"])
+                    curr_iv = float(df_latest.iloc[0]["iv"])
+
+                sql_hist = f"""
+                    SELECT iv
+                    FROM commodity_iv_history
+                    WHERE ts_code = '{ts_code}'
+                    ORDER BY trade_date DESC
+                    LIMIT 252
+                """
+                df_hist = pd.read_sql(sql_hist, engine)
+                if df_hist.empty:
+                    iv_rank = 50.0
+                else:
+                    max_iv = float(df_hist["iv"].max())
+                    min_iv = float(df_hist["iv"].min())
+                    iv_rank = ((curr_iv - min_iv) / (max_iv - min_iv) * 100.0) if max_iv != min_iv else 50.0
+
+                level = _calc_iv_level(iv_rank)
+                best = {
+                    "iv": round(curr_iv, 2),
+                    "iv_rank": round(iv_rank, 1),
+                    "level": level,
+                    "ts_code": ts_code,
+                    "trade_date": latest_trade_date,
+                }
+                break
+            except Exception as e:
+                print(f"⚠️ [IV快照] {commodity} via {prefix} 查询异常: {e}")
+                continue
+
+        if best:
+            snapshot_map[commodity] = best
+            lines.append(
+                f"- {commodity}: {best['iv']:.2f}%（{best['level']}，Rank {best['iv_rank']:.1f}%）"
+                f" [合约 {best['ts_code']}, 日期 {best['trade_date']}]"
+            )
+        else:
+            lines.append(f"- {commodity}: 暂无可用IV数据（本次不做数值对齐）")
+
+    snapshot_text = "\n".join(lines)
+    return snapshot_map, snapshot_text
+
+
+def validate_commodity_cards(html: str, expected_iv_map: dict = None):
     """
     校验商品卡片的隐含波动率字段是否合理：
     1) 必须包含“隐含波动率/隐波/IV”字段；
     2) 必须给出高/中/低等级描述；
     3) 若给出百分比，必须在 0%~300% 区间。
+    4) 若提供 expected_iv_map，百分比需与程序注入真值一致（容忍±0.3%）。
     """
     anomalies = []
     if not html:
@@ -101,11 +225,22 @@ def validate_commodity_cards(html: str):
         iv_percent = _extract_first_percent(iv_text)
         if iv_percent is not None and not (0 <= iv_percent <= 300):
             anomalies.append(f"{commodity} IV百分比超范围: {iv_percent:.2f}%")
+        if iv_percent is None:
+            anomalies.append(f"{commodity} IV缺少百分比数值: {iv_text}")
+
+        expected = (expected_iv_map or {}).get(commodity)
+        if expected and iv_percent is not None:
+            expected_iv = float(expected["iv"])
+            if abs(iv_percent - expected_iv) > 0.3:
+                anomalies.append(
+                    f"{commodity} IV与真值不一致: 页面={iv_percent:.2f}%, 真值={expected_iv:.2f}%"
+                )
 
     return len(anomalies) == 0, anomalies
 
 
-def _rewrite_report_after_validation(raw_material: str, html: str, anomalies: list, round_idx: int) -> str:
+def _rewrite_report_after_validation(raw_material: str, html: str, anomalies: list, round_idx: int,
+                                     iv_snapshot_text: str = "") -> str:
     """当商品卡片校验失败时，提醒 LLM 定向重写整份 HTML。"""
     anomaly_text = "\n".join([f"- {x}" for x in anomalies])
     rewrite_prompt = f"""
@@ -118,10 +253,13 @@ def _rewrite_report_after_validation(raw_material: str, html: str, anomalies: li
 1. 必须是完整HTML（无Markdown代码块）。
 2. 商品期货全景必须保留10个商品卡片，且每个卡片都含“隐含波动率：X”字段。
 3. 隐含波动率字段必须体现“高/中/低”等级（可写成“偏高/偏低/中等/极高/极低”）。
-4. 若写具体数值，必须是百分比格式（例如 42.5%），并保持合理范围。
+4. 必须写具体百分比，格式示例：“隐含波动率：42.5%（偏高）”。
 5. 不要再写“支撑：... | 压力：...”这一行。
 6. 趋势判断（看多/看空/震荡）仍由你根据素材自主判断。
 7. 其他板块风格与结构尽量保持原有质量。
+
+【程序注入的商品IV真值（最高优先级，必须原样使用）】
+{iv_snapshot_text}
 
 【记者素材】
 {raw_material}
@@ -270,10 +408,15 @@ def draft_report(raw_material):
 
     today = datetime.now().strftime("%Y年%m月%d日")
     weekday = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"][datetime.now().weekday()]
+    iv_snapshot_map, iv_snapshot_text = _fetch_programmatic_commodity_iv_snapshot()
+    print(f"🧮 [程序注入] 商品IV真值已生成: {len(iv_snapshot_map)}/{len(COMMODITY_CARD_LIST)}")
 
     prompt = f"""
     你是【爱波塔首席投研】的主编。你的记者刚刚提交了今天的市场调研素材。
     请根据这些素材，写一份**《每日深度复盘》**。
+
+    【程序查库得到的商品IV真值（最高优先级，必须原样使用）】
+    {iv_snapshot_text}
 
     【记者提交的素材】：
     {raw_material}
@@ -519,7 +662,8 @@ def draft_report(raw_material):
 
     ## 9. 内容要求
     - 商品期货全景：必须包含 10 个商品卡片（5行2列）
-    - 商品卡片第二行必须展示“隐含波动率：xx%（高/中/低）”或“隐含波动率：高/中/低”
+    - 商品卡片第二行必须展示“隐含波动率：xx.xx%（高/中/低）”
+    - 各商品IV百分比与等级，必须逐字匹配【程序查库得到的商品IV真值】
     - 商品卡片不要再出现“支撑/压力”字段
     - 期权IV：用进度条可视化
     - 每日选的牛股或风险警示股，除了说明基本面原因，也要搭配说明K线技术面
@@ -531,15 +675,15 @@ def draft_report(raw_material):
     html = res.content.replace("```html", "").replace("```", "").strip()
 
     # 发布前商品卡片校验：异常则提醒 LLM 重写
-    is_valid, anomalies = validate_commodity_cards(html)
+    is_valid, anomalies = validate_commodity_cards(html, iv_snapshot_map)
     for i in range(1, MAX_REWRITE_ROUNDS + 1):
         if is_valid:
             break
         print(f"⚠️ [发布前校验] 商品卡片异常，触发重写（第{i}轮）")
         for a in anomalies[:8]:
             print(f"   - {a}")
-        html = _rewrite_report_after_validation(raw_material, html, anomalies, i)
-        is_valid, anomalies = validate_commodity_cards(html)
+        html = _rewrite_report_after_validation(raw_material, html, anomalies, i, iv_snapshot_text)
+        is_valid, anomalies = validate_commodity_cards(html, iv_snapshot_map)
 
     if not is_valid:
         print("❌ [发布前校验] 商品卡片校验仍未通过，终止发布。")
