@@ -1,33 +1,57 @@
-#!/bin/bash
+﻿#!/bin/bash
 
-# 1. 进入项目目录 (非常重要！确保找到 .env 文件)
-cd /root/finance_app/future-app
+set -u
 
-# 激活虚拟环境
-source venv/bin/activate
+APP_DIR="/root/finance_app/future-app"
+LOG_FILE="${APP_DIR}/update.log"
+PYTHON_BIN="${APP_DIR}/venv/bin/python"
+FAILED_STEPS=0
 
-# 2. 打印开始时间到日志
-echo "" >> update.log
-echo "========================================" >> update.log
-echo "⏰ 任务开始: $(date)" >> update.log
+cd "${APP_DIR}" || exit 1
 
+if [ ! -x "${PYTHON_BIN}" ]; then
+  echo "" >> "${LOG_FILE}"
+  echo "========================================" >> "${LOG_FILE}"
+  echo "❌ 任务开始: $(date)" >> "${LOG_FILE}"
+  echo "❌ 未找到虚拟环境解释器: ${PYTHON_BIN}" >> "${LOG_FILE}"
+  echo "❌ 任务终止，请先创建/修复 venv 环境" >> "${LOG_FILE}"
+  echo "========================================" >> "${LOG_FILE}"
+  exit 1
+fi
 
-# 使用 python3 运行，将输出追加到 update.log，错误也追加到 update.log
-echo ">>> [1/5] 开始更新期货席位数据..." >> update.log
-/usr/bin/python3 update_open_oneday.py >> update.log 2>&1
+run_step() {
+  local idx="$1"
+  local total="$2"
+  local title="$3"
+  local script="$4"
 
-echo ">>> [2/5] 开始更新美股价格数据..." >> update.log
-/usr/bin/python3 update_stock_tiingo.py >> update.log 2>&1
+  echo ">>> [${idx}/${total}] 开始${title}..." >> "${LOG_FILE}"
+  "${PYTHON_BIN}" "${script}" >> "${LOG_FILE}" 2>&1
+  local rc=$?
+  echo "<<< [${idx}/${total}] 结束${title} (rc=${rc})" >> "${LOG_FILE}"
+  echo "" >> "${LOG_FILE}"
 
-echo ">>> [3/5] 开始更新债券收益数据..." >> update.log
-/usr/bin/python3 update_bond_data.py >> update.log 2>&1
+  if [ ${rc} -ne 0 ]; then
+    FAILED_STEPS=$((FAILED_STEPS + 1))
+  fi
+}
 
-echo ">>> [4/5] 开始更新热搜数据..." >> update.log
-/usr/bin/python3 trend_monitor.py >> update.log 2>&1
+echo "" >> "${LOG_FILE}"
+echo "========================================" >> "${LOG_FILE}"
+echo "⏰ 任务开始: $(date)" >> "${LOG_FILE}"
+echo "🐍 Python: ${PYTHON_BIN}" >> "${LOG_FILE}"
 
-echo ">>> [5/5] 开始更新宏观数据..." >> update.log
-/usr/bin/python3 update_micro_daily.py >> update.log 2>&1
+run_step 1 5 "更新期货席位数据" "update_open_oneday.py"
+run_step 2 5 "更新美股价格数据" "update_stock_tiingo.py"
+run_step 3 5 "更新债券收益数据" "update_bond_data.py"
+run_step 4 5 "更新热搜数据" "trend_monitor.py"
+run_step 5 5 "更新宏观数据" "update_micro_daily.py"
 
-# 7. 结束
-echo "✅ 任务结束: $(date)" >> update.log
-echo "========================================" >> update.log
+if [ ${FAILED_STEPS} -gt 0 ]; then
+  echo "⚠️ 本次任务失败步骤数: ${FAILED_STEPS}" >> "${LOG_FILE}"
+else
+  echo "✅ 本次任务全部步骤成功" >> "${LOG_FILE}"
+fi
+
+echo "✅ 任务结束: $(date)" >> "${LOG_FILE}"
+echo "========================================" >> "${LOG_FILE}"
