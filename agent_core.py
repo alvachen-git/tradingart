@@ -421,18 +421,20 @@ def generalist_node(state: AgentState, llm):
         partial_response = last_response
 
         # 🔥 从响应中提取图表路径
-        chart_match = re.search(r'!\[.*?\]\((chart_[a-zA-Z0-9_]+\.json)\)', last_response)
-        if chart_match:
-            chart_img = chart_match.group(1)
+        chart_matches = re.findall(r'!\[.*?\]\((chart_[a-zA-Z0-9_]+\.json)\)', last_response)
+        if chart_matches:
+            chart_img = chart_matches[-1]
 
         # 🔥 如果响应中没找到，尝试从所有消息中查找
         if not chart_img:
-            for msg in result.get("messages", []):
+            base_msg_count = len(state.get("messages", []))
+            new_msgs = result.get("messages", [])[base_msg_count:]
+            all_chart_matches = []
+            for msg in new_msgs:
                 content = getattr(msg, 'content', str(msg))
-                chart_match = re.search(r'(chart_[a-zA-Z0-9_]+\.json)', content)
-                if chart_match:
-                    chart_img = chart_match.group(1)
-                    break
+                all_chart_matches.extend(re.findall(r'(chart_[a-zA-Z0-9_]+\.json)', content))
+            if all_chart_matches:
+                chart_img = all_chart_matches[-1]
 
         return {
             "messages": [HumanMessage(content=f"【王牌分析】\n{last_response}")],
@@ -579,17 +581,19 @@ def analyst_node(state: AgentState, llm):
             # 兜底：如果没提取到，用symbol
             symbol_name = state.get('symbol', '')
 
-        chart_match = re.search(r'IMAGE_CREATED:(chart_[a-zA-Z0-9_]+\.json)', last_response)
-        if chart_match:
-            chart_img = chart_match.group(1)
+        chart_matches = re.findall(r'IMAGE_CREATED:(chart_[a-zA-Z0-9_]+\.json)', last_response)
+        if chart_matches:
+            chart_img = chart_matches[-1]
             print(f"📊 analyst_node 提取到图表: {chart_img}")
         if not chart_img:
-            for msg in result.get("messages", []):
+            base_msg_count = len(state.get("messages", []))
+            new_msgs = result.get("messages", [])[base_msg_count:]
+            all_chart_matches = []
+            for msg in new_msgs:
                 content = getattr(msg, 'content', str(msg))
-                chart_match = re.search(r'IMAGE_CREATED:(chart_[a-zA-Z0-9_]+\.json)', content)
-                if chart_match:
-                    chart_img = chart_match.group(1)
-                    break
+                all_chart_matches.extend(re.findall(r'IMAGE_CREATED:(chart_[a-zA-Z0-9_]+\.json)', content))
+            if all_chart_matches:
+                chart_img = all_chart_matches[-1]
 
         # 提取信号
         trend_signal = "震荡"
@@ -1066,9 +1070,9 @@ def macro_analyst_node(state: AgentState, llm):
 
         # 提取图表
         chart_img = ""
-        chart_match = re.search(r'(macro_chart_[a-zA-Z0-9_]+\.json)', last_response)
-        if chart_match:
-            chart_img = chart_match.group(1)
+        macro_matches = re.findall(r'(macro_chart_[a-zA-Z0-9_]+\.json)', last_response)
+        if macro_matches:
+            chart_img = macro_matches[-1]
 
         return {
             "messages": [HumanMessage(content=f"【宏观策略】\n{last_response}")],
@@ -1723,9 +1727,9 @@ def finalizer_node(state: AgentState, llm):
         # 提取图表路径（如果有）
         chart_img = state.get("chart_img", "")
         if not chart_img:
-            chart_match = re.search(r'IMAGE_CREATED:(chart_[a-zA-Z0-9_]+\.json)', context_text)
-            if chart_match:
-                chart_img = chart_match.group(1)
+            chart_matches = re.findall(r'IMAGE_CREATED:(chart_[a-zA-Z0-9_]+\.json)', context_text)
+            if chart_matches:
+                chart_img = chart_matches[-1]
         return {
             "messages": [HumanMessage(content=roaster_content if roaster_content else context_text)],
             "chart_img": chart_img
@@ -1983,9 +1987,9 @@ def finalizer_node(state: AgentState, llm):
 
         # 如果 state 中没有，尝试从报告内容中提取
         if not chart_img:
-            chart_match = re.search(r'IMAGE_CREATED:(chart_[a-zA-Z0-9_]+\.json)', context_text)
-            if chart_match:
-                chart_img = chart_match.group(1)
+            chart_matches = re.findall(r'IMAGE_CREATED:(chart_[a-zA-Z0-9_]+\.json)', context_text)
+            if chart_matches:
+                chart_img = chart_matches[-1]
                 print(f"📊 finalizer 从报告中提取到图表: {chart_img}")
 
         return {

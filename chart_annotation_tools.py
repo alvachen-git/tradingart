@@ -42,8 +42,8 @@ ROLE_COLOR = {
     "swing_low": "#fbbf24",   # 金：摆动低点
     "break":     "#f97316",   # 橙：破底
     "flip":      "#818cf8",   # 紫：翻
-    "bullish":   "#4ade80",   # 亮绿：多头信号K线
-    "bearish":   "#f87171",   # 亮红：空头信号K线
+    "bullish":   "#f87171",   # 亮红：多头信号K线（红涨）
+    "bearish":   "#4ade80",   # 亮绿：空头信号K线（绿跌）
     "star":      "#fbbf24",   # 金：星体
     "neutral":   "#94a3b8",   # 灰：十字星等中性
     "highlight": "#a78bfa",   # 淡紫：通用高亮
