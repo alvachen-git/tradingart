@@ -437,7 +437,7 @@ def _build_candidate_pool(trade_date: str, current_positions: Dict[str, Dict[str
             base_df = pd.read_sql(sql, conn, params={"td": trade_date})
 
     if base_df.empty:
-        return pd.DataFrame(columns=["symbol", "name", "industry", "score", "close", "pct_chg", "amount", "vol"])
+        return pd.DataFrame(columns=["symbol", "name", "industry", "score", "close", "pct_chg", "amount", "vol", "from_holdings_fallback"])
 
     base_df["symbol"] = base_df["ts_code"].apply(_normalize_symbol)
     base_df = base_df[base_df["symbol"].astype(bool)]
@@ -479,6 +479,7 @@ def _build_candidate_pool(trade_date: str, current_positions: Dict[str, Dict[str
                 "pct_chg": _to_float(r.get("pct_chg"), 0.0),
                 "amount": amount,
                 "vol": _to_float(price_info.get("vol"), 0.0),
+                "from_holdings_fallback": 0,
             }
         )
 
@@ -507,6 +508,7 @@ def _build_candidate_pool(trade_date: str, current_positions: Dict[str, Dict[str
                     "pct_chg": _to_float(r.get("pct_chg"), 0.0),
                     "amount": _to_float(price_info.get("amount"), 0.0),
                     "vol": _to_float(price_info.get("vol"), 0.0),
+                    "from_holdings_fallback": 0,
                 }
             )
 
@@ -527,11 +529,12 @@ def _build_candidate_pool(trade_date: str, current_positions: Dict[str, Dict[str
                 "pct_chg": 0.0,
                 "amount": _to_float(p.get("amount"), 0.0),
                 "vol": _to_float(p.get("vol"), 0.0),
+                "from_holdings_fallback": 1,
             }
         )
 
     if not rows:
-        return pd.DataFrame(columns=["symbol", "name", "industry", "score", "close", "pct_chg", "amount", "vol"])
+        return pd.DataFrame(columns=["symbol", "name", "industry", "score", "close", "pct_chg", "amount", "vol", "from_holdings_fallback"])
 
     df = pd.DataFrame(rows).drop_duplicates(subset=["symbol"], keep="first")
     df = df.sort_values(["score", "amount"], ascending=[False, False]).head(limit).reset_index(drop=True)
@@ -1432,19 +1435,46 @@ def _build_review_payload(
     adjusted = [o for o in orders_audited if o.get("gate_status") == "adjusted"]
 
     held_symbols = set(final_positions.keys())
+    traded_symbols = {
+        _normalize_symbol(str(t.get("symbol") or ""))
+        for t in executed_trades
+        if _normalize_symbol(str(t.get("symbol") or ""))
+    }
     watchlist = []
     for _, row in candidates_df.iterrows():
         s = _normalize_symbol(row.get("symbol", ""))
-        if not s or s in held_symbols:
+        score = _to_float(row.get("score"), 0.0)
+        from_holdings_fallback = int(_to_float(row.get("from_holdings_fallback"), 0.0)) == 1
+        if (
+            not s
+            or s in held_symbols
+            or s in traded_symbols
+            or from_holdings_fallback
+            or score <= 0
+        ):
             continue
         watchlist.append({
             "symbol": s,
             "name": str(row.get("name") or ""),
-            "score": round(_to_float(row.get("score"), 0.0), 2),
+            "score": round(score, 2),
         })
         if len(watchlist) >= 5:
             break
 
+    # 候选池质量偏弱时，放宽分数阈值，但仍避免把昨日持仓兜底行塞进观察列表。
+    if not watchlist:
+        for _, row in candidates_df.iterrows():
+            s = _normalize_symbol(row.get("symbol", ""))
+            from_holdings_fallback = int(_to_float(row.get("from_holdings_fallback"), 0.0)) == 1
+            if not s or s in held_symbols or s in traded_symbols or from_holdings_fallback:
+                continue
+            watchlist.append({
+                "symbol": s,
+                "name": str(row.get("name") or ""),
+                "score": round(_to_float(row.get("score"), 0.0), 2),
+            })
+            if len(watchlist) >= 5:
+                break
     def _reason_for_trade(symbol: str, side: str) -> str:
         side = str(side or "").lower()
         primary_side = "buy" if side == "buy" else "sell"
