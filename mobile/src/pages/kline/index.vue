@@ -17,8 +17,54 @@ let _startRecordPromise: Promise<void> | null = null
 let isActive = false
 // Prevent double-invocation of startGame (e.g. double-tap)
 let _startingGame = false
+let _resizeBound = false
+
+const isLandscape = ref(false)
+
+function updateOrientation(windowWidth?: number, windowHeight?: number) {
+  let ww = Number(windowWidth || 0)
+  let wh = Number(windowHeight || 0)
+
+  if (!ww || !wh) {
+    try {
+      const info = uni.getSystemInfoSync()
+      ww = Number((info as any)?.windowWidth || 0)
+      wh = Number((info as any)?.windowHeight || 0)
+    } catch (_) {}
+  }
+
+  if (ww > 0 && wh > 0) {
+    isLandscape.value = ww > wh
+  }
+}
+
+function handleWindowResize(res: any) {
+  const size = res?.size || res || {}
+  updateOrientation(size.windowWidth, size.windowHeight)
+}
+
+function bindWindowResize() {
+  if (_resizeBound) return
+  const u = uni as any
+  if (typeof u.onWindowResize === 'function') {
+    u.onWindowResize(handleWindowResize)
+    _resizeBound = true
+  }
+}
+
+function unbindWindowResize() {
+  if (!_resizeBound) return
+  const u = uni as any
+  if (typeof u.offWindowResize === 'function') {
+    u.offWindowResize(handleWindowResize)
+  }
+  _resizeBound = false
+}
+
 
 onShow(() => {
+  bindWindowResize()
+  updateOrientation()
   isActive = true
   if (!auth.isLoggedIn) { uni.reLaunch({ url: '/pages/login/index' }); return }
   // Only resume if we were actively loading (user explicitly started loading).
@@ -35,6 +81,7 @@ onShow(() => {
 
 onHide(() => {
   isActive = false
+  unbindWindowResize()
 })
 
 // ── SVG layout ─────────────────────────────────────────────
@@ -73,6 +120,7 @@ const phase = ref<Phase>('idle')
 const loadError  = ref('')
 const tradeMsg   = ref('')
 const saving     = ref(false)
+const showBottomNav = computed(() => !(phase.value === 'playing' && isLandscape.value))
 
 // ── Penalty state ──────────────────────────────────────────
 const penaltyGameId = ref(0)
@@ -411,7 +459,10 @@ function startTimer() {
   }, ms)
 }
 function stopTimer() { if (autoTimer) { clearInterval(autoTimer); autoTimer = null } }
-onUnmounted(() => stopTimer())
+onUnmounted(() => {
+  stopTimer()
+  unbindWindowResize()
+})
 
 // ── Game lifecycle ─────────────────────────────────────────
 // ── Step 1: user taps "开始游戏" → check for abandoned game → load data ──
@@ -521,7 +572,7 @@ function pDec(p: number) { return p < 10 ? 3 : p < 1000 ? 2 : 0 }
 </script>
 
 <template>
-  <view class="page">
+  <view class="page" :class="{ landscape: isLandscape, 'playing-landscape': isLandscape && phase === 'playing' }">
 
     <!-- ══ PENALTY ════════════════════════════════════════════ -->
     <view v-if="phase === 'penalty'" class="penalty-page">
@@ -672,6 +723,15 @@ function pDec(p: number) { return p < 10 ? 3 : p < 1000 ? 2 : 0 }
           <text class="progress-text">{{ playedCount }}/{{ totalPlayable }}</text>
         </view>
         <view class="topbar-right">
+          <text
+            v-if="isLandscape"
+            :class="[
+              'mini-pnl',
+              pos.direction ? (floatingPnl >= 0 ? 'bull' : 'bear') : 'mini-pnl-empty'
+            ]"
+          >
+            浮{{ pos.direction ? fmtPnl(floatingPnl) : '--' }}
+          </text>
           <text class="lev-badge">{{ selectedLeverage }}x</text>
           <view class="end-btn" @click="finishGame"><text class="end-text">结束</text></view>
         </view>
@@ -728,14 +788,16 @@ function pDec(p: number) { return p < 10 ? 3 : p < 1000 ? 2 : 0 }
           <view class="ma-dot" style="background:#a78bfa;" /><text class="ma-leg-text">60</text>
         </view>
       </view>
-
+      <view class="play-main">
+        <view class="chart-col">
       <!-- Chart SVG -->
       <view class="chart-wrap">
         <svg
           :width="SVG_W" :height="SVG_H"
           :viewBox="`0 0 ${SVG_W} ${SVG_H}`"
+          :preserveAspectRatio="isLandscape && phase === 'playing' ? 'none' : 'xMidYMid meet'"
           xmlns="http://www.w3.org/2000/svg"
-          style="width:100%;display:block;"
+          :style="isLandscape && phase === 'playing' ? 'width:100%;height:100%;display:block;' : 'width:100%;display:block;'"
         >
           <!-- ── Price area background ── -->
           <rect x="0" :y="PAD_T - 2" :width="SVG_W - PAD_R" :height="PRICE_H + 4" fill="#090f1c" />
@@ -839,7 +901,9 @@ function pDec(p: number) { return p < 10 ? 3 : p < 1000 ? 2 : 0 }
       <view v-if="tradeMsg" class="trade-msg">
         <text class="trade-msg-text">{{ tradeMsg }}</text>
       </view>
+        </view>
 
+        <view class="trade-col">
       <!-- Lot selector -->
       <view class="lot-row">
         <text class="lot-label">手数</text>
@@ -864,8 +928,7 @@ function pDec(p: number) { return p < 10 ? 3 : p < 1000 ? 2 : 0 }
         <!-- 全部平仓 (middle) -->
         <view class="trade-btn-wrap trade-mid" @click="closeAll()">
           <view class="trade-big-btn btn-closeall" :class="{ 'op30': !pos.direction }">
-            <text class="trade-closeall-label">全部</text>
-            <text class="trade-closeall-label">平仓</text>
+            <text class="trade-closeall-label">全部平仓</text>
             <text class="trade-big-lots">{{ pos.lots }}手</text>
           </view>
         </view>
@@ -880,6 +943,8 @@ function pDec(p: number) { return p < 10 ? 3 : p < 1000 ? 2 : 0 }
         </view>
       </view>
 
+        </view>
+      </view>
     </view>
 
     <!-- ══ FINISHED ═══════════════════════════════════════════ -->
@@ -903,8 +968,8 @@ function pDec(p: number) { return p < 10 ? 3 : p < 1000 ? 2 : 0 }
       <view class="back-btn" @click="resetGame"><text class="back-text">返回入口</text></view>
     </view>
 
-    <view style="height: 120rpx;" />
-    <BottomNav active="kline" />
+    <view v-if="showBottomNav" style="height: 120rpx;" />
+    <BottomNav v-if="showBottomNav" active="kline" />
   </view>
 </template>
 
@@ -1027,8 +1092,11 @@ function pDec(p: number) { return p < 10 ? 3 : p < 1000 ? 2 : 0 }
 @keyframes spin { to { transform:rotate(360deg); } }
 .loading-text { font-size:30rpx;color:#e8eaf0;font-weight:600; } .loading-sub { font-size:24rpx;color:#64748b; }
 
-/* ══ GAME ═══════════════════════════════════════════════════ */
-.game-wrap { display:flex;flex-direction:column; }
+/* Game */
+.game-wrap { display:flex;flex-direction:column;min-height:100vh; }
+.play-main { display:flex;flex-direction:column; }
+.chart-col { width:100%;min-width:0; }
+.trade-col { width:100%;min-width:0; }
 
 /* Top bar */
 .game-topbar { display:flex;align-items:center;justify-content:space-between;padding:14rpx 20rpx;background:#0e1929;border-bottom:1px solid #1e2d45;gap:12rpx; }
@@ -1039,6 +1107,8 @@ function pDec(p: number) { return p < 10 ? 3 : p < 1000 ? 2 : 0 }
 .progress-fill  { height:100%;background:#3b82f6;transition:width 0.2s linear; }
 .progress-text  { font-size:20rpx;color:#4a6080;white-space:nowrap; }
 .topbar-right { display:flex;align-items:center;gap:12rpx; }
+.mini-pnl { font-size:18rpx;font-weight:700;white-space:nowrap;text-shadow:0 1px 2px rgba(0,0,0,0.35); }
+.mini-pnl-empty { color:#64748b; }
 .lev-badge { font-size:20rpx;color:#f5c518;background:rgba(245,197,24,0.12);border:1px solid rgba(245,197,24,0.3);border-radius:8rpx;padding:4rpx 12rpx; }
 .end-btn { padding:10rpx 20rpx;border-radius:10rpx;background:rgba(100,116,139,0.2);border:1px solid #334155; }
 .end-text { font-size:22rpx;color:#94a3b8; }
@@ -1076,7 +1146,7 @@ function pDec(p: number) { return p < 10 ? 3 : p < 1000 ? 2 : 0 }
 .lot-active { background:#1e3a5f;border-color:#3b82f6; }
 .lot-chip-text { font-size:24rpx;color:#64748b; } .lot-active .lot-chip-text { color:#93c5fd;font-weight:700; }
 
-/* ═══ TRADE BUTTONS ═══════════════════════════════════════════ */
+/* Trade Buttons */
 .trade-panel { display:flex;gap:10rpx;padding:16rpx 16rpx 20rpx;background:#07101f; }
 .trade-btn-wrap { flex:1;display:flex; }
 .trade-mid { flex:0.65; }
@@ -1086,31 +1156,31 @@ function pDec(p: number) { return p < 10 ? 3 : p < 1000 ? 2 : 0 }
   align-items:center;justify-content:center;gap:6rpx;padding:22rpx 10rpx;
   position:relative;overflow:hidden;
 }
-/* 做多 — red gradient */
+/* long: red gradient */
 .btn-long {
   background: linear-gradient(160deg, #dc2626 0%, #991b1b 100%);
   box-shadow: 0 4rpx 20rpx rgba(220,38,38,0.45), inset 0 1px 0 rgba(255,255,255,0.12);
   border: 1.5px solid rgba(239,68,68,0.6);
 }
-/* 做空 — green gradient */
+/* short: green gradient */
 .btn-short {
   background: linear-gradient(160deg, #16a34a 0%, #14532d 100%);
   box-shadow: 0 4rpx 20rpx rgba(22,163,74,0.45), inset 0 1px 0 rgba(255,255,255,0.12);
   border: 1.5px solid rgba(34,197,94,0.6);
 }
-/* 平空 — amber accent */
+/* close short: amber accent */
 .btn-close-short {
   background: linear-gradient(160deg, #b45309 0%, #92400e 100%);
   box-shadow: 0 4rpx 16rpx rgba(245,158,11,0.4), inset 0 1px 0 rgba(255,255,255,0.1);
   border: 1.5px solid rgba(251,191,36,0.5);
 }
-/* 平多 — teal accent */
+/* close long: teal accent */
 .btn-close-long {
   background: linear-gradient(160deg, #0e7490 0%, #164e63 100%);
   box-shadow: 0 4rpx 16rpx rgba(6,182,212,0.4), inset 0 1px 0 rgba(255,255,255,0.1);
   border: 1.5px solid rgba(34,211,238,0.5);
 }
-/* 全平 */
+/* close all */
 .btn-closeall {
   background: linear-gradient(160deg, #374151 0%, #1f2937 100%);
   box-shadow: 0 4rpx 12rpx rgba(0,0,0,0.4), inset 0 1px 0 rgba(255,255,255,0.06);
@@ -1122,7 +1192,244 @@ function pDec(p: number) { return p < 10 ? 3 : p < 1000 ? 2 : 0 }
 .trade-big-hint  { font-size:19rpx;color:rgba(255,255,255,0.45); }
 .trade-closeall-label { font-size:28rpx;font-weight:800;color:#9ca3af;letter-spacing:2rpx; }
 
-/* ══ RESULT ════════════════════════════════════════════════ */
+/* Landscape playing mode */
+.page.playing-landscape {
+  height: 100vh;
+  height: 100dvh;
+  overflow: hidden;
+}
+.page.playing-landscape .game-wrap {
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+  padding-bottom: env(safe-area-inset-bottom);
+  box-sizing: border-box;
+}
+.page.playing-landscape .game-topbar {
+  padding: 2rpx 8rpx;
+  gap: 6rpx;
+}
+.page.playing-landscape .game-topbar,
+.page.playing-landscape .acct-strip,
+.page.playing-landscape .pos-row,
+.page.playing-landscape .indicator-bar {
+  flex-shrink: 0;
+}
+.page.playing-landscape .topbar-price { gap: 6rpx; }
+.page.playing-landscape .cur-price { font-size:24rpx; }
+.page.playing-landscape .price-chg { font-size:15rpx; }
+.page.playing-landscape .progress-track { height: 4rpx; }
+.page.playing-landscape .progress-text { font-size: 14rpx; }
+.page.playing-landscape .topbar-right { gap: 8rpx; flex-shrink: 0; }
+.page.playing-landscape .mini-pnl {
+  font-size: 14rpx;
+  max-width: 120rpx;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.page.playing-landscape .lev-badge { font-size: 14rpx; padding: 2rpx 7rpx; }
+.page.playing-landscape .end-btn { padding: 2rpx 9rpx; border-radius: 8rpx; }
+.page.playing-landscape .end-text { font-size: 16rpx; }
+.page.playing-landscape .acct-strip {
+  padding: 1rpx 6rpx;
+  gap: 6rpx;
+  justify-content: space-between;
+}
+.page.playing-landscape .acct-col {
+  flex: 1;
+  flex-direction: row;
+  align-items: baseline;
+  gap: 2rpx;
+  min-width: 0;
+}
+.page.playing-landscape .acct-label { font-size:12rpx;white-space:nowrap; }
+.page.playing-landscape .acct-val { font-size:15rpx;white-space:nowrap; }
+.page.playing-landscape .pos-row { padding:1rpx 8rpx; }
+.page.playing-landscape .pos-dir { font-size: 15rpx; }
+.page.playing-landscape .pos-detail { font-size:13rpx;white-space:nowrap;overflow:hidden;text-overflow:ellipsis; }
+.page.playing-landscape .pos-pct { font-size: 15rpx; }
+.page.playing-landscape .indicator-bar {
+  padding:2rpx 6rpx;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+.page.playing-landscape .indicator-bar::-webkit-scrollbar { display: none; }
+.page.playing-landscape .ind-toggle {
+  padding:3rpx 9rpx;
+  flex-shrink: 0;
+}
+.page.playing-landscape .ind-text { font-size:15rpx; }
+.page.playing-landscape .ma-legend {
+  margin-left: 8rpx;
+  transform: scale(0.9);
+  transform-origin: left center;
+}
+.page.playing-landscape .play-main {
+  flex: 1;
+  min-height: 0;
+  flex-direction: row;
+  align-items: stretch;
+}
+.page.playing-landscape .chart-col {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+}
+.page.playing-landscape .chart-wrap {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+.page.playing-landscape .chart-wrap svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+.page.playing-landscape .trade-col {
+  width: 280rpx;
+  max-width: 31vw;
+  min-width: 236rpx;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid #1e2d45;
+  background: linear-gradient(180deg, #091426 0%, #050b16 100%);
+}
+.page.playing-landscape .trade-msg {
+  position: absolute;
+  left: 10rpx;
+  right: 10rpx;
+  bottom: 10rpx;
+  z-index: 3;
+  padding: 5rpx 8rpx;
+  border-radius: 10rpx;
+  background: rgba(239, 68, 68, 0.18);
+  border: 1px solid rgba(239, 68, 68, 0.35);
+}
+.page.playing-landscape .trade-msg-text { font-size:14rpx; }
+.page.playing-landscape .lot-row {
+  display: flex;
+  align-items: center;
+  gap: 3rpx;
+  padding: 2rpx 5rpx;
+  border-bottom: 1px solid #1e2d45;
+}
+.page.playing-landscape .lot-label {
+  width: auto;
+  font-size: 12rpx;
+  white-space: nowrap;
+  margin-right: 2rpx;
+}
+.page.playing-landscape .lot-chip {
+  flex: 1;
+  min-width: 0;
+  min-height: 30rpx;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 1rpx 0;
+  border-radius: 8rpx;
+}
+.page.playing-landscape .lot-chip-text { font-size: 13rpx; }
+.page.playing-landscape .trade-panel {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: minmax(0, 0.9fr) minmax(0, 0.58fr) minmax(0, 0.9fr);
+  gap: 7rpx;
+  padding: 3rpx 6rpx 5rpx;
+  background: transparent;
+}
+.page.playing-landscape .trade-btn-wrap,
+.page.playing-landscape .trade-mid {
+  flex: none;
+  min-height: 0;
+}
+.page.playing-landscape .trade-big-btn {
+  height: 100%;
+  min-height: 0;
+  padding: 4rpx 5rpx;
+  gap: 0;
+  border-radius: 12rpx;
+  box-shadow: 0 7rpx 18rpx rgba(0, 0, 0, 0.34);
+  transition: transform 0.08s ease, box-shadow 0.12s ease;
+}
+.page.playing-landscape .trade-btn-wrap:active .trade-big-btn {
+  transform: scale(0.965);
+  box-shadow: 0 4rpx 12rpx rgba(0, 0, 0, 0.4);
+}
+.page.playing-landscape .trade-big-label {
+  font-size: 22rpx;
+  line-height: 1.02;
+  text-shadow: 0 1px 4px rgba(0,0,0,0.35);
+}
+.page.playing-landscape .trade-big-lots {
+  font-size: 13rpx;
+  line-height: 1;
+}
+.page.playing-landscape .trade-big-hint { display:none; }
+.page.playing-landscape .trade-closeall-label {
+  font-size: 16rpx;
+  line-height: 1.05;
+  letter-spacing: 0;
+  white-space: nowrap;
+}
+
+@media (max-height: 500px) {
+  .page.playing-landscape .trade-col {
+    width: 256rpx;
+    min-width: 216rpx;
+    max-width: 31vw;
+  }
+  .page.playing-landscape .lot-row { padding: 1rpx 4rpx; }
+  .page.playing-landscape .lot-chip { min-height: 28rpx; }
+  .page.playing-landscape .lot-chip-text { font-size: 12rpx; }
+  .page.playing-landscape .trade-panel {
+    grid-template-rows: minmax(0, 0.82fr) minmax(0, 0.5fr) minmax(0, 0.82fr);
+    gap: 4rpx;
+    padding: 2rpx 4rpx 4rpx;
+  }
+  .page.playing-landscape .trade-big-btn { padding: 3rpx 4rpx; }
+  .page.playing-landscape .trade-big-label { font-size: 20rpx; }
+  .page.playing-landscape .trade-big-lots { font-size: 12rpx; }
+  .page.playing-landscape .trade-closeall-label { font-size: 14rpx; }
+}
+
+@media (max-height: 430px) {
+  .page.playing-landscape .acct-strip,
+  .page.playing-landscape .pos-row {
+    display: none;
+  }
+  .page.playing-landscape .indicator-bar {
+    padding: 1rpx 4rpx;
+  }
+  .page.playing-landscape .ind-toggle {
+    padding: 1rpx 6rpx;
+  }
+  .page.playing-landscape .ind-text {
+    font-size: 14rpx;
+  }
+  .page.playing-landscape .trade-col {
+    width: 240rpx;
+    min-width: 204rpx;
+    max-width: 30vw;
+    min-height: 0;
+  }
+  .page.playing-landscape .lot-row { padding: 2rpx 4rpx; }
+  .page.playing-landscape .lot-chip { min-height: 30rpx; }
+  .page.playing-landscape .lot-chip-text { font-size: 13rpx; }
+  .page.playing-landscape .trade-panel { gap: 4rpx; padding: 3rpx 4rpx 4rpx; }
+  .page.playing-landscape .trade-big-label { font-size: 21rpx; }
+  .page.playing-landscape .trade-big-lots { font-size: 13rpx; }
+}
+
+/* Result */
 .result-page { display:flex;flex-direction:column;align-items:center;padding:60rpx 44rpx;gap:16rpx; }
 .result-sym   { font-size:28rpx;color:#64748b; } .result-label { font-size:24rpx;color:#94a3b8;margin-top:8rpx; }
 .result-pnl   { font-size:68rpx;font-weight:900; } .result-rate  { font-size:38rpx;font-weight:700; }
