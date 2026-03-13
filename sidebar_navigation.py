@@ -101,6 +101,7 @@ def show_navigation():
     # 首页
     with st.expander("首页", expanded=False):
         st.page_link("Home.py", label="AI对话")
+        st.page_link("pages/20_AI模拟投资.py", label="AI炒股")
         # st.page_link("pages/09_全球风险地图.py", label="全球风险地图")  # 暂不上线
 
     # 期权数据（去掉icon）
@@ -123,7 +124,7 @@ def show_navigation():
     with st.expander("K线游戏", expanded=False):
         # st.page_link("pages/16_K线卡牌MVP.py", label="K线卡牌")  # 暂不上线
         st.page_link("pages/K线训练.py", label="K线训练")
-        st.page_link("pages/19_K线复盘.py", label="K线复盘")
+        st.page_link("pages/19_K线复盘.py", label="交易复盘")
         # st.page_link("pages/期权学习.py", label="期权学习")  # 暂不上线
 
     # 个人中心（去掉icon）
