@@ -10,9 +10,27 @@
       }
     },
     {
+      "path": "pages/policy/terms",
+      "style": {
+        "navigationBarTitleText": "用户服务协议",
+        "navigationBarBackgroundColor": "#0b1121",
+        "navigationBarTextStyle": "white",
+        "backgroundColor": "#0b1121"
+      }
+    },
+    {
+      "path": "pages/policy/privacy",
+      "style": {
+        "navigationBarTitleText": "隐私政策",
+        "navigationBarBackgroundColor": "#0b1121",
+        "navigationBarTextStyle": "white",
+        "backgroundColor": "#0b1121"
+      }
+    },
+    {
       "path": "pages/index/index",
       "style": {
-        "navigationBarTitleText": "爱波塔 AI",
+        "navigationBarTitleText": "爱波塔",
         "navigationBarBackgroundColor": "#0b1121",
         "navigationBarTextStyle": "white",
         "backgroundColor": "#0b1121"

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onUnmounted } from 'vue'
+import { ref, computed, watch, nextTick, onUnmounted } from 'vue'
 import { onShow, onHide } from '@dcloudio/uni-app'
 import { useAuthStore } from '../../store/auth'
 import BottomNav from '../../components/BottomNav.vue'
@@ -41,6 +41,11 @@ function updateOrientation(windowWidth?: number, windowHeight?: number) {
 function handleWindowResize(res: any) {
   const size = res?.size || res || {}
   updateOrientation(size.windowWidth, size.windowHeight)
+  // #ifdef MP-WEIXIN
+  if (phase.value === 'playing') {
+    nextTick(() => syncMpCanvasSize(true))
+  }
+  // #endif
 }
 
 function bindWindowResize() {
@@ -76,6 +81,10 @@ onShow(() => {
     // Safety: clear any stale cache when returning to idle screen
     _cache = null
     loadEntryData()
+  } else if (phase.value === 'playing') {
+    // #ifdef MP-WEIXIN
+    nextTick(() => syncMpCanvasSize(true))
+    // #endif
   }
 })
 
@@ -97,6 +106,8 @@ const SVG_H   = PAD_T + PRICE_H + GAP + SUB_H + PAD_B  // ≈ 316
 
 const SUB_TOP = PAD_T + PRICE_H + GAP  // y-start of sub pane
 const CHART_WINDOW = 60
+const mpCanvasW = ref(SVG_W)
+const mpCanvasH = ref(SVG_H)
 
 // ── Config selections ──────────────────────────────────────
 const SPEED_OPTIONS = [
@@ -446,6 +457,168 @@ const svgPaths = computed(() => {
   return { candles, volumes, xLabels, yLabels, priceY, divY, ma, macd: macdPaths, subLabel }
 })
 
+function parsePointStr(points: string, sx: number, sy: number): Array<{ x: number; y: number }> {
+  if (!points) return []
+  return points
+    .trim()
+    .split(/\s+/)
+    .map((pair) => {
+      const [x, y] = pair.split(',')
+      return { x: Number(x) * sx, y: Number(y) * sy }
+    })
+    .filter((p) => Number.isFinite(p.x) && Number.isFinite(p.y))
+}
+
+function drawPolyline(ctx: any, points: string, color: string, lineWidth: number, sx: number, sy: number) {
+  const pts = parsePointStr(points, sx, sy)
+  if (pts.length < 2) return
+  ctx.setStrokeStyle(color)
+  ctx.setLineWidth(lineWidth)
+  ctx.beginPath()
+  ctx.moveTo(pts[0].x, pts[0].y)
+  for (let i = 1; i < pts.length; i += 1) ctx.lineTo(pts[i].x, pts[i].y)
+  ctx.stroke()
+}
+
+function syncMpCanvasSize(drawAfter = false) {
+  // #ifdef MP-WEIXIN
+  const query = uni.createSelectorQuery()
+  query.select('.chart-wrap').boundingClientRect((rect: any) => {
+    let width = Math.round(Number(rect?.width || 0))
+    let height = Math.round(Number(rect?.height || 0))
+    if (!width) {
+      try {
+        width = Math.round(Number(uni.getSystemInfoSync()?.windowWidth || SVG_W))
+      } catch (_) {
+        width = SVG_W
+      }
+    }
+    if (!(isLandscape.value && phase.value === 'playing')) {
+      height = Math.round((width / SVG_W) * SVG_H)
+    } else if (!height) {
+      height = Math.round((width / SVG_W) * SVG_H)
+    }
+    mpCanvasW.value = Math.max(300, width)
+    mpCanvasH.value = Math.max(160, height)
+    if (drawAfter) drawMpCanvas()
+  }).exec()
+  // #endif
+}
+
+function drawMpCanvas() {
+  // #ifdef MP-WEIXIN
+  if (phase.value !== 'playing') return
+  const w = mpCanvasW.value
+  const h = mpCanvasH.value
+  const sx = w / SVG_W
+  const sy = h / SVG_H
+  const paths = svgPaths.value
+  const ctx = uni.createCanvasContext('klineGameCanvas')
+
+  ctx.clearRect(0, 0, w, h)
+  ctx.setFillStyle('#090f1c')
+  ctx.fillRect(0, (PAD_T - 2) * sy, (SVG_W - PAD_R) * sx, (PRICE_H + 4) * sy)
+  if (subPane.value !== 'off') {
+    ctx.setFillStyle('#07111f')
+    ctx.fillRect(0, SUB_TOP * sy, (SVG_W - PAD_R) * sx, SUB_H * sy)
+    ctx.setStrokeStyle('#1e2d45')
+    ctx.setLineWidth(1)
+    ctx.beginPath()
+    ctx.moveTo(0, SUB_TOP * sy)
+    ctx.lineTo((SVG_W - PAD_R) * sx, SUB_TOP * sy)
+    ctx.stroke()
+  }
+
+  if (subPane.value === 'vol') {
+    paths.volumes.forEach((v) => {
+      ctx.setFillStyle(v.isUp ? 'rgba(239,68,68,0.45)' : 'rgba(34,197,94,0.45)')
+      ctx.fillRect((v.x - v.cw / 2) * sx, v.top * sy, v.cw * sx, v.h * sy)
+    })
+  }
+
+  if (subPane.value === 'macd' && paths.macd) {
+    ctx.setStrokeStyle('#2a3a55')
+    ctx.setLineWidth(1)
+    if ((ctx as any).setLineDash) (ctx as any).setLineDash([3, 3], 0)
+    ctx.beginPath()
+    ctx.moveTo(0, (SUB_TOP + SUB_H / 2) * sy)
+    ctx.lineTo((SVG_W - PAD_R) * sx, (SUB_TOP + SUB_H / 2) * sy)
+    ctx.stroke()
+    if ((ctx as any).setLineDash) (ctx as any).setLineDash([], 0)
+    paths.macd.hist.forEach((b) => {
+      ctx.setFillStyle(b.isPos ? 'rgba(239,68,68,0.55)' : 'rgba(34,197,94,0.55)')
+      ctx.fillRect((b.x - b.cw / 2) * sx, b.top * sy, b.cw * sx, b.h * sy)
+    })
+    drawPolyline(ctx, paths.macd.difPts, '#60a5fa', 1.5, sx, sy)
+    drawPolyline(ctx, paths.macd.deaPts, '#f97316', 1.5, sx, sy)
+  }
+
+  paths.candles.forEach((c) => {
+    ctx.setStrokeStyle(c.isUp ? '#ef4444' : '#22c55e')
+    ctx.setLineWidth(1.2)
+    ctx.beginPath()
+    ctx.moveTo(c.x * sx, c.wickTop * sy)
+    ctx.lineTo(c.x * sx, c.wickBot * sy)
+    ctx.stroke()
+    ctx.setFillStyle(c.isUp ? '#ef4444' : '#22c55e')
+    ctx.fillRect((c.x - c.cw / 2) * sx, c.top * sy, c.cw * sx, Math.max(1, c.bodyH * sy))
+  })
+
+  paths.ma.forEach((ma) => {
+    drawPolyline(ctx, ma.points, ma.color, 1.4, sx, sy)
+  })
+
+  if (paths.priceY) {
+    ctx.setStrokeStyle('#f5c518')
+    ctx.setLineWidth(1)
+    if ((ctx as any).setLineDash) (ctx as any).setLineDash([5, 4], 0)
+    ctx.beginPath()
+    ctx.moveTo(0, paths.priceY * sy)
+    ctx.lineTo((SVG_W - PAD_R + 2) * sx, paths.priceY * sy)
+    ctx.stroke()
+    if ((ctx as any).setLineDash) (ctx as any).setLineDash([], 0)
+  }
+
+  ctx.setFillStyle('#090f1c')
+  ctx.fillRect((SVG_W - PAD_R + 2) * sx, 0, (PAD_R - 2) * sx, h)
+
+  if (subPane.value !== 'off') {
+    ctx.setFillStyle('#3d5270')
+    ctx.setFontSize(Math.max(10, Math.round(16 * sy)))
+    ctx.fillText(paths.subLabel, 8 * sx, (SUB_TOP + 14) * sy)
+  }
+
+  ctx.setFillStyle('#4a6080')
+  ctx.setFontSize(Math.max(10, Math.round(17 * sy)))
+  paths.yLabels.forEach((y) => {
+    ctx.fillText(y.label, (SVG_W - PAD_R + 6) * sx, (y.y + 4) * sy)
+  })
+
+  ctx.setFillStyle('#3d5270')
+  ctx.setFontSize(Math.max(10, Math.round(17 * sy)))
+  paths.xLabels.forEach((xl) => {
+    ctx.fillText(xl.label, (xl.x - 12) * sx, (SVG_H - 4) * sy)
+  })
+
+  if (paths.priceY) {
+    ctx.setFillStyle('#1e3a20')
+    ctx.fillRect((SVG_W - PAD_R + 2) * sx, (paths.priceY - 10) * sy, (PAD_R - 2) * sx, 20 * sy)
+    ctx.setFillStyle('#f5c518')
+    ctx.setFontSize(Math.max(10, Math.round(16 * sy)))
+    ctx.fillText(fmtN(currentPrice.value, pDec(currentPrice.value)), (SVG_W - PAD_R + 6) * sx, (paths.priceY + 5) * sy)
+  }
+
+  ctx.draw()
+  // #endif
+}
+
+watch([svgPaths, phase, isLandscape], () => {
+  // #ifdef MP-WEIXIN
+  if (phase.value !== 'playing') return
+  nextTick(() => syncMpCanvasSize(true))
+  // #endif
+}, { deep: true })
+
 // ── Auto-play ──────────────────────────────────────────────
 let autoTimer: ReturnType<typeof setInterval> | null = null
 
@@ -527,6 +700,9 @@ function beginPlaying() {
 
   phase.value = 'playing'
   startTimer()
+  // #ifdef MP-WEIXIN
+  nextTick(() => syncMpCanvasSize(true))
+  // #endif
 
   // NOW create the DB record (game is officially running from this point)
   // Any future navigation-away is a real abandon and deserves penalty
@@ -792,6 +968,16 @@ function pDec(p: number) { return p < 10 ? 3 : p < 1000 ? 2 : 0 }
         <view class="chart-col">
       <!-- Chart SVG -->
       <view class="chart-wrap">
+        <!-- #ifdef MP-WEIXIN -->
+        <canvas
+          canvas-id="klineGameCanvas"
+          class="chart-canvas"
+          :style="{ width: mpCanvasW + 'px', height: mpCanvasH + 'px' }"
+          :width="mpCanvasW"
+          :height="mpCanvasH"
+        />
+        <!-- #endif -->
+        <!-- #ifndef MP-WEIXIN -->
         <svg
           :width="SVG_W" :height="SVG_H"
           :viewBox="`0 0 ${SVG_W} ${SVG_H}`"
@@ -895,6 +1081,7 @@ function pDec(p: number) { return p < 10 ? 3 : p < 1000 ? 2 : 0 }
             font-size="17" fill="#f5c518" font-weight="bold"
           >{{ fmtN(currentPrice, pDec(currentPrice)) }}</text>
         </svg>
+        <!-- #endif -->
       </view>
 
       <!-- Trade error message -->
@@ -1134,6 +1321,7 @@ function pDec(p: number) { return p < 10 ? 3 : p < 1000 ? 2 : 0 }
 
 /* Chart */
 .chart-wrap { background:#090f1c; }
+.chart-canvas { display:block; }
 
 /* Trade msg */
 .trade-msg { background:rgba(239,68,68,0.1);border-bottom:1px solid rgba(239,68,68,0.2);padding:10rpx 20rpx;text-align:center; }
@@ -1288,6 +1476,10 @@ function pDec(p: number) { return p < 10 ? 3 : p < 1000 ? 2 : 0 }
   width: 100%;
   height: 100%;
   display: block;
+}
+.page.playing-landscape .chart-wrap .chart-canvas {
+  width: 100% !important;
+  height: 100% !important;
 }
 .page.playing-landscape .trade-col {
   width: 280rpx;

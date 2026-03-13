@@ -9,12 +9,6 @@ export const authApi = {
   login: (account: string, password: string) =>
     request<{ token: string; username: string }>('POST', '/api/auth/login', { account, password }),
 
-  loginEmail: (email: string, code: string) =>
-    request<{ token: string; username: string }>('POST', '/api/auth/login/email', { email, code }),
-
-  sendCode: (email: string) =>
-    request<{ message: string }>('POST', '/api/auth/send-code', { email }),
-
   logout: () =>
     request<{ message: string }>('POST', '/api/auth/logout'),
 
