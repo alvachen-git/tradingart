@@ -27,7 +27,7 @@ from futures_fund_flow_tools import get_futures_fund_flow
 from volume_oi_tools import get_option_volume_abnormal, analyze_etf_option_sentiment
 from screener_tool import search_top_stocks
 from kline_tools import analyze_kline_pattern
-from data_engine import get_commodity_iv_info, search_broker_holdings_on_date
+from data_engine import get_commodity_iv_info, search_broker_holdings_on_date, tool_analyze_broker_positions
 from email_utils2 import send_email
 from search_tools import search_web
 from polymarket_tool import tool_get_polymarket_sentiment
@@ -274,6 +274,30 @@ def _rewrite_report_after_validation(raw_material: str, html: str, anomalies: li
 # ==========================================
 # 2. 定义【AI 首席记者】(The Reporter)
 # ==========================================
+def _get_recent_holding_dates():
+    """Return latest two futures_holding trade dates as (start_date, end_date) in YYYYMMDD."""
+    try:
+        sql = """
+            SELECT REPLACE(trade_date, '-', '') AS trade_date
+            FROM futures_holding
+            GROUP BY REPLACE(trade_date, '-', '')
+            ORDER BY trade_date DESC
+            LIMIT 2
+        """
+        df_dates = pd.read_sql(sql, engine)
+        if len(df_dates) >= 2:
+            end_date = str(df_dates.iloc[0]["trade_date"])
+            start_date = str(df_dates.iloc[1]["trade_date"])
+            return start_date, end_date
+        if len(df_dates) == 1:
+            only_date = str(df_dates.iloc[0]["trade_date"])
+            return only_date, only_date
+    except Exception as e:
+        print(f"[holding-dates] fetch failed: {e}")
+
+    fallback = datetime.now().strftime("%Y%m%d")
+    return fallback, fallback
+
 def collect_data_via_agent():
     """
     🔥 派出 AI 记者去采集素材
@@ -292,6 +316,7 @@ def collect_data_via_agent():
         tool_get_retail_money_flow,
         get_futures_fund_flow,
         search_broker_holdings_on_date,
+        tool_analyze_broker_positions,
 
         # 期权/技术类
         get_commodity_iv_info,
@@ -304,7 +329,7 @@ def collect_data_via_agent():
     ]
 
     today_str = datetime.now().strftime("%Y年%m月%d日")
-
+    holdings_start_date, holdings_end_date = _get_recent_holding_dates()
     system_prompt = f"""
     你是一位**顶级财经记者**，正在为今天的《晚间深度复盘日报》采集素材。
     当前日期：{today_str}。
@@ -376,6 +401,16 @@ def collect_data_via_agent():
     不要写成最终新闻稿，只要罗列事实、数据和你的发现即可，供主编后续使用。
     """
 
+
+    system_prompt += f"""
+
+    ## Broker holdings section must focus on day-over-day changes (MANDATORY)
+    - Use `tool_analyze_broker_positions` for each broker below with exact date range `{holdings_start_date}` -> `{holdings_end_date}` and `sort_by='net'`.
+    - Brokers: 海通期货、东证期货、国泰君安。
+    - For each broker, extract top 3 products with the largest net increase and top 3 with the largest net decrease.
+    - Prioritize "change" over absolute position size; avoid repeating fixed products unless they truly rank in daily changes.
+    - If date range has no change data, then fallback to `search_broker_holdings_on_date` as backup snapshot.
+    """
     reporter_agent = create_react_agent(llm, tools, prompt=system_prompt)
 
     try:
@@ -385,6 +420,11 @@ def collect_data_via_agent():
         3. 每个商品都要给出趋势判断和隐含波动率水平（高/中/低）
         """
 
+
+        trigger_msg += f"""
+        4. Use holdings change dates: {holdings_start_date} -> {holdings_end_date}
+        5. In broker holdings, prioritize net position changes (increase/decrease top movers), not absolute net position rank.
+        """
         result = reporter_agent.invoke(
             {"messages": [HumanMessage(content=trigger_msg)]},
             {"recursion_limit": 160}
