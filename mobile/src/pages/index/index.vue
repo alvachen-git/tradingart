@@ -22,6 +22,12 @@ let pollTimer: ReturnType<typeof setInterval> | null = null
 const HISTORY_KEY = computed(() => `chat_history_${auth.username}`)
 const PENDING_KEY = computed(() => `chat_pending_${auth.username}`)
 
+function markAiContent(content: string) {
+  const text = String(content || '').trim()
+  if (!text) return '【AI生成】'
+  return text.startsWith('【AI生成】') ? text : `【AI生成】\n${text}`
+}
+
 // ── 初始化：onShow 统一处理，避免 onMounted/onShow 时序竞争 ──
 onShow(async () => {
   if (!auth.isLoggedIn) { uni.reLaunch({ url: '/pages/login/index' }); return }
@@ -35,7 +41,10 @@ function loadHistory() {
     const saved = uni.getStorageSync(HISTORY_KEY.value)
     if (saved) {
       const loaded: UIMessage[] = JSON.parse(saved)
-      messages.value = loaded
+      messages.value = loaded.map((m) => {
+        if (m.role !== 'assistant') return m
+        return { ...m, content: markAiContent(m.content) }
+      })
       // 从已加载消息中初始化 msgCounter，避免新消息 ID 与历史 ID 重复导致 v-for 渲染错乱
       msgCounter = loaded.reduce((max, m) => Math.max(max, m.id || 0), 0)
     }
@@ -44,7 +53,7 @@ function loadHistory() {
     messages.value = [{
       id: ++msgCounter,
       role: 'assistant',
-      content: '你好！我是爱波塔 AI，专注 A 股期权期货分析。\n\n你可以问我：\n• 沪铜近期多空格局\n• 300ETF 隐含波动率分析\n• 当前适合做哪个期权策略',
+      content: markAiContent('你好！我是爱波塔 AI，专注 A 股期权期货分析。\n\n你可以问我：\n• 沪铜近期多空格局\n• 300ETF 隐含波动率分析\n• 当前适合做哪个期权策略\n\n内容仅供参考，不构成投资建议。'),
     }]
   }
 }
@@ -112,19 +121,19 @@ function pollStatus(taskId: string, loadingId: number) {
         stopPoll()
         uni.removeStorageSync(PENDING_KEY.value)
         const aiText = res.result?.response || res.result?.answer || JSON.stringify(res.result)
-        replaceLoading(loadingId, aiText)
+        replaceLoading(loadingId, markAiContent(aiText))
         saveHistory()
         sending.value = false
       } else if (res.status === 'error') {
         stopPoll()
         uni.removeStorageSync(PENDING_KEY.value)
-        replaceLoading(loadingId, `分析失败：${res.error || '请稍后重试'}`)
+        replaceLoading(loadingId, markAiContent(`分析失败：${res.error || '请稍后重试'}`))
         sending.value = false
       }
     } catch {
       stopPoll()
       uni.removeStorageSync(PENDING_KEY.value)
-      replaceLoading(loadingId, '网络异常，请稍后重试')
+      replaceLoading(loadingId, markAiContent('网络异常，请稍后重试'))
       sending.value = false
     }
   }, 1000)
@@ -168,8 +177,11 @@ function clearChat() {
   <view class="page">
     <!-- 顶部操作栏 -->
     <view class="top-bar">
-      <text class="top-title">AI 问答</text>
+      <text class="top-title">爱波塔</text>
       <text class="clear-btn" @tap="clearChat">清空</text>
+    </view>
+    <view class="ai-notice">
+      <text class="ai-notice-text">以下回复均为人工智能生成内容，请谨慎甄别，仅供参考，不构成投资建议。</text>
     </view>
 
     <!-- 消息列表 -->
@@ -259,6 +271,19 @@ function clearChat() {
   color: #666666;
 }
 
+.ai-notice {
+  margin: 14rpx 24rpx 0;
+  padding: 10rpx 14rpx;
+  border-radius: 12rpx;
+  border: 1px solid rgba(245, 197, 24, 0.3);
+  background: rgba(245, 197, 24, 0.08);
+}
+
+.ai-notice-text {
+  font-size: 22rpx;
+  color: #f5c518;
+}
+
 .msg-list {
   padding: 20rpx 24rpx 0;
 }
@@ -291,7 +316,6 @@ function clearChat() {
 
 .user-bubble .msg-text { color: #0b1121; font-weight: 600; }
 .ai-bubble .msg-text { color: #f0f0f0; line-height: 1.7; white-space: pre-wrap; }
-
 .loading-bubble {
   background: #162035;
   border: 1px solid #1e2d45;

@@ -96,6 +96,10 @@ function formatVal(v: any) {
 
 <template>
   <view class="page">
+    <view class="ai-notice">
+      <text class="ai-notice-text">本页体检结论与总结为人工智能生成内容，仅供参考，不构成投资建议。</text>
+    </view>
+
     <!-- 进度条（上传/分析中） -->
     <view v-if="polling" class="progress-banner">
       <view class="spinner" />
@@ -124,7 +128,7 @@ function formatVal(v: any) {
       <!-- 总结 -->
       <view class="card" style="margin: 0 24rpx 20rpx;">
         <text class="section-title">AI 总结</text>
-        <text class="summary-text selectable">{{ snapshot.summary_text || '暂无总结' }}</text>
+        <text class="summary-text selectable">【AI生成】{{ snapshot.summary_text || '暂无总结' }}</text>
       </view>
 
       <!-- KPI 指标 -->
@@ -175,6 +179,20 @@ function formatVal(v: any) {
 
 <style scoped>
 .page { background: #0d0d0d; min-height: 100vh; }
+
+.ai-notice {
+  margin: 16rpx 24rpx 0;
+  padding: 12rpx 14rpx;
+  border-radius: 12rpx;
+  border: 1px solid rgba(245, 197, 24, 0.35);
+  background: rgba(245, 197, 24, 0.1);
+}
+
+.ai-notice-text {
+  font-size: 22rpx;
+  line-height: 1.5;
+  color: #f5c518;
+}
 
 .progress-banner {
   background: rgba(245, 197, 24, 0.1);

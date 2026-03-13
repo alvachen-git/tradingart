@@ -134,6 +134,7 @@ const isHtml = computed(() => {
 
 <!-- HTML 渲染深层样式（覆盖晚报自带样式，适配深色主题） -->
 <style>
+/* #ifdef H5 */
 .html-body {
   color: #cccccc;
   font-size: 28rpx;
@@ -181,4 +182,5 @@ const isHtml = computed(() => {
 .html-body a { color: #f5c518 !important; }
 
 .html-body img { max-width: 100% !important; }
+/* #endif */
 </style>
