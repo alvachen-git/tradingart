@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, watch } from 'vue'
+import { ref, computed, watch, nextTick } from 'vue'
 import { onLoad, onHide, onUnload } from '@dcloudio/uni-app'
 import { marketApi } from '../../api/index'
 
@@ -259,6 +259,9 @@ let lpTimer:any=null, lpStartX=0, lpStartY=0
 let t0X=0, t0Idx=0, t0Dist=0, t0Count=0
 
 function getW() { try { return (uni.getSystemInfoSync().windowWidth||375)-48 } catch { return 327 } }
+function svgH(h: number) {
+  return `${(getW() / SVG_W * h).toFixed(1)}px`
+}
 
 function onTouchStart(e:any) {
   if(e.touches.length===1) {
@@ -326,6 +329,135 @@ function ivRankColor(r:number):string {
 function pctColor(v:number|null):string { if(v==null) return '#888'; return v>0?'#e84040':v<0?'#22c55e':'#888' }
 function dumbChgColor(v:number|null):string { if(v==null) return '#888'; return v<0?'#22c55e':v>0?'#e84040':'#888' }
 const tooltipColor = computed(()=>tooltip.value.pct>0?'#e84040':tooltip.value.pct<0?'#22c55e':'#888')
+
+// ── 小程序 Canvas 兜底渲染（避免 SVG 兼容差异）────────────────
+const mpPanelW = ref(Math.max(280, getW()))
+const mpCandleH = computed(() => Math.max(120, Math.round((mpPanelW.value / SVG_W) * CANDLE_H)))
+const mpSmallH = computed(() => Math.max(52, Math.round((mpPanelW.value / SVG_W) * IV_H)))
+
+function syncMpPanelSize() {
+  mpPanelW.value = Math.max(280, getW())
+}
+
+function drawMpCandlePanel() {
+  // #ifdef MP-WEIXIN
+  const chart = candleChart.value
+  const w = mpPanelW.value
+  const h = mpCandleH.value
+  const ctx = uni.createCanvasContext('mpCandleCanvas')
+  ctx.clearRect(0, 0, w, h)
+  if (!chart) { ctx.draw(); return }
+
+  const sx = w / SVG_W
+  const sy = h / CANDLE_H
+  const xL = PAD_L * sx
+  const xR = (SVG_W - PAD_R) * sx
+
+  // 网格线
+  ctx.setStrokeStyle('#252525')
+  ctx.setLineWidth(1)
+  ;[chart.maxY, chart.midY, chart.minY].forEach((y) => {
+    const py = y * sy
+    ctx.beginPath()
+    ctx.moveTo(xL, py)
+    ctx.lineTo(xR, py)
+    ctx.stroke()
+  })
+
+  chart.candles.forEach((c: any) => {
+    const color = c.up ? '#e84040' : '#22c55e'
+    const x = c.x * sx
+    const hy = c.hy * sy
+    const ly = c.ly * sy
+    const bw = Math.max(1.2, c.barW * sx)
+    const top = c.bodyTop * sy
+    const bh = Math.max(1, c.bodyH * sy)
+    ctx.setStrokeStyle(color)
+    ctx.setLineWidth(1)
+    ctx.beginPath()
+    ctx.moveTo(x, hy)
+    ctx.lineTo(x, ly)
+    ctx.stroke()
+    ctx.setFillStyle(color)
+    ctx.fillRect(x - bw / 2, top, bw, bh)
+  })
+
+  ctx.draw()
+  // #endif
+}
+
+function drawMpLinePanel(canvasId: string, rows: any[], key: string, color: string) {
+  // #ifdef MP-WEIXIN
+  const w = mpPanelW.value
+  const h = mpSmallH.value
+  const ctx = uni.createCanvasContext(canvasId)
+  ctx.clearRect(0, 0, w, h)
+  if (!rows || rows.length < 2) { ctx.draw(); return }
+
+  const vals = rows.map((r: any) => Number(r?.[key] ?? 0)).filter((v: number) => Number.isFinite(v))
+  if (vals.length < 2) { ctx.draw(); return }
+
+  const maxV = Math.max(...vals)
+  const minV = Math.min(...vals)
+  const range = maxV - minV || 1
+  const pad = 2
+  const usableW = w - pad * 2
+  const usableH = h - pad * 2
+  const toX = (i: number) => pad + (i / (rows.length - 1)) * usableW
+  const toY = (v: number) => pad + usableH - ((v - minV) / range) * usableH
+
+  if (minV < 0 && maxV > 0) {
+    const zy = toY(0)
+    ctx.setStrokeStyle(color)
+    ctx.setGlobalAlpha(0.35)
+    ctx.setLineWidth(1)
+    ctx.beginPath()
+    ctx.moveTo(pad, zy)
+    ctx.lineTo(w - pad, zy)
+    ctx.stroke()
+    ctx.setGlobalAlpha(1)
+  }
+
+  ctx.setStrokeStyle(color)
+  ctx.setLineWidth(2)
+  ctx.beginPath()
+  rows.forEach((r: any, i: number) => {
+    const x = toX(i)
+    const y = toY(Number(r?.[key] ?? 0))
+    if (i === 0) ctx.moveTo(x, y)
+    else ctx.lineTo(x, y)
+  })
+  ctx.stroke()
+
+  const lx = toX(rows.length - 1)
+  const ly = toY(Number(rows[rows.length - 1]?.[key] ?? 0))
+  ctx.setFillStyle(color)
+  ctx.beginPath()
+  ctx.arc(lx, ly, 2.5, 0, Math.PI * 2)
+  ctx.fill()
+
+  ctx.draw()
+  // #endif
+}
+
+function drawMpPanels() {
+  // #ifdef MP-WEIXIN
+  syncMpPanelSize()
+  nextTick(() => {
+    drawMpCandlePanel()
+    drawMpLinePanel('mpIvCanvas', visIv.value, 'v', '#3b82f6')
+    drawMpLinePanel('mpOiCanvas', visTotalOi.value, 'v', '#f5c518')
+    drawMpLinePanel('mpDumbCanvas', visDumb.value, 'net', '#e84040')
+    drawMpLinePanel('mpSmartCanvas', visSmart.value, 'net', '#22c55e')
+  })
+  // #endif
+}
+
+watch(
+  [visOhlc, visIv, visTotalOi, visDumb, visSmart, activeRange, startIdx, barCount, liveCandle],
+  () => drawMpPanels(),
+  { deep: true, immediate: true }
+)
 </script>
 
 <template>
@@ -389,14 +521,23 @@ const tooltipColor = computed(()=>tooltip.value.pct>0?'#e84040':tooltip.value.pc
         </view>
         <view class="gesture-hint"><text class="hint-text">拖动平移 | 双指缩放 | 长按查看OHLC</text></view>
 
-        <!-- #ifdef H5 -->
         <!-- ① K线子图 -->
         <view class="sub-panel">
           <view class="sub-header">
             <text class="sub-title" style="color:#f5c518">K线</text>
             </view>
           <view class="svg-wrap" @touchstart="onTouchStart" @touchmove.prevent="onTouchMove" @touchend="onTouchEnd">
-              <svg class="chart-svg" :width="SVG_W" :height="CANDLE_H"
+              <!-- #ifdef MP-WEIXIN -->
+              <canvas
+                canvas-id="mpCandleCanvas"
+                class="chart-canvas"
+                :style="{ width: mpPanelW + 'px', height: mpCandleH + 'px' }"
+                :width="mpPanelW"
+                :height="mpCandleH"
+              />
+              <!-- #endif -->
+              <!-- #ifndef MP-WEIXIN -->
+              <svg class="chart-svg" :style="{ height: svgH(CANDLE_H) }" :width="SVG_W" :height="CANDLE_H"
                 :viewBox="`0 0 ${SVG_W} ${CANDLE_H}`" preserveAspectRatio="none">
                 <template v-if="candleChart">
                   <line :x1="PAD_L" :y1="candleChart.maxY" :x2="SVG_W-PAD_R" :y2="candleChart.maxY" stroke="#252525" stroke-width="1"/>
@@ -415,6 +556,7 @@ const tooltipColor = computed(()=>tooltip.value.pct>0?'#e84040':tooltip.value.pc
                     stroke="#fff" stroke-width="0.8" stroke-dasharray="3,3" opacity="0.4"/>
                 </template>
               </svg>
+              <!-- #endif -->
               <template v-if="candleChart">
                 <text class="y-max">{{ candleChart.maxLabel }}</text>
                 <text class="y-mid">{{ candleChart.midLabel }}</text>
@@ -454,7 +596,17 @@ const tooltipColor = computed(()=>tooltip.value.pct>0?'#e84040':tooltip.value.pc
             <text v-else class="no-data">暂无数据</text>
           </view>
           <view class="svg-wrap">
-            <svg class="chart-svg" :width="SVG_W" :height="IV_H"
+            <!-- #ifdef MP-WEIXIN -->
+            <canvas
+              canvas-id="mpIvCanvas"
+              class="chart-canvas"
+              :style="{ width: mpPanelW + 'px', height: mpSmallH + 'px' }"
+              :width="mpPanelW"
+              :height="mpSmallH"
+            />
+            <!-- #endif -->
+            <!-- #ifndef MP-WEIXIN -->
+            <svg class="chart-svg" :style="{ height: svgH(IV_H) }" :width="SVG_W" :height="IV_H"
               :viewBox="`0 0 ${SVG_W} ${IV_H}`" preserveAspectRatio="none">
               <defs>
                 <linearGradient id="ivgd" x1="0" y1="0" x2="0" y2="1">
@@ -468,6 +620,7 @@ const tooltipColor = computed(()=>tooltip.value.pct>0?'#e84040':tooltip.value.pc
                 <circle :cx="ivLine.lastX" :cy="(parseFloat(ivLine.lastY)-IV_Y0).toFixed(1)" r="3" fill="#3b82f6"/>
               </template>
             </svg>
+            <!-- #endif -->
             <template v-if="ivLine">
               <text class="y-max" style="color:#3b82f6">{{ ivLine.maxLabel }}</text>
               <text class="y-min" style="color:#3b82f6">{{ ivLine.minLabel }}</text>
@@ -483,7 +636,17 @@ const tooltipColor = computed(()=>tooltip.value.pct>0?'#e84040':tooltip.value.pc
             <text v-else class="no-data">暂无数据</text>
           </view>
           <view class="svg-wrap">
-            <svg class="chart-svg" :width="SVG_W" :height="OI_H"
+            <!-- #ifdef MP-WEIXIN -->
+            <canvas
+              canvas-id="mpOiCanvas"
+              class="chart-canvas"
+              :style="{ width: mpPanelW + 'px', height: mpSmallH + 'px' }"
+              :width="mpPanelW"
+              :height="mpSmallH"
+            />
+            <!-- #endif -->
+            <!-- #ifndef MP-WEIXIN -->
+            <svg class="chart-svg" :style="{ height: svgH(OI_H) }" :width="SVG_W" :height="OI_H"
               :viewBox="`0 0 ${SVG_W} ${OI_H}`" preserveAspectRatio="none">
               <defs>
                 <linearGradient id="oigd" x1="0" y1="0" x2="0" y2="1">
@@ -497,6 +660,7 @@ const tooltipColor = computed(()=>tooltip.value.pct>0?'#e84040':tooltip.value.pc
                 <circle :cx="oiLine.lastX" :cy="(parseFloat(oiLine.lastY)-OI_Y0).toFixed(1)" r="3" fill="#f5c518"/>
               </template>
             </svg>
+            <!-- #endif -->
             <template v-if="oiLine">
               <text class="y-max" style="color:#f5c518">{{ oiLine.maxLabel }}</text>
               <text class="y-min" style="color:#f5c518">{{ oiLine.minLabel }}</text>
@@ -512,7 +676,17 @@ const tooltipColor = computed(()=>tooltip.value.pct>0?'#e84040':tooltip.value.pc
             <text v-else class="no-data">暂无数据</text>
           </view>
           <view class="svg-wrap">
-            <svg class="chart-svg" :width="SVG_W" :height="DUMB_H"
+            <!-- #ifdef MP-WEIXIN -->
+            <canvas
+              canvas-id="mpDumbCanvas"
+              class="chart-canvas"
+              :style="{ width: mpPanelW + 'px', height: mpSmallH + 'px' }"
+              :width="mpPanelW"
+              :height="mpSmallH"
+            />
+            <!-- #endif -->
+            <!-- #ifndef MP-WEIXIN -->
+            <svg class="chart-svg" :style="{ height: svgH(DUMB_H) }" :width="SVG_W" :height="DUMB_H"
               :viewBox="`0 0 ${SVG_W} ${DUMB_H}`" preserveAspectRatio="none">
               <defs>
                 <linearGradient id="dumbgd" x1="0" y1="0" x2="0" y2="1">
@@ -528,6 +702,7 @@ const tooltipColor = computed(()=>tooltip.value.pct>0?'#e84040':tooltip.value.pc
                 <circle :cx="dumbLine.lastX" :cy="(parseFloat(dumbLine.lastY)-DUMB_Y0).toFixed(1)" r="3" fill="#e84040"/>
               </template>
             </svg>
+            <!-- #endif -->
             <template v-if="dumbLine">
               <text class="y-max" style="color:#e84040">{{ dumbLine.maxLabel }}</text>
               <text class="y-min" style="color:#e84040">{{ dumbLine.minLabel }}</text>
@@ -543,7 +718,17 @@ const tooltipColor = computed(()=>tooltip.value.pct>0?'#e84040':tooltip.value.pc
             <text v-else class="no-data">暂无数据</text>
           </view>
           <view class="svg-wrap">
-            <svg class="chart-svg" :width="SVG_W" :height="SMART_H"
+            <!-- #ifdef MP-WEIXIN -->
+            <canvas
+              canvas-id="mpSmartCanvas"
+              class="chart-canvas"
+              :style="{ width: mpPanelW + 'px', height: mpSmallH + 'px' }"
+              :width="mpPanelW"
+              :height="mpSmallH"
+            />
+            <!-- #endif -->
+            <!-- #ifndef MP-WEIXIN -->
+            <svg class="chart-svg" :style="{ height: svgH(SMART_H) }" :width="SVG_W" :height="SMART_H"
               :viewBox="`0 0 ${SVG_W} ${SMART_H}`" preserveAspectRatio="none">
               <defs>
                 <linearGradient id="smartgd" x1="0" y1="0" x2="0" y2="1">
@@ -559,14 +744,13 @@ const tooltipColor = computed(()=>tooltip.value.pct>0?'#e84040':tooltip.value.pc
                 <circle :cx="smartLine.lastX" :cy="(parseFloat(smartLine.lastY)-SMART_Y0).toFixed(1)" r="3" fill="#22c55e"/>
               </template>
             </svg>
+            <!-- #endif -->
             <template v-if="smartLine">
               <text class="y-max" style="color:#22c55e">{{ smartLine.maxLabel }}</text>
               <text class="y-min" style="color:#22c55e">{{ smartLine.minLabel }}</text>
             </template>
           </view>
         </view>
-        <!-- #endif -->
-
         <view v-if="chartData?.cur_iv" class="iv-tag">
           <text class="iv-tag-text">IV {{ chartData.cur_iv.toFixed(1) }}%  |  Rank {{ initIvRank>=0?Math.round(initIvRank):'-' }}</text>
         </view>
@@ -628,7 +812,8 @@ const tooltipColor = computed(()=>tooltip.value.pct>0?'#e84040':tooltip.value.pc
 
 /* SVG 容器：相对定位，供 Y 轴标签绝对定位 */
 .svg-wrap { position:relative; width:100%; }
-.chart-svg { display:block; width:100%; height:auto; }
+.chart-svg { display:block; width:100%; }
+.chart-canvas { display:block; width:100%; }
 
 /* Y轴标签：绝对定位在 SVG 右上/右下角 */
 .y-max {

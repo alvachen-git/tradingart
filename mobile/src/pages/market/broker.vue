@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue'
-import { onLoad } from '@dcloudio/uni-app'
+import { ref, computed, watch, nextTick } from 'vue'
+import { onLoad, onReady } from '@dcloudio/uni-app'
 import { marketApi, type BrokerDetailRow } from '../../api/index'
 
 const product     = ref('')
@@ -18,6 +18,12 @@ onLoad((options: any) => {
   fetchDetail()
 })
 
+onReady(() => {
+  // 兜底：确保 canvas 节点 ready 后至少渲染一次
+  syncCanvasSize()
+  nextTick(() => drawScoreCanvas())
+})
+
 async function fetchDetail() {
   loading.value = true
   errMsg.value  = ''
@@ -25,6 +31,9 @@ async function fetchDetail() {
     const res = await marketApi.brokerDetail(product.value, broker.value)
     rows.value       = res.rows
     totalScore.value = res.total_score
+    // 数据返回后再触发一次渲染，避免首屏 ready 时序差异
+    syncCanvasSize()
+    nextTick(() => drawScoreCanvas())
   } catch (e: any) {
     errMsg.value = e.message || '加载失败'
   } finally {
@@ -84,6 +93,114 @@ const svgData = computed(() => {
 const lineColor = computed(() => totalScore.value >= 0 ? '#e84040' : '#22c55e')
 const areaFill  = computed(() => totalScore.value >= 0 ? 'rgba(232,64,64,0.09)' : 'rgba(34,197,94,0.09)')
 
+// ── 小程序 Canvas 兜底（避免 SVG 兼容问题）──────────────────
+const canvasW = ref(360)
+const canvasH = 180
+
+function syncCanvasSize() {
+  try {
+    const ww = uni.getSystemInfoSync().windowWidth || 375
+    // chart-wrap 左右 6rpx，按 px 近似减掉 12
+    canvasW.value = Math.max(300, Math.round(ww - 12))
+  } catch {
+    canvasW.value = 360
+  }
+}
+
+function drawScoreCanvas() {
+  // #ifdef MP-WEIXIN
+  const data = chartRows.value
+  const w = canvasW.value
+  const h = canvasH
+  const padL = 42
+  const padR = 12
+  const padT = 16
+  const padB = 28
+  const innerW = w - padL - padR
+  const innerH = h - padT - padB
+  const ctx = uni.createCanvasContext('brokerScoreCanvas')
+  ctx.clearRect(0, 0, w, h)
+
+  if (!data || data.length < 2) {
+    ctx.draw()
+    return
+  }
+
+  const scores = data.map((r) => Number(r.cum_score || 0))
+  const minS = Math.min(...scores, 0)
+  const maxS = Math.max(...scores, 0)
+  const range = maxS - minS || 1
+  const toX = (i: number) => padL + (i / (data.length - 1)) * innerW
+  const toY = (v: number) => padT + (1 - (v - minS) / range) * innerH
+  const lineColorLocal = totalScore.value >= 0 ? '#e84040' : '#22c55e'
+  const areaColorLocal = totalScore.value >= 0 ? 'rgba(232,64,64,0.09)' : 'rgba(34,197,94,0.09)'
+
+  const pts = data.map((r, i) => ({ x: toX(i), y: toY(Number(r.cum_score || 0)) }))
+  const zeroY = toY(0)
+  const clipY = Math.min(h - padB, Math.max(padT, zeroY))
+
+  // 零轴
+  ctx.setStrokeStyle('#2a3a52')
+  ctx.setLineWidth(1)
+  if ((ctx as any).setLineDash) (ctx as any).setLineDash([4, 3], 0)
+  ctx.beginPath()
+  ctx.moveTo(padL, clipY)
+  ctx.lineTo(w - padR, clipY)
+  ctx.stroke()
+  if ((ctx as any).setLineDash) (ctx as any).setLineDash([], 0)
+
+  // 面积
+  ctx.setFillStyle(areaColorLocal)
+  ctx.beginPath()
+  pts.forEach((p, i) => {
+    if (i === 0) ctx.moveTo(p.x, p.y)
+    else ctx.lineTo(p.x, p.y)
+  })
+  ctx.lineTo(pts[pts.length - 1].x, clipY)
+  ctx.lineTo(pts[0].x, clipY)
+  ctx.closePath()
+  ctx.fill()
+
+  // 线
+  ctx.setStrokeStyle(lineColorLocal)
+  ctx.setLineWidth(2)
+  ctx.beginPath()
+  pts.forEach((p, i) => {
+    if (i === 0) ctx.moveTo(p.x, p.y)
+    else ctx.lineTo(p.x, p.y)
+  })
+  ctx.stroke()
+
+  // Y 标签（min/0/max 去重）
+  const yVals = [...new Set([Math.round(minS), 0, Math.round(maxS)])]
+  ctx.setFillStyle('#556070')
+  ctx.setFontSize(10)
+  yVals.forEach((v) => {
+    const y = toY(v)
+    const txt = v > 0 ? `+${v}` : String(v)
+    ctx.fillText(txt, 2, y + 3)
+  })
+
+  // X 标签（约 5 个）
+  const tickCount = Math.min(5, data.length)
+  for (let i = 0; i < tickCount; i += 1) {
+    const idx = Math.round(i * (data.length - 1) / Math.max(1, tickCount - 1))
+    const x = toX(idx)
+    const label = data[idx].dt.slice(5)
+    ctx.fillText(label, x - 16, h - 6)
+  }
+
+  ctx.draw()
+  // #endif
+}
+
+watch([chartRows, totalScore], () => {
+  // #ifdef MP-WEIXIN
+  syncCanvasSize()
+  nextTick(() => drawScoreCanvas())
+  // #endif
+}, { immediate: true, deep: true })
+
 // ── Helpers ───────────────────────────────────────────────
 function scoreColor(v: number) { return v > 0 ? '#e84040' : v < 0 ? '#22c55e' : '#888888' }
 function fmtScore(v: number)   { return (v > 0 ? '+' : '') + Math.round(v) }
@@ -118,6 +235,16 @@ function fmtPct(v: number)     { return (v > 0 ? '+' : '') + v.toFixed(2) + '%' 
       <view class="chart-section">
         <text class="section-title">累计得分走势</text>
         <view class="chart-wrap">
+          <!-- #ifdef MP-WEIXIN -->
+          <canvas
+            canvas-id="brokerScoreCanvas"
+            class="chart-canvas"
+            :style="{ width: canvasW + 'px', height: canvasH + 'px' }"
+            :width="canvasW"
+            :height="canvasH"
+          />
+          <!-- #endif -->
+          <!-- #ifndef MP-WEIXIN -->
           <svg
             v-if="svgData"
             :width="SVG_W" :height="SVG_H"
@@ -152,6 +279,7 @@ function fmtPct(v: number)     { return (v > 0 ? '+' : '') + v.toFixed(2) + '%' 
               text-anchor="middle" font-size="10" fill="#556070"
             >{{ t.label }}</text>
           </svg>
+          <!-- #endif -->
         </view>
       </view>
 
@@ -206,6 +334,7 @@ function fmtPct(v: number)     { return (v > 0 ? '+' : '') + v.toFixed(2) + '%' 
 .chart-section { padding: 20rpx 0 0; }
 .section-title { display: block; font-size: 24rpx; color: #666666; padding: 0 24rpx 10rpx; }
 .chart-wrap { padding: 0 6rpx 6rpx; }
+.chart-canvas { display: block; width: 100%; height: 180px; }
 
 /* Table */
 .table-section { padding: 20rpx 0 0; }
