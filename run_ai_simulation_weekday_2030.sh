@@ -17,7 +17,7 @@ LOG_FILE="${LOG_DIR}/ai_simulation_daily.log"
   echo ""
   echo "========================================"
   echo "⏰ AI模拟盘任务开始: $(date '+%Y-%m-%d %H:%M:%S %Z')"
-  ./.venv311/bin/python run_ai_simulation_daily.py
+  ./.venv311/bin/python ai_simulation_service.py
   echo "✅ AI模拟盘任务结束: $(date '+%Y-%m-%d %H:%M:%S %Z')"
   echo "========================================"
 } >> "${LOG_FILE}" 2>&1
