@@ -42,6 +42,21 @@ engine = create_engine(db_url)
 
 llm = ChatTongyi(model="qwen-plus", api_key=os.getenv("DASHSCOPE_API_KEY"))
 
+HIGH_IV_RANK_THRESHOLD = 70.0
+CONTRACT_CODE_RE = re.compile(r"[A-Z]{1,3}\d{4}-[CP]-\d+\.[A-Z]+")
+MULTI_LEG_STRATEGY_LEGS = {
+    "双卖": 2,
+    "Short Straddle": 2,
+    "牛市价差": 2,
+    "Bull Call Spread": 2,
+    "熊市价差": 2,
+    "Bear Put Spread": 2,
+    "蝴蝶": 3,
+    "Butterfly": 3,
+    "铁鹰": 4,
+    "Iron Condor": 4,
+}
+
 # ==========================================
 # 常量配置
 # ==========================================
@@ -315,7 +330,7 @@ def tool_get_underlying_price(underlying_code: str, option_type: str = "ETF期�
 
 @tool
 def tool_get_recommended_strikes(underlying_code: str, option_type: str, maturity_date_str: str,
-                                 current_price: float, strategy: str) -> str:
+                                 current_price: float, strategy: str, iv_rank: float | None = None) -> str:
     """
     【推荐行权价查询】
     根据当前价格和策略，返回推荐的具体期权合约（行权价、权利金、持仓量）。
@@ -324,7 +339,7 @@ def tool_get_recommended_strikes(underlying_code: str, option_type: str, maturit
     - option_type: 'ETF期权' 或 '商品期权'
     - maturity_date_str: 到期日 YYYYMMDD
     - current_price: 标的当前价格
-    - strategy: 策略类型，如 '买看涨','卖看跌','买看跌','卖看涨','双卖','蝴蝶','铁鹰'
+    - strategy: 策略类型，如 '买看涨','卖看跌','买看跌','卖看涨','双卖','蝴蝶','铁鹰','牛市价差','熊市价差'
     """
     try:
         if option_type == "ETF期权":
@@ -370,6 +385,7 @@ def tool_get_recommended_strikes(underlying_code: str, option_type: str, maturit
 
         atm_c_idx = find_atm_idx(calls, current_price)
         atm_p_idx = find_atm_idx(puts, current_price)
+        is_high_iv = iv_rank is not None and iv_rank >= HIGH_IV_RANK_THRESHOLD
 
         def fmt_contract(row):
             premium = f"{row['premium']:.4f}" if pd.notna(row.get("premium")) else "N/A"
@@ -377,7 +393,55 @@ def tool_get_recommended_strikes(underlying_code: str, option_type: str, maturit
             return (f"  合约:{row['ts_code']} | 行权价:{row['exercise_price']} | "
                     f"权利金:{premium} | 持仓量:{oi}手")
 
+        def pick_otm_call(depth: int = 1):
+            otm_calls = calls[calls["exercise_price"] > current_price].reset_index(drop=True)
+            if otm_calls.empty:
+                return None
+            idx = min(max(depth - 1, 0), len(otm_calls) - 1)
+            return otm_calls.iloc[idx]
+
+        def pick_otm_put(depth: int = 1):
+            otm_puts = puts[puts["exercise_price"] < current_price].reset_index(drop=True)
+            if otm_puts.empty:
+                return None
+            idx = max(len(otm_puts) - depth, 0)
+            return otm_puts.iloc[idx]
+
+        def pick_bull_call_spread_legs():
+            """Return (buy_call, sell_call) with buy strike < sell strike whenever possible."""
+            if len(calls) < 2:
+                return None, None
+
+            buy_call = calls.iloc[atm_c_idx]
+            higher_calls = calls[calls["exercise_price"] > buy_call["exercise_price"]].reset_index(drop=True)
+            if not higher_calls.empty:
+                return buy_call, higher_calls.iloc[0]
+
+            # If ATM is already the highest strike, step one level down for buy leg.
+            if atm_c_idx > 0:
+                return calls.iloc[atm_c_idx - 1], calls.iloc[atm_c_idx]
+
+            return calls.iloc[-2], calls.iloc[-1]
+
+        def pick_bear_put_spread_legs():
+            """Return (buy_put, sell_put) with buy strike > sell strike whenever possible."""
+            if len(puts) < 2:
+                return None, None
+
+            buy_put = puts.iloc[atm_p_idx]
+            lower_puts = puts[puts["exercise_price"] < buy_put["exercise_price"]].reset_index(drop=True)
+            if not lower_puts.empty:
+                return buy_put, lower_puts.iloc[-1]
+
+            # If ATM is already the lowest strike, step one level up for buy leg.
+            if atm_p_idx < len(puts) - 1:
+                return puts.iloc[atm_p_idx + 1], puts.iloc[atm_p_idx]
+
+            return puts.iloc[1], puts.iloc[0]
+
         lines = [f"\n📌 【{underlying_code}】{strategy} 推荐合约（到期:{maturity_date_str}，标的现价≈{current_price}）"]
+        if iv_rank is not None:
+            lines.append(f"📊 IV Rank≈{iv_rank:.1f}% | {'高IV环境' if is_high_iv else '低/中IV环境'}")
 
         if strategy in ("买看涨", "买call", "Buy Call"):
             # ATM Call（平值）
@@ -386,46 +450,73 @@ def tool_get_recommended_strikes(underlying_code: str, option_type: str, maturit
                 lines.append("🟢 推荐买入 ATM Call（平值认购）：")
                 lines.append(fmt_contract(row))
 
+        elif strategy in ("牛市价差", "Bull Call Spread"):
+            if len(calls) >= 2:
+                buy_call, sell_call = pick_bull_call_spread_legs()
+                lines.append("🟥 推荐牛市价差（买入Call + 卖出Call）：")
+                if buy_call is not None and sell_call is not None and sell_call["ts_code"] != buy_call["ts_code"]:
+                    lines.append(f"  买入Call: {fmt_contract(buy_call)}")
+                    lines.append(f"  卖出Call: {fmt_contract(sell_call)}")
+                else:
+                    lines.append("  ⚠️ Call档位不足，暂未构建完整牛市价差")
+            elif not calls.empty:
+                lines.append("  ⚠️ Call合约数量不足（<2），无法构建完整牛市价差")
+
         elif strategy in ("卖看跌", "卖put", "Sell Put"):
-            # 第一虚值 Put（低于现价的第一档）
             if not puts.empty:
-                otm_puts = puts[puts["exercise_price"] < current_price]
-                if not otm_puts.empty:
-                    row = otm_puts.iloc[-1]  # 最接近现价的虚值
-                    lines.append("🔵 推荐卖出 OTM Put（第一虚值认沽）：")
+                if is_high_iv:
+                    row = pick_otm_put(2)
+                    lines.append("🔵 高IV环境：推荐卖出更虚值 Put（第二虚值认沽）：")
                     lines.append(fmt_contract(row))
                 else:
                     row = puts.iloc[atm_p_idx]
-                    lines.append("🔵 推荐卖出 ATM Put（找不到虚值，退而求其次用平值）：")
+                    lines.append("🔵 低/中IV环境：推荐卖出 ATM Put（平值认沽）：")
                     lines.append(fmt_contract(row))
 
         elif strategy in ("买看跌", "买put", "Buy Put"):
-            # ATM Put
             if not puts.empty:
                 row = puts.iloc[atm_p_idx]
                 lines.append("🔴 推荐买入 ATM Put（平值认沽）：")
                 lines.append(fmt_contract(row))
 
+        elif strategy in ("熊市价差", "Bear Put Spread"):
+            if len(puts) >= 2:
+                buy_put, sell_put = pick_bear_put_spread_legs()
+                lines.append("🟩 推荐熊市价差（买入Put + 卖出Put）：")
+                if buy_put is not None and sell_put is not None and sell_put["ts_code"] != buy_put["ts_code"]:
+                    lines.append(f"  买入Put: {fmt_contract(buy_put)}")
+                    lines.append(f"  卖出Put: {fmt_contract(sell_put)}")
+                else:
+                    lines.append("  ⚠️ Put档位不足，暂未构建完整熊市价差")
+            elif not puts.empty:
+                lines.append("  ⚠️ Put合约数量不足（<2），无法构建完整熊市价差")
+
         elif strategy in ("卖看涨", "卖call", "Sell Call"):
-            # 第一虚值 Call（高于现价的第一档）
             if not calls.empty:
-                otm_calls = calls[calls["exercise_price"] > current_price]
-                if not otm_calls.empty:
-                    row = otm_calls.iloc[0]  # 最接近现价的虚值
-                    lines.append("🟠 推荐卖出 OTM Call（第一虚值认购）：")
+                if is_high_iv:
+                    row = pick_otm_call(2)
+                    lines.append("🟠 高IV环境：推荐卖出更虚值 Call（第二虚值认购）：")
                     lines.append(fmt_contract(row))
                 else:
                     row = calls.iloc[atm_c_idx]
-                    lines.append("🟠 推荐卖出 ATM Call（找不到虚值，退而求其次用平值）：")
+                    lines.append("🟠 低/中IV环境：推荐卖出 ATM Call（平值认购）：")
                     lines.append(fmt_contract(row))
 
         elif strategy in ("双卖", "双卖平值", "Straddle Short"):
-            # 卖 ATM Call + 卖 ATM Put
-            lines.append("⚖️ 推荐双卖平值组合：")
-            if not calls.empty:
-                lines.append(f"  卖出 Call: {fmt_contract(calls.iloc[atm_c_idx])}")
-            if not puts.empty:
-                lines.append(f"  卖出 Put:  {fmt_contract(puts.iloc[atm_p_idx])}")
+            if is_high_iv:
+                lines.append("⚖️ 高IV环境：推荐双卖宽跨式组合（卖出虚值Call + 卖出虚值Put）：")
+                sell_call = pick_otm_call(1)
+                sell_put = pick_otm_put(1)
+                if sell_call is not None:
+                    lines.append(f"  卖出 Call: {fmt_contract(sell_call)}")
+                if sell_put is not None:
+                    lines.append(f"  卖出 Put:  {fmt_contract(sell_put)}")
+            else:
+                lines.append("⚖️ 低/中IV环境：推荐双卖平值组合：")
+                if not calls.empty:
+                    lines.append(f"  卖出 Call: {fmt_contract(calls.iloc[atm_c_idx])}")
+                if not puts.empty:
+                    lines.append(f"  卖出 Put:  {fmt_contract(puts.iloc[atm_p_idx])}")
 
         elif strategy in ("蝴蝶", "Butterfly"):
             # 卖2手ATM + 买1手上翼Call + 买1手下翼Put
@@ -531,6 +622,40 @@ def parse_strategy_from_kline(kline_text: str) -> tuple[str, str]:
 
     # 多空信号相当 → 震荡策略
     return "铁鹰", f"多空信号相当（多:{bull_score} 空:{bear_score}），方向不明，建议铁鹰策略控制风险"
+
+
+# IV-aware strategy overlay for expiry options.
+def parse_strategy_with_iv(kline_text: str, iv_context: dict | None = None) -> tuple[str, str]:
+    base_strategy, base_reason = parse_strategy_from_kline(kline_text)
+    iv_rank = None if not iv_context else iv_context.get("iv_rank")
+    iv_level = "未知" if not iv_context else iv_context.get("iv_level", "未知")
+    is_high_iv = iv_rank is not None and iv_rank >= HIGH_IV_RANK_THRESHOLD
+
+    if base_strategy in ("买看涨", "买call", "Buy Call") and is_high_iv:
+        return "牛市价差", f"{base_reason}；但IV处于{iv_level}（IV Rank {iv_rank:.1f}%），末日直接买权利金偏贵，改用买平值卖虚值的牛市价差"
+
+    if base_strategy in ("买看跌", "买put", "Buy Put") and is_high_iv:
+        return "熊市价差", f"{base_reason}；但IV处于{iv_level}（IV Rank {iv_rank:.1f}%），末日直接买权利金偏贵，改用买平值卖虚值的熊市价差"
+
+    if base_strategy in ("卖看跌", "卖put", "Sell Put"):
+        if is_high_iv:
+            return "卖看跌", f"{base_reason}；当前IV处于{iv_level}（IV Rank {iv_rank:.1f}%），优先卖更虚值认沽提升安全垫"
+        return "卖看跌", f"{base_reason}；当前IV处于{iv_level}，优先卖平值认沽提升时间价值效率"
+
+    if base_strategy in ("卖看涨", "卖call", "Sell Call"):
+        if is_high_iv:
+            return "卖看涨", f"{base_reason}；当前IV处于{iv_level}（IV Rank {iv_rank:.1f}%），优先卖更虚值认购提高容错"
+        return "卖看涨", f"{base_reason}；当前IV处于{iv_level}，优先卖平值认购提升时间价值效率"
+
+    if base_strategy in ("双卖", "双卖平值", "Straddle Short"):
+        if is_high_iv:
+            return "铁鹰", f"{base_reason}；当前IV处于{iv_level}（IV Rank {iv_rank:.1f}%），改用铁鹰/宽跨式更适合高波动卖方环境"
+        return "双卖", f"{base_reason}；当前IV处于{iv_level}，保留平值双卖更合适"
+
+    if base_strategy in ("铁鹰", "Iron Condor") and not is_high_iv:
+        return "双卖", f"{base_reason}；但IV不高，铁鹰收益压缩，改为平值双卖更直接"
+
+    return base_strategy, f"{base_reason}；当前IV处于{iv_level}" if iv_context else base_reason
 
 
 # ==========================================
@@ -697,6 +822,85 @@ def get_price_direct(underlying: str, option_type: str, contract_month: str = ""
     return None
 
 
+def get_iv_context(underlying: str, option_type: str, contract_month: str = "", window: int = 252) -> dict:
+    """Fetch current IV and IV rank for the underlying used by expiry strategy selection."""
+    context = {
+        "current_iv": None,
+        "iv_rank": None,
+        "iv_level": "未知",
+        "iv_source": "",
+    }
+
+    try:
+        if option_type == "ETF期权":
+            sql = f"""
+                SELECT REPLACE(trade_date, '-', '') AS trade_date, iv
+                FROM etf_iv_history
+                WHERE etf_code = '{underlying}'
+                ORDER BY trade_date DESC
+                LIMIT {window}
+            """
+            df_iv = pd.read_sql(sql, engine)
+            iv_source = underlying
+        else:
+            code = underlying.upper()
+            search_code = INDEX_OPT_FUTURES_MAP.get(code, code)
+            candidates = []
+            if contract_month:
+                candidates.append(f"{search_code}{contract_month}")
+                if search_code != code:
+                    candidates.append(f"{code}{contract_month}")
+            else:
+                candidates.append(search_code)
+                if search_code != code:
+                    candidates.append(code)
+
+            df_iv = pd.DataFrame()
+            iv_source = ""
+            for candidate in candidates:
+                sql = f"""
+                    SELECT REPLACE(trade_date, '-', '') AS trade_date, iv
+                    FROM commodity_iv_history
+                    WHERE ts_code = '{candidate}'
+                    ORDER BY trade_date DESC
+                    LIMIT {window}
+                """
+                df_iv = pd.read_sql(sql, engine)
+                if not df_iv.empty:
+                    iv_source = candidate
+                    break
+
+        if df_iv.empty:
+            return context
+
+        curr_iv = float(df_iv.iloc[0]["iv"])
+        max_iv = float(df_iv["iv"].max())
+        min_iv = float(df_iv["iv"].min())
+        iv_rank = ((curr_iv - min_iv) / (max_iv - min_iv) * 100.0) if max_iv != min_iv else 0.0
+
+        if iv_rank < 20:
+            iv_level = "低"
+        elif iv_rank < 50:
+            iv_level = "中低"
+        elif iv_rank < 70:
+            iv_level = "中"
+        elif iv_rank < 85:
+            iv_level = "高"
+        else:
+            iv_level = "极高"
+
+        context.update({
+            "current_iv": round(curr_iv, 2),
+            "iv_rank": round(iv_rank, 1),
+            "iv_level": iv_level,
+            "iv_source": iv_source,
+        })
+    except Exception as e:
+        print(f"查询 {underlying} IV 失败: {e}")
+
+    return context
+
+
 # ==========================================
 # 主流程：数据采集 + AI报告生成
 # ==========================================
@@ -731,6 +935,9 @@ def collect_and_analyze():
             "maturity_date": mat_date,
             "days_left": days_left,
             "kline_text": "",
+            "iv_current": None,
+            "iv_rank": None,
+            "iv_level": "未知",
             "strategy": "",
             "strategy_reason": "",
             "recommended_contracts": "",
@@ -755,8 +962,17 @@ def collect_and_analyze():
             section["kline_text"] = f"K线分析失败: {e}"
             print(f"  ❌ K线分析失败: {e}")
 
-        # Step 2: 策略映射
-        strategy, reason = parse_strategy_from_kline(section["kline_text"])
+        # Step 2: 获取 IV 环境并做策略映射
+        iv_context = get_iv_context(underlying, option_type, opt_contract_month)
+        section["iv_current"] = iv_context.get("current_iv")
+        section["iv_rank"] = iv_context.get("iv_rank")
+        section["iv_level"] = iv_context.get("iv_level", "未知")
+        if section["iv_rank"] is not None:
+            print(f"  📈 IV环境: IV={section['iv_current']} | Rank={section['iv_rank']}% | Level={section['iv_level']}")
+        else:
+            print("  ⚠️ 暂无可用IV数据，策略将按技术面默认逻辑处理")
+
+        strategy, reason = parse_strategy_with_iv(section["kline_text"], iv_context)
         section["strategy"] = strategy
         section["strategy_reason"] = reason
         print(f"  💡 策略判断: {strategy} | {reason}")
@@ -777,9 +993,36 @@ def collect_and_analyze():
                     "option_type": option_type,
                     "maturity_date_str": mat_date,
                     "current_price": price,
-                    "strategy": strategy
+                    "strategy": strategy,
+                    "iv_rank": section["iv_rank"],
                 })
                 section["recommended_contracts"] = contracts
+
+                expected_legs = get_expected_leg_count(section["strategy"])
+                actual_codes = extract_contract_codes(str(contracts))
+                if expected_legs > 1 and len(actual_codes) < expected_legs:
+                    downgrade_map = {
+                        "牛市价差": "买看涨",
+                        "Bull Call Spread": "Buy Call",
+                        "熊市价差": "买看跌",
+                        "Bear Put Spread": "Buy Put",
+                    }
+                    fallback_strategy = downgrade_map.get(section["strategy"])
+                    if fallback_strategy:
+                        print(f"  ⚠️ {section['strategy']} 合约腿不足({len(actual_codes)}/{expected_legs})，降级为 {fallback_strategy}")
+                        section["strategy"] = fallback_strategy
+                        section["strategy_reason"] = (
+                            f"{section['strategy_reason']}；当前可交易档位不足以构建完整价差，已自动降级为单腿策略。"
+                        )
+                        contracts = tool_get_recommended_strikes.invoke({
+                            "underlying_code": underlying,
+                            "option_type": option_type,
+                            "maturity_date_str": mat_date,
+                            "current_price": price,
+                            "strategy": fallback_strategy,
+                            "iv_rank": section["iv_rank"],
+                        })
+                        section["recommended_contracts"] = contracts
                 print(f"  ✅ 合约推荐完成")
             except Exception as e:
                 section["recommended_contracts"] = f"合约查询失败: {e}"
@@ -804,12 +1047,98 @@ SYSTEM_PROMPT = """你是爱波塔的期权策略首席分析师，专注末日�
 3. 趋势标签颜色（中国市场：红涨绿跌）：
    - 买看涨/强多头 → 背景 #dc2626（红），白字
    - 买看跌/强空头 → 背景 #16a34a（绿），白字
+   - 牛市价差 → 背景 #dc2626（红），白字
+   - 熊市价差 → 背景 #16a34a（绿），白字
    - 卖看跌/震荡偏多 → 背景 #f97316（橙），白字
    - 卖看涨/震荡偏空 → 背景 #0ea5e9（蓝），白字
    - 双卖/铁鹰/蝴蝶 → 背景 #d97706（黄），白字
 4. 每个标的单独一张卡片，清晰展示：趋势研判 + 策略 + 推荐合约
 5. 末尾统一风险提示区块，重点提醒Gamma风险
+6. 多腿策略必须逐条完整展示，不得省略任何一条腿：
+   - 双卖：2条腿
+   - 牛市价差：2条腿（买入Call、卖出Call）
+   - 熊市价差：2条腿（买入Put、卖出Put）
+   - 蝴蝶：3条腿
+   - 铁鹰：4条腿（买入Put、卖出Put、卖出Call、买入Call）
 """
+
+
+def get_expected_leg_count(strategy: str) -> int:
+    return MULTI_LEG_STRATEGY_LEGS.get(strategy, 0)
+
+
+def extract_contract_codes(text: str) -> list[str]:
+    seen = set()
+    codes = []
+    for code in CONTRACT_CODE_RE.findall(text or ""):
+        if code not in seen:
+            seen.add(code)
+            codes.append(code)
+    return codes
+
+
+def get_complete_multi_leg_codes(section: dict) -> list[str]:
+    strategy = str(section.get("strategy") or "")
+    expected_legs = get_expected_leg_count(strategy)
+    if expected_legs <= 1:
+        return []
+
+    codes = extract_contract_codes(str(section.get("recommended_contracts") or ""))
+    if len(codes) < expected_legs:
+        return []
+    return codes[:expected_legs]
+
+
+def collect_missing_contract_codes(html: str, sections: list[dict]) -> list[dict]:
+    missing = []
+    for section in sections:
+        codes = get_complete_multi_leg_codes(section)
+        if not codes:
+            continue
+        for code in codes:
+            if code not in html:
+                missing.append({
+                    "name": section.get("name"),
+                    "strategy": section.get("strategy"),
+                    "code": code,
+                })
+    return missing
+
+
+def clean_generated_html(raw_html: str) -> str:
+    html = (raw_html or "").strip()
+    return html.replace("```html", "").replace("```", "").strip()
+
+
+def build_repair_prompt(original_html: str, sections: list[dict], missing: list[dict]) -> str:
+    lines = [
+        "你刚生成的末日期权晚报 HTML 存在多腿策略缺腿问题。",
+        "请在保留当前 HTML 整体结构、样式、文案风格的前提下，只修复缺失的推荐合约腿。",
+        "硬性要求：",
+        "1. 仍然只输出纯 HTML，不要 Markdown，不要解释。",
+        "2. 不要删减已有卡片和段落。",
+        "3. 对缺失腿，必须在对应标的的 contract-box 内新增独立 contract-row。",
+        "4. 每条缺失腿都必须按原始合约代码完整展示。",
+        "",
+        "缺失合约如下：",
+    ]
+    for item in missing:
+        lines.append(f"- {item['name']} | {item['strategy']} | 缺失合约: {item['code']}")
+
+    lines.append("")
+    lines.append("对应标的的完整推荐合约素材如下：")
+    for section in sections:
+        codes = get_complete_multi_leg_codes(section)
+        if not codes:
+            continue
+        lines.append(f"【{section['name']}】{section['strategy']}")
+        lines.append(str(section.get("recommended_contracts") or ""))
+        lines.append("-" * 30)
+
+    lines.append("")
+    lines.append("待修复 HTML 如下：")
+    lines.append(original_html)
+    return "\n".join(lines)
 
 
 def build_prompt(sections: list[dict]) -> str:
@@ -909,13 +1238,22 @@ def build_prompt(sections: list[dict]) -> str:
         lines.append(f"到期日：{s['maturity_date']} | 剩余天数：{s['days_left']}天")
         if s['current_price']:
             lines.append(f"标的现价：{s['current_price']}")
+        if s.get('iv_rank') is not None:
+            lines.append(f"IV信息：当前IV {s['iv_current']}% | IV Rank {s['iv_rank']}% | IV等级 {s['iv_level']}")
         lines.append(f"策略判断：{s['strategy']} | 原因：{s['strategy_reason']}")
         lines.append(f"K线摘要（简洁参考）：")
         # 只取K线结果前400字，避免prompt过长
         kline_summary = str(s['kline_text'])[:400] if s['kline_text'] else "无"
         lines.append(kline_summary)
         if s['recommended_contracts']:
-            lines.append(f"推荐合约：{str(s['recommended_contracts'])[:300]}")
+            lines.append("推荐合约（必须完整保留下面每一条，不得省略）：")
+            lines.append(str(s['recommended_contracts']))
+            multi_leg_codes = get_complete_multi_leg_codes(s)
+            if multi_leg_codes:
+                lines.append(
+                    f"校验要求：该{s['strategy']}策略必须在HTML中完整展示{len(multi_leg_codes)}条腿，"
+                    f"且以下合约代码都要出现：{', '.join(multi_leg_codes)}。"
+                )
         lines.append("-" * 30)
 
     lines.append("""
@@ -954,9 +1292,29 @@ def generate_report(sections: list[dict]) -> str:
     ]
     response = llm.invoke(messages)
 
-    # 清理可能的代码块标记
-    html = response.content.strip()
-    html = html.replace("```html", "").replace("```", "").strip()
+    html = clean_generated_html(response.content)
+
+    missing = collect_missing_contract_codes(html, sections)
+    if missing:
+        print(f"  ⚠️ 检测到多腿策略缺失 {len(missing)} 条合约腿，触发一次HTML修复重生成...")
+        repair_prompt = build_repair_prompt(html, sections, missing)
+        repair_messages = [
+            SystemMessage(content=SYSTEM_PROMPT),
+            HumanMessage(content=repair_prompt)
+        ]
+        repair_response = llm.invoke(repair_messages)
+        repaired_html = clean_generated_html(repair_response.content)
+        repaired_missing = collect_missing_contract_codes(repaired_html, sections)
+        if len(repaired_missing) < len(missing):
+            html = repaired_html
+            missing = repaired_missing
+
+        if missing:
+            missing_codes = ", ".join(item["code"] for item in missing)
+            print(f"  ⚠️ 修复后仍有缺失腿未补齐：{missing_codes}")
+        else:
+            print("  ✅ 多腿策略缺腿已自动修复。")
+
     return html
 
 
