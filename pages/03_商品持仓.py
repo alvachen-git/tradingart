@@ -667,7 +667,18 @@ try:
         for i, row in df_conflict.iterrows():
             with cols[i % 4]:
                 direction = row['action']
-                color = "#d32f2f" if direction == "看漲" else "#2e7d32"
+                direction_text = str(direction).lower()
+                bullish_tokens = ("看涨", "看漲", "做多", "bull", "long", "涨", "漲")
+                bearish_tokens = ("看跌", "做空", "bear", "short", "跌")
+                is_bullish = any(token in direction_text for token in bullish_tokens)
+                is_bearish = any(token in direction_text for token in bearish_tokens)
+                if is_bullish and not is_bearish:
+                    color = "#d32f2f"  # 红色：看涨/做多
+                elif is_bearish and not is_bullish:
+                    color = "#2e7d32"  # 绿色：看跌/做空
+                else:
+                    # Fallback: action 文本异常时，按主力净持仓方向染色
+                    color = "#d32f2f" if float(row.get('smart_net', 0)) >= 0 else "#2e7d32"
                 card_html = f"""
     <div class="conflict-card" style="border-top: 4px solid {color};">
     <div class="conflict-header">

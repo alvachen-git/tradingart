@@ -66,6 +66,42 @@ def _cached_minute_trend(
     return fetch_minute_trend(symbol)
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def _cached_comprehensive_market_data(
+    user_id: str, page: str, symbol: str, date_window: str
+) -> pd.DataFrame:
+    # Reuse the same precomputed dataset as ranking page to keep IV Rank consistent.
+    return de.get_comprehensive_market_data()
+
+
+def _extract_contract_code(contract_label: str) -> str:
+    if not isinstance(contract_label, str):
+        return ""
+    match = re.match(r"([A-Za-z]+\d{3,4})", contract_label.strip())
+    return match.group(1).upper() if match else ""
+
+
+def _pick_market_row_by_product(df_market: pd.DataFrame, product_code: str, used_contract: str = ""):
+    if df_market is None or df_market.empty:
+        return None
+
+    product_code = str(product_code or "").upper()
+    used_contract = str(used_contract or "").upper()
+    work = df_market.copy()
+    work["__contract_code"] = work["合约"].apply(_extract_contract_code)
+    candidates = work[work["__contract_code"].str.startswith(product_code, na=False)]
+    if candidates.empty:
+        return None
+
+    if used_contract:
+        exact = candidates[candidates["__contract_code"] == used_contract]
+        if not exact.empty:
+            return exact.iloc[0]
+
+    # Default to the first row (same display order as ranking dataset).
+    return candidates.iloc[0]
+
+
 
 # 🔥 添加统一的侧边栏导航
 import sys
@@ -425,6 +461,27 @@ st.markdown("""
         background-color: #1e293b !important; /* 稍亮的深色背景 */
     }
 
+    [data-testid="stSidebar"] div[data-baseweb="select"] > div {
+        background-color: #1e293b !important;
+        border: 1px solid #334155 !important;
+    }
+
+    [data-testid="stSidebar"] div[data-baseweb="select"] [role="combobox"] {
+        color: #e2e8f0 !important;
+    }
+
+    [data-testid="stSidebar"] div[data-baseweb="select"] input {
+        color: #e2e8f0 !important;
+        -webkit-text-fill-color: #e2e8f0 !important;
+        caret-color: #e2e8f0 !important;
+        background-color: transparent !important;
+    }
+
+    [data-testid="stSidebar"] div[data-baseweb="select"] input::selection {
+        background-color: #334155 !important;
+        color: #e2e8f0 !important;
+    }
+
     [data-testid="stSidebar"] div[data-baseweb="select"] span {
         color: #e2e8f0 !important; /* 亮色文字 */
     }
@@ -578,7 +635,7 @@ with st.sidebar:
         "lc": "碳酸锂", "si": "工业硅", "ps": "多晶硅","pt": "铂金","pd": "钯金",
         "rb": "螺纹钢", "i": "铁矿石", "hc": "热卷","jm": "焦煤","ad": "铝合金","fg": "玻璃","sa": "纯碱","ao": "氧化铝","sh": "烧碱","sp": "纸浆","lg": "原木",
         "M": "豆粕", "a": "豆一", "RM": "菜粕","y": "豆油","oi": "菜油","p": "棕榈油","pk": "花生",
-        "sc": "原油","ta": "PTA","px": "对二甲苯",  "ma": "甲醇", "v": "PVC", "eb": "苯乙烯","bz": "纯苯","eg": "乙二醇","pp": "聚丙烯","l": "塑料","bu": "沥青","fu": "燃料油","br": "BR橡胶",
+        "sc": "原油","ta": "PTA","px": "对二甲苯",  "ma": "甲醇", "v": "PVC", "eb": "苯乙烯","bz": "纯苯","eg": "乙二醇","pp": "聚丙烯","l": "塑料","bu": "沥青","fu": "燃料油","br": "BR橡胶","ur": "尿素",
         "ru": "橡胶", "c": "玉米", "jd": "鸡蛋", "CF": "棉花", "SR": "白糖", "ap": "苹果", "lh": "生猪"
     }
     variety = st.selectbox("品种", list(COMMODITY_MAP.keys()), format_func=lambda x: f"{x} ({COMMODITY_MAP[x]})")
@@ -870,20 +927,59 @@ if target_contract:
     if df_kline is not None and not df_kline.empty:
         st.subheader(f"{target_contract} ")
 
-        # --- 【新增功能】IV Rank 仪表盘 (仅主力连续显示) ---
-        if is_continuous and df_iv is not None and not df_iv.empty:
-            # 取最新数据
-            curr_iv = df_iv.iloc[-1]['iv']
+        # --- 【新增功能】IV Rank 仪表盘 (仅主力连续显示) ---        if is_continuous and df_iv is not None and not df_iv.empty:
+            latest_used_contract = str(df_iv.iloc[-1].get("used_contract") or "").split(".")[0].upper()
 
-            # 取过去一年数据计算 Rank
-            df_year = df_iv.tail(252)
-            max_iv = df_year['iv'].max()
-            min_iv = df_year['iv'].min()
+            monitor_window = "market_monitor_3600s"
+            monitor_sig = f"{_perf_user_id()}|{PAGE_NAME}|{variety}|{monitor_window}"
+            monitor_hit = _probe_cache("comprehensive_market_data", monitor_sig)
+            _db_t1 = time.perf_counter()
+            df_market = _cached_comprehensive_market_data(
+                _perf_user_id(), PAGE_NAME, variety, monitor_window
+            )
+            _perf_page_log(
+                page=PAGE_NAME,
+                db_ms=(time.perf_counter() - _db_t1) * 1000,
+                cache_hit=monitor_hit,
+                stage="get_comprehensive_market_data",
+            )
 
-            if max_iv > min_iv:
-                iv_rank = (curr_iv - min_iv) / (max_iv - min_iv) * 100
+            market_row = _pick_market_row_by_product(df_market, variety, latest_used_contract)
+            curr_iv = None
+            iv_rank = None
+
+            if market_row is not None:
+                curr_iv_val = pd.to_numeric(market_row.get("当前IV"), errors="coerce")
+                iv_rank_val = pd.to_numeric(market_row.get("IV Rank"), errors="coerce")
+                if pd.notna(curr_iv_val) and pd.notna(iv_rank_val):
+                    curr_iv = float(curr_iv_val)
+                    iv_rank = float(iv_rank_val)
+
+            # Fallback: keep page available when market snapshot has no usable row.
+            if curr_iv is None or iv_rank is None:
+                df_rank_base = df_iv.copy()
+                df_rank_base["iv"] = pd.to_numeric(df_rank_base["iv"], errors="coerce")
+                df_rank_base = df_rank_base[df_rank_base["iv"] > 0.0001].tail(252)
+                if not df_rank_base.empty:
+                    curr_iv = float(df_rank_base.iloc[-1]["iv"])
+                    max_iv = float(df_rank_base["iv"].max())
+                    min_iv = float(df_rank_base["iv"].min())
+                    iv_rank = (curr_iv - min_iv) / (max_iv - min_iv) * 100 if max_iv > min_iv else 0.0
+                else:
+                    curr_iv = float(pd.to_numeric(df_iv.iloc[-1]["iv"], errors="coerce") or 0.0)
+                    max_iv = curr_iv
+                    min_iv = curr_iv
+                    iv_rank = 0.0
             else:
-                iv_rank = 0
+                df_rank_base = df_iv.copy()
+                df_rank_base["iv"] = pd.to_numeric(df_rank_base["iv"], errors="coerce")
+                df_rank_base = df_rank_base[df_rank_base["iv"] > 0.0001].tail(252)
+                if not df_rank_base.empty:
+                    max_iv = float(df_rank_base["iv"].max())
+                    min_iv = float(df_rank_base["iv"].min())
+                else:
+                    max_iv = curr_iv
+                    min_iv = curr_iv
 
             if iv_rank < 20:
                 status = "🟢 偏低 (买方有利)"
@@ -896,13 +992,11 @@ if target_contract:
 
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("当前 IV", f"{curr_iv:.2f}%")
-            c2.metric("IV Rank (年)", f"{iv_rank:.1f}", help="当前IV在过去一年中的百分位水平")
+            c2.metric("IV Rank (年)", f"{iv_rank:.1f}", help="与排行榜口径一致（同源数据）")
             c3.metric("历史最高 / 最低", f"{max_iv:.1f}% / {min_iv:.1f}%")
-            c4.info(f"📊 状态: **{status}**")
-            st.divider()  # 分割线，下面接着显示历史 K 线
+            c4.info(f"📳 状态: **{status}**")
+            st.divider()
 
-            # 🔥【核心修改区】在这里调用刚才定义的局部刷新函数
-            # 注意：不再需要 st_autorefresh 插件，@st.fragment 会自动处理
             render_realtime_chart(target_contract)
 
 
