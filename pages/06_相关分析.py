@@ -17,6 +17,7 @@ import symbol_map as sm
 PAGE_NAME = "相关分析"
 _PAGE_T0 = time.perf_counter()
 _PERF_LOGGER = logging.getLogger(__name__)
+_CACHE_PROBE_SEEN = set()
 
 
 def _perf_user_id() -> str:
@@ -29,9 +30,9 @@ def _perf_user_id() -> str:
 
 
 def _probe_cache(tag: str, signature: str) -> int:
-    cache_key = f"_perf_cache_probe::{PAGE_NAME}::{tag}::{signature}"
-    hit = 1 if st.session_state.get(cache_key) else 0
-    st.session_state[cache_key] = True
+    cache_key = f"{PAGE_NAME}::{tag}::{signature}"
+    hit = 1 if cache_key in _CACHE_PROBE_SEEN else 0
+    _CACHE_PROBE_SEEN.add(cache_key)
     return hit
 
 
@@ -576,8 +577,6 @@ with tab1:
                     stock_code,
                     lookback_stock,
                 )
-                st.session_state["corr_stock_result"] = df_res
-                st.session_state["corr_stock_params"] = (stock_code, lookback_stock)
                 _perf_page_log(
                     page=PAGE_NAME,
                     db_ms=(time.perf_counter() - _db_t0) * 1000,
@@ -807,8 +806,6 @@ with tab2:
                 tuple(selected_futures),
                 lookback_futures,
             )
-            st.session_state["corr_futures_result"] = corr_matrix
-            st.session_state["corr_futures_params"] = (tuple(selected_futures), lookback_futures)
             _perf_page_log(
                 page=PAGE_NAME,
                 db_ms=(time.perf_counter() - _db_t0) * 1000,
@@ -1043,8 +1040,6 @@ with tab3:
                 cache_hit=s2_hit,
                 stage="get_price_series_b",
             )
-
-            st.session_state["corr_roll_params"] = (asset_a, type_a, asset_b, type_b, rolling_win)
 
             if s1.empty or s2.empty:
                 st.error(f"获取数据失败，请检查代码是否正确")

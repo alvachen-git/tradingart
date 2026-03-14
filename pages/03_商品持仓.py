@@ -33,6 +33,7 @@ import data_engine as de
 PAGE_NAME = "商品持仓"
 _PAGE_T0 = time.perf_counter()
 _PERF_LOGGER = logging.getLogger(__name__)
+_CACHE_PROBE_SEEN = set()
 
 
 def _perf_user_id() -> str:
@@ -45,9 +46,9 @@ def _perf_user_id() -> str:
 
 
 def _probe_cache(tag: str, signature: str) -> int:
-    cache_key = f"_perf_cache_probe::{PAGE_NAME}::{tag}::{signature}"
-    hit = 1 if st.session_state.get(cache_key) else 0
-    st.session_state[cache_key] = True
+    cache_key = f"{PAGE_NAME}::{tag}::{signature}"
+    hit = 1 if cache_key in _CACHE_PROBE_SEEN else 0
+    _CACHE_PROBE_SEEN.add(cache_key)
     return hit
 
 

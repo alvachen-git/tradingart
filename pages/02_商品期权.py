@@ -24,6 +24,8 @@ st.set_page_config(
 PAGE_NAME = "商品期权"
 _PAGE_T0 = time.perf_counter()
 _PERF_LOGGER = logging.getLogger(__name__)
+_CACHE_PROBE_SEEN = set()
+USE_GLOBAL_MONITOR_SNAPSHOT = False
 
 
 def _perf_user_id() -> str:
@@ -36,9 +38,9 @@ def _perf_user_id() -> str:
 
 
 def _probe_cache(tag: str, signature: str) -> int:
-    cache_key = f"_perf_cache_probe::{PAGE_NAME}::{tag}::{signature}"
-    hit = 1 if st.session_state.get(cache_key) else 0
-    st.session_state[cache_key] = True
+    cache_key = f"{PAGE_NAME}::{tag}::{signature}"
+    hit = 1 if cache_key in _CACHE_PROBE_SEEN else 0
+    _CACHE_PROBE_SEEN.add(cache_key)
     return hit
 
 
@@ -64,6 +66,25 @@ def _cached_minute_trend(
     user_id: str, page: str, symbol: str, date_window: str
 ) -> pd.DataFrame:
     return fetch_minute_trend(symbol)
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def _cached_recent_contract_pool(
+    user_id: str, page: str, symbol: str, date_window: str, cutoff_yyyymmdd: str
+) -> list[str]:
+    if de.engine is None:
+        return []
+    sql = text(
+        """
+        SELECT DISTINCT ts_code
+        FROM commodity_iv_history
+        WHERE REPLACE(trade_date, '-', '') >= :cutoff
+        ORDER BY ts_code DESC
+        """
+    )
+    with de.engine.connect() as conn:
+        rows = conn.execute(sql, {"cutoff": cutoff_yyyymmdd}).fetchall()
+    return [str(r[0]) for r in rows if r and r[0]]
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -648,28 +669,13 @@ with st.sidebar:
     def get_contracts(user_id, page, symbol, date_window, v):
         if de.engine is None: return []
         try:
-            # 使用参数化查询，彻底解决 % 报错问题
-            sql = text("""
-                       SELECT DISTINCT ts_code
-                       FROM commodity_iv_history
-                       WHERE ts_code LIKE :p1
-                          OR ts_code LIKE :p2
-                          OR ts_code LIKE :p3
-                       ORDER BY ts_code DESC
-                       """)
-
-            with de.engine.connect() as conn:
-                result = conn.execute(sql, {
-                    "p1": f"{v}%",
-                    "p2": f"{v.upper()}%",
-                    "p3": f"{v.lower()}%"
-                }).fetchall()
-
-            raw_codes = [row[0] for row in result]
-            valid_subs = []
-
-            # 获取当前年月 (YYMM)，用于过滤过期合约
+            # 先取一次近期合约池，再在内存筛选；切换品种会更快
             now = dt.datetime.now()
+            cutoff_yyyymmdd = (now - dt.timedelta(days=540)).strftime("%Y%m%d")
+            raw_codes = _cached_recent_contract_pool(
+                user_id, page, "ALL", "contracts_pool_120s", cutoff_yyyymmdd
+            )
+            valid_subs = []
             current_yymm = int(now.strftime('%y%m'))
 
             for code in raw_codes:
@@ -930,21 +936,22 @@ if target_contract:
         # --- 【新增功能】IV Rank 仪表盘 (仅主力连续显示) ---        if is_continuous and df_iv is not None and not df_iv.empty:
             latest_used_contract = str(df_iv.iloc[-1].get("used_contract") or "").split(".")[0].upper()
 
-            monitor_window = "market_monitor_3600s"
-            monitor_sig = f"{_perf_user_id()}|{PAGE_NAME}|{variety}|{monitor_window}"
-            monitor_hit = _probe_cache("comprehensive_market_data", monitor_sig)
-            _db_t1 = time.perf_counter()
-            df_market = _cached_comprehensive_market_data(
-                _perf_user_id(), PAGE_NAME, variety, monitor_window
-            )
-            _perf_page_log(
-                page=PAGE_NAME,
-                db_ms=(time.perf_counter() - _db_t1) * 1000,
-                cache_hit=monitor_hit,
-                stage="get_comprehensive_market_data",
-            )
-
-            market_row = _pick_market_row_by_product(df_market, variety, latest_used_contract)
+            market_row = None
+            if USE_GLOBAL_MONITOR_SNAPSHOT:
+                monitor_window = "market_monitor_3600s"
+                monitor_sig = f"{_perf_user_id()}|{PAGE_NAME}|{variety}|{monitor_window}"
+                monitor_hit = _probe_cache("comprehensive_market_data", monitor_sig)
+                _db_t1 = time.perf_counter()
+                df_market = _cached_comprehensive_market_data(
+                    _perf_user_id(), PAGE_NAME, variety, monitor_window
+                )
+                _perf_page_log(
+                    page=PAGE_NAME,
+                    db_ms=(time.perf_counter() - _db_t1) * 1000,
+                    cache_hit=monitor_hit,
+                    stage="get_comprehensive_market_data",
+                )
+                market_row = _pick_market_row_by_product(df_market, variety, latest_used_contract)
             curr_iv = None
             iv_rank = None
 
