@@ -50,6 +50,9 @@ for key in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"]:
 
 # ==================== 公告配置区 ====================
 ENABLE_HOME_ANNOUNCEMENT = True  # 临时关闭首页公告，恢复时改为 True
+# Fast router is disabled by default to avoid false positives on
+# historical/list queries (for example: "最近两周每天价格").
+FAST_ROUTER_ENABLED = os.getenv("AIBOTA_FAST_ROUTER_ENABLED", "0").strip().lower() in {"1", "true", "yes", "on"}
 
 ANNOUNCEMENT_CONTENT = {
     "title": "🎉 最新动态",
@@ -1392,15 +1395,16 @@ def process_user_input(prompt_text):
     # 构造最终 Prompt
     final_prompt = image_context + prompt_text
 
-    # --- 3. 极速伪路由检查 (保留) ---
-    is_hit, fast_response = fast_router_check(final_prompt)
-    if is_hit:
-        st.session_state.messages.append({"role": "assistant", "content": fast_response})
-        # 🔥 [新增] 清除已使用的图片
-        if uploaded_image:
-            st.session_state.uploader_key += 1
-        st.rerun()
-        return
+    # --- 3. 极速伪路由检查（默认关闭，可通过环境变量显式开启） ---
+    if FAST_ROUTER_ENABLED:
+        is_hit, fast_response = fast_router_check(final_prompt)
+        if is_hit:
+            st.session_state.messages.append({"role": "assistant", "content": fast_response})
+            # 🔥 [新增] 清除已使用的图片
+            if uploaded_image:
+                st.session_state.uploader_key += 1
+            st.rerun()
+            return
 
     # ============================================================
     # 🔥🔥🔥 [修正区域]：LangGraph + 记忆检索 (RAG)
