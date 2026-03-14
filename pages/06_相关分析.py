@@ -5,12 +5,72 @@ import plotly.graph_objects as go
 import sys
 import os
 from datetime import datetime, timedelta
+import time
+import logging
 
 # 添加父目录到路径，以便导入主目录的模块
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 import market_correlation as mc
 import symbol_map as sm
+
+PAGE_NAME = "相关分析"
+_PAGE_T0 = time.perf_counter()
+_PERF_LOGGER = logging.getLogger(__name__)
+
+
+def _perf_user_id() -> str:
+    return str(
+        st.session_state.get("username")
+        or st.session_state.get("user")
+        or st.session_state.get("current_user")
+        or "anonymous"
+    )
+
+
+def _probe_cache(tag: str, signature: str) -> int:
+    cache_key = f"_perf_cache_probe::{PAGE_NAME}::{tag}::{signature}"
+    hit = 1 if st.session_state.get(cache_key) else 0
+    st.session_state[cache_key] = True
+    return hit
+
+
+def _perf_page_log(
+    *,
+    page: str,
+    render_ms: float = 0.0,
+    db_ms: float = 0.0,
+    api_ms: float = 0.0,
+    cache_hit: int = -1,
+    stage: str = "main",
+) -> None:
+    msg = (
+        f"PERF_PAGE page={page} stage={stage} "
+        f"render_ms={render_ms:.1f} db_ms={db_ms:.1f} api_ms={api_ms:.1f} cache_hit={cache_hit}"
+    )
+    print(msg)
+    _PERF_LOGGER.info(msg)
+
+
+@st.cache_data(ttl=90, show_spinner=False)
+def _cached_stock_market_corr(
+    user_id: str, page: str, symbol: str, date_window: str, stock_code: str, lookback_days: int
+):
+    return mc.analyze_stock_market_correlation(stock_code, lookback_days=lookback_days)
+
+
+@st.cache_data(ttl=90, show_spinner=False)
+def _cached_futures_corr(
+    user_id: str, page: str, symbol: str, date_window: str, futures_codes: tuple, lookback_days: int
+):
+    return mc.analyze_futures_correlation(list(futures_codes), lookback_days=lookback_days)
+
+
+@st.cache_data(ttl=90, show_spinner=False)
+def _cached_price_series(
+    user_id: str, page: str, symbol: str, date_window: str, asset: str, asset_type: str, start_date: str
+):
+    return mc.get_price_series(asset, asset_type, start_date)
 
 # ==========================================
 #  页面配置
@@ -503,7 +563,27 @@ with tab1:
     with col_result:
         if analyze_btn and stock_code:
             with st.spinner("正在计算相关性..."):
-                df_res = mc.analyze_stock_market_correlation(stock_code, lookback_days=lookback_stock)
+                user_id = _perf_user_id()
+                stock_window = f"{lookback_stock}d"
+                stock_sig = f"{user_id}|{PAGE_NAME}|{stock_code}|{stock_window}"
+                stock_hit = _probe_cache("stock_market_corr", stock_sig)
+                _db_t0 = time.perf_counter()
+                df_res = _cached_stock_market_corr(
+                    user_id,
+                    PAGE_NAME,
+                    stock_code,
+                    stock_window,
+                    stock_code,
+                    lookback_stock,
+                )
+                st.session_state["corr_stock_result"] = df_res
+                st.session_state["corr_stock_params"] = (stock_code, lookback_stock)
+                _perf_page_log(
+                    page=PAGE_NAME,
+                    db_ms=(time.perf_counter() - _db_t0) * 1000,
+                    cache_hit=stock_hit,
+                    stage="analyze_stock_market_correlation",
+                )
 
                 if df_res is None or df_res.empty:
                     st.error("无法获取数据，请检查股票代码")
@@ -713,7 +793,28 @@ with tab2:
         st.warning("请至少选择两个品种进行对比")
     elif analyze_futures_btn:
         with st.spinner("构建相关性矩阵..."):
-            corr_matrix = mc.analyze_futures_correlation(selected_futures, lookback_days=lookback_futures)
+            user_id = _perf_user_id()
+            futures_symbol = ",".join(selected_futures)
+            futures_window = f"{lookback_futures}d"
+            futures_sig = f"{user_id}|{PAGE_NAME}|{futures_symbol}|{futures_window}"
+            futures_hit = _probe_cache("futures_corr", futures_sig)
+            _db_t0 = time.perf_counter()
+            corr_matrix = _cached_futures_corr(
+                user_id,
+                PAGE_NAME,
+                futures_symbol,
+                futures_window,
+                tuple(selected_futures),
+                lookback_futures,
+            )
+            st.session_state["corr_futures_result"] = corr_matrix
+            st.session_state["corr_futures_params"] = (tuple(selected_futures), lookback_futures)
+            _perf_page_log(
+                page=PAGE_NAME,
+                db_ms=(time.perf_counter() - _db_t0) * 1000,
+                cache_hit=futures_hit,
+                stage="analyze_futures_correlation",
+            )
 
             if not corr_matrix.empty:
                 # 将列名和行名转换为中文
@@ -902,8 +1003,48 @@ with tab3:
         display_b = asset_b_input if asset_b_input else asset_b
 
         with st.spinner("获取数据..."):
-            s1 = mc.get_price_series(asset_a, type_a, start_date_long)
-            s2 = mc.get_price_series(asset_b, type_b, start_date_long)
+            user_id = _perf_user_id()
+            roll_window = f"rolling_{rolling_win}d"
+
+            s1_sig = f"{user_id}|{PAGE_NAME}|{asset_a}|{roll_window}"
+            s1_hit = _probe_cache("price_series_a", s1_sig)
+            _db_t0 = time.perf_counter()
+            s1 = _cached_price_series(
+                user_id,
+                PAGE_NAME,
+                asset_a,
+                roll_window,
+                asset_a,
+                type_a,
+                start_date_long,
+            )
+            _perf_page_log(
+                page=PAGE_NAME,
+                db_ms=(time.perf_counter() - _db_t0) * 1000,
+                cache_hit=s1_hit,
+                stage="get_price_series_a",
+            )
+
+            s2_sig = f"{user_id}|{PAGE_NAME}|{asset_b}|{roll_window}"
+            s2_hit = _probe_cache("price_series_b", s2_sig)
+            _db_t0 = time.perf_counter()
+            s2 = _cached_price_series(
+                user_id,
+                PAGE_NAME,
+                asset_b,
+                roll_window,
+                asset_b,
+                type_b,
+                start_date_long,
+            )
+            _perf_page_log(
+                page=PAGE_NAME,
+                db_ms=(time.perf_counter() - _db_t0) * 1000,
+                cache_hit=s2_hit,
+                stage="get_price_series_b",
+            )
+
+            st.session_state["corr_roll_params"] = (asset_a, type_a, asset_b, type_b, rolling_win)
 
             if s1.empty or s2.empty:
                 st.error(f"获取数据失败，请检查代码是否正确")
@@ -1021,3 +1162,10 @@ st.markdown("""
     </div>
 </div>
 """, unsafe_allow_html=True)
+
+_perf_page_log(
+    page=PAGE_NAME,
+    render_ms=(time.perf_counter() - _PAGE_T0) * 1000,
+    cache_hit=-1,
+    stage="page_done",
+)

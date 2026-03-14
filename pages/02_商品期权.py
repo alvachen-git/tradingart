@@ -7,6 +7,8 @@ from streamlit_autorefresh import st_autorefresh
 import sys
 import os
 import re
+import time
+import logging
 import data_engine as de
 from sqlalchemy import text
 import datetime as dt
@@ -18,6 +20,50 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded"
 )
+
+PAGE_NAME = "商品期权"
+_PAGE_T0 = time.perf_counter()
+_PERF_LOGGER = logging.getLogger(__name__)
+
+
+def _perf_user_id() -> str:
+    return str(
+        st.session_state.get("username")
+        or st.session_state.get("user")
+        or st.session_state.get("current_user")
+        or "anonymous"
+    )
+
+
+def _probe_cache(tag: str, signature: str) -> int:
+    cache_key = f"_perf_cache_probe::{PAGE_NAME}::{tag}::{signature}"
+    hit = 1 if st.session_state.get(cache_key) else 0
+    st.session_state[cache_key] = True
+    return hit
+
+
+def _perf_page_log(
+    *,
+    page: str,
+    render_ms: float = 0.0,
+    db_ms: float = 0.0,
+    api_ms: float = 0.0,
+    cache_hit: int = -1,
+    stage: str = "main",
+) -> None:
+    msg = (
+        f"PERF_PAGE page={page} stage={stage} "
+        f"render_ms={render_ms:.1f} db_ms={db_ms:.1f} api_ms={api_ms:.1f} cache_hit={cache_hit}"
+    )
+    print(msg)
+    _PERF_LOGGER.info(msg)
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def _cached_minute_trend(
+    user_id: str, page: str, symbol: str, date_window: str
+) -> pd.DataFrame:
+    return fetch_minute_trend(symbol)
 
 
 
@@ -541,8 +587,8 @@ with st.sidebar:
 
 
     # 获取合约列表函数 (已修复 % 报错问题)
-    @st.cache_data(ttl=3600)
-    def get_contracts(v):
+    @st.cache_data(ttl=120, show_spinner=False)
+    def get_contracts(user_id, page, symbol, date_window, v):
         if de.engine is None: return []
         try:
             # 使用参数化查询，彻底解决 % 报错问题
@@ -607,7 +653,18 @@ with st.sidebar:
             st.error(f"合约加载失败: {e}")
             return []
 
-    options = get_contracts(variety)
+    user_id = _perf_user_id()
+    contracts_window = "contracts_120s"
+    contracts_sig = f"{user_id}|{PAGE_NAME}|{variety}|{contracts_window}"
+    contracts_hit = _probe_cache("contracts", contracts_sig)
+    _db_t0 = time.perf_counter()
+    options = get_contracts(user_id, PAGE_NAME, variety, contracts_window, variety)
+    _perf_page_log(
+        page=PAGE_NAME,
+        db_ms=(time.perf_counter() - _db_t0) * 1000,
+        cache_hit=contracts_hit,
+        stage="get_contracts",
+    )
 
     if not options:
         st.warning(f"未找到 {variety} 的相关合约数据")
@@ -661,8 +718,8 @@ else:
     is_continuous = False
 
 # 3. 数据获取函数
-@st.cache_data(ttl=300)
-def get_chart_data(code):
+@st.cache_data(ttl=90, show_spinner=False)
+def get_chart_data(user_id, page, symbol, date_window, code, is_continuous_flag):
     if not code: return None, None
     try:
         # A. 获取 IV (直接查 commodity_iv_history)
@@ -676,7 +733,7 @@ def get_chart_data(code):
         df_k = pd.read_sql(sql_k, de.engine, params={"c": code})
 
         # 容错：如果查 IF (主连) 没查到价格，尝试查 IF0 (常见的连续代码)
-        if df_k.empty and is_continuous:
+        if df_k.empty and is_continuous_flag:
             alternatives = [f"{code}0", f"{code}888", f"{code.lower()}0"]
             for alt in alternatives:
                 df_k = pd.read_sql(sql_k, de.engine, params={"c": alt})
@@ -704,8 +761,19 @@ def render_realtime_chart(symbol):
         if st.button("🔄 刷新", key=f"btn_refresh_{symbol}", use_container_width=True):
             st.rerun()
 
-    # 1. 获取数据 (因为 realtime_tools 里加了 cache，这里很快)
-    df_trend = fetch_minute_trend(symbol)
+    # 1. 获取数据 (页面内缓存 30s)
+    user_id_local = _perf_user_id()
+    rt_window = "realtime_30s"
+    rt_sig = f"{user_id_local}|{PAGE_NAME}|{symbol}|{rt_window}"
+    rt_hit = _probe_cache("minute_trend", rt_sig)
+    _api_t0 = time.perf_counter()
+    df_trend = _cached_minute_trend(user_id_local, PAGE_NAME, symbol, rt_window)
+    _perf_page_log(
+        page=PAGE_NAME,
+        api_ms=(time.perf_counter() - _api_t0) * 1000,
+        cache_hit=rt_hit,
+        stage="fetch_minute_trend",
+    )
 
     if not df_trend.empty:
         # --- 计算动态 Y 轴范围 ---
@@ -780,7 +848,24 @@ def render_realtime_chart(symbol):
 
 # 4. 绘图逻辑
 if target_contract:
-    df_kline, df_iv = get_chart_data(target_contract)
+    chart_window = "chart_90s"
+    chart_sig = f"{_perf_user_id()}|{PAGE_NAME}|{target_contract}|{chart_window}|{is_continuous}"
+    chart_hit = _probe_cache("chart_data", chart_sig)
+    _db_t0 = time.perf_counter()
+    df_kline, df_iv = get_chart_data(
+        _perf_user_id(),
+        PAGE_NAME,
+        target_contract,
+        chart_window,
+        target_contract,
+        is_continuous,
+    )
+    _perf_page_log(
+        page=PAGE_NAME,
+        db_ms=(time.perf_counter() - _db_t0) * 1000,
+        cache_hit=chart_hit,
+        stage="get_chart_data",
+    )
 
     if df_kline is not None and not df_kline.empty:
         st.subheader(f"{target_contract} ")
@@ -873,6 +958,12 @@ if target_contract:
         if is_continuous:
             st.caption("提示：可能是数据库中 futures_price 表缺少主连代码（如 IF 或 IF0）。")
 
+_perf_page_log(
+    page=PAGE_NAME,
+    render_ms=(time.perf_counter() - _PAGE_T0) * 1000,
+    cache_hit=-1,
+    stage="page_done",
+)
 
 
 

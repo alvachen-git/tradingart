@@ -3,6 +3,9 @@ import pandas as pd
 import plotly.express as px
 import sys
 import os
+import time
+import logging
+from sqlalchemy import text
 
 
 # 1. 页面配置
@@ -26,6 +29,103 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 root_dir = os.path.dirname(current_dir)
 sys.path.append(root_dir)
 import data_engine as de
+
+PAGE_NAME = "商品持仓"
+_PAGE_T0 = time.perf_counter()
+_PERF_LOGGER = logging.getLogger(__name__)
+
+
+def _perf_user_id() -> str:
+    return str(
+        st.session_state.get("username")
+        or st.session_state.get("user")
+        or st.session_state.get("current_user")
+        or "anonymous"
+    )
+
+
+def _probe_cache(tag: str, signature: str) -> int:
+    cache_key = f"_perf_cache_probe::{PAGE_NAME}::{tag}::{signature}"
+    hit = 1 if st.session_state.get(cache_key) else 0
+    st.session_state[cache_key] = True
+    return hit
+
+
+def _perf_page_log(
+    *,
+    page: str,
+    render_ms: float = 0.0,
+    db_ms: float = 0.0,
+    api_ms: float = 0.0,
+    cache_hit: int = -1,
+    stage: str = "main",
+) -> None:
+    msg = (
+        f"PERF_PAGE page={page} stage={stage} "
+        f"render_ms={render_ms:.1f} db_ms={db_ms:.1f} api_ms={api_ms:.1f} cache_hit={cache_hit}"
+    )
+    print(msg)
+    _PERF_LOGGER.info(msg)
+
+
+@st.cache_data(ttl=90, show_spinner=False)
+def _cached_broker_rankings(user_id: str, page: str, symbol: str, date_window: str) -> pd.DataFrame:
+    return de.calculate_broker_rankings(symbol=symbol)
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def _cached_cross_market_ranking(
+    user_id: str, page: str, symbol: str, date_window: str, days: int, top_n: int
+):
+    return de.get_cross_market_ranking(days=days, top_n=top_n)
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def _cached_expert_sentiment(
+    user_id: str,
+    page: str,
+    symbol: str,
+    date_window: str,
+    latest_date,
+    expert_symbol: str,
+):
+    return de.get_expert_sentiment(latest_date, symbol=expert_symbol)
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def _cached_latest_foreign_capital(user_id: str, page: str, symbol: str, date_window: str) -> pd.DataFrame:
+    if de.engine is None:
+        return pd.DataFrame()
+    latest_df = pd.read_sql(text("SELECT MAX(trade_date) AS trade_date FROM foreign_capital_analysis"), de.engine)
+    latest_date = latest_df.iloc[0, 0] if not latest_df.empty else None
+    if latest_date is None:
+        return pd.DataFrame()
+    sql = text(
+        """
+        SELECT symbol, direction, brokers, total_net_vol
+        FROM foreign_capital_analysis
+        WHERE trade_date = :trade_date
+        """
+    )
+    return pd.read_sql(sql, de.engine, params={"trade_date": latest_date})
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def _cached_latest_conflict_data(user_id: str, page: str, symbol: str, date_window: str) -> pd.DataFrame:
+    if de.engine is None:
+        return pd.DataFrame()
+    latest_df = pd.read_sql(text("SELECT MAX(trade_date) AS trade_date FROM market_conflict_daily"), de.engine)
+    latest_date = latest_df.iloc[0, 0] if not latest_df.empty else None
+    if latest_date is None:
+        return pd.DataFrame()
+    sql = text(
+        """
+        SELECT symbol, action, dumb_net, smart_net
+        FROM market_conflict_daily
+        WHERE trade_date = :trade_date
+        """
+    )
+    return pd.read_sql(sql, de.engine, params={"trade_date": latest_date})
 
 # 加载 CSS (注意路径)
 css_path = os.path.join(root_dir, 'style.css')
@@ -185,8 +285,19 @@ def card(label, value, delta, delta_color="pos"):
 # (以下代码无需修改，继续使用之前的逻辑)
 
 # 数据加载
+page_user_id = _perf_user_id()
+rank_window = "rank_90s"
+rank_sig = f"{page_user_id}|{PAGE_NAME}|{current_code}|{rank_window}"
+rank_hit = _probe_cache("broker_rankings", rank_sig)
+_db_t0 = time.perf_counter()
 with st.spinner(f"正在扫描持仓数据..."):
-    df_scores = de.calculate_broker_rankings(symbol=current_code)
+    df_scores = _cached_broker_rankings(page_user_id, PAGE_NAME, current_code, rank_window)
+_perf_page_log(
+    page=PAGE_NAME,
+    db_ms=(time.perf_counter() - _db_t0) * 1000,
+    cache_hit=rank_hit,
+    stage="calculate_broker_rankings",
+)
 
 if df_scores.empty:
     st.error(f"暂无 {current_name} 数据。")
@@ -239,7 +350,24 @@ with c_ai:
         # 使用 columns 在 AI 框内布局，手机上也会自动堆叠
         c_txt, c_btn = st.columns([1, 1])
         expert_symbol = ''.join([i for i in current_code if not i.isdigit()])
-        expert_data = de.get_expert_sentiment(latest_date, symbol=expert_symbol)
+        expert_window = "expert_120s"
+        expert_sig = f"{page_user_id}|{PAGE_NAME}|{expert_symbol}|{expert_window}"
+        expert_hit = _probe_cache("expert_sentiment", expert_sig)
+        _api_t0 = time.perf_counter()
+        expert_data = _cached_expert_sentiment(
+            page_user_id,
+            PAGE_NAME,
+            current_code,
+            expert_window,
+            latest_date,
+            expert_symbol,
+        )
+        _perf_page_log(
+            page=PAGE_NAME,
+            api_ms=(time.perf_counter() - _api_t0) * 1000,
+            cache_hit=expert_hit,
+            stage="get_expert_sentiment",
+        )
 
 
         with c_btn:
@@ -324,8 +452,20 @@ st.subheader("🏆 全品种盈亏排行榜")
 st.caption("统计范围：近200天, (部分期货商亏损是因为做套保)")
 
 # 获取数据
+cross_window = "cross_market_120s"
+cross_sig = f"{page_user_id}|{PAGE_NAME}|{current_code}|{cross_window}"
+cross_hit = _probe_cache("cross_market_ranking", cross_sig)
+_db_t0 = time.perf_counter()
 with st.spinner("正在扫描全市场数据..."):
-    df_win, df_lose = de.get_cross_market_ranking(days=150, top_n=5)
+    df_win, df_lose = _cached_cross_market_ranking(
+        page_user_id, PAGE_NAME, current_code, cross_window, 150, 5
+    )
+_perf_page_log(
+    page=PAGE_NAME,
+    db_ms=(time.perf_counter() - _db_t0) * 1000,
+    cache_hit=cross_hit,
+    stage="get_cross_market_ranking",
+)
 
 if not df_win.empty:
     col_win, col_lose = st.columns(2)
@@ -467,40 +607,37 @@ st.caption("### 🌍 外资动向 (摩根/瑞银/乾坤)")
 
 # 读库
 try:
-    # 获取最新日期
-    latest_f_date = pd.read_sql("SELECT MAX(trade_date) FROM foreign_capital_analysis", de.engine).iloc[0, 0]
+    foreign_window = "foreign_120s"
+    foreign_sig = f"{page_user_id}|{PAGE_NAME}|{current_code}|{foreign_window}"
+    foreign_hit = _probe_cache("foreign_cards", foreign_sig)
+    _db_t0 = time.perf_counter()
+    df_foreign = _cached_latest_foreign_capital(page_user_id, PAGE_NAME, current_code, foreign_window)
+    _perf_page_log(
+        page=PAGE_NAME,
+        db_ms=(time.perf_counter() - _db_t0) * 1000,
+        cache_hit=foreign_hit,
+        stage="foreign_capital_cards",
+    )
 
-    if latest_f_date:
-        df_foreign = pd.read_sql(f"SELECT * FROM foreign_capital_analysis WHERE trade_date='{latest_f_date}'",
-                                 de.engine)
-
-        if not df_foreign.empty:
-            # 使用列布局展示卡片
-            cols = st.columns(4)
-            for i, row in df_foreign.iterrows():
-                # 循环使用列
-                with cols[i % 4]:
-                    # --- 【新增】清洗機構名稱 ---
-                    # 去除 (代客)、（代客）等後綴
-                    cleaned_brokers = row['brokers'].replace('（代客）', '').replace('(代客)', '')
-
-                    color = "#d32f2f" if row['direction'] == "做多" else "#2e7d32"
-
-                    st.markdown(f"""
-                                        <div class="metric-card" style="border-top: 3px solid {color};">
-                                            <div class="metric-label">{row['symbol'].upper()}</div>
-                                            <div class="metric-value" style="color:{color}">{row['direction']}</div>
-                                            <div class="metric-delta" style="font-size:0.8rem; color:#888;">
-                                               {cleaned_brokers} </div>
-                                            <div style="font-size:0.8rem; margin-top:5px; color:#3b3b3b;">
-                                               淨量: {int(row['total_net_vol']):,}
-                                            </div>
+    if not df_foreign.empty:
+        cols = st.columns(4)
+        for i, row in df_foreign.iterrows():
+            with cols[i % 4]:
+                cleaned_brokers = row['brokers'].replace('（代客）', '').replace('(代客)', '')
+                color = "#d32f2f" if row['direction'] == "做多" else "#2e7d32"
+                st.markdown(f"""
+                                    <div class="metric-card" style="border-top: 3px solid {color};">
+                                        <div class="metric-label">{row['symbol'].upper()}</div>
+                                        <div class="metric-value" style="color:{color}">{row['direction']}</div>
+                                        <div class="metric-delta" style="font-size:0.8rem; color:#888;">
+                                           {cleaned_brokers} </div>
+                                        <div style="font-size:0.8rem; margin-top:5px; color:#3b3b3b;">
+                                           淨量: {int(row['total_net_vol']):,}
                                         </div>
-                                        """, unsafe_allow_html=True)
-        else:
-            st.info("今日外资无明显共振操作。")
+                                    </div>
+                                    """, unsafe_allow_html=True)
     else:
-        st.info("暂无外资分析数据，请运行 calc_foreign_capital.py。")
+        st.info("今日外资无明显共振操作。")
 
 except Exception as e:
     st.error(f"读取外资数据失败: {e}")
@@ -513,47 +650,54 @@ st.caption("筛选逻辑：机构与散户差异最大的持仓对比")
 
 # 1. 獲取數據 (直接讀表)
 try:
-    # 檢查表裡是否有數據
-    latest_c_date = pd.read_sql("SELECT MAX(trade_date) FROM market_conflict_daily", de.engine).iloc[0, 0]
+    conflict_window = "conflict_120s"
+    conflict_sig = f"{page_user_id}|{PAGE_NAME}|{current_code}|{conflict_window}"
+    conflict_hit = _probe_cache("conflict_cards", conflict_sig)
+    _db_t0 = time.perf_counter()
+    df_conflict = _cached_latest_conflict_data(page_user_id, PAGE_NAME, current_code, conflict_window)
+    _perf_page_log(
+        page=PAGE_NAME,
+        db_ms=(time.perf_counter() - _db_t0) * 1000,
+        cache_hit=conflict_hit,
+        stage="market_conflict_cards",
+    )
 
-    if latest_c_date:
-        df_conflict = pd.read_sql(f"SELECT * FROM market_conflict_daily WHERE trade_date='{latest_c_date}'", de.engine)
-
-        if not df_conflict.empty:
-            # 創建 4 列佈局
-            cols = st.columns(4)
-            for i, row in df_conflict.iterrows():
-                with cols[i % 4]:  # 防止超過4個報錯
-                    # 顏色邏輯
-                    direction = row['action']
-                    color = "#d32f2f" if direction == "看漲" else "#2e7d32"  # 紅漲綠跌
-
-                    # HTML 結構 (引用上面定義好的 CSS 類名)
-                    card_html = f"""
-        <div class="conflict-card" style="border-top: 4px solid {color};">
-        <div class="conflict-header">
-        <div class="conflict-symbol">{row['symbol'].upper()}</div>
-        <div class="conflict-direction" style="color: {color};">{direction}</div>
-        </div>
-        <div class="conflict-body">
-        <div class="conflict-item-left">
-        <div class="conflict-label">反指(散户)</div>
-        <div class="conflict-value" style="color: #333;">{int(row['dumb_net']):,}</div>
-        </div>
-        <div style="width: 1px; height: 20px; background-color: #ddd;"></div>
-        <div class="conflict-item-right">
-        <div class="conflict-label">正指(主力)</div>
-        <div class="conflict-value" style="color: {color};">{int(row['smart_net']):,}</div>
-        </div>
-        </div>
-        </div>
-        """
-                    st.markdown(card_html, unsafe_allow_html=True)
-        else:
-            st.info("今日市場平靜，無明顯正反博弈信號。")
+    if not df_conflict.empty:
+        cols = st.columns(4)
+        for i, row in df_conflict.iterrows():
+            with cols[i % 4]:
+                direction = row['action']
+                color = "#d32f2f" if direction == "看漲" else "#2e7d32"
+                card_html = f"""
+    <div class="conflict-card" style="border-top: 4px solid {color};">
+    <div class="conflict-header">
+    <div class="conflict-symbol">{row['symbol'].upper()}</div>
+    <div class="conflict-direction" style="color: {color};">{direction}</div>
+    </div>
+    <div class="conflict-body">
+    <div class="conflict-item-left">
+    <div class="conflict-label">反指(散户)</div>
+    <div class="conflict-value" style="color: #333;">{int(row['dumb_net']):,}</div>
+    </div>
+    <div style="width: 1px; height: 20px; background-color: #ddd;"></div>
+    <div class="conflict-item-right">
+    <div class="conflict-label">正指(主力)</div>
+    <div class="conflict-value" style="color: {color};">{int(row['smart_net']):,}</div>
+    </div>
+    </div>
+    </div>
+    """
+                st.markdown(card_html, unsafe_allow_html=True)
     else:
-        st.info("暫無對決數據，請運行後台計算腳本。")
+        st.info("今日市場平靜，無明顯正反博弈信號。")
 
 except Exception as e:
     st.error(f"讀取對決數據失敗: {e}")
+
+_perf_page_log(
+    page=PAGE_NAME,
+    render_ms=(time.perf_counter() - _PAGE_T0) * 1000,
+    cache_hit=-1,
+    stage="page_done",
+)
 

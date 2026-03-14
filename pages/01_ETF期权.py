@@ -3,6 +3,8 @@ import pandas as pd
 import plotly.express as px
 import sys
 import os
+import time
+import logging
 from lightweight_charts.widgets import StreamlitChart
 # 【关键修改】导入新的独立工具模块，不再依赖 data_engine
 import etf_option_tool as de
@@ -34,6 +36,64 @@ from sidebar_navigation import show_navigation
 with st.sidebar:
     show_navigation()
 
+PAGE_NAME = "ETF期权"
+_PAGE_T0 = time.perf_counter()
+_PERF_LOGGER = logging.getLogger(__name__)
+
+
+def _perf_user_id() -> str:
+    return str(
+        st.session_state.get("username")
+        or st.session_state.get("user")
+        or st.session_state.get("current_user")
+        or "anonymous"
+    )
+
+
+def _probe_cache(tag: str, signature: str) -> int:
+    cache_key = f"_perf_cache_probe::{PAGE_NAME}::{tag}::{signature}"
+    hit = 1 if st.session_state.get(cache_key) else 0
+    st.session_state[cache_key] = True
+    return hit
+
+
+def _perf_page_log(
+    *,
+    page: str,
+    render_ms: float = 0.0,
+    db_ms: float = 0.0,
+    api_ms: float = 0.0,
+    cache_hit: int = -1,
+    stage: str = "main",
+) -> None:
+    msg = (
+        f"PERF_PAGE page={page} stage={stage} "
+        f"render_ms={render_ms:.1f} db_ms={db_ms:.1f} api_ms={api_ms:.1f} cache_hit={cache_hit}"
+    )
+    print(msg)
+    _PERF_LOGGER.info(msg)
+
+
+@st.cache_data(ttl=90, show_spinner=False)
+def _cached_etf_option_analysis(
+    user_id: str, page: str, symbol: str, date_window: str, days: int
+):
+    return de.get_etf_option_analysis(symbol, days=days)
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def _cached_iv_rank_data(
+    user_id: str, page: str, symbol: str, date_window: str, window: int
+):
+    return de.get_iv_rank_data(symbol, window=window)
+
+
+@st.cache_data(ttl=90, show_spinner=False)
+def _cached_kline_and_iv_data(
+    user_id: str, page: str, symbol: str, date_window: str, limit: int
+):
+    return de.get_kline_and_iv_data(symbol, limit=limit)
+
 
 # --- 页面逻辑 ---
 st.markdown('<div class="mobile-top-container">', unsafe_allow_html=True)
@@ -56,8 +116,19 @@ if "." not in etf_code:
         etf_code = etf_code + ".SH" # 沪市 (50/300/500/科创)
 
 # 数据获取
+user_id = _perf_user_id()
+main_window = "20d"
+main_sig = f"{user_id}|{PAGE_NAME}|{etf_code}|{main_window}"
+main_cache_hit = _probe_cache("etf_option_analysis", main_sig)
+_api_t0 = time.perf_counter()
 with st.spinner(f"正在扫描 {etf_code} 全市场持仓数据..."):
-    df = de.get_etf_option_analysis(etf_code, days=20)
+    df = _cached_etf_option_analysis(user_id, PAGE_NAME, etf_code, main_window, 20)
+_perf_page_log(
+    page=PAGE_NAME,
+    api_ms=(time.perf_counter() - _api_t0) * 1000,
+    cache_hit=main_cache_hit,
+    stage="get_etf_option_analysis",
+)
 
 if df is None or df.empty:
     st.error("暂无数据，可能是非交易时间或 Tushare 接口受限。")
@@ -90,7 +161,17 @@ latest_data = df[df['date_str'] == latest_date]
 
 # --- 核心指标卡片 ---
 # (此处调用 tool.get_iv_rank_data)
-iv_stats = de.get_iv_rank_data(etf_code, window=252)
+iv_window = "252d"
+iv_sig = f"{user_id}|{PAGE_NAME}|{etf_code}|{iv_window}"
+iv_cache_hit = _probe_cache("iv_rank", iv_sig)
+_api_t0 = time.perf_counter()
+iv_stats = _cached_iv_rank_data(user_id, PAGE_NAME, etf_code, iv_window, 252)
+_perf_page_log(
+    page=PAGE_NAME,
+    api_ms=(time.perf_counter() - _api_t0) * 1000,
+    cache_hit=iv_cache_hit,
+    stage="get_iv_rank_data",
+)
 
 try:
     call_row = latest_data[latest_data['type'].str.contains('认购')].iloc[0]
@@ -125,7 +206,17 @@ st.markdown("---")
 
 # --- 3. 价格与波动率 (K线 + IV) ---
 # 【核心调用】从新文件获取数据
-df_kline, df_iv = de.get_kline_and_iv_data(etf_code, limit=500)
+kline_window = "500bars"
+kline_sig = f"{user_id}|{PAGE_NAME}|{etf_code}|{kline_window}"
+kline_cache_hit = _probe_cache("kline_iv", kline_sig)
+_api_t0 = time.perf_counter()
+df_kline, df_iv = _cached_kline_and_iv_data(user_id, PAGE_NAME, etf_code, kline_window, 500)
+_perf_page_log(
+    page=PAGE_NAME,
+    api_ms=(time.perf_counter() - _api_t0) * 1000,
+    cache_hit=kline_cache_hit,
+    stage="get_kline_and_iv_data",
+)
 
 
 
@@ -251,4 +342,11 @@ with st.expander("查看详细数据表"):
         },
         use_container_width=True
     )
+
+_perf_page_log(
+    page=PAGE_NAME,
+    render_ms=(time.perf_counter() - _PAGE_T0) * 1000,
+    cache_hit=-1,
+    stage="page_done",
+)
 
