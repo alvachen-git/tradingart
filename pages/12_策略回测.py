@@ -8,7 +8,7 @@ from ui_components import inject_sidebar_toggle_style
 from backtest_engine import engine, run_etf_roll_backtest, get_etf_underlyings, get_etf_expiries, get_etf_strikes_for_expiry, get_etf_first_trade_date, get_etf_strikes_for_range
 
 
-st.set_page_config(page_title="策略回测", layout="wide")
+st.set_page_config(page_title="策略回测", page_icon="favicon.ico",layout="wide")
 
 
 # 🔥 添加统一的侧边栏导航

@@ -188,7 +188,7 @@ def _render_watchlist_cards(watchlist: list[dict]) -> str:
     return f'<div class="watch-grid">{"".join(cards)}</div>'
 
 
-st.set_page_config(page_title="AI模拟投资", page_icon="📈", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title="爱波塔-AI炒股", page_icon="favicon.ico", layout="wide", initial_sidebar_state="expanded")
 
 from sidebar_navigation import show_navigation
 

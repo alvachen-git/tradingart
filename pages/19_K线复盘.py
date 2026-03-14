@@ -12,7 +12,7 @@ import kline_game as kg
 from sidebar_navigation import show_navigation
 
 
-st.set_page_config(page_title="K线交易复盘", page_icon="📋", layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="爱波塔-K线交易复盘", page_icon="favicon.ico", layout="wide", initial_sidebar_state="collapsed")
 
 with st.sidebar:
     show_navigation()
