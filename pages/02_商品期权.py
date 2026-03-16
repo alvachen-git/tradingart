@@ -1,9 +1,6 @@
 import streamlit as st
-import plotly.graph_objects as go
 import pandas as pd
 from lightweight_charts.widgets import StreamlitChart
-from realtime_tools import fetch_minute_trend
-from streamlit_autorefresh import st_autorefresh
 import sys
 import os
 import re
@@ -13,6 +10,7 @@ import data_engine as de
 from sqlalchemy import text
 import datetime as dt
 from ui_components import inject_sidebar_toggle_style
+from symbol_match import sql_prefix_condition
 # 1. 基础配置
 st.set_page_config(
     page_title="爱波塔-商品期权技术分析",
@@ -26,6 +24,10 @@ _PAGE_T0 = time.perf_counter()
 _PERF_LOGGER = logging.getLogger(__name__)
 _CACHE_PROBE_SEEN = set()
 USE_GLOBAL_MONITOR_SNAPSHOT = False
+CONTRACT_LOOKBACK_DAYS = 420
+MAX_CONTRACT_POOL_ROWS = 1200
+MAX_CONTRACT_OPTIONS = 120
+MAX_CHART_ROWS = 520
 
 
 def _perf_user_id() -> str:
@@ -61,25 +63,21 @@ def _perf_page_log(
     _PERF_LOGGER.info(msg)
 
 
-@st.cache_data(ttl=30, show_spinner=False)
-def _cached_minute_trend(
-    user_id: str, page: str, symbol: str, date_window: str
-) -> pd.DataFrame:
-    return fetch_minute_trend(symbol)
-
-
-@st.cache_data(ttl=120, show_spinner=False)
+@st.cache_data(ttl=300, show_spinner=False)
 def _cached_recent_contract_pool(
-    user_id: str, page: str, symbol: str, date_window: str, cutoff_yyyymmdd: str
+    user_id: str, page: str, symbol: str, date_window: str, cutoff_yyyymmdd: str, variety_code: str
 ) -> list[str]:
     if de.engine is None:
         return []
+    prefix_sql = sql_prefix_condition(variety_code)
     sql = text(
-        """
+        f"""
         SELECT DISTINCT ts_code
         FROM commodity_iv_history
         WHERE REPLACE(trade_date, '-', '') >= :cutoff
+          AND {prefix_sql}
         ORDER BY ts_code DESC
+        LIMIT {MAX_CONTRACT_POOL_ROWS}
         """
     )
     with de.engine.connect() as conn:
@@ -656,7 +654,7 @@ with st.sidebar:
         "lc": "碳酸锂", "si": "工业硅", "ps": "多晶硅","pt": "铂金","pd": "钯金",
         "rb": "螺纹钢", "i": "铁矿石", "hc": "热卷","jm": "焦煤","ad": "铝合金","fg": "玻璃","sa": "纯碱","ao": "氧化铝","sh": "烧碱","sp": "纸浆","lg": "原木",
         "M": "豆粕", "a": "豆一", "RM": "菜粕","y": "豆油","oi": "菜油","p": "棕榈油","pk": "花生",
-        "sc": "原油","ta": "PTA","px": "对二甲苯",  "ma": "甲醇", "v": "PVC", "eb": "苯乙烯","bz": "纯苯","eg": "乙二醇","pp": "聚丙烯","l": "塑料","bu": "沥青","fu": "燃料油","br": "BR橡胶","ur": "尿素",
+        "sc": "原油","ta": "PTA","px": "对二甲苯","PR": "瓶片",  "ma": "甲醇", "v": "PVC", "eb": "苯乙烯","bz": "纯苯","eg": "乙二醇","pp": "聚丙烯","l": "塑料","bu": "沥青","fu": "燃料油","br": "BR橡胶","ur": "尿素",
         "ru": "橡胶", "c": "玉米", "jd": "鸡蛋", "CF": "棉花", "SR": "白糖", "ap": "苹果", "lh": "生猪"
     }
     variety = st.selectbox("品种", list(COMMODITY_MAP.keys()), format_func=lambda x: f"{x} ({COMMODITY_MAP[x]})")
@@ -665,15 +663,15 @@ with st.sidebar:
 
 
     # 获取合约列表函数 (已修复 % 报错问题)
-    @st.cache_data(ttl=120, show_spinner=False)
+    @st.cache_data(ttl=300, show_spinner=False)
     def get_contracts(user_id, page, symbol, date_window, v):
         if de.engine is None: return []
         try:
-            # 先取一次近期合约池，再在内存筛选；切换品种会更快
+            # 直接按品种前缀在 SQL 过滤，避免全表合约池扫描
             now = dt.datetime.now()
-            cutoff_yyyymmdd = (now - dt.timedelta(days=540)).strftime("%Y%m%d")
+            cutoff_yyyymmdd = (now - dt.timedelta(days=CONTRACT_LOOKBACK_DAYS)).strftime("%Y%m%d")
             raw_codes = _cached_recent_contract_pool(
-                user_id, page, "ALL", "contracts_pool_120s", cutoff_yyyymmdd
+                user_id, page, v, "contracts_pool_300s", cutoff_yyyymmdd, v
             )
             valid_subs = []
             current_yymm = int(now.strftime('%y%m'))
@@ -686,8 +684,7 @@ with st.sidebar:
                 prefix = match.group(1)
                 num_part = match.group(2)
 
-                # --- 修复 1: 严格品种匹配 ---
-                # 如果选的是 C (玉米)，必须严格等于 C，不能匹配到 CF (棉花)
+                # SQL端已做严格前缀过滤，这里仅做最终保险
                 if prefix.upper() != v.upper():
                     continue
 
@@ -706,7 +703,8 @@ with st.sidebar:
                 if compare_val >= (current_yymm - 1):
                     valid_subs.append(code)
 
-            valid_subs.sort(reverse=True)
+            # 去重并限制展示数量，降低 selectbox 与前端渲染负载
+            valid_subs = sorted(list(dict.fromkeys(valid_subs)), reverse=True)[:MAX_CONTRACT_OPTIONS]
 
             # 把 "主力连续" 放在第一个
             options = [f"{v.upper()} (主力连续)"] + valid_subs
@@ -787,12 +785,34 @@ def get_chart_data(user_id, page, symbol, date_window, code, is_continuous_flag)
     try:
         # A. 获取 IV (直接查 commodity_iv_history)
         sql_iv = text(
-            "SELECT trade_date, iv, hv, used_contract FROM commodity_iv_history WHERE ts_code=:c ORDER BY trade_date")
+            f"""
+            SELECT trade_date, iv, used_contract
+            FROM (
+                SELECT trade_date, iv, used_contract
+                FROM commodity_iv_history
+                WHERE ts_code=:c
+                ORDER BY trade_date DESC
+                LIMIT {MAX_CHART_ROWS}
+            ) t
+            ORDER BY trade_date
+            """
+        )
         df_iv = pd.read_sql(sql_iv, de.engine, params={"c": code})
 
         # B. 获取 K线 (期货价格)
         sql_k = text(
-            "SELECT trade_date, open_price as open, high_price as high, low_price as low, close_price as close FROM futures_price WHERE ts_code=:c ORDER BY trade_date")
+            f"""
+            SELECT trade_date, open_price AS open, high_price AS high, low_price AS low, close_price AS close
+            FROM (
+                SELECT trade_date, open_price, high_price, low_price, close_price
+                FROM futures_price
+                WHERE ts_code=:c
+                ORDER BY trade_date DESC
+                LIMIT {MAX_CHART_ROWS}
+            ) t
+            ORDER BY trade_date
+            """
+        )
         df_k = pd.read_sql(sql_k, de.engine, params={"c": code})
 
         # 容错：如果查 IF (主连) 没查到价格，尝试查 IF0 (常见的连续代码)
@@ -806,108 +826,6 @@ def get_chart_data(user_id, page, symbol, date_window, code, is_continuous_flag)
     except Exception as e:
         return None, None
 
-
-# ==============================================================================
-# 🔥【核心修改区】定义局部刷新函数 (放在主逻辑 if target_contract 之前)
-# ==============================================================================
-@st.fragment(run_every=300)  # 👈 关键：每60秒只重新运行这个函数内部，不刷新整个网页
-def render_realtime_chart(symbol):
-    """
-    这是一个独立的 UI 片段，负责绘制实时分时图。
-    它会自动每 60 秒刷新一次，或者点击按钮手动刷新。
-    """
-    # 布局：标题 + 刷新按钮
-    col_title, col_btn = st.columns([8, 2])
-    with col_title:
-        st.subheader(f"当日分时走势")
-    with col_btn:
-        if st.button("🔄 刷新", key=f"btn_refresh_{symbol}", use_container_width=True):
-            st.rerun()
-
-    # 1. 获取数据 (页面内缓存 30s)
-    user_id_local = _perf_user_id()
-    rt_window = "realtime_30s"
-    rt_sig = f"{user_id_local}|{PAGE_NAME}|{symbol}|{rt_window}"
-    rt_hit = _probe_cache("minute_trend", rt_sig)
-    _api_t0 = time.perf_counter()
-    df_trend = _cached_minute_trend(user_id_local, PAGE_NAME, symbol, rt_window)
-    _perf_page_log(
-        page=PAGE_NAME,
-        api_ms=(time.perf_counter() - _api_t0) * 1000,
-        cache_hit=rt_hit,
-        stage="fetch_minute_trend",
-    )
-
-    if not df_trend.empty:
-        # --- 计算动态 Y 轴范围 ---
-        p_min = df_trend['close'].min()
-        p_max = df_trend['close'].max()
-        p_range = p_max - p_min
-        if p_range == 0: p_range = p_max * 0.01
-        y_lower = p_min - (p_range * 0.2)
-        y_upper = p_max + (p_range * 0.2)
-
-        # --- 美化 X 轴标签 ---
-        df_trend['time_display'] = df_trend['date'].apply(
-            lambda x: x.split(' ')[-1][:5] if ' ' in str(x) else str(x))
-
-        # 2. 绘制分时线
-        fig_trend = go.Figure()
-        fig_trend.add_trace(go.Scatter(
-            x=df_trend['date'],
-            y=df_trend['close'],
-            mode='lines',
-            name='最新价',
-            line=dict(color='#2962FF', width=2),
-            hovertemplate='%{y:.2f}<extra></extra>'
-        ))
-
-        # 3. 计算涨跌信息
-        last_price = df_trend.iloc[-1]['close']
-        last_time = df_trend.iloc[-1]['date'].split(' ')[-1]
-        open_price = df_trend.iloc[0]['close']
-        chg = last_price - open_price
-        chg_pct = (chg / open_price) * 100
-        color_code = "#ef232a" if chg >= 0 else "#14b143"
-        sign = "+" if chg >= 0 else ""
-
-        # 4. 图表布局
-        fig_trend.update_layout(
-            title=dict(
-                text=f"<b>{last_price}</b> <span style='color:{color_code};'>({sign}{chg:.1f} / {sign}{chg_pct:.2f}%)</span> <span style='font-size:12px;color:#999'>🕒 {last_time}</span>",
-                font=dict(size=20),
-                x=0, y=1
-            ),
-            height=320,
-            margin=dict(l=10, r=10, t=40, b=10),
-            xaxis=dict(
-                type='category',
-                tickmode='auto',
-                nticks=6,
-                tickangle=0,
-                showgrid=False,
-                linecolor='#333',
-                ticktext=df_trend['time_display'].iloc[::len(df_trend) // 6].tolist(),
-                tickfont=dict(size=10, color="#666")
-            ),
-            yaxis=dict(
-                range=[y_lower, y_upper],
-                showgrid=True,
-                gridcolor='rgba(128,128,128,0.1)',
-                side='right',
-                tickfont=dict(size=10, color="#666"),
-                zeroline=False
-            ),
-            template="plotly_white",
-            paper_bgcolor='rgba(0,0,0,0)',
-            plot_bgcolor='rgba(0,0,0,0)',
-            hovermode="x unified"
-        )
-        st.plotly_chart(fig_trend, use_container_width=True)
-    else:
-        st.info(f"💤 暂无 {symbol} 的实时分时数据")
-
-    st.divider()
 
 # 4. 绘图逻辑
 if target_contract:
@@ -1003,8 +921,6 @@ if target_contract:
             c3.metric("历史最高 / 最低", f"{max_iv:.1f}% / {min_iv:.1f}%")
             c4.info(f"📳 状态: **{status}**")
             st.divider()
-
-            render_realtime_chart(target_contract)
 
 
         # --- K线数据处理 ---
