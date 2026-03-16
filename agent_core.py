@@ -31,7 +31,7 @@ from market_correlation import tool_stock_hedging_analysis, tool_futures_correla
 from beta_tool import calculate_hedging_beta
 from knowledge_tools import search_investment_knowledge
 from stock_volume_tools import query_stock_volume, search_volume_anomalies
-from backtest_tools import run_option_backtest
+from backtest_tools import run_option_strategy_backtest
 from portfolio_tools import (
     get_user_portfolio_summary,
     get_user_portfolio_details,
@@ -356,7 +356,7 @@ def generalist_node(state: AgentState, llm):
         tool_futures_correlation_check, tool_stock_correlation_check, calculate_hedging_beta,
         tool_get_retail_money_flow, draw_chart_tool, get_stock_valuation, tool_compare_stocks,
         get_futures_fund_flow, get_futures_fund_ranking, get_available_patterns, analyze_etf_option_sentiment,
-        get_etf_option_strikes,tool_analyze_broker_positions, run_option_backtest,
+        get_etf_option_strikes,tool_analyze_broker_positions, run_option_strategy_backtest,
         get_macro_indicator,get_macro_overview,analyze_yield_curve
     ]
 
@@ -393,7 +393,8 @@ def generalist_node(state: AgentState, llm):
         19.查宏观环境总览 -> get_macro_overview 
         20.分析收益率曲线 -> analyze_yield_curve 
         21.查单只股票的成交量详情 -> query_stock_volume
-        22.期权策略回测 -> run_option_backtest
+        22.期权策略回测 -> run_option_strategy_backtest
+        23. 用户问“某策略在某时间段的胜率/盈亏比/回撤”时，必须调用回测工具，禁止口头估算。
 
         【行为准则】
         1. 先给结论，然后解释理由。
@@ -808,7 +809,7 @@ def strategist_node(state: AgentState, llm):
         get_market_snapshot,  # 标的快照/现价
         # 辅助工具
         search_investment_knowledge,  # 知识库检索
-        run_option_backtest,  # 期权回测
+        run_option_strategy_backtest,  # 期权回测(支持任意时间段)
     ]
 
     # === 🔥 ReAct Prompt - 引导期权策略推理 ===
@@ -840,7 +841,8 @@ def strategist_node(state: AgentState, llm):
         - **查询合约**：用 `tool_query_specific_option` 查具体期权价格（格式："标的 行权价 认购/认沽"），权利金价格也要乘上合约乘数。
         - 只有当工具返回了有效的价格数据时，才能推荐该合约。
         - 如果工具返回“未找到”，请尝试调整行权价再次查询，或者诚实告知用户该档位无合约。
-        - 如果客户问“回测/策略表现”，可用 `run_option_backtest` 给出回测结果。
+        - 如果客户问“回测/策略表现”，优先用 `run_option_strategy_backtest` 给出回测结果。
+        - 如果客户问“某策略在某时间段的胜率/盈亏比/最大回撤”，必须调用回测工具并传入 `start_date/end_date` 或 `time_expr`，禁止口头估算。
 
         【风险偏好适配】：
            - 【保守型】：只推荐风险有限的策略（牛市价差、熊市价差、比率价差），禁止裸卖
