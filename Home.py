@@ -49,7 +49,7 @@ for key in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"]:
         del os.environ[key]
 
 # ==================== 公告配置区 ====================
-ENABLE_HOME_ANNOUNCEMENT = True  # 临时关闭首页公告，恢复时改为 True
+ENABLE_HOME_ANNOUNCEMENT = False  # 临时关闭首页公告，恢复时改为 True
 # Fast router is disabled by default to avoid false positives on
 # historical/list queries (for example: "最近两周每天价格").
 FAST_ROUTER_ENABLED = os.getenv("AIBOTA_FAST_ROUTER_ENABLED", "0").strip().lower() in {"1", "true", "yes", "on"}
@@ -848,7 +848,7 @@ def _restore_login_with_cookie_state(cookies: dict):
 
 # 🔥 [关键修复] 在任何 rerun 之前，先读取公告状态并保存到 session_state
 # 这样即使后面触发 rerun，公告状态也不会丢失
-if 'announcement_cookie_loaded' not in st.session_state:
+if ENABLE_HOME_ANNOUNCEMENT and 'announcement_cookie_loaded' not in st.session_state:
     try:
         cm = stx.CookieManager(key="early_announcement_reader")
         announcement_cookies = cm.get_all() or {}

@@ -366,10 +366,9 @@ with col_title:
     </div>
     """, unsafe_allow_html=True)
 
+refresh_requested = False
 with col_refresh:
-    if st.button("🔄 刷新数据", key="refresh_btn", use_container_width=True):
-        st.cache_data.clear()
-        st.rerun()
+    refresh_requested = st.button("🔄 刷新数据", key="refresh_btn", use_container_width=True)
 
 
 # ============================================================
@@ -387,25 +386,19 @@ def load_data():
     return df
 
 
-# 加载进度
-with st.spinner(""):
-    progress_bar = st.progress(0, text="🔍 正在连接数据库...")
+if refresh_requested:
+    # 仅清理本页 load_data 缓存，避免全局缓存被清空后引发整站重算。
+    load_data.clear()
 
-    progress_bar.progress(25, text="📈 正在查询价格数据...")
-    time.sleep(0.05)
 
-    progress_bar.progress(50, text="🌊 正在查询波动率数据...")
-    time.sleep(0.05)
-
-    progress_bar.progress(75, text="💼 正在查询持仓数据...")
-
-    start_time = time.time()
+# 数据加载：保留缓存，移除固定 sleep，避免命中缓存时仍然“看起来很慢”
+start_time = time.time()
+if refresh_requested:
+    with st.spinner("🔄 正在刷新排行榜数据..."):
+        df_monitor = load_data()
+else:
     df_monitor = load_data()
-    load_time = time.time() - start_time
-
-    progress_bar.progress(100, text=f"✅ 加载完成 ({load_time:.2f}秒)")
-    time.sleep(0.3)
-    progress_bar.empty()
+load_time = time.time() - start_time
 
 # ============================================================
 # 主内容区域
@@ -821,3 +814,4 @@ else:
 - 数据库是否运行
 - 运行数据更新脚本
         """)
+
