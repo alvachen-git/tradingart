@@ -14,7 +14,11 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import data_engine as de
 import auth_utils as auth
 from task_manager import TaskManager
-from ui_components import inject_sidebar_toggle_style
+from ui_components import (
+    inject_sidebar_toggle_style,
+    inject_quant_ops_header_style,
+    render_quant_ops_header,
+)
 
 
 st.set_page_config(
@@ -164,6 +168,7 @@ st.markdown(
 
 # 统一侧边栏折叠/展开箭头样式（与 Home 页一致）
 inject_sidebar_toggle_style(mode="high_contrast")
+inject_quant_ops_header_style()
 
 if "portfolio_cookie_retry_once" not in st.session_state:
     st.session_state.portfolio_cookie_retry_once = False
@@ -310,8 +315,11 @@ if not positions_df.empty and "symbol" in positions_df.columns:
     derived_grade = positions_df["momentum_score_10d"].apply(_grade_from_momentum)
     positions_df["technical_grade"] = derived_grade.combine_first(positions_df["technical_grade"])
 
-st.markdown("## 持仓体检")
-st.caption("自动识别持仓截图后生成：行业占比、技术分级、组合指数相关度。")
+render_quant_ops_header(
+    "持仓体检",
+    "自动识别持仓截图后生成行业占比与技术分级",
+    "输出组合指数相关度、风险提示与结构化诊断结论。",
+)
 
 if pending_meta and (pending_status or {}).get("status") in {"pending", "processing"}:
     progress_text = (pending_status or {}).get("progress") or "正在计算行业占比与相关度..."

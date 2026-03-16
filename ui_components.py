@@ -1,4 +1,142 @@
 import streamlit as st
+from html import escape
+
+
+def inject_quant_ops_header_style() -> None:
+    """注入量化操盘室风格的大标题样式。"""
+    st.markdown(
+        """
+        <style>
+        @import url('https://fonts.googleapis.com/css2?family=Rajdhani:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
+
+        .quant-hero-shell {
+            border: 1px solid rgba(120, 149, 204, 0.32);
+            border-radius: 16px;
+            padding: 18px 18px 16px 18px;
+            background: linear-gradient(120deg, rgba(12, 26, 54, 0.92), rgba(10, 22, 46, 0.78));
+            box-shadow: 0 16px 40px rgba(0, 0, 0, 0.32), inset 0 1px 0 rgba(255, 255, 255, 0.04);
+            margin-bottom: 14px;
+            position: relative;
+            overflow: hidden;
+            animation: quantHeroOpen 900ms cubic-bezier(.22,.9,.28,1) both;
+        }
+        .quant-hero-shell::after {
+            content: "";
+            position: absolute;
+            top: 0;
+            left: -38%;
+            width: 32%;
+            height: 100%;
+            background: linear-gradient(90deg, transparent, rgba(108, 171, 255, 0.18), transparent);
+            transform: skewX(-16deg);
+            animation: quantScanSweep 6.2s ease-in-out infinite;
+        }
+        .quant-hero-top {
+            display: flex;
+            align-items: baseline;
+            justify-content: flex-start;
+            flex-wrap: wrap;
+            gap: 10px;
+            position: relative;
+            z-index: 1;
+        }
+        .quant-hero-title {
+            font-family: "Rajdhani", "Noto Sans SC", sans-serif;
+            font-size: clamp(28px, 3.8vw, 44px);
+            line-height: 1.06;
+            font-weight: 700;
+            letter-spacing: 0.02em;
+            margin: 0;
+            color: #ecf3ff;
+            text-shadow: 0 8px 22px rgba(59, 130, 246, 0.35);
+        }
+        .quant-hero-sub {
+            color: #9fb0cd;
+            font-family: "IBM Plex Mono", "Noto Sans SC", monospace;
+            font-size: 14px;
+            margin-top: 6px;
+            letter-spacing: 0.02em;
+            position: relative;
+            z-index: 1;
+        }
+        .quant-hero-note {
+            margin-top: 10px;
+            color: #c8d6ef;
+            font-size: 14px;
+            line-height: 1.5;
+            position: relative;
+            z-index: 1;
+            animation: quantFadeUp 760ms ease both;
+            animation-delay: 220ms;
+        }
+
+        @keyframes quantHeroOpen {
+            0% {
+                opacity: 0;
+                transform: translateY(14px) scale(0.994);
+                filter: blur(6px);
+            }
+            100% {
+                opacity: 1;
+                transform: translateY(0) scale(1);
+                filter: blur(0);
+            }
+        }
+        @keyframes quantScanSweep {
+            0% { left: -38%; }
+            58% { left: 118%; }
+            100% { left: 118%; }
+        }
+        @keyframes quantFadeUp {
+            0% {
+                opacity: 0;
+                transform: translateY(10px);
+            }
+            100% {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+        @media (max-width: 980px) {
+            .quant-hero-title {
+                font-size: 30px;
+            }
+            .quant-hero-sub {
+                font-size: 13px;
+            }
+            .quant-hero-note {
+                font-size: 13px;
+            }
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_quant_ops_header(title: str, subtitle: str = "", note: str = "") -> None:
+    """渲染量化操盘室风格的大标题区块。"""
+    safe_title = escape(title or "")
+    safe_subtitle = escape(subtitle or "")
+    safe_note = escape(note or "")
+
+    subtitle_html = f'<div class="quant-hero-sub">{safe_subtitle}</div>' if safe_subtitle else ""
+    note_html = f'<div class="quant-hero-note">{safe_note}</div>' if safe_note else ""
+
+    st.markdown(
+        (
+            '<div class="quant-hero-shell">'
+            '<div class="quant-hero-top">'
+            '<div>'
+            f'<h1 class="quant-hero-title">{safe_title}</h1>'
+            f"{subtitle_html}"
+            "</div>"
+            "</div>"
+            f"{note_html}"
+            "</div>"
+        ),
+        unsafe_allow_html=True,
+    )
 
 
 def inject_sidebar_toggle_style(mode: str = "high_contrast") -> None:

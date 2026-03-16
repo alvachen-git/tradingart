@@ -9,7 +9,11 @@ import auth_utils as auth
 import extra_streamlit_components as stx
 import streamlit.components.v1 as components
 from share_utils import add_share_button
-from ui_components import inject_sidebar_toggle_style
+from ui_components import (
+    inject_sidebar_toggle_style,
+    inject_quant_ops_header_style,
+    render_quant_ops_header,
+)
 
 
 # ==========================================
@@ -18,7 +22,7 @@ from ui_components import inject_sidebar_toggle_style
 st.set_page_config(
     page_title="情报站 - 爱波塔",
     page_icon="📡",
-    layout="centered",
+    layout="wide",
     initial_sidebar_state="expanded"
 )
 
@@ -51,9 +55,34 @@ st.markdown("""
 
     /* 拓宽主内容区 */
     [data-testid="stMainBlockContainer"] {
-        max-width: 65rem !important;
-        padding-left: 2rem;
-        padding-right: 2rem;
+        max-width: 88rem !important;
+        padding-top: 0.8rem !important;
+        padding-bottom: 1.2rem !important;
+        padding-left: 1.2rem;
+        padding-right: 1.2rem;
+    }
+
+    /* 情报站标题高对比修复 */
+    .quant-hero-shell .quant-hero-title {
+        color: #f8fbff !important;
+        font-weight: 800 !important;
+        text-shadow:
+            0 0 20px rgba(59, 130, 246, 0.55),
+            0 0 2px rgba(255, 255, 255, 0.85) !important;
+        -webkit-text-stroke: 0.5px rgba(186, 224, 255, 0.5);
+    }
+    .quant-hero-shell .quant-hero-sub,
+    .quant-hero-shell .quant-hero-note {
+        color: #dbe9ff !important;
+    }
+
+    @media (max-width: 768px) {
+        [data-testid="stMainBlockContainer"] {
+            max-width: 100% !important;
+            padding-top: 0.5rem !important;
+            padding-left: 0.8rem;
+            padding-right: 0.8rem;
+        }
     }
 
     /* 隐藏顶部装饰 */
@@ -560,6 +589,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 inject_sidebar_toggle_style(mode="high_contrast")
+inject_quant_ops_header_style()
 
 # ==========================================
 # 初始化 Session State
@@ -774,6 +804,11 @@ with st.sidebar:
 # ==========================================
 # 📡 主内容区
 # ==========================================
+render_quant_ops_header(
+    "情报站",
+    "",
+    "AI结合市场数据和团队实战经验生成报告",
+)
 
 # ==========================================
 # 未登录提示
@@ -829,10 +864,6 @@ if st.session_state.get('show_notifications'):
 # ==========================================
 # 📺 频道选择
 # ==========================================
-st.markdown(
-    '<div class="section-header"><div class="section-icon"></div><h3 class="section-title">📡 情报订阅</h3></div>',
-    unsafe_allow_html=True)
-
 channels = sub_svc.get_all_channels()
 user_subs = sub_svc.get_user_subscriptions(user)
 user_sub_map = {s['channel_id']: s for s in user_subs}
