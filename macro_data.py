@@ -25,7 +25,7 @@ DB_NAME = os.getenv("DB_NAME")
 
 # 妫€鏌ラ厤缃槸鍚﹁鍙栨垚鍔?(闃叉 .env 娌￠厤濂芥姤閿?
 if not all([DB_USER, DB_PASSWORD, DB_HOST, DB_NAME]):
-    raise ValueError("鉂?鏁版嵁搴撻厤缃己澶憋紒璇锋鏌?.env 鏂囦欢涓槸鍚﹀寘鍚?DB_HOST, DB_USER, DB_PASSWORD 绛変俊鎭€?)
+    raise ValueError("数据库配置缺失，请检查 .env 中的 DB_HOST / DB_USER / DB_PASSWORD / DB_NAME")
 
 # 銆愪慨鏀圭偣銆戝姞涓婅繖涓楗板櫒
 @st.cache_resource
@@ -48,7 +48,7 @@ def get_china_us_spread():
     # 2. 璇诲彇
     df = pd.read_sql(sql, engine)
 
-    print(f"   -> 鏌ヨ缁撴灉: {len(df)} 鏉℃暟鎹?)
+    print(f"   -> 查询结果: {len(df)} 条数据")
 
     if df.empty:
         return pd.DataFrame()
@@ -91,7 +91,7 @@ def get_gold_silver_ratio():
         df = pd.read_sql(sql, engine)
 
         if df.empty:
-            print("鉂?鏈煡鍒?au/ag 鏁版嵁锛岃妫€鏌?futures_price 琛ㄣ€?)
+            print("未查询到 au/ag 数据，请检查 futures_price 表。")
             return pd.DataFrame()
 
         # 2. 鏁版嵁閫忚 (Long -> Wide)
