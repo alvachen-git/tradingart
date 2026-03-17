@@ -10,6 +10,7 @@ import sys
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, text
+from ui_components import inject_quant_ops_header_style, render_quant_ops_header
 
 # 1. 环境初始化
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
@@ -62,9 +63,26 @@ st.markdown("""
         font-family: 'PingFang SC', 'Microsoft YaHei', sans-serif;
     }
 
+    [data-testid="stMainBlockContainer"] {
+        max-width: 95rem !important;
+        padding-top: 0.8rem !important;
+        padding-bottom: 1.2rem !important;
+    }
+    .block-container {
+        padding-top: 0.8rem !important;
+    }
+    [data-testid="stDecoration"] {
+        display: none;
+    }
+    @media (max-width: 768px) {
+        [data-testid="stMainBlockContainer"] {
+            padding-top: 0.5rem !important;
+        }
+    }
+
     /* 隐藏顶部白条 */
     header[data-testid="stHeader"] {
-        background-color: #0f172a !important;
+        background-color: transparent !important;
     }
 
     /* 侧边栏 */
@@ -337,7 +355,12 @@ def calculate_beta_metrics(stock_code, benchmark_idx_code, benchmark_etf_code, f
 
 
 # 4. 页面主体
-st.title("Beta对冲分析")
+inject_quant_ops_header_style()
+render_quant_ops_header(
+    "Beta对冲分析",
+    "股票与基准Beta敞口测算",
+    "输出ETF/期指对冲手数建议与风险暴露参考。",
+)
 
 # --- 参数栏 ---
 with st.container():

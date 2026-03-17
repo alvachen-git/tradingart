@@ -13,6 +13,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 import market_correlation as mc
 import symbol_map as sm
+from ui_components import inject_quant_ops_header_style, render_quant_ops_header
 
 PAGE_NAME = "相关分析"
 _PAGE_T0 = time.perf_counter()
@@ -430,28 +431,12 @@ for codes in FUTURES_GROUPS.values():
 # ==========================================
 #  页面标题
 # ==========================================
-st.markdown("""
-<div style="margin-bottom: 16px;">
-    <h1 style="margin: 0; font-size: 26px; font-weight: 600; color: #e5e7eb; display: inline-flex; align-items: center;">
-        资产相关性分析
-        <span class="tooltip-container">
-            <span class="tooltip-icon">?</span>
-            <span class="tooltip-content">
-                <div class="tooltip-title">计算方法说明</div>
-                <div>本系统采用金融界最标准的 <span class="tooltip-highlight">皮尔逊积矩相关系数 (Pearson Correlation Coefficient)</span> 进行计算。</div>
-                <div style="margin-top: 8px;">计算基于 <span class="tooltip-highlight">日收益率 (Daily Returns)</span>，而非价格本身，以准确反映资产间的联动关系。</div>
-                <div style="margin-top: 8px;">当两个相关度很高的品种，近期价格波动幅度差距过大时，可以做多表现差的，做空表现好的，等待价差回归正常水平时平仓获利。</div>
-                <div style="margin-top: 8px; padding-top: 8px; border-top: 1px solid #374151; color: #9ca3af; font-size: 12px;">
-                    相关系数范围：-1 (完全负相关) 至 +1 (完全正相关)
-                </div>
-            </span>
-        </span>
-    </h1>
-    <p style="margin: 4px 0 0; font-size: 15px; color: #6b7280;">
-        持仓风险诊断 · 对冲机会发现
-    </p>
-</div>
-""", unsafe_allow_html=True)
+inject_quant_ops_header_style()
+render_quant_ops_header(
+    "资产相关性分析",
+    "持仓风险诊断 · 对冲机会发现",
+    "基于日收益率相关结构，识别联动关系与价差回归机会。",
+)
 
 st.markdown("<hr style='margin: 16px 0; border-color: #1f2937;'>", unsafe_allow_html=True)
 
