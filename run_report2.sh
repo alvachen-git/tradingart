@@ -13,60 +13,64 @@ log_line() {
 
 run_job() {
   local step="$1"
-  local script_name="$2"
+  shift
 
-  log_line ">>> [$step] 开始执行 ${script_name}..."
+  log_line ">>> [$step] START: $*"
 
-  if "$PYTHON_BIN" "$script_name" >> "$LOG_FILE" 2>&1; then
-    log_line "✅ [$step] ${script_name} 执行成功"
+  if "$PYTHON_BIN" "$@" >> "$LOG_FILE" 2>&1; then
+    log_line "✅ [$step] SUCCESS: $*"
   else
     local code=$?
-    log_line "❌ [$step] ${script_name} 执行失败，退出码: ${code}"
-    log_line "🛑 任务中断: $(date)"
+    log_line "❌ [$step] FAILED: $* (exit=${code})"
+    log_line "🛑 TASK ABORTED: $(date)"
     log_line "========================================"
     exit "$code"
   fi
 }
 
-# 1. 进入项目目录
+# 1) Enter app directory
 if ! cd "$APP_DIR"; then
-  echo "❌ 无法进入目录: $APP_DIR" >&2
+  echo "❌ Cannot enter directory: $APP_DIR" >&2
   exit 1
 fi
 
 if [ ! -x "$PYTHON_BIN" ]; then
-  log_line "❌ Python解释器不存在或不可执行: $PYTHON_BIN"
+  log_line "❌ Python interpreter not executable: $PYTHON_BIN"
   exit 1
 fi
 
-# 2. 打印开始时间到日志
+# 2) Start log
 log_line ""
 log_line "========================================"
-log_line "⏰ 任务开始: $(date)"
+log_line "⏰ REPORT JOB START: $(date)"
 
-# 3. 交易日门禁（非交易日或当日数据未就绪时跳过发布）
+# 3) Trading-day gate
 TODAY=$(date +%Y%m%d)
 LATEST_DB_DATE=$("$PYTHON_BIN" -c "from data_engine import get_latest_data_date; d=get_latest_data_date(); s=''.join(ch for ch in str(d) if ch.isdigit())[:8]; print(s)" 2>>"$LOG_FILE" || true)
 
 if [ -z "$LATEST_DB_DATE" ]; then
-  log_line "⏭️ 跳过：未能获取数据库最新交易日（门禁保护）"
-  log_line "✅ 任务结束: $(date)"
+  log_line "⏭️ SKIP: cannot get latest trading date from DB"
+  log_line "✅ REPORT JOB END: $(date)"
   log_line "========================================"
   exit 0
 fi
 
 if [ "$LATEST_DB_DATE" != "$TODAY" ]; then
-  log_line "⏭️ 跳过：非交易日或数据未更新（today=$TODAY latest_db=$LATEST_DB_DATE）"
-  log_line "✅ 任务结束: $(date)"
+  log_line "⏭️ SKIP: non-trading day or data not ready (today=$TODAY latest_db=$LATEST_DB_DATE)"
+  log_line "✅ REPORT JOB END: $(date)"
   log_line "========================================"
   exit 0
 fi
 
-# 4. 顺序执行（任一步失败即中断）
-run_job "1/3" "fund_flow_report_generator.py"
-run_job "2/3" "broker_position_generator.py"
-run_job "3/3" "expiry_option_generator.py"
+# 4) Execute in sequence (fail-fast)
+# Performance rule: only update today's cross-asset IV index (no historical backfill in cron).
+run_job "1/5" update_cross_asset_iv_index_daily.py
+run_job "2/5" fund_flow_report_generator.py
+run_job "3/5" broker_position_generator.py
+run_job "4/5" expiry_option_generator.py
+run_job "5/5" points_reconcile_daily.py
 
-# 5. 结束
-log_line "✅ 任务结束: $(date)"
+# 5) End
+log_line "✅ REPORT JOB END: $(date)"
 log_line "========================================"
+

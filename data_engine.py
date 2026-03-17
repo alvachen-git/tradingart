@@ -15,6 +15,15 @@ from langchain.agents import create_agent
 import tushare as ts
 from datetime import datetime, timedelta
 import streamlit as st
+from cross_asset_iv_index import (
+    CROSS_ASSET_IV_BASKET_VERSION,
+    CROSS_ASSET_IV_MIN_COVERAGE_PCT,
+    backfill_cross_asset_iv_index_history as _backfill_cross_asset_iv_index_history_impl,
+    get_cross_asset_iv_components as _cross_asset_iv_components_impl,
+    get_cross_asset_iv_index as _cross_asset_iv_index_impl,
+    get_cross_asset_iv_index_history as _cross_asset_iv_index_history_impl,
+    refresh_cross_asset_iv_index_for_date as _refresh_cross_asset_iv_index_for_date_impl,
+)
 
 # --- AI 模块 ---
 from langchain_community.chat_models import ChatTongyi
@@ -88,6 +97,90 @@ def _log_tool_startup_self_check():
 
 
 _log_tool_startup_self_check()
+
+
+# --- 跨资产 IV 温度指数（轻量接口） ---
+def get_cross_asset_iv_index(end_date=None, lookback=252, smooth_span=5, auto_compute=True):
+    """
+    获取跨资产 IV 温度指数（优先读日更结果表；缺失时轻量回退计算）。
+    """
+    return _cross_asset_iv_index_impl(
+        engine=engine,
+        sql_prefix_condition_fn=sql_prefix_condition,
+        end_date=end_date,
+        lookback=lookback,
+        smooth_span=smooth_span,
+        basket_version=CROSS_ASSET_IV_BASKET_VERSION,
+        auto_compute=auto_compute,
+    )
+
+
+def get_cross_asset_iv_components(trade_date=None, auto_compute=True):
+    """
+    获取跨资产 IV 温度指数组件明细。
+    """
+    return _cross_asset_iv_components_impl(
+        engine=engine,
+        sql_prefix_condition_fn=sql_prefix_condition,
+        trade_date=trade_date,
+        lookback=252,
+        smooth_span=5,
+        basket_version=CROSS_ASSET_IV_BASKET_VERSION,
+        auto_compute=auto_compute,
+    )
+
+
+def get_cross_asset_iv_index_history(days=252, end_date=None, start_date=None, min_coverage_pct=None):
+    """
+    获取跨资产 IV 温度指数历史（读结果表）。
+    """
+    return _cross_asset_iv_index_history_impl(
+        engine=engine,
+        end_date=end_date,
+        days=days,
+        start_date=start_date,
+        basket_version=CROSS_ASSET_IV_BASKET_VERSION,
+        min_coverage_pct=min_coverage_pct,
+    )
+
+
+def refresh_cross_asset_iv_index_for_date(trade_date=None, lookback=252, smooth_span=5, persist=True):
+    """
+    计算并可选落表指定交易日的跨资产 IV 温度指数。
+    """
+    return _refresh_cross_asset_iv_index_for_date_impl(
+        engine=engine,
+        sql_prefix_condition_fn=sql_prefix_condition,
+        trade_date=trade_date,
+        lookback=lookback,
+        smooth_span=smooth_span,
+        basket_version=CROSS_ASSET_IV_BASKET_VERSION,
+        persist=persist,
+    )
+
+
+def backfill_cross_asset_iv_index_history(
+    end_date=None,
+    days=252,
+    start_date=None,
+    lookback=252,
+    smooth_span=5,
+    only_missing=False,
+):
+    """
+    回填跨资产 IV 温度指数历史（按交易日顺序增量写入）。
+    """
+    return _backfill_cross_asset_iv_index_history_impl(
+        engine=engine,
+        sql_prefix_condition_fn=sql_prefix_condition,
+        end_date=end_date,
+        days=days,
+        start_date=start_date,
+        lookback=lookback,
+        smooth_span=smooth_span,
+        basket_version=CROSS_ASSET_IV_BASKET_VERSION,
+        only_missing=only_missing,
+    )
 
 
 # --- 新增：定义查库工具 ---
