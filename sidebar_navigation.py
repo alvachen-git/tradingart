@@ -110,6 +110,7 @@ def show_navigation():
         st.page_link("pages/02_商品期权.py", label="商品期权")
         st.page_link("pages/12_策略回测.py", label="策略回测")
         st.page_link("pages/04_排行榜.py", label="排行榜")
+        st.page_link("pages/10_跨资产IV温度.py", label="跨资产IV温度")
 
     # 量化分析（去掉icon）
     with st.expander("量化分析", expanded=False):
