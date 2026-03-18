@@ -96,6 +96,7 @@ COMMODITY_NAME_MAP = {
     "SA": "纯碱",
     "SH": "烧碱",
     "SC": "原油",
+    "BU": "沥青",
     "EB": "苯乙烯",
     "PP": "聚丙烯",
     "L": "塑料",
@@ -125,11 +126,14 @@ COMMODITY_NAME_MAP = {
     "ZC": "动力煤",
     "PF": "短纤",
     "PL": "丙烯",
+    "OP": "双胶纸",
     "SN": "锡",
+    "PB": "铅",
     "RU": "橡胶",
     "BR": "BR橡胶",
     "JD": "鸡蛋",
     "AO": "氧化铝",
+    "AD": "铝合金",
     "BZ": "纯苯",
     "LG": "原木",
     # 股指期权（中金所，存于 commodity_option_basic）
@@ -137,6 +141,28 @@ COMMODITY_NAME_MAP = {
     "HO": "上证50股指",
     "MO": "中证1000股指",
 }
+
+
+def normalize_etf_code(underlying: str) -> str:
+    """Normalize ETF underlying code to 6-digit form (e.g. 159915.SZ -> 159915)."""
+    raw = str(underlying or "").strip().upper()
+    if not raw:
+        return ""
+    if "." in raw:
+        raw = raw.split(".", 1)[0]
+    return raw
+
+
+def resolve_etf_name(underlying: str) -> str:
+    """Resolve ETF display name from either 6-digit code or full ts_code."""
+    raw = str(underlying or "").strip().upper()
+    base = normalize_etf_code(raw)
+    return ETF_NAME_MAP.get(raw) or ETF_NAME_MAP.get(base) or str(underlying)
+
+
+def resolve_commodity_name(underlying: str) -> str:
+    code = str(underlying or "").strip().upper()
+    return COMMODITY_NAME_MAP.get(code, str(underlying))
 
 
 # 股指期权 → 对应期货代码（用于查现价和K线分析）
@@ -246,9 +272,9 @@ def tool_get_expiring_options(days_ahead: int = 7) -> str:
 
         # 获取标的中文名
         if opt_type == "ETF期权":
-            name = ETF_NAME_MAP.get(str(underlying), underlying)
+            name = resolve_etf_name(str(underlying))
         else:
-            name = COMMODITY_NAME_MAP.get(str(underlying), underlying)
+            name = resolve_commodity_name(str(underlying))
 
         # 找ATM附近（持仓量最大的合约作为参考平值）
         atm_info = ""
@@ -297,7 +323,7 @@ def tool_get_underlying_price(underlying_code: str, option_type: str = "ETF期�
                 return f"未找到 {underlying_code} 的ETF价格数据"
             price = float(df.iloc[0]["close_price"])
             date = df.iloc[0]["trade_date"]
-            name = ETF_NAME_MAP.get(str(underlying_code), underlying_code)
+            name = resolve_etf_name(str(underlying_code))
             return f"{name}({underlying_code}) 最新价格: {price:.4f} 元  (数据日期: {date})"
 
         else:
@@ -317,7 +343,7 @@ def tool_get_underlying_price(underlying_code: str, option_type: str = "ETF期�
             price = float(df.iloc[0]["close_price"])
             ts_code = df.iloc[0]["ts_code"]
             date = df.iloc[0]["trade_date"]
-            name = COMMODITY_NAME_MAP.get(underlying_code.upper(), underlying_code)
+            name = resolve_commodity_name(underlying_code.upper())
             return f"{name}({ts_code}) 主力合约最新价: {price:.2f}  (数据日期: {date})"
 
     except Exception as e:
@@ -695,7 +721,7 @@ def get_expiring_underlying_list(days_ahead: int = 7) -> list[dict]:
                 "maturity_date": mat_str,
                 "contract_month": "",  # ETF无期货合约月份概念
                 "days_left": (mat - today).days,
-                "name": ETF_NAME_MAP.get(str(row["underlying"]), str(row["underlying"]))
+                "name": resolve_etf_name(str(row["underlying"]))
             })
     except Exception as e:
         print(f"ETF期权扫描错误: {e}")
@@ -731,7 +757,7 @@ def get_expiring_underlying_list(days_ahead: int = 7) -> list[dict]:
                 "maturity_date": mat_str,
                 "contract_month": contract_month,  # 从ts_code提取的期货合约月份（如2504）
                 "days_left": (mat - today).days,
-                "name": COMMODITY_NAME_MAP.get(product, product)
+                "name": resolve_commodity_name(product)
             })
     except Exception as e:
         print(f"商品期权扫描错误: {e}")
@@ -1110,6 +1136,29 @@ def clean_generated_html(raw_html: str) -> str:
     return html.replace("```html", "").replace("```", "").strip()
 
 
+def enforce_symbol_label_consistency(html: str, sections: list[dict]) -> str:
+    """
+    Normalize mismatched labels like `159915.SZ(豆粕ETF)` to canonical names from section mapping.
+    Only rewrites `code(name)` fragments to avoid touching contract rows.
+    """
+    fixed = html or ""
+    for section in sections or []:
+        code = str(section.get("underlying") or "").strip()
+        opt_type = str(section.get("option_type") or "").strip()
+        if opt_type == "ETF期权":
+            canonical_name = resolve_etf_name(code)
+        else:
+            canonical_name = resolve_commodity_name(code)
+
+        canonical_name = str(canonical_name or "").strip()
+        if not code or not canonical_name or canonical_name == code:
+            continue
+
+        pattern = rf"({re.escape(code)})\s*[（(][^）)<]*[）)]"
+        fixed = re.sub(pattern, rf"\1（{canonical_name}）", fixed, flags=re.IGNORECASE)
+    return fixed
+
+
 def build_repair_prompt(original_html: str, sections: list[dict], missing: list[dict]) -> str:
     lines = [
         "你刚生成的末日期权晚报 HTML 存在多腿策略缺腿问题。",
@@ -1235,6 +1284,7 @@ def build_prompt(sections: list[dict]) -> str:
 
     for i, s in enumerate(sections, 1):
         lines.append(f"\n【标的 {i}】{s['name']}（{s['underlying']}）{s['option_type']}")
+        lines.append(f"名称约束：该标的中文名固定为「{s['name']}」，不得改写为其他品种名；若代码与名称同显，请写成「{s['underlying']}（{s['name']}）」")
         lines.append(f"到期日：{s['maturity_date']} | 剩余天数：{s['days_left']}天")
         if s['current_price']:
             lines.append(f"标的现价：{s['current_price']}")
@@ -1314,6 +1364,11 @@ def generate_report(sections: list[dict]) -> str:
             print(f"  ⚠️ 修复后仍有缺失腿未补齐：{missing_codes}")
         else:
             print("  ✅ 多腿策略缺腿已自动修复。")
+
+    fixed_html = enforce_symbol_label_consistency(html, sections)
+    if fixed_html != html:
+        print("  ⚠️ 检测到标的名称错配，已按代码映射自动纠偏。")
+        html = fixed_html
 
     return html
 
