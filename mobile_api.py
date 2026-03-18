@@ -19,7 +19,8 @@ mobile_api.py — 爱波塔手机端专用 FastAPI 后端
 
   GET    /api/intel/reports             获取情报站晚报列表（支持分页/频道筛选）
   GET    /api/intel/report/{id}         获取单篇晚报完整内容
-  POST   /api/intel/subscribe           订阅免费频道
+  POST   /api/intel/subscribe           订阅白名单频道
+  POST   /api/alipay/notify             支付宝异步回调通知（验签+到账）
 
   GET    /api/market/snapshot           综合行情快照
 
@@ -43,8 +44,9 @@ from datetime import datetime
 from typing import Optional, List
 
 import redis
-from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, Query
+from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import PlainTextResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 
@@ -54,6 +56,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import auth_utils as auth
 from task_manager import TaskManager
 import subscription_service as sub_svc
+import payment_service as pay_svc
 import data_engine as de
 from vision_tools import analyze_portfolio_image
 from mobile_trading_day import enrich_prices_payload_with_trading_day
@@ -559,8 +562,13 @@ def chat_status(task_id: str, username: str = Depends(get_current_user)):
 #  INTEL — 情报站晚报
 # ════════════════════════════════════════════════════════════
 
-# 可以自助订阅的免费频道名称
-_FREE_CHANNEL_NAMES = {"复盘晚报", "末日期权晚报", "期货商持仓分析晚报"}
+# 可以自助订阅的频道 code 白名单（默认空，环境变量灰度开启）
+# 示例: FREE_SELF_SUBSCRIBE_CHANNEL_CODES=daily_report,expiry_option_radar
+_FREE_CHANNEL_CODES = {
+    item.strip().lower()
+    for item in str(os.getenv("FREE_SELF_SUBSCRIBE_CHANNEL_CODES", "")).split(",")
+    if item.strip()
+}
 
 
 @app.get("/api/intel/reports", tags=["情报站"])
@@ -616,6 +624,10 @@ def intel_report_detail(
     content = sub_svc.get_content_by_id(report_id)
     if not content:
         raise HTTPException(status_code=404, detail="内容不存在或已下架")
+    if content.get("is_premium"):
+        access = sub_svc.check_subscription_access(username, int(content.get("channel_id") or 0))
+        if not access.get("has_access"):
+            raise HTTPException(status_code=403, detail="该内容需要订阅后查看")
     return content
 
 
@@ -624,12 +636,15 @@ def intel_subscribe(
     body: SubscribeRequest,
     username: str = Depends(get_current_user),
 ):
-    """订阅免费情报频道（复盘晚报 / 末日期权晚报 / 期货商持仓分析晚报）。"""
-    channel = sub_svc.get_channel_by_code(body.channel_code)
+    """订阅白名单情报频道（默认关闭，通过环境变量灰度开启）。"""
+    channel_code = str(body.channel_code or "").strip()
+    if not channel_code:
+        raise HTTPException(status_code=400, detail="channel_code 不能为空")
+    channel = sub_svc.get_channel_by_code(channel_code)
     if not channel:
         raise HTTPException(status_code=404, detail="频道不存在")
 
-    if channel.get("name") not in _FREE_CHANNEL_NAMES:
+    if channel_code.lower() not in _FREE_CHANNEL_CODES:
         raise HTTPException(status_code=403, detail="该频道需要人工开通，请联系客服")
 
     result = sub_svc.add_subscription(username, channel["id"], days=3650)
@@ -642,6 +657,27 @@ def intel_subscribe(
     if not success:
         raise HTTPException(status_code=400, detail=msg)
     return {"message": msg}
+
+
+@app.post("/api/alipay/notify", tags=["支付"])
+async def alipay_notify(request: Request):
+    """
+    支付宝异步回调端点：
+    - 不走 JWT 鉴权
+    - 回调成功必须返回纯文本 success
+    """
+    try:
+        form_data = await request.form()
+        payload = {str(k): str(v) for k, v in form_data.items()}
+    except Exception as exc:
+        print(f"[mobile_api][alipay_notify] parse_form_failed err={exc}")
+        return PlainTextResponse("failure", status_code=200)
+
+    ok, reason = pay_svc.process_alipay_notify(payload)
+    if ok:
+        return PlainTextResponse("success", status_code=200)
+    print(f"[mobile_api][alipay_notify] failed reason={reason}")
+    return PlainTextResponse("failure", status_code=200)
 
 
 # ════════════════════════════════════════════════════════════
