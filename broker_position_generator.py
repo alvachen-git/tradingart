@@ -161,6 +161,36 @@ def get_db_broker_name(broker_name: str) -> str:
     return BROKER_DB_NAMES.get(broker_name, broker_name)
 
 
+def _normalize_broker_base_name(broker_name: str) -> str:
+    name = str(broker_name or "").strip()
+    name = name.replace("（代客）", "").replace("(代客)", "").strip()
+    return name
+
+
+def _expand_broker_names(broker_name: str) -> list[str]:
+    """
+    数据库中同一机构可能同时存在：
+    - 无后缀（海通期货）
+    - 全角代客（海通期货（代客））
+    - 半角代客（海通期货(代客)）
+    查询前统一展开，避免跨交易所品种被漏算。
+    """
+    primary = str(broker_name or "").strip()
+    base = _normalize_broker_base_name(primary)
+    candidates = {primary, base}
+    if base:
+        candidates.add(f"{base}（代客）")
+        candidates.add(f"{base}(代客)")
+    return [x for x in candidates if x]
+
+
+def _expand_broker_list(brokers_db: list[str]) -> list[str]:
+    expanded = set()
+    for broker in brokers_db or []:
+        expanded.update(_expand_broker_names(broker))
+    return sorted(expanded)
+
+
 def _extract_product_code(ts_code: str) -> str:
     match = re.match(r"([A-Za-z]+)", str(ts_code or ""))
     return match.group(1).upper() if match else ""
@@ -179,11 +209,12 @@ def _query_group_product_net_changes(brokers_db: list[str], start_date: str, end
     """
     d1 = _normalize_trade_date(start_date)
     d2 = _normalize_trade_date(end_date)
-    if not brokers_db or len(d1) != 8 or len(d2) != 8:
+    query_brokers = _expand_broker_list(brokers_db)
+    if not query_brokers or len(d1) != 8 or len(d2) != 8:
         return []
 
     try:
-        brokers_sql = ",".join("'" + str(b).replace("'", "''") + "'" for b in brokers_db)
+        brokers_sql = ",".join("'" + str(b).replace("'", "''") + "'" for b in query_brokers)
         sql = f"""
             SELECT
                 broker,
