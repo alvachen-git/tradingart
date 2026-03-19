@@ -182,6 +182,43 @@ def get_user_subscriptions(user_id: str) -> List[Dict]:
         return []
 
 
+def get_channel_email_subscribers(channel_code: str) -> List[Dict]:
+    """
+    获取某频道开启邮件通知且订阅有效的用户邮箱。
+
+    Returns:
+        [{"user_id": "...", "email": "..."}, ...]
+    """
+    try:
+        with engine.connect() as conn:
+            sql = text("""
+                       SELECT us.user_id, u.email
+                       FROM user_subscriptions us
+                                JOIN content_channels c ON us.channel_id = c.id
+                                JOIN users u ON u.username = us.user_id
+                       WHERE c.code = :code
+                         AND us.is_active = 1
+                         AND us.notify_email = 1
+                         AND (us.expire_at IS NULL OR us.expire_at > NOW())
+                         AND u.email IS NOT NULL
+                         AND u.email != ''
+                       ORDER BY us.user_id
+                       """)
+            rows = conn.execute(sql, {"code": channel_code}).fetchall()
+
+        results = []
+        for row in rows:
+            user_id = str(row[0] or "").strip()
+            email = str(row[1] or "").strip()
+            if not user_id or not email or "@" not in email:
+                continue
+            results.append({"user_id": user_id, "email": email})
+        return results
+    except Exception as e:
+        print(f"获取频道邮件订阅用户失败: {e}")
+        return []
+
+
 def add_subscription(user_id: str, channel_id: int, days: int = 30) -> tuple:
     """
     为用户添加订阅

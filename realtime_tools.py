@@ -7,6 +7,23 @@ import requests
 import datetime
 import re
 
+_SINA_HEADERS = {
+    "Referer": "http://finance.sina.com.cn/",
+    "User-Agent": "Mozilla/5.0",
+}
+
+
+def _build_sina_session() -> requests.Session:
+    """
+    所有新浪请求统一使用独立 Session：
+    - 显式 trust_env=False，避免继承系统代理导致 SOCKS 依赖错误。
+    - 固定请求头，降低 403/空响应概率。
+    """
+    session = requests.Session()
+    session.trust_env = False
+    session.headers.update(_SINA_HEADERS)
+    return session
+
 
 # ==========================================
 #  1. 辅助：替身生成器
@@ -138,9 +155,9 @@ def get_future_snapshot(symbol: str):
         # 或者用 ak.futures_zh_spot() 查全市场 (较慢)
 
         # 这里混用一下原生 request，因为它作为 Tool 使用频率高，要求速度
-        import requests
         url = f"http://hq.sinajs.cn/list={sina_sym}"
-        resp = requests.get(url, timeout=2)
+        session = _build_sina_session()
+        resp = session.get(url, timeout=2)
 
         if '="' in resp.text:
             data = resp.text.split('="')[1]
@@ -229,13 +246,14 @@ def get_realtime_prices_batch(symbol_list: list):
     batch_size = 50
     all_codes_list = list(all_sina_codes)
     price_cache = {}  # { 'nf_ag2606': {'price': 7100, 'name': '白银'} }
+    session = _build_sina_session()
 
     for i in range(0, len(all_codes_list), batch_size):
         chunk = all_codes_list[i:i + batch_size]
         url = f"http://hq.sinajs.cn/list={','.join(chunk)}"
 
         try:
-            resp = requests.get(url, timeout=2)
+            resp = session.get(url, timeout=2)
             # 解析返回数据: var hq_str_nf_ag2606="白银2606,5800...";
             lines = resp.text.split(';')
             for line in lines:
