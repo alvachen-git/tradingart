@@ -1,0 +1,277 @@
+from sqlalchemy import create_engine, text
+
+from industry_chain_tools import (
+    _build_flow_edges,
+    _sort_stage_companies,
+    calc_fund_signal,
+    get_chain_snapshot,
+    scale_flow_width,
+    split_net_flow,
+)
+
+
+def _seed_sqlite(engine):
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                CREATE TABLE daily_stock_screener (
+                    trade_date TEXT,
+                    ts_code TEXT,
+                    name TEXT,
+                    industry TEXT,
+                    pattern TEXT,
+                    ma_trend TEXT,
+                    score INTEGER
+                )
+                """
+            )
+        )
+        conn.execute(
+            text(
+                """
+                CREATE TABLE stock_moneyflow_daily (
+                    trade_date TEXT,
+                    ts_code TEXT,
+                    net_mf_amount REAL,
+                    main_net_amount REAL,
+                    small_mid_net_amount REAL
+                )
+                """
+            )
+        )
+        conn.execute(
+            text(
+                """
+                CREATE TABLE stock_company_profile_cache (
+                    ts_code TEXT,
+                    company_name TEXT,
+                    main_business TEXT,
+                    business_scope TEXT,
+                    domain_tags TEXT,
+                    tags_updated_at TEXT
+                )
+                """
+            )
+        )
+
+        conn.execute(
+            text(
+                """
+                INSERT INTO daily_stock_screener
+                (trade_date, ts_code, name, industry, pattern, ma_trend, score)
+                VALUES
+                ('20260319','000001.SZ','甲公司','半导体','平台突破','多头',90),
+                ('20260319','000002.SZ','乙公司','半导体','上升三法','多头',80),
+                ('20260319','000003.SZ','丙公司','半导体','','震荡',70)
+                """
+            )
+        )
+
+        conn.execute(
+            text(
+                """
+                INSERT INTO stock_moneyflow_daily
+                (trade_date, ts_code, net_mf_amount, main_net_amount, small_mid_net_amount)
+                VALUES
+                ('20260319','000001.SZ',0,100,0),
+                ('20260318','000001.SZ',0,50,0),
+                ('20260319','000002.SZ',0,80,0),
+                ('20260318','000002.SZ',0,-20,0),
+                ('20260319','000003.SZ',0,-10,0),
+                ('20260318','000003.SZ',0,-30,0)
+                """
+            )
+        )
+
+        conn.execute(
+            text(
+                """
+                INSERT INTO stock_company_profile_cache
+                (ts_code, company_name, main_business, business_scope, domain_tags, tags_updated_at)
+                VALUES
+                ('000001.SZ','甲公司','主营芯片设计','经营范围A','芯片设计|AI算力','2026-03-19 18:00:00'),
+                ('000002.SZ','乙公司','主营封测','经营范围B','封装测试','2026-03-19 18:00:00')
+                """
+            )
+        )
+
+
+def test_calc_fund_signal():
+    assert calc_fund_signal(10, 20) == "持续流入"
+    assert calc_fund_signal(-1, 20) == "短线分歧"
+    assert calc_fund_signal(1, -2) == "反抽修复"
+    assert calc_fund_signal(-1, -2) == "持续流出"
+
+
+def test_get_chain_snapshot_merges_pattern_fund_domain_tags():
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    _seed_sqlite(engine)
+
+    templates = {
+        "半导体": {
+            "display_name": "半导体产业链",
+            "stages": [
+                {"id": "mid_design", "name": "中游-IC设计"},
+                {"id": "mid_pack", "name": "中游-封测"},
+            ],
+            "edges": [["mid_design", "mid_pack"]],
+        }
+    }
+    stage_member_map = {
+        "mid_design": [{"ts_code": "000001.SZ", "name": "甲公司"}, {"ts_code": "000003.SZ", "name": "丙公司"}],
+        "mid_pack": [{"ts_code": "000002.SZ", "name": "乙公司"}],
+    }
+
+    snap = get_chain_snapshot(
+        sector_name="半导体",
+        limit_per_stage=10,
+        engine=engine,
+        pro=None,
+        templates=templates,
+        stage_member_map=stage_member_map,
+    )
+
+    assert snap["meta"]["screener_trade_date"] == "20260319"
+    assert snap["meta"]["fund_trade_date"] == "20260319"
+    assert len(snap["stages"]) == 2
+
+    first_stage = snap["stages"][0]
+    assert first_stage["name"] == "中游-IC设计"
+    assert len(first_stage["companies"]) == 2
+
+    top = first_stage["companies"][0]
+    assert top["ts_code"] == "000001.SZ"
+    assert top["pattern"] == "平台突破"
+    assert top["main_net_amount_1d"] == 100.0
+    assert top["main_net_amount_5d"] == 150.0
+    assert top["domain_tags_text"] == "芯片设计 / AI算力"
+    assert "fund_signal" in top
+    assert "net_flow_5d" in first_stage
+    assert "net_flow_5d_history" in first_stage
+    assert isinstance(first_stage["net_flow_5d_history"], list)
+    assert "flow_in_external" in first_stage
+    assert "flow_out_external" in first_stage
+    assert "flow_window" in snap["meta"]
+    assert "flow_semantics" in snap["meta"]
+    assert "fund_history_dates" in snap["meta"]
+
+
+def test_sort_prefers_market_cap_then_five_day_flow_then_score():
+    rows = [
+        {"ts_code": "A", "market_cap": 1000, "main_net_amount_5d": 10, "score": 90, "main_net_amount_1d": 1},
+        {"ts_code": "B", "market_cap": 1200, "main_net_amount_5d": -100, "score": 10, "main_net_amount_1d": 1},
+        {"ts_code": "C", "market_cap": 1000, "main_net_amount_5d": 30, "score": 30, "main_net_amount_1d": 1},
+        {"ts_code": "D", "market_cap": 1000, "main_net_amount_5d": 30, "score": 80, "main_net_amount_1d": 1},
+    ]
+    out = _sort_stage_companies(rows, limit_per_stage=10)
+    # B 市值最高，应优先
+    assert out[0]["ts_code"] == "B"
+    # C 与 D 市值/5D相同，按 score 排
+    assert out[1]["ts_code"] == "D"
+    assert out[2]["ts_code"] == "C"
+
+
+def test_split_net_flow_decomposition():
+    p, o = split_net_flow(12.3)
+    assert p == 12.3
+    assert o == 0.0
+
+    p, o = split_net_flow(-8.8)
+    assert p == 0.0
+    assert o == 8.8
+
+    p, o = split_net_flow(0)
+    assert p == 0.0
+    assert o == 0.0
+
+
+def test_internal_flow_allocation_sums_to_positive_inflow():
+    stage_results = [
+        {"id": "a", "net_flow_5d": 100.0, "net_flow_1d": 0.0},
+        {"id": "b", "net_flow_5d": 60.0, "net_flow_1d": 0.0},
+        {"id": "c", "net_flow_5d": 20.0, "net_flow_1d": 0.0},
+    ]
+    edges = [["a", "b"], ["a", "c"]]
+    flow_edges, _, _ = _build_flow_edges(stage_results, edges, flow_window="5D")
+    internal = [x for x in flow_edges if x["flow_type"] == "internal" and x["source"] == "a"]
+    assert len(internal) == 2
+    total = sum(float(x["flow_value_abs"]) for x in internal)
+    assert abs(total - 100.0) < 1e-6
+
+
+def test_external_balance_logic():
+    stage_results = [
+        {"id": "a", "net_flow_5d": 100.0, "net_flow_1d": 0.0},
+        {"id": "b", "net_flow_5d": -30.0, "net_flow_1d": 0.0},
+        {"id": "c", "net_flow_5d": 10.0, "net_flow_1d": 0.0},
+    ]
+    edges = [["a", "b"], ["a", "c"]]
+    flow_edges, flow_in_external, flow_out_external = _build_flow_edges(
+        stage_results, edges, flow_window="5D"
+    )
+    assert flow_out_external["b"] == 30.0
+    # c 只收到 a 的内部流，链外流入应为 0
+    assert abs(flow_in_external["c"]) < 1e-6
+    # b 自身净流出，不应有链外流入
+    assert abs(flow_in_external["b"]) < 1e-6
+    # a 无上游承接，净流入应归入链外流入
+    assert abs(flow_in_external["a"] - 100.0) < 1e-6
+    # 存在 b -> 链外流出 的边
+    assert any(
+        x["flow_type"] == "external_out" and x["source"] == "b"
+        for x in flow_edges
+    )
+
+
+def test_scale_flow_width_log_monotonic():
+    w1 = scale_flow_width(10, mode="log")
+    w2 = scale_flow_width(100, mode="log")
+    w3 = scale_flow_width(1000, mode="log")
+    assert w1 < w2 < w3
+
+
+def test_no_internal_allocation_when_downstream_not_positive():
+    stage_results = [
+        {"id": "up", "net_flow_5d": 120.0, "net_flow_1d": 0.0},
+        {"id": "mid", "net_flow_5d": -50.0, "net_flow_1d": 0.0},
+    ]
+    edges = [["up", "mid"]]
+    flow_edges, flow_in_external, _ = _build_flow_edges(stage_results, edges, flow_window="5D")
+    internal = [x for x in flow_edges if x["flow_type"] == "internal"]
+    assert len(internal) == 1
+    assert abs(float(internal[0]["flow_value_abs"])) < 1e-6
+    # 上游净流入无法被下游承接，应体现在链外流入
+    assert abs(flow_in_external["up"] - 120.0) < 1e-6
+
+
+def test_snapshot_contains_three_day_fund_history_metadata():
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    _seed_sqlite(engine)
+    templates = {
+        "半导体": {
+            "display_name": "半导体产业链",
+            "stages": [
+                {"id": "up", "name": "上游"},
+            ],
+            "edges": [],
+        }
+    }
+    stage_member_map = {
+        "up": [{"ts_code": "000001.SZ", "name": "甲公司"}],
+    }
+    snap = get_chain_snapshot(
+        sector_name="半导体",
+        limit_per_stage=10,
+        engine=engine,
+        pro=None,
+        templates=templates,
+        stage_member_map=stage_member_map,
+    )
+    hist_dates = snap["meta"].get("fund_history_dates", [])
+    assert isinstance(hist_dates, list)
+    assert hist_dates[0] == "20260319"
+    stage_hist = snap["stages"][0].get("net_flow_5d_history", [])
+    assert isinstance(stage_hist, list)
+    assert stage_hist
+    assert stage_hist[0]["trade_date"] == "20260319"

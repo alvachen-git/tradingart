@@ -1,0 +1,51 @@
+{
+  "半导体": {
+    "display_name": "半导体产业链",
+    "stages": [
+      {
+        "id": "up_material",
+        "name": "上游-材料",
+        "ths_index_codes": ["884091.TI"]
+      },
+      {
+        "id": "up_equipment",
+        "name": "上游-设备",
+        "ths_index_codes": ["884229.TI"]
+      },
+      {
+        "id": "mid_design",
+        "name": "中游-IC设计",
+        "ths_index_codes": ["884287.TI", "884288.TI"]
+      },
+      {
+        "id": "mid_fab",
+        "name": "中游-晶圆制造",
+        "ths_index_codes": ["884227.TI"]
+      },
+      {
+        "id": "mid_packaging",
+        "name": "中游-封测",
+        "ths_index_codes": ["884228.TI"]
+      },
+      {
+        "id": "downstream",
+        "name": "下游-应用",
+        "ths_index_codes": ["881121.TI"],
+        "exclude_stage_ids": [
+          "up_material",
+          "up_equipment",
+          "mid_design",
+          "mid_fab",
+          "mid_packaging"
+        ]
+      }
+    ],
+    "edges": [
+      ["up_material", "mid_design"],
+      ["up_equipment", "mid_fab"],
+      ["mid_design", "mid_fab"],
+      ["mid_fab", "mid_packaging"],
+      ["mid_packaging", "downstream"]
+    ]
+  }
+}

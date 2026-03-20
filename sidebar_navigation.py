@@ -119,6 +119,7 @@ def show_navigation():
         st.page_link("pages/06_相关分析.py", label="相关分析")
         st.page_link("pages/07_对冲分析.py", label="对冲分析")
         st.page_link("pages/08_股票资金.py", label="股票资金")
+        st.page_link("pages/21_产业链图谱.py", label="产业链图谱")
         # st.page_link("pages/美股.py", label="美股")  # 暂不上线
 
     # K线游戏（去掉icon）
