@@ -250,6 +250,7 @@ def _build_flow_bubble_chart(snapshot: dict, flow_window: str, scale_mode: str) 
         return fig
 
     stage_names = [str(s.get("name") or "") for s in stages]
+    stage_x = list(range(len(stage_names)))
     net_1d = [float(s.get("net_flow_1d") or 0.0) for s in stages]
     net_5d = [float(s.get("net_flow_5d") or 0.0) for s in stages]
     ext_in = [float(s.get("flow_in_external") or 0.0) for s in stages]
@@ -275,24 +276,28 @@ def _build_flow_bubble_chart(snapshot: dict, flow_window: str, scale_mode: str) 
                     vals.append(float(hist_map.get(d, 0.0)))
             period_defs.append(
                 {
-                    "label": "当日5D" if idx == 0 else f"前{idx}日5D",
+                    "label": "当日主力资金流" if idx == 0 else f"{idx}天前主力资金流",
                     "trade_date": d,
                     "values": vals,
-                    "alpha": [0.88, 0.45, 0.25][min(idx, 2)],
-                    "size_scale": [1.0, 0.88, 0.76][min(idx, 2)],
+                    "alpha": [0.90, 0.62, 0.46][min(idx, 2)],
+                    "size_scale": [1.0, 0.86, 0.74][min(idx, 2)],
                     "symbol": ["circle", "circle-open", "diamond-open"][min(idx, 2)],
+                    "hollow": idx > 0,
+                    "draw_order": 2 - min(idx, 2),
                     "show_text": idx == 0,
                 }
             )
     else:
         period_defs.append(
             {
-                "label": "当日1D",
+                "label": "当日主力资金流",
                 "trade_date": str(meta.get("fund_trade_date") or ""),
                 "values": net_1d,
                 "alpha": 0.88,
                 "size_scale": 1.0,
                 "symbol": "circle",
+                "hollow": False,
+                "draw_order": 2,
                 "show_text": True,
             }
         )
@@ -312,20 +317,39 @@ def _build_flow_bubble_chart(snapshot: dict, flow_window: str, scale_mode: str) 
         return (14.0 + 50.0 * (t / max_t)) * size_scale
 
     fig = go.Figure()
-    for p in period_defs:
+    render_defs = sorted(period_defs, key=lambda x: int(x.get("draw_order", 0)))
+    for p in render_defs:
         values = [float(v) for v in p["values"]]
         sizes = [_bubble_size(abs(v), float(p["size_scale"])) for v in values]
         colors = []
+        line_colors = []
+        is_hollow = bool(p.get("hollow", False))
         for v in values:
             if v > 0:
-                colors.append(f"rgba(37,99,235,{float(p['alpha']):.3f})")
+                if is_hollow:
+                    colors.append("rgba(96,165,250,0.98)")
+                    line_colors.append("rgba(96,165,250,0.98)")
+                else:
+                    colors.append(f"rgba(37,99,235,{float(p['alpha']):.3f})")
+                    line_colors.append("rgba(147,197,253,0.92)")
             elif v < 0:
-                colors.append(f"rgba(220,38,38,{float(p['alpha']):.3f})")
+                if is_hollow:
+                    colors.append("rgba(251,113,133,0.98)")
+                    line_colors.append("rgba(251,113,133,0.98)")
+                else:
+                    colors.append(f"rgba(220,38,38,{float(p['alpha']):.3f})")
+                    line_colors.append("rgba(253,164,175,0.92)")
             else:
-                colors.append(f"rgba(107,114,128,{max(0.18, float(p['alpha']) * 0.8):.3f})")
+                if is_hollow:
+                    colors.append("rgba(203,213,225,0.92)")
+                    line_colors.append("rgba(203,213,225,0.92)")
+                else:
+                    colors.append(f"rgba(107,114,128,{max(0.22, float(p['alpha']) * 0.8):.3f})")
+                    line_colors.append("rgba(203,213,225,0.9)")
 
         text_vals = [f"{v / 10000.0:+.2f}亿" for v in values] if p["show_text"] else [""] * len(values)
         mode_text = "markers+text" if p["show_text"] else "markers"
+        x_vals = stage_x
         customdata = [
             [
                 str(p["trade_date"]),
@@ -336,12 +360,13 @@ def _build_flow_bubble_chart(snapshot: dict, flow_window: str, scale_mode: str) 
                 ext_out[i],
                 company_cnt[i],
                 abs(values[i]),
+                stage_names[i],
             ]
             for i in range(len(stages))
         ]
         fig.add_trace(
             go.Scatter(
-                x=stage_names,
+                x=x_vals,
                 y=values,
                 mode=mode_text,
                 text=text_vals,
@@ -352,11 +377,11 @@ def _build_flow_bubble_chart(snapshot: dict, flow_window: str, scale_mode: str) 
                     size=sizes,
                     symbol=str(p["symbol"]),
                     color=colors,
-                    line=dict(color="rgba(219,234,254,0.35)", width=1),
+                    line=dict(color=line_colors, width=1.8),
                 ),
                 customdata=customdata,
                 hovertemplate=(
-                    "环节: %{x}<br>"
+                    "环节: %{customdata[8]}<br>"
                     "口径日期: %{customdata[0]}<br>"
                     "该期净流(万元): %{customdata[3]:,.2f}<br>"
                     "当日1D净流(万元): %{customdata[1]:,.2f}<br>"
@@ -371,13 +396,15 @@ def _build_flow_bubble_chart(snapshot: dict, flow_window: str, scale_mode: str) 
 
     fig.update_layout(
         height=460,
-        margin=dict(l=8, r=8, t=12, b=8),
+        margin=dict(l=8, r=8, t=56, b=8),
         font=dict(color="#dbeafe", family='"Rajdhani", "Noto Sans SC", sans-serif'),
         xaxis=dict(
             title="产业链环节",
             tickfont=dict(size=13, color="#dbeafe"),
-            categoryorder="array",
-            categoryarray=stage_names,
+            tickmode="array",
+            tickvals=stage_x,
+            ticktext=stage_names,
+            range=[-0.6, max(stage_x) + 0.6] if stage_x else None,
             gridcolor="rgba(120,149,204,0.20)",
             linecolor="rgba(120,149,204,0.34)",
         ),
@@ -390,7 +417,16 @@ def _build_flow_bubble_chart(snapshot: dict, flow_window: str, scale_mode: str) 
             gridcolor="rgba(120,149,204,0.20)",
             linecolor="rgba(120,149,204,0.34)",
         ),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0.0),
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.03,
+            x=0.0,
+            font=dict(size=14, color="#eef4ff"),
+            bgcolor="rgba(6, 15, 33, 0.72)",
+            bordercolor="rgba(120,149,204,0.42)",
+            borderwidth=1,
+        ),
         plot_bgcolor="rgba(9, 21, 44, 0.75)",
         paper_bgcolor="rgba(0,0,0,0)",
     )
