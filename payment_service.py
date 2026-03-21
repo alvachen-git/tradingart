@@ -30,10 +30,10 @@ import subscription_service as sub_svc
 
 
 POINTS_PACKAGES = [
-    {"name": "体验包", "rmb": Decimal("30.00"), "points": 300},
-    {"name": "标准包", "rmb": Decimal("50.00"), "points": 500},
-    {"name": "超值包", "rmb": Decimal("100.00"), "points": 1100},
-    {"name": "年费包", "rmb": Decimal("500.00"), "points": 6000},
+    {"name": "体验包", "rmb": Decimal("50.00"), "points": 500},
+    {"name": "标准包", "rmb": Decimal("100.00"), "points": 1000},
+    {"name": "超值包", "rmb": Decimal("500.00"), "points": 6000},
+    {"name": "富豪包", "rmb": Decimal("5000.00"), "points": 80000},
 ]
 _PACKAGES_MAP = {item["name"]: item for item in POINTS_PACKAGES}
 
@@ -449,7 +449,7 @@ def process_alipay_notify(data: Dict[str, Any]) -> tuple[bool, str]:
         return False, "db_error"
 
 
-def deduct_points(
+def _legacy_deduct_points(
     user_id: str,
     amount: int,
     *,
@@ -493,6 +493,78 @@ def deduct_points(
                 biz_id=biz_id,
             )
             return True, "ok"
+    except IntegrityError as exc:
+        print(f"[payment][deduct] integrity user={user_id} biz={biz_id} err={exc}")
+        return True, "already_processed"
+    except Exception as exc:
+        print(f"[payment][deduct] user={user_id} err={exc}")
+        return False, "扣点失败"
+
+
+def _deduct_points_in_tx(
+    conn,
+    user_id: str,
+    amount: int,
+    *,
+    ref_id: Optional[str],
+    description: Optional[str],
+    biz_id: Optional[str] = None,
+) -> tuple[bool, str]:
+    if amount <= 0:
+        return False, "amount_must_be_positive"
+
+    if _tx_exists(conn, user_id, "spend", biz_id):
+        return True, "already_processed"
+
+    _ensure_points_row(conn, user_id)
+    balance = _get_balance(conn, user_id, for_update=True) or 0
+    if balance < amount:
+        return False, "余额不足"
+
+    conn.execute(
+        text(
+            """
+            UPDATE user_points
+            SET balance = balance - :amt,
+                total_spent = total_spent + :amt,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE user_id = :uid
+            """
+        ),
+        {"uid": user_id, "amt": amount},
+    )
+    balance_after = _get_balance(conn, user_id, for_update=False) or 0
+    _insert_tx(
+        conn,
+        user_id=user_id,
+        tx_type="spend",
+        amount=-amount,
+        balance_after=balance_after,
+        ref_id=ref_id,
+        description=description,
+        biz_id=biz_id,
+    )
+    return True, "ok"
+
+
+def deduct_points(
+    user_id: str,
+    amount: int,
+    *,
+    ref_id: Optional[str],
+    description: Optional[str],
+    biz_id: Optional[str] = None,
+) -> tuple[bool, str]:
+    try:
+        with engine.begin() as conn:
+            return _deduct_points_in_tx(
+                conn,
+                user_id,
+                amount,
+                ref_id=ref_id,
+                description=description,
+                biz_id=biz_id,
+            )
     except IntegrityError as exc:
         print(f"[payment][deduct] integrity user={user_id} biz={biz_id} err={exc}")
         return True, "already_processed"
@@ -663,7 +735,7 @@ def get_paid_products() -> list[Dict[str, Any]]:
                 "name": INTEL_PACKAGE_PRODUCT["name"],
                 "icon": INTEL_PACKAGE_PRODUCT["icon"],
                 "points_monthly": int(INTEL_PACKAGE_PRODUCT["points_monthly"]),
-                "months_options": [1],
+                "months_options": [1, 3, 6, 12],
                 "includes": include_codes,
                 "includes_names": [channel_map[code]["name"] for code in include_codes],
             }
@@ -671,7 +743,7 @@ def get_paid_products() -> list[Dict[str, Any]]:
     return products
 
 
-def purchase_subscription_with_points(
+def _legacy_purchase_subscription_with_points(
     user_id: str,
     channel_id: int,
     *,
@@ -747,7 +819,7 @@ def purchase_subscription_with_points(
         return False, "购买失败，请稍后重试"
 
 
-def purchase_intel_package_with_points(
+def _legacy_purchase_intel_package_with_points(
     user_id: str,
     *,
     months: int = 1,
@@ -818,6 +890,189 @@ def purchase_intel_package_with_points(
         return True, f"购买成功：已开通 {', '.join(opened_names)}"
     except Exception as exc:
         print(f"[payment][package] user={user_id} err={exc}")
+        return False, "套餐购买失败，请稍后重试"
+
+
+def purchase_subscription_with_points(
+    user_id: str,
+    channel_id: int,
+    *,
+    months: int = 1,
+    biz_id: Optional[str] = None,
+) -> tuple[bool, str]:
+    if months <= 0:
+        return False, "months_invalid"
+    biz_id = biz_id or f"purchase:{user_id}:{channel_id}:{months}:{uuid4().hex[:10]}"
+
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(
+                text(
+                    """
+                    SELECT code, name, price_points_monthly
+                    FROM content_channels
+                    WHERE id = :cid AND is_active = 1
+                    """
+                ),
+                {"cid": channel_id},
+            ).fetchone()
+        if not row:
+            return False, "频道不存在"
+
+        channel_code = str(row[0] or "")
+        channel_name = str(row[1] or channel_code)
+        price_points_monthly = row[2]
+        if price_points_monthly is None:
+            fallback = _REPORT_PRICE_DEFAULTS.get(channel_code)
+            if fallback is None:
+                return False, "该频道不支持点数购买"
+            price_points_monthly = fallback
+
+        total_cost = int(price_points_monthly) * int(months)
+        ok, reason = deduct_points(
+            user_id,
+            total_cost,
+            ref_id=str(channel_id),
+            description=f"购买 {channel_name} {months}个月",
+            biz_id=biz_id,
+        )
+        if not ok:
+            return False, reason
+        if reason == "already_processed":
+            return True, "already_processed"
+
+        result = sub_svc.add_subscription(
+            user_id,
+            channel_id,
+            days=months * 30,
+            source_type="points_purchase",
+            source_ref=biz_id,
+            source_note=f"channel={channel_code};months={months}",
+            operator="system_points",
+        )
+        if isinstance(result, tuple):
+            sub_ok = bool(result[0])
+            sub_msg = str(result[1]) if len(result) > 1 else ""
+        else:
+            sub_ok = bool(result)
+            sub_msg = ""
+
+        if sub_ok:
+            print(
+                f"[payment][purchase] success user_id={user_id} biz_id={biz_id} "
+                f"channel_id={channel_id} channel_code={channel_code}"
+            )
+            return True, "购买成功，有效期已更新"
+
+        refund_ok, refund_reason = credit_points(
+            user_id,
+            total_cost,
+            ref_id=str(channel_id),
+            description=f"购买失败退款 {channel_name} {months}个月",
+            tx_type="refund",
+            biz_id=biz_id,
+        )
+        if not refund_ok:
+            print(
+                f"[payment][purchase] refund_failed user_id={user_id} "
+                f"channel_id={channel_id} biz_id={biz_id} reason={refund_reason}"
+            )
+        return False, sub_msg or "订阅开通失败，已自动退款"
+    except Exception as exc:
+        print(f"[payment][purchase] user_id={user_id} channel_id={channel_id} biz_id={biz_id} err={exc}")
+        return False, "购买失败，请稍后重试"
+
+
+def purchase_intel_package_with_points(
+    user_id: str,
+    *,
+    months: int = 1,
+    biz_id: Optional[str] = None,
+) -> tuple[bool, str]:
+    if months <= 0:
+        return False, "months_invalid"
+
+    include_codes = list(INTEL_PACKAGE_PRODUCT["includes"])
+    package_code = str(INTEL_PACKAGE_PRODUCT["code"])
+    package_name = str(INTEL_PACKAGE_PRODUCT["name"])
+    biz_id = biz_id or f"purchase:{user_id}:{package_code}:{months}:{uuid4().hex[:10]}"
+    total_cost = int(INTEL_PACKAGE_PRODUCT["points_monthly"]) * int(months)
+
+    try:
+        with engine.begin() as conn:
+            rows = conn.execute(
+                text(
+                    """
+                    SELECT id, code, name
+                    FROM content_channels
+                    WHERE is_active = 1
+                    """
+                )
+            ).fetchall()
+            rows = [row for row in rows if str(row[1] or "") in include_codes]
+            if len(rows) != len(include_codes):
+                found = {str(x[1]) for x in rows}
+                missing = [code for code in include_codes if code not in found]
+                return False, f"套餐频道缺失：{','.join(missing)}"
+
+            code_to_row = {str(row[1]): row for row in rows}
+            ordered_rows = [code_to_row[code] for code in include_codes]
+
+            ok, reason = _deduct_points_in_tx(
+                conn,
+                user_id,
+                total_cost,
+                ref_id=package_code,
+                description=f"购买 {package_name} {months}个月",
+                biz_id=biz_id,
+            )
+            if not ok:
+                return False, reason
+            if reason == "already_processed":
+                return True, "already_processed"
+
+            opened_names: list[str] = []
+            for row in ordered_rows:
+                channel_id = int(row[0])
+                channel_code = str(row[1] or "")
+                channel_name = str(row[2] or channel_code)
+                print(
+                    f"[payment][package] grant_start user_id={user_id} biz_id={biz_id} "
+                    f"package_code={package_code} channel_id={channel_id} channel_code={channel_code}"
+                )
+                sub_ok, sub_msg = sub_svc.add_subscription_in_tx(
+                    conn,
+                    user_id,
+                    channel_id,
+                    days=months * 30,
+                    source_type="points_package",
+                    source_ref=biz_id,
+                    source_note=f"package={package_code};months={months};channel={channel_code}",
+                    operator="system_points",
+                )
+                if not sub_ok:
+                    raise RuntimeError(sub_msg or f"channel_grant_failed:{channel_code}")
+                opened_names.append(channel_name)
+
+            print(
+                f"[payment][package] success user_id={user_id} biz_id={biz_id} package_code={package_code} "
+                f"channels={','.join(include_codes)}"
+            )
+            return True, f"购买成功：已开通 {', '.join(opened_names)}"
+    except RuntimeError as exc:
+        print(
+            f"[payment][package] rollback user_id={user_id} biz_id={biz_id} "
+            f"package_code={package_code} err={exc}"
+        )
+        return False, "套餐开通失败，已回滚扣点与权限"
+    except IntegrityError as exc:
+        print(
+            f"[payment][package] integrity user_id={user_id} biz_id={biz_id} "
+            f"package_code={package_code} err={exc}"
+        )
+        return True, "already_processed"
+    except Exception as exc:
+        print(f"[payment][package] user_id={user_id} biz_id={biz_id} package_code={package_code} err={exc}")
         return False, "套餐购买失败，请稍后重试"
 
 

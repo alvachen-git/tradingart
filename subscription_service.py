@@ -7,12 +7,200 @@
 """
 
 from datetime import datetime, timedelta
+import os
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 from typing import Optional, List, Dict, Any
 import pandas as pd
 
 # 导入数据库引擎
 from data_engine import engine
+
+
+_SUB_SOURCE_COLUMNS = {"source_type", "source_ref", "source_note", "granted_at", "operator"}
+_HAS_SUB_SOURCE_COLUMNS: Optional[bool] = None
+_TRIAL_TABLE_READY: bool = False
+
+
+def _has_subscription_source_columns(conn) -> bool:
+    global _HAS_SUB_SOURCE_COLUMNS
+    if _HAS_SUB_SOURCE_COLUMNS is not None:
+        return _HAS_SUB_SOURCE_COLUMNS
+
+    try:
+        if conn.dialect.name == "sqlite":
+            rows = conn.execute(text("PRAGMA table_info(user_subscriptions)")).fetchall()
+            cols = {str(row[1]).lower() for row in rows}
+        else:
+            rows = conn.execute(
+                text(
+                    """
+                    SELECT column_name
+                    FROM information_schema.columns
+                    WHERE table_schema = DATABASE()
+                      AND table_name = 'user_subscriptions'
+                    """
+                )
+            ).fetchall()
+            cols = {str(row[0]).lower() for row in rows}
+        _HAS_SUB_SOURCE_COLUMNS = _SUB_SOURCE_COLUMNS.issubset(cols)
+    except Exception as exc:
+        print(f"[subscription] detect_source_columns_failed err={exc}")
+        _HAS_SUB_SOURCE_COLUMNS = False
+    return bool(_HAS_SUB_SOURCE_COLUMNS)
+
+
+def _ensure_trial_grants_table(conn) -> None:
+    global _TRIAL_TABLE_READY
+    if _TRIAL_TABLE_READY:
+        return
+
+    if conn.dialect.name == "sqlite":
+        conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS user_trial_grants (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id TEXT NOT NULL,
+                    trial_code TEXT NOT NULL,
+                    channel_id INTEGER NOT NULL,
+                    days INTEGER NOT NULL,
+                    granted_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    source_note TEXT DEFAULT NULL,
+                    operator TEXT DEFAULT NULL,
+                    UNIQUE(user_id, trial_code)
+                )
+                """
+            )
+        )
+    else:
+        conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS user_trial_grants (
+                    id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+                    user_id VARCHAR(50) NOT NULL,
+                    trial_code VARCHAR(100) NOT NULL,
+                    channel_id INT NOT NULL,
+                    days INT NOT NULL,
+                    granted_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    source_note VARCHAR(255) DEFAULT NULL,
+                    operator VARCHAR(100) DEFAULT NULL,
+                    UNIQUE KEY uq_trial_user_code (user_id, trial_code),
+                    INDEX idx_trial_user (user_id),
+                    INDEX idx_trial_channel (channel_id)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                """
+            )
+        )
+    _TRIAL_TABLE_READY = True
+
+
+def _add_subscription_core(
+    conn,
+    user_id: str,
+    channel_id: int,
+    days: int = 30,
+    source_type: Optional[str] = None,
+    source_ref: Optional[str] = None,
+    source_note: Optional[str] = None,
+    operator: Optional[str] = None,
+) -> tuple[bool, str]:
+    expire_at = None
+    if days > 0:
+        expire_at = datetime.now() + timedelta(days=days)
+
+    has_source_cols = _has_subscription_source_columns(conn)
+
+    check_sql = text(
+        """
+        SELECT id, expire_at
+        FROM user_subscriptions
+        WHERE user_id = :uid
+          AND channel_id = :cid
+        """
+    )
+    existing = conn.execute(check_sql, {"uid": user_id, "cid": channel_id}).fetchone()
+
+    if existing:
+        old_expire = existing[1]
+        if old_expire and old_expire > datetime.now() and days > 0:
+            new_expire = old_expire + timedelta(days=days)
+        else:
+            new_expire = expire_at
+
+        if has_source_cols:
+            update_sql = text(
+                """
+                UPDATE user_subscriptions
+                SET is_active = 1,
+                    expire_at = :expire,
+                    updated_at = CURRENT_TIMESTAMP,
+                    source_type = COALESCE(:source_type, source_type),
+                    source_ref = COALESCE(:source_ref, source_ref),
+                    source_note = COALESCE(:source_note, source_note),
+                    operator = COALESCE(:operator, operator),
+                    granted_at = COALESCE(granted_at, CURRENT_TIMESTAMP)
+                WHERE user_id = :uid
+                  AND channel_id = :cid
+                """
+            )
+            conn.execute(
+                update_sql,
+                {
+                    "expire": new_expire,
+                    "uid": user_id,
+                    "cid": channel_id,
+                    "source_type": source_type,
+                    "source_ref": source_ref,
+                    "source_note": source_note,
+                    "operator": operator,
+                },
+            )
+        else:
+            update_sql = text(
+                """
+                UPDATE user_subscriptions
+                SET is_active = 1,
+                    expire_at = :expire,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE user_id = :uid
+                  AND channel_id = :cid
+                """
+            )
+            conn.execute(update_sql, {"expire": new_expire, "uid": user_id, "cid": channel_id})
+        return True, f"订阅续期成功，有效期至 {new_expire.strftime('%Y-%m-%d') if new_expire else '永久'}"
+
+    if has_source_cols:
+        insert_sql = text(
+            """
+            INSERT INTO user_subscriptions
+            (user_id, channel_id, is_active, expire_at, source_type, source_ref, source_note, granted_at, operator)
+            VALUES (:uid, :cid, 1, :expire, :source_type, :source_ref, :source_note, CURRENT_TIMESTAMP, :operator)
+            """
+        )
+        conn.execute(
+            insert_sql,
+            {
+                "uid": user_id,
+                "cid": channel_id,
+                "expire": expire_at,
+                "source_type": source_type or "unknown",
+                "source_ref": source_ref,
+                "source_note": source_note,
+                "operator": operator,
+            },
+        )
+    else:
+        insert_sql = text(
+            """
+            INSERT INTO user_subscriptions (user_id, channel_id, is_active, expire_at)
+            VALUES (:uid, :cid, 1, :expire)
+            """
+        )
+        conn.execute(insert_sql, {"uid": user_id, "cid": channel_id, "expire": expire_at})
+
+    return True, "订阅成功"
 
 
 # =============================================
@@ -219,7 +407,7 @@ def get_channel_email_subscribers(channel_code: str) -> List[Dict]:
         return []
 
 
-def add_subscription(user_id: str, channel_id: int, days: int = 30) -> tuple:
+def _legacy_add_subscription(user_id: str, channel_id: int, days: int = 30) -> tuple:
     """
     为用户添加订阅
 
@@ -277,6 +465,143 @@ def add_subscription(user_id: str, channel_id: int, days: int = 30) -> tuple:
     except Exception as e:
         print(f"添加订阅失败: {e}")
         return False, "订阅失败，请稍后重试"
+
+
+def add_subscription_in_tx(
+    conn,
+    user_id: str,
+    channel_id: int,
+    days: int = 30,
+    source_type: Optional[str] = None,
+    source_ref: Optional[str] = None,
+    source_note: Optional[str] = None,
+    operator: Optional[str] = None,
+) -> tuple[bool, str]:
+    """
+    在外部事务中开通/续期订阅（不创建新事务）。
+    """
+    return _add_subscription_core(
+        conn=conn,
+        user_id=user_id,
+        channel_id=channel_id,
+        days=days,
+        source_type=source_type,
+        source_ref=source_ref,
+        source_note=source_note,
+        operator=operator,
+    )
+
+
+def add_subscription(
+    user_id: str,
+    channel_id: int,
+    days: int = 30,
+    source_type: Optional[str] = None,
+    source_ref: Optional[str] = None,
+    source_note: Optional[str] = None,
+    operator: Optional[str] = None,
+) -> tuple:
+    """
+    为用户开通/续期订阅（独立事务）。
+    """
+    try:
+        with engine.begin() as conn:
+            return _add_subscription_core(
+                conn=conn,
+                user_id=user_id,
+                channel_id=channel_id,
+                days=days,
+                source_type=source_type,
+                source_ref=source_ref,
+                source_note=source_note,
+                operator=operator,
+            )
+    except Exception as e:
+        print(f"[subscription] add_failed user={user_id} channel={channel_id} err={e}")
+        return False, "订阅失败，请稍后重试"
+
+
+def grant_new_user_trial(user_id: str, channel_code: str = "daily_report", days: int = 5) -> tuple[bool, str]:
+    """
+    注册成功后发放 5 天复盘试用（幂等，每账号仅一次）。
+    """
+    if not user_id:
+        return False, "user_id_empty"
+    if days <= 0:
+        return False, "days_invalid"
+
+    trial_code = f"new_user_{channel_code}_{days}d"
+    source_note = f"new_user_trial:{channel_code}:{days}d"
+    operator = os.getenv("TRIAL_GRANT_OPERATOR", "system_register")
+
+    try:
+        with engine.begin() as conn:
+            _ensure_trial_grants_table(conn)
+            exists = conn.execute(
+                text(
+                    """
+                    SELECT id
+                    FROM user_trial_grants
+                    WHERE user_id = :uid AND trial_code = :trial_code
+                    LIMIT 1
+                    """
+                ),
+                {"uid": user_id, "trial_code": trial_code},
+            ).fetchone()
+            if exists:
+                return True, "already_granted"
+
+            channel = conn.execute(
+                text(
+                    """
+                    SELECT id
+                    FROM content_channels
+                    WHERE code = :code AND is_active = 1
+                    LIMIT 1
+                    """
+                ),
+                {"code": channel_code},
+            ).fetchone()
+            if not channel:
+                return False, f"channel_not_found:{channel_code}"
+
+            channel_id = int(channel[0])
+            ok, msg = _add_subscription_core(
+                conn=conn,
+                user_id=user_id,
+                channel_id=channel_id,
+                days=days,
+                source_type="trial",
+                source_ref=trial_code,
+                source_note=source_note,
+                operator=operator,
+            )
+            if not ok:
+                return False, msg
+
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO user_trial_grants
+                    (user_id, trial_code, channel_id, days, granted_at, source_note, operator)
+                    VALUES (:uid, :trial_code, :channel_id, :days, CURRENT_TIMESTAMP, :source_note, :operator)
+                    """
+                ),
+                {
+                    "uid": user_id,
+                    "trial_code": trial_code,
+                    "channel_id": channel_id,
+                    "days": days,
+                    "source_note": source_note,
+                    "operator": operator,
+                },
+            )
+            return True, "trial_granted"
+    except IntegrityError:
+        return True, "already_granted"
+    except Exception as exc:
+        print(f"[subscription] grant_trial_failed user={user_id} trial={trial_code} err={exc}")
+        return False, "trial_grant_failed"
 
 
 def update_notification_settings(user_id: str, channel_id: int,

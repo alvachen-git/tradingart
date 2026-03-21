@@ -1,4 +1,4 @@
-import re
+﻿import re
 import time
 import streamlit as st
 from datetime import datetime, timedelta, timezone
@@ -17,43 +17,47 @@ from ui_components import (
 
 
 # ==========================================
-# 页面配置
+# 椤甸潰閰嶇疆
 # ==========================================
 st.set_page_config(
     page_title="情报站 - 爱波塔",
-    page_icon="📡",
+    page_icon="📈",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
 
 
-# 🔥 添加统一的侧边栏导航
+# 馃敟 娣诲姞缁熶竴鐨勪晶杈规爮瀵艰埅
 import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from sidebar_navigation import show_navigation
 
 # ==========================================
-# 🔧 自助订阅频道配置（点击即可自助开通，无需联系客服）
-# 如需新增自助订阅频道，直接往这个列表里加频道名称即可
+# 馃敡 鑷姪璁㈤槄棰戦亾鐧藉悕鍗曪紙榛樿鍏抽棴锛涢€氳繃鐜鍙橀噺鐏板害寮€鍚級
+# FREE_SELF_SUBSCRIBE_CHANNEL_CODES 绀轰緥: daily_report,expiry_option_radar
 # ==========================================
-FREE_SELF_SUBSCRIBE_CHANNELS = ["复盘晚报", "末日期权晚报"]
+FREE_SELF_SUBSCRIBE_CHANNEL_CODES = {
+    item.strip().lower()
+    for item in str(os.getenv("FREE_SELF_SUBSCRIBE_CHANNEL_CODES", "")).split(",")
+    if item.strip()
+}
 with st.sidebar:
     show_navigation()
 
 # ==========================================
-# 🎨 高级样式注入
+# 馃帹 楂樼骇鏍峰紡娉ㄥ叆
 # ==========================================
 st.markdown("""
 <style>
-    /* ========== 全局背景 ========== */
+    /* ========== 鍏ㄥ眬鑳屾櫙 ========== */
     .stApp {
         background-color: #0b1121 !important;
         background-image: radial-gradient(circle at 50% 0%, #1e293b 0%, #0b1121 70%);
     }
 
-    /* 拓宽主内容区 */
+    /* 鎷撳涓诲唴瀹瑰尯 */
     [data-testid="stMainBlockContainer"] {
         max-width: 88rem !important;
         padding-top: 0.8rem !important;
@@ -62,7 +66,7 @@ st.markdown("""
         padding-right: 1.2rem;
     }
 
-    /* 情报站标题高对比修复 */
+    /* 鎯呮姤绔欐爣棰橀珮瀵规瘮淇 */
     .quant-hero-shell .quant-hero-title {
         color: #f8fbff !important;
         font-weight: 800 !important;
@@ -85,7 +89,7 @@ st.markdown("""
         }
     }
 
-    /* 隐藏顶部装饰 */
+    /* 闅愯棌椤堕儴瑁呴グ */
     header[data-testid="stHeader"] {
         background-color: transparent !important;
     }
@@ -93,7 +97,7 @@ st.markdown("""
         display: none;
     }
 
-    /* ========== 页面标题样式 ========== */
+    /* ========== 椤甸潰鏍囬鏍峰紡 ========== */
     .page-header {
         background: linear-gradient(135deg, rgba(251,191,36,0.1) 0%, rgba(30,41,59,0.6) 100%);
         border: 1px solid rgba(251,191,36,0.2);
@@ -115,7 +119,7 @@ st.markdown("""
         margin-top: 8px;
     }
 
-    /* ========== 频道卡片网格 ========== */
+    /* ========== 棰戦亾鍗＄墖缃戞牸 ========== */
     .channel-grid {
         display: grid;
         grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
@@ -174,7 +178,7 @@ st.markdown("""
         margin-bottom: 12px;
     }
 
-    /* 订阅状态徽章 */
+    /* 璁㈤槄鐘舵€佸窘绔?*/
     .status-badge {
         display: inline-block;
         padding: 4px 12px;
@@ -203,7 +207,7 @@ st.markdown("""
         border: 1px solid rgba(56, 189, 248, 0.3);
     }
 
-    /* ========== 内容区域 ========== */
+    /* ========== 鍐呭鍖哄煙 ========== */
     .section-header {
         display: flex;
         align-items: center;
@@ -213,24 +217,24 @@ st.markdown("""
         border-bottom: 1px solid rgba(255,255,255,0.1);
     }
     .section-title {
-        /* 🔥 修改点：改为亮白色，并加粗 */
+        /* 馃敟 淇敼鐐癸細鏀逛负浜櫧鑹诧紝骞跺姞绮?*/
         color: #f1f5f9 !important; 
-        font-size: 22px;  /* 字号加大一点 */
-        font-weight: 700; /* 加粗 */
+        font-size: 22px;  /* 瀛楀彿鍔犲ぇ涓€鐐?*/
+        font-weight: 700; /* 鍔犵矖 */
         margin: 0;
-        /* 增加文字阴影，让它从背景中浮出来 */
+        /* 澧炲姞鏂囧瓧闃村奖锛岃瀹冧粠鑳屾櫙涓诞鍑烘潵 */
         text-shadow: 0 2px 4px rgba(0,0,0,0.6); 
-        letter-spacing: 1px; /* 增加字间距 */
+        letter-spacing: 1px; /* 澧炲姞瀛楅棿璺?*/
     }
     .section-icon {
-        width: 5px; /* 稍微加宽装饰条 */
+        width: 5px; /* 绋嶅井鍔犲瑁呴グ鏉?*/
         height: 24px;
         background: linear-gradient(180deg, #fbbf24, #f59e0b);
         border-radius: 2px;
-        box-shadow: 0 0 10px rgba(251, 191, 36, 0.5); /* 让旁边的金条发光 */
+        box-shadow: 0 0 10px rgba(251, 191, 36, 0.5); /* 璁╂梺杈圭殑閲戞潯鍙戝厜 */
     }
 
-    /* ========== 内容卡片 ========== */
+    /* ========== 鍐呭鍗＄墖 ========== */
     .content-card {
         background: rgba(30, 41, 59, 0.5);
         border: 1px solid rgba(255, 255, 255, 0.06);
@@ -280,7 +284,7 @@ st.markdown("""
         line-height: 1.6;
     }
 
-    /* ========== 锁定遮罩 ========== */
+    /* ========== 閿佸畾閬僵 ========== */
     .locked-card {
         background: linear-gradient(135deg, rgba(15,23,42,0.95) 0%, rgba(30,41,59,0.9) 100%);
         border: 1px solid rgba(251, 191, 36, 0.2);
@@ -306,7 +310,7 @@ st.markdown("""
         margin-bottom: 20px;
     }
 
-    /* ========== 消息通知按钮 ========== */
+    /* ========== 娑堟伅閫氱煡鎸夐挳 ========== */
     .notification-btn {
         position: relative;
         background: rgba(30, 41, 59, 0.8);
@@ -335,7 +339,7 @@ st.markdown("""
         text-align: center;
     }
 
-    /* ========== 日期分隔线 ========== */
+    /* ========== 鏃ユ湡鍒嗛殧绾?========== */
     .date-divider {
         display: flex;
         align-items: center;
@@ -356,7 +360,7 @@ st.markdown("""
         white-space: nowrap;
     }
 
-    /* ========== 空状态 ========== */
+    /* ========== 绌虹姸鎬?========== */
     .empty-state {
         background: rgba(30, 41, 59, 0.4);
         border: 1px dashed rgba(255,255,255,0.1);
@@ -374,7 +378,7 @@ st.markdown("""
         font-size: 15px;
     }
 
-    /* ========== 空状态 ========== */
+    /* ========== 绌虹姸鎬?========== */
     .empty-state {
         background: rgba(30, 41, 59, 0.4);
         border: 1px dashed rgba(255,255,255,0.1);
@@ -392,13 +396,13 @@ st.markdown("""
         font-size: 15px;
     }
 
-    /* 🔥🔥🔥 [新增] 强制侧边栏背景与 Home.py 一致 🔥🔥🔥 */
+    /* 馃敟馃敟馃敟 [鏂板] 寮哄埗渚ц竟鏍忚儗鏅笌 Home.py 涓€鑷?馃敟馃敟馃敟 */
     [data-testid="stSidebar"] {
-        background-color: #0f172a !important; /* 深蓝黑背景 */
-        border-right: 1px solid #1e293b;      /* 可选：右侧分割线 */
+        background-color: #0f172a !important; /* 娣辫摑榛戣儗鏅?*/
+        border-right: 1px solid #1e293b;      /* 鍙€夛細鍙充晶鍒嗗壊绾?*/
     }
 
-    /* 🔥🔥🔥 [新增] 强制侧边栏文字变白/灰 (覆盖默认黑色) 🔥🔥🔥 */
+    /* 馃敟馃敟馃敟 [鏂板] 寮哄埗渚ц竟鏍忔枃瀛楀彉鐧?鐏?(瑕嗙洊榛樿榛戣壊) 馃敟馃敟馃敟 */
     [data-testid="stSidebar"] p, 
     [data-testid="stSidebar"] span, 
     [data-testid="stSidebar"] div,
@@ -406,7 +410,7 @@ st.markdown("""
         color: #cbd5e1 !important;
     }
 
-    /* ========== 侧边栏统一样式 ========== */
+    /* ========== 渚ц竟鏍忕粺涓€鏍峰紡 ========== */
     .sidebar-card {
         background-color: #1E2329;
         border: 1px solid #31333F;
@@ -439,7 +443,7 @@ st.markdown("""
         font-weight: 600;
     }
 
-    /* 客服卡片 */
+    /* 瀹㈡湇鍗＄墖 */
     .contact-card {
         background-color: #1E2329;
         border: 1px solid #31333F;
@@ -464,7 +468,7 @@ st.markdown("""
         font-weight: bold;
     }
 
-    /* ========== 按钮样式覆盖 ========== */
+    /* ========== 鎸夐挳鏍峰紡瑕嗙洊 ========== */
     div.stButton > button {
         background-color: #1E2329 !important;
         color: #e6e6e6 !important;
@@ -478,7 +482,7 @@ st.markdown("""
         color: #ffffff !important;
         transform: translateY(-2px);
     }
-    /* 1. 隐藏原生丑陋的三角形 */
+    /* 1. 闅愯棌鍘熺敓涓戦檵鐨勪笁瑙掑舰 */
     details > summary {
         list-style: none;
         cursor: pointer;
@@ -488,7 +492,7 @@ st.markdown("""
         display: none;
     }
 
-    /* 2. 定义 Summary (也就是标题栏) 的布局 */
+    /* 2. 瀹氫箟 Summary (涔熷氨鏄爣棰樻爮) 鐨勫竷灞€ */
     .native-summary {
         display: flex;
         justify-content: space-between;
@@ -502,19 +506,19 @@ st.markdown("""
         background: rgba(255, 255, 255, 0.03);
     }
 
-    /* 3. 定义展开后的内容容器 */
+    /* 3. 瀹氫箟灞曞紑鍚庣殑鍐呭瀹瑰櫒 */
     .native-content {
         padding: 0 20px 20px 20px;
-        margin-top: -10px; /* 让内容紧贴标题 */
+        margin-top: -10px; /* 璁╁唴瀹圭揣璐存爣棰?*/
         border-top: 1px solid rgba(255,255,255,0.06);
         padding-top: 20px;
-        /* 🔥 关键：添加进入动画 */
+        /* 馃敟 鍏抽敭锛氭坊鍔犺繘鍏ュ姩鐢?*/
         animation: slideDown 0.3s ease-out forwards;
     }
 
-    /* 4. 定义按钮文字变化 (纯CSS实现 展开/收起 切换) */
+    /* 4. 瀹氫箟鎸夐挳鏂囧瓧鍙樺寲 (绾疌SS瀹炵幇 灞曞紑/鏀惰捣 鍒囨崲) */
     .toggle-text::after {
-        content: "展开";
+        content: "灞曞紑";
         display: inline-block;
         padding: 4px 12px;
         background: rgba(255, 255, 255, 0.1);
@@ -524,67 +528,67 @@ st.markdown("""
         transition: all 0.2s;
     }
 
-    /* 当 details 处于 open 状态时，文字变更为 收起 */
+    /* 褰?details 澶勪簬 open 鐘舵€佹椂锛屾枃瀛楀彉鏇翠负 鏀惰捣 */
     details[open] .toggle-text::after {
-        content: "收起";
+        content: "鏀惰捣";
         background: rgba(251, 191, 36, 0.2);
         color: #fbbf24;
     }
 
-    /* 5. 动画关键帧 */
+    /* 5. 鍔ㄧ敾鍏抽敭甯?*/
     @keyframes slideDown {
         from { opacity: 0; transform: translateY(-10px); }
         to { opacity: 1; transform: translateY(0); }
     }
 
-    /* 6. 容器边框 (替代原来的 col 布局) */
+    /* 6. 瀹瑰櫒杈规 (鏇夸唬鍘熸潵鐨?col 甯冨眬) */
     .native-card-container {
         border-bottom: 1px solid rgba(255,255,255,0.1);
         margin-bottom: 16px;
     }
 
     /* =============================================
-       🔥 [修复] 折叠框 (Expander) 标题高亮样式
+       馃敟 [淇] 鎶樺彔妗?(Expander) 鏍囬楂樹寒鏍峰紡
        ============================================= */
 
-    /* 1. 强制折叠框标题栏 (summary) 的样式 */
+    /* 1. 寮哄埗鎶樺彔妗嗘爣棰樻爮 (summary) 鐨勬牱寮?*/
     [data-testid="stExpander"] details > summary {
-        color: #fbbf24 !important;      /* 强制亮金色字体 */
-        font-size: 12px;     /* 字号适中 */
-        font-weight: 400 !important;    /* 加粗 */
-        background-color: rgba(255, 255, 255, 0.05) !important; /* 微微发亮的背景 */
-        border: 1px solid rgba(255, 255, 255, 0.1) !important;  /* 加上边框更像个按钮 */
+        color: #fbbf24 !important;      /* 寮哄埗浜噾鑹插瓧浣?*/
+        font-size: 12px;     /* 瀛楀彿閫備腑 */
+        font-weight: 400 !important;    /* 鍔犵矖 */
+        background-color: rgba(255, 255, 255, 0.05) !important; /* 寰井鍙戜寒鐨勮儗鏅?*/
+        border: 1px solid rgba(255, 255, 255, 0.1) !important;  /* 鍔犱笂杈规鏇村儚涓寜閽?*/
         border-radius: 8px !important;
-        padding: 10px 15px !important;  /* 增加点击区域 */
+        padding: 10px 15px !important;  /* 澧炲姞鐐瑰嚮鍖哄煙 */
         transition: all 0.3s ease !important;
     }
 
-    /* 2. 修复折叠框内部的文字元素 (防止被 span/p 覆盖) */
+    /* 2. 淇鎶樺彔妗嗗唴閮ㄧ殑鏂囧瓧鍏冪礌 (闃叉琚?span/p 瑕嗙洊) */
     [data-testid="stExpander"] details > summary p,
     [data-testid="stExpander"] details > summary span {
         color: #fbbf24 !important;
         font-weight: 600 !important;
     }
 
-    /* 3. 强制箭头图标变色 */
+    /* 3. 寮哄埗绠ご鍥炬爣鍙樿壊 */
     [data-testid="stExpander"] details > summary svg {
-        fill: #fbbf24 !important;       /* 箭头变成金色 */
+        fill: #fbbf24 !important;       /* 绠ご鍙樻垚閲戣壊 */
         color: #fbbf24 !important;
     }
 
-    /* 4. 鼠标悬停时的交互效果 */
+    /* 4. 榧犳爣鎮仠鏃剁殑浜や簰鏁堟灉 */
     [data-testid="stExpander"] details > summary:hover {
-        background-color: rgba(251, 191, 36, 0.15) !important; /* 悬停背景变亮 */
-        border-color: #fbbf24 !important;                      /* 边框变亮 */
+        background-color: rgba(251, 191, 36, 0.15) !important; /* 鎮仠鑳屾櫙鍙樹寒 */
+        border-color: #fbbf24 !important;                      /* 杈规鍙樹寒 */
     }
 
     [data-testid="stExpander"] details > summary:hover p,
     [data-testid="stExpander"] details > summary:hover span {
-        color: #ffffff !important;      /* 悬停时文字变白，提示可点击 */
+        color: #ffffff !important;      /* 鎮仠鏃舵枃瀛楀彉鐧斤紝鎻愮ず鍙偣鍑?*/
     }
 
     [data-testid="stExpander"] details > summary:hover svg {
-        fill: #ffffff !important;       /* 悬停时箭头变白 */
+        fill: #ffffff !important;       /* 鎮仠鏃剁澶村彉鐧?*/
     }
 </style>
 """, unsafe_allow_html=True)
@@ -592,7 +596,7 @@ inject_sidebar_toggle_style(mode="high_contrast")
 inject_quant_ops_header_style()
 
 # ==========================================
-# 初始化 Session State
+# 鍒濆鍖?Session State
 # ==========================================
 if 'selected_channel' not in st.session_state:
     st.session_state.selected_channel = 'all'
@@ -611,7 +615,7 @@ cookies = cookie_manager.get_all() or {}
 
 def _restore_login_with_cookie_state(cookies: dict):
     """
-    返回:
+    杩斿洖:
     - restored: bool
     - state: ok | empty | partial | invalid | error
     """
@@ -653,10 +657,10 @@ if st.session_state.get("just_logged_out", False):
 
 
 # ==========================================
-# 辅助函数
+# 杈呭姪鍑芥暟
 # ==========================================
 def get_current_user():
-    """获取当前登录用户"""
+    """鑾峰彇褰撳墠鐧诲綍鐢ㄦ埛"""
     if st.session_state.get('is_logged_in') and st.session_state.get('user_id'):
         return st.session_state['user_id']
     return None
@@ -667,7 +671,6 @@ def format_time(dt: datetime) -> str:
     if not dt:
         return ""
     now = datetime.now(BEIJING_TZ)
-    # 数据库存储UTC（MySQL NOW()），转换为北京时间再计算差值
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc).astimezone(BEIJING_TZ)
     delta = now - dt
@@ -677,12 +680,11 @@ def format_time(dt: datetime) -> str:
             mins = delta.seconds // 60
             return f"{mins} 分钟前" if mins > 0 else "刚刚"
         return f"{delta.seconds // 3600} 小时前"
-    elif delta.days == 1:
+    if delta.days == 1:
         return "昨天 " + dt.strftime("%H:%M")
-    elif delta.days < 7:
+    if delta.days < 7:
         return f"{delta.days} 天前"
-    else:
-        return dt.strftime("%m-%d %H:%M")
+    return dt.strftime("%m-%d %H:%M")
 
 
 def toggle_expand(content_id: int):
@@ -694,58 +696,38 @@ def toggle_expand(content_id: int):
 
 
 # ==========================================
-# 获取用户信息
+# 鑾峰彇鐢ㄦ埛淇℃伅
 # ==========================================
 user = get_current_user()
-unread_count = sub_svc.get_unread_count(user) if user else 0
 
 # ==========================================
-# 🎯 侧边栏（统一暗色风格，参考Home.py）
+# 馃幆 渚ц竟鏍忥紙缁熶竴鏆楄壊椋庢牸锛屽弬鑰僅ome.py锛?
 # ==========================================
 with st.sidebar:
-    # 用户状态 - 使用暗色卡片而非 st.success
+    # 鐢ㄦ埛鐘舵€?- 浣跨敤鏆楄壊鍗＄墖鑰岄潪 st.success
     if user:
-        st.markdown(f"""
-        <div style="background-color: #1E2329; border: 1px solid #31333F; border-radius: 8px; padding: 12px 15px; margin-bottom: 12px;">
-            <span style="color: #22c55e; font-weight: 600;">👤 欢迎回来，{user}</span>
-        </div>
-        """, unsafe_allow_html=True)
+        user_card_html = (
+            '<div style="background-color:#1E2329;border:1px solid #31333F;'
+            'border-radius:8px;padding:12px 15px;margin-bottom:12px;">'
+            f'<span style="color:#22c55e;font-weight:600;">欢迎回来，{user}</span>'
+            '</div>'
+        )
+        st.markdown(user_card_html, unsafe_allow_html=True)
 
-        # 订阅统计卡片
+        # 用户订阅信息
         user_subs = sub_svc.get_user_subscriptions(user)
-        active_subs = [s for s in user_subs if s['is_active']]
 
-        st.markdown(f"""
-        <div style="background-color: #1E2329; border: 1px solid #31333F; border-radius: 8px; padding: 15px; margin-bottom: 12px;">
-            <div style="font-size: 14px; font-weight: bold; color: #e6e6e6; margin-bottom: 12px;">📊 订阅统计</div>
-            <div style="display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid rgba(255,255,255,0.05);">
-                <span style="color: #8b949e; font-size: 13px;">已订阅频道</span>
-                <span style="color: #fbbf24; font-size: 13px; font-weight: 600;">{len(active_subs)} 个</span>
-            </div>
-            <div style="display: flex; justify-content: space-between; padding: 8px 0;">
-                <span style="color: #8b949e; font-size: 13px;">未读消息</span>
-                <span style="color: #fbbf24; font-size: 13px; font-weight: 600;">{unread_count} 条</span>
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
-
-        # 快捷操作
-        if unread_count > 0:
-            if st.button(f"🔔 查看消息 ({unread_count})", use_container_width=True):
-                st.session_state.show_notifications = True
-                st.rerun()
-
-        # 管理订阅
+        # 绠＄悊璁㈤槄
         with st.expander("⚙️ 管理订阅", expanded=False):
             channels = sub_svc.get_all_channels()
             user_sub_map = {s['channel_id']: s for s in user_subs}
 
             for channel in channels:
                 sub_info = user_sub_map.get(channel['id'])
-                # 判断当前用户是否拥有该频道的有效订阅
+                # 鍒ゆ柇褰撳墠鐢ㄦ埛鏄惁鎷ユ湁璇ラ閬撶殑鏈夋晥璁㈤槄
                 is_subscribed = sub_info and sub_info.get('is_active')
 
-                col1, col2 = st.columns([2.5, 1.2])  # 调整一下列宽比例
+                col1, col2 = st.columns([2.5, 1.2])  # 璋冩暣涓€涓嬪垪瀹芥瘮渚?
 
                 with col1:
                     st.markdown(f"**{channel['icon']} {channel['name']}**")
@@ -759,50 +741,56 @@ with st.sidebar:
                         st.caption("🔒 未订阅")
 
                 with col2:
-                    # 🔥🔥🔥 【核心修改逻辑开始】 🔥🔥🔥
-
-                    # 场景 1: 针对 "复盘晚报" (或你可以添加其他允许自助订阅的频道)
-                    if channel['name'] in FREE_SELF_SUBSCRIBE_CHANNELS:
+                    # 场景 1: 白名单频道允许自助订阅/退订
+                    if str(channel.get('code', '')).lower() in FREE_SELF_SUBSCRIBE_CHANNEL_CODES:
                         if is_subscribed:
-                            # 已有权限 -> 显示“退订” (Secondary 灰色按钮)
                             if st.button("退订", key=f"unsub_{channel['id']}", type="secondary",
                                          use_container_width=True):
                                 if sub_svc.cancel_subscription(user, channel['id']):
                                     st.success("已退订")
                                     st.rerun()
                         else:
-                            # 无权限 -> 显示“订阅” (Primary 亮色按钮)
                             if st.button("订阅", key=f"sub_{channel['id']}", type="primary", use_container_width=True):
-                                # 默认订阅 30 天，或者你可以改成 365 天
-                                success, msg = sub_svc.add_subscription(user, channel['id'], days=100)
+                                # 默认订阅 100 天
+                                success, msg = sub_svc.add_subscription(
+                                    user,
+                                    channel['id'],
+                                    days=100,
+                                    source_type="self_subscribe_whitelist",
+                                    source_ref=f"streamlit:intel_sidebar:{str(channel.get('code', '')).lower()}",
+                                    source_note="intel_sidebar_free_subscribe",
+                                    operator="user_self_service",
+                                )
                                 if success:
                                     st.balloons()
                                     st.rerun()
                                 else:
                                     st.error(msg)
 
-                    # 场景 2: 其他付费频道 -> 引导联系客服
+                    # 场景 2: 其他付费频道引导到充值中心
                     elif channel['is_premium'] and not is_subscribed:
                         if st.button("开通", key=f"side_sub_{channel['id']}", type="secondary",
                                      use_container_width=True):
-                            st.toast("此频道请联系客服开通", icon="💁")
+                            st.toast("请点击下方“付费开通”完成购买", icon="💳")
+        st.page_link("pages/17_充值中心.py", label="💳 付费开通", use_container_width=True)
 
     st.markdown("---")
 
     # 客服卡片
-    st.markdown("""
-    <div class="contact-card">
-        <div class="contact-title">🤝 客服联系</div>
-        <div class="contact-item">微信：<span class="wechat-highlight">trader-sec</span></div>
-        <div class="contact-item">电话：<span class="wechat-highlight">17521591756</span></div>
-        <div class="contact-item" style="font-size: 12px; margin-top: 8px;">
-            沪ICP备2021018087号-2
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
+    contact_html = (
+        '<div class="contact-card">'
+        '<div class="contact-title">客服联系</div>'
+        '<div class="contact-item">微信：<span class="wechat-highlight">trader-sec</span></div>'
+        '<div class="contact-item">电话：<span class="wechat-highlight">17521591756</span></div>'
+        '<div class="contact-item" style="font-size: 12px; margin-top: 8px;">'
+        '沪ICP备2021018087号-2'
+        '</div>'
+        '</div>'
+    )
+    st.markdown(contact_html, unsafe_allow_html=True)
 
 # ==========================================
-# 📡 主内容区
+# 馃摗 涓诲唴瀹瑰尯
 # ==========================================
 render_quant_ops_header(
     "情报站",
@@ -811,16 +799,17 @@ render_quant_ops_header(
 )
 
 # ==========================================
-# 未登录提示
+# 鏈櫥褰曟彁绀?
 # ==========================================
 if not user:
-    st.markdown("""
-    <div class="locked-card">
-        <div class="locked-icon">🔐</div>
-        <div class="locked-title">请先登录</div>
-        <div class="locked-desc">登录后即可查看订阅内容、管理订阅和接收消息通知</div>
-    </div>
-    """, unsafe_allow_html=True)
+    login_html = (
+        '<div class="locked-card">'
+        '<div class="locked-icon">LOCK</div>'
+        '<div class="locked-title">请先登录</div>'
+        '<div class="locked-desc">登录后即可查看订阅内容、管理订阅和接收消息通知</div>'
+        '</div>'
+    )
+    st.markdown(login_html, unsafe_allow_html=True)
 
     col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
@@ -828,47 +817,14 @@ if not user:
     st.stop()
 
 # ==========================================
-# 站内消息弹窗
 # ==========================================
-if st.session_state.get('show_notifications'):
-    st.markdown(
-        '<div class="section-header"><div class="section-icon"></div><h3 class="section-title">📬 站内消息</h3></div>',
-        unsafe_allow_html=True)
-
-    notifications = sub_svc.get_notifications(user, limit=20)
-
-    if notifications:
-        col1, col2 = st.columns([3, 1])
-        with col2:
-            if st.button("全部已读", key="mark_all_read", type="secondary"):
-                sub_svc.mark_notification_read(user_id=user, mark_all=True)
-                st.rerun()
-
-        for notif in notifications:
-            bg = "rgba(251,191,36,0.08)" if not notif['is_read'] else "rgba(30,41,59,0.4)"
-            st.markdown(f"""
-            <div style="background:{bg}; border-radius:10px; padding:14px; margin-bottom:8px; border-left:3px solid {'#fbbf24' if not notif['is_read'] else 'transparent'};">
-                <div style="color:#e2e8f0; font-size:14px; font-weight:{'600' if not notif['is_read'] else '400'};">{notif['title']}</div>
-                <div style="color:#64748b; font-size:12px; margin-top:4px;">{format_time(notif['created_at'])}</div>
-            </div>
-            """, unsafe_allow_html=True)
-    else:
-        st.info("📭 暂无消息")
-
-    if st.button("关闭消息", key="close_notif", use_container_width=True):
-        st.session_state.show_notifications = False
-        st.rerun()
-
-    st.markdown("---")
-
-# ==========================================
-# 📺 频道选择
+# 馃摵 棰戦亾閫夋嫨
 # ==========================================
 channels = sub_svc.get_all_channels()
 user_subs = sub_svc.get_user_subscriptions(user)
 user_sub_map = {s['channel_id']: s for s in user_subs}
 
-# 频道按钮
+# 棰戦亾鎸夐挳
 cols = st.columns(len(channels) + 1)
 
 with cols[0]:
@@ -882,7 +838,7 @@ for i, channel in enumerate(channels):
         sub_info = user_sub_map.get(channel['id'])
         is_active = st.session_state.selected_channel == channel['code']
 
-        # 状态判断
+        # 鐘舵€佸垽鏂?
         if not channel['is_premium']:
             status = "免费"
             status_class = "free"
@@ -901,7 +857,7 @@ for i, channel in enumerate(channels):
             st.session_state.selected_channel = channel['code']
             st.rerun()
 
-        # 状态标签
+        # 鐘舵€佹爣绛?
         st.markdown(
             f'<div style="text-align:center;margin-top:-8px;"><span class="status-badge status-{status_class}">{status}</span></div>',
             unsafe_allow_html=True)
@@ -909,13 +865,13 @@ for i, channel in enumerate(channels):
 st.markdown("<br>", unsafe_allow_html=True)
 
 # ==========================================
-# 📄 内容列表
+# 馃搫 鍐呭鍒楄〃
 # ==========================================
 st.markdown(
-    '<div class="section-header"><div class="section-icon"></div><h3 class="section-title">📄 最新内容</h3></div>',
+    '<div class="section-header"><div class="section-icon"></div><h3 class="section-title">📋 最新内容</h3></div>',
     unsafe_allow_html=True)
 
-# 获取内容
+# 鑾峰彇鍐呭
 if st.session_state.selected_channel == 'all':
     contents = sub_svc.get_channel_contents(days=10, limit=30)
 else:
@@ -925,7 +881,7 @@ if not contents:
     st.markdown("""
     <div class="empty-state">
         <div class="empty-icon">📭</div>
-        <div class="empty-text">暂无内容，请稍后再来查看</div>
+        <div class="empty-text">暂无内容，请稍后再来看</div>
     </div>
     """, unsafe_allow_html=True)
 else:
@@ -934,7 +890,7 @@ else:
     current_date = None
 
     for content in contents:
-        # 日期分隔（publish_time 是 UTC，转北京时间取日期）
+        # 鏃ユ湡鍒嗛殧锛坧ublish_time 鏄?UTC锛岃浆鍖椾含鏃堕棿鍙栨棩鏈燂級
         pt = content['publish_time']
         if pt:
             if pt.tzinfo is None:
@@ -954,16 +910,16 @@ else:
             st.markdown(f'<div class="date-divider"><span class="date-label">{date_text}</span></div>',
                         unsafe_allow_html=True)
 
-        # 检查权限
+        # 妫€鏌ユ潈闄?
         access = sub_svc.check_subscription_access(user, content['channel_id'])
 
         if access['has_access']:
-            # 有权限 - 显示内容卡片
+            # 鏈夋潈闄?- 鏄剧ず鍐呭鍗＄墖
             pub_time_str = format_time(content['publish_time'])
             summary_text = content['summary'][:120] + "..." if content['summary'] else "暂无摘要"
 
-            # 1. 先显示一个漂亮的预览卡片 (Header)
-            # 这里只显示标题、摘要和时间，不显示复杂内容，所以绝对不会崩
+            # 1. 鍏堟樉绀轰竴涓紓浜殑棰勮鍗＄墖 (Header)
+            # 杩欓噷鍙樉绀烘爣棰樸€佹憳瑕佸拰鏃堕棿锛屼笉鏄剧ず澶嶆潅鍐呭锛屾墍浠ョ粷瀵逛笉浼氬穿
             st.markdown(f"""
                         <div style="background:rgba(30,41,59,0.5); border:1px solid rgba(255,255,255,0.06); border-radius:12px; padding:16px; margin-bottom:0px; border-bottom-left-radius:0; border-bottom-right-radius:0;">
                             <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
@@ -978,16 +934,16 @@ else:
                         </div>
                         """, unsafe_allow_html=True)
 
-            # 2. 使用 Expander 包裹正式内容
-            # 注意：st.expander 在新版 Streamlit 中也是客户端渲染，速度很快
-            with st.expander("📄 点击查看完整复盘", expanded=False):
-                # 3. 🔥🔥🔥 核心：使用 components.html 渲染 HTML 🔥🔥🔥
-                # height=1000: 给一个足够的高度
-                # scrolling=True: 内容太长可以滚动
-                # 这样就是一个独立的网页沙箱，无论 HTML 多复杂都能完美显示！
+            # 2. 浣跨敤 Expander 鍖呰９姝ｅ紡鍐呭
+            # 娉ㄦ剰锛歴t.expander 鍦ㄦ柊鐗?Streamlit 涓篃鏄鎴风娓叉煋锛岄€熷害寰堝揩
+            with st.expander("📋 点击查看完整复盘", expanded=False):
+                # 3. 馃敟馃敟馃敟 鏍稿績锛氫娇鐢?components.html 娓叉煋 HTML 馃敟馃敟馃敟
+                # height=1000: 缁欎竴涓冻澶熺殑楂樺害
+                # scrolling=True: 鍐呭澶暱鍙互婊氬姩
+                # 杩欐牱灏辨槸涓€涓嫭绔嬬殑缃戦〉娌欑锛屾棤璁?HTML 澶氬鏉傞兘鑳藉畬缇庢樉绀猴紒
                 components.html(content['content'], height=1000, scrolling=True)
 
-                # 🔥 新增：分享功能
+                # 馃敟 鏂板锛氬垎浜姛鑳?
                 add_share_button(
                     content_title=content['title'],
                     content_summary=content['summary'],
@@ -997,51 +953,61 @@ else:
                     content_id=content['id']
                 )
 
-            # 加个间距
+            # 鍔犱釜闂磋窛
             st.markdown("<div style='margin-bottom: 20px;'></div>", unsafe_allow_html=True)
         else:
-            # 无权限 - 显示锁定卡片
+            # 无权限：显示锁定卡片
             reason_map = {
                 "not_subscribed": "订阅后即可查看完整内容",
                 "expired": f"订阅已于 {access['expire_at'].strftime('%Y-%m-%d') if access['expire_at'] else ''} 过期",
-                "subscription_inactive": "订阅已停用"
+                "subscription_inactive": "订阅状态已失效",
             }
-            reason = reason_map.get(access['reason'], "需要订阅")
+            reason = reason_map.get(access['reason'], "需要订阅后查看")
 
-            st.markdown(f"""
-            <div class="locked-card">
-                <div class="locked-icon">🔒</div>
-                <div class="locked-title">{content['title']}</div>
-                <div class="locked-desc">{reason}</div>
-            </div>
-            """, unsafe_allow_html=True)
+            locked_html = (
+                '<div class="locked-card">'
+                '<div class="locked-icon">🔒</div>'
+                f"<div class='locked-title'>{content['title']}</div>"
+                f"<div class='locked-desc'>{reason}</div>"
+                '</div>'
+            )
+            st.markdown(locked_html, unsafe_allow_html=True)
 
             col1, col2, col3 = st.columns([1, 2, 1])
             with col2:
-                # 🔥🔥🔥 【修复】针对“复盘晚报”实现点击即订阅 🔥🔥🔥
+                # 馃敟馃敟馃敟 銆愪慨澶嶃€戦拡瀵光€滃鐩樻櫄鎶モ€濆疄鐜扮偣鍑诲嵆璁㈤槄 馃敟馃敟馃敟
 
-                # 检查是否是复盘晚报 (或者其他你定义的免费频道)
-                # 注意：这里需要确保 content 字典里有 'channel_name' 字段
-                current_content_channel = content.get('channel_name')
+                # 妫€鏌ユ槸鍚︽槸澶嶇洏鏅氭姤 (鎴栬€呭叾浠栦綘瀹氫箟鐨勫厤璐归閬?
+                # 娉ㄦ剰锛氳繖閲岄渶瑕佺‘淇?content 瀛楀吀閲屾湁 'channel_name' 瀛楁
+                current_content_channel_code = str(content.get('channel_code') or "").lower()
 
-                # 2. 判断是否为免费频道 (复盘晚报)
-                is_free_channel = current_content_channel in FREE_SELF_SUBSCRIBE_CHANNELS
+                # 2. 鍒ゆ柇鏄惁涓虹櫧鍚嶅崟棰戦亾锛堥粯璁ゅ叧闂級
+                is_free_channel = current_content_channel_code in FREE_SELF_SUBSCRIBE_CHANNEL_CODES
 
                 if is_free_channel:
-                    # 场景 1: 免费/自助频道 -> 显示绿色/亮色按钮直接开通
+                    # 场景1：白名单频道，允许直接开通
                     if st.button("🔓 免费订阅", key=f"lock_{content['id']}", type="primary", use_container_width=True):
-                        # 调用订阅服务
-                        success, msg = sub_svc.add_subscription(user, content['channel_id'], days=100)
+                        success, msg = sub_svc.add_subscription(
+                            user,
+                            content['channel_id'],
+                            days=100,
+                            source_type="self_subscribe_whitelist",
+                            source_ref=f"streamlit:intel_locked:{current_content_channel_code}",
+                            source_note="intel_locked_card_free_subscribe",
+                            operator="user_self_service",
+                        )
 
                         if success:
-                            st.balloons()  # 撒花
-                            st.toast("✅ 订阅成功！正在刷新...", icon="🎉")
+                            st.balloons()
+                            st.toast("✅ 订阅成功，正在刷新页面…", icon="🎉")
                             time.sleep(1)
-                            st.rerun()  # 立即刷新页面
+                            st.rerun()
                         else:
                             st.error(f"订阅失败: {msg}")
 
                 else:
-                    # 场景 2: 其他付费频道 -> 引导联系客服
-                    if st.button("🔓 立即订阅", key=f"lock_{content['id']}", type="primary", use_container_width=True):
-                        st.info("此频道为高级服务，请联系客服开通：微信 trader-sec")
+                    # 场景2：付费频道，跳转充值中心
+                    if st.button("💳 付费开通", key=f"lock_{content['id']}", type="primary", use_container_width=True):
+                        st.switch_page("pages/17_充值中心.py")
+
+

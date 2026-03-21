@@ -135,5 +135,6 @@ def show_navigation():
         st.page_link("pages/18_持仓体检.py", label="持仓体检")
         # st.page_link("pages/01_秘书.py", label="秘书")  # 暂不上线
         st.page_link("pages/11_情报站.py", label="情报站")
+        st.page_link("pages/17_充值中心.py", label="充值中心")
 
     st.markdown("---")
