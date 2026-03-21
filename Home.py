@@ -10,6 +10,7 @@ import plotly.io as pio
 import os
 import json
 import random
+import io
 import markdown
 import sys
 import auth_utils as auth
@@ -34,6 +35,7 @@ from langchain_core.outputs import LLMResult
 # --- AI 相关导入 ---
 from llm_compat import ChatTongyiCompat as ChatTongyi
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
+from captcha_utils import generate_captcha_image
 
 # Streamlit 运行时/第三方组件仍可能访问旧别名，提前映射以避免弃用日志噪音。
 if hasattr(st, "user"):
@@ -187,6 +189,17 @@ def check_and_show_announcement():
 # ==========================================
 #  1. 页面配置 (必须在第一行) [修改点：改为 centered 布局]
 # ==========================================
+def refresh_register_image_captcha():
+    """Refresh register image captcha and rotate nonce safely."""
+    image, code = generate_captcha_image(length=5)
+    buf = io.BytesIO()
+    image.save(buf, format="PNG")
+    st.session_state["reg_image_captcha_code"] = str(code or "").upper()
+    st.session_state["reg_image_captcha_bytes"] = buf.getvalue()
+    # Never write to a mounted text_input key directly.
+    st.session_state["reg_image_captcha_nonce"] = int(st.session_state.get("reg_image_captcha_nonce", 0)) + 1
+
+
 st.set_page_config(
     page_title="爱波塔-懂期权的AI | K线分析+期权策略",
     page_icon="favicon.ico",
@@ -462,6 +475,33 @@ st.markdown("""
         color: #cbd5e1 !important; /* 内部文字颜色 */
         border: 1px solid rgba(255,255,255,0.1);
         border-radius: 8px;
+    }
+
+    /* 注册区：图形验证码刷新按钮（小圆形 icon） */
+    .st-key-btn_refresh_reg_captcha div.stButton > button {
+        width: 40px !important;
+        min-width: 40px !important;
+        height: 40px !important;
+        padding: 0 !important;
+        border-radius: 999px !important;
+        font-size: 18px !important;
+        line-height: 1 !important;
+        white-space: nowrap !important;
+        margin-top: 6px !important;
+        border: 1px solid rgba(59, 130, 246, 0.55) !important;
+        background: linear-gradient(135deg, rgba(37, 99, 235, 0.35), rgba(30, 41, 59, 0.9)) !important;
+        box-shadow: 0 4px 10px rgba(30, 64, 175, 0.25) !important;
+    }
+    .st-key-btn_refresh_reg_captcha div.stButton > button::after {
+        content: none !important;
+    }
+    .st-key-btn_refresh_reg_captcha div.stButton > button:hover {
+        transform: scale(1.04) !important;
+        border-color: rgba(96, 165, 250, 0.9) !important;
+        box-shadow: 0 6px 14px rgba(59, 130, 246, 0.35) !important;
+    }
+    .st-key-btn_refresh_reg_captcha div.stButton > button:active {
+        transform: scale(0.98) !important;
     }
 
     /* 🔥 隐藏 Streamlit 默认的页面导航（使用自定义分组导航） */
@@ -1678,6 +1718,9 @@ def show_welcome_screen():
 # ==========================================
 
 # A. 侧边栏：登录/设置 (折叠起来保持清爽)
+if "reg_image_captcha_code" not in st.session_state or "reg_image_captcha_bytes" not in st.session_state:
+    refresh_register_image_captcha()
+
 with st.sidebar:
     # 🔥 [新增] 统一的分组导航菜单
     from sidebar_navigation import show_navigation
@@ -1727,6 +1770,26 @@ with st.sidebar:
             reg_password = st.text_input("设置密码", type="password", key="reg_password", placeholder="至少6位")
             reg_password2 = st.text_input("确认密码", type="password", key="reg_password2")
 
+            st.caption("🔒 图形验证码（英文数字）")
+            captcha_col1, captcha_col2 = st.columns([4, 1], vertical_alignment="bottom")
+            with captcha_col1:
+                st.image(
+                    st.session_state.get("reg_image_captcha_bytes"),
+                    use_container_width=True,
+                )
+            with captcha_col2:
+                if st.button("↻", key="btn_refresh_reg_captcha", help="换一张验证码"):
+                    refresh_register_image_captcha()
+                    st.rerun()
+            st.caption("看不清可点右侧刷新图标")
+
+            answer_key = f"reg_image_captcha_answer_{st.session_state.get('reg_image_captcha_nonce', 0)}"
+            reg_image_captcha_answer = st.text_input(
+                "验证码",
+                key=answer_key,
+                placeholder="输入图片中的英文数字",
+                max_chars=6,
+            )
             # 邮箱选填区域
             with st.expander("📧 绑定邮箱（选填）", expanded=False):
                 st.caption("绑定后可用邮箱登录和找回密码，也可注册后在个人资料中绑定")
@@ -1760,6 +1823,11 @@ with st.sidebar:
                     st.warning("密码至少6位")
                 elif reg_password != reg_password2:
                     st.error("两次密码不一致")
+                elif not reg_image_captcha_answer:
+                    st.warning("请输入图形验证码")
+                elif str(reg_image_captcha_answer).strip().upper() != str(st.session_state.get("reg_image_captcha_code", "")).upper():
+                    st.error("图形验证码错误，请重试")
+                    refresh_register_image_captcha()
                 elif reg_email and not reg_code:
                     st.warning("填写了邮箱请输入验证码，或清空邮箱")
                 else:
@@ -1777,6 +1845,7 @@ with st.sidebar:
                         success, msg = auth.register_user(reg_username, reg_password)
 
                     if success:
+                        refresh_register_image_captcha()
                         st.success(msg if msg else "注册成功！")
                         st.balloons()
                         # 自动登录
