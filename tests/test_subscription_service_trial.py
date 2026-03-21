@@ -59,8 +59,11 @@ class TestSubscriptionTrial(unittest.TestCase):
             conn.execute(
                 text(
                     """
-                    INSERT INTO content_channels(id, code, name, is_active, is_premium)
-                    VALUES (1, 'daily_report', '复盘晚报', 1, 1)
+                    INSERT INTO content_channels(id, code, name, is_active, is_premium) VALUES
+                    (1, 'daily_report', '复盘晚报', 1, 1),
+                    (2, 'expiry_option_radar', '末日期权晚报', 1, 1),
+                    (3, 'broker_position_report', '持仓密报', 1, 1),
+                    (4, 'fund_flow_report', '资金流晚报', 1, 1)
                     """
                 )
             )
@@ -95,6 +98,46 @@ class TestSubscriptionTrial(unittest.TestCase):
         self.assertEqual(int(cnt_trial), 1)
         self.assertEqual(int(cnt_sub), 1)
         self.assertEqual(str(source_type), "trial")
+
+    def test_grant_new_user_trial_all_reports_idempotent(self):
+        ok1, msg1 = sub.grant_new_user_trial_all_reports("new_user_all")
+        ok2, msg2 = sub.grant_new_user_trial_all_reports("new_user_all")
+
+        self.assertTrue(ok1)
+        self.assertTrue(msg1.startswith("trial_granted:") or msg1 == "already_granted")
+        self.assertTrue(ok2)
+        self.assertEqual(msg2, "already_granted")
+
+        with self.engine.connect() as conn:
+            cnt_sub = conn.execute(
+                text(
+                    """
+                    SELECT COUNT(*) FROM user_subscriptions
+                    WHERE user_id='new_user_all' AND channel_id IN (1,2,3,4)
+                    """
+                )
+            ).scalar_one()
+            cnt_marker = conn.execute(
+                text(
+                    """
+                    SELECT COUNT(*) FROM user_trial_grants
+                    WHERE user_id='new_user_all'
+                      AND trial_code='new_user_all_reports_3d_v1:marker'
+                    """
+                )
+            ).scalar_one()
+            cnt_trial_rows = conn.execute(
+                text(
+                    """
+                    SELECT COUNT(*) FROM user_trial_grants
+                    WHERE user_id='new_user_all'
+                    """
+                )
+            ).scalar_one()
+
+        self.assertEqual(int(cnt_sub), 4)
+        self.assertEqual(int(cnt_marker), 1)
+        self.assertEqual(int(cnt_trial_rows), 5)
 
 
 if __name__ == "__main__":

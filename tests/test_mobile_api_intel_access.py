@@ -44,7 +44,7 @@ class TestMobileApiIntelAccess(unittest.TestCase):
             return_value=False,
         ), patch.object(
             mobile_api,
-            "_FREE_CHANNEL_CODES",
+            "_EFFECTIVE_FREE_CHANNEL_CODES",
             set(),
         ), patch.object(
             mobile_api.sub_svc,
@@ -65,7 +65,7 @@ class TestMobileApiIntelAccess(unittest.TestCase):
             return_value=False,
         ), patch.object(
             mobile_api,
-            "_FREE_CHANNEL_CODES",
+            "_EFFECTIVE_FREE_CHANNEL_CODES",
             {"daily_report"},
         ), patch.object(
             mobile_api.sub_svc,
@@ -81,6 +81,27 @@ class TestMobileApiIntelAccess(unittest.TestCase):
         self.assertEqual(out["message"], "ok")
         kwargs = mocked_add.call_args.kwargs
         self.assertEqual(kwargs["source_type"], "self_subscribe_whitelist")
+
+    def test_subscribe_reject_for_force_paid_channel_even_if_whitelisted(self):
+        body = mobile_api.SubscribeRequest(channel_code="fund_flow_report")
+        with patch.object(mobile_api, "_INTEL_SELF_SUBSCRIBE_API_ENABLED", True), patch.object(
+            mobile_api, "_ALLOW_SELF_SUB_IN_PROD", True
+        ), patch.object(
+            mobile_api,
+            "_is_production_env",
+            return_value=False,
+        ), patch.object(
+            mobile_api,
+            "_EFFECTIVE_FREE_CHANNEL_CODES",
+            {"daily_report"},
+        ), patch.object(
+            mobile_api.sub_svc,
+            "get_channel_by_code",
+            return_value={"id": 3, "code": "fund_flow_report"},
+        ):
+            with self.assertRaises(HTTPException) as cm:
+                mobile_api.intel_subscribe(body=body, username="u1")
+        self.assertEqual(cm.exception.status_code, 403)
 
 
 if __name__ == "__main__":

@@ -43,6 +43,13 @@ FREE_SELF_SUBSCRIBE_CHANNEL_CODES = {
     for item in str(os.getenv("FREE_SELF_SUBSCRIBE_CHANNEL_CODES", "")).split(",")
     if item.strip()
 }
+FORCE_PAID_CHANNEL_CODES = {
+    "daily_report",
+    "expiry_option_radar",
+    "broker_position_report",
+    "fund_flow_report",
+}
+EFFECTIVE_FREE_CHANNEL_CODES = FREE_SELF_SUBSCRIBE_CHANNEL_CODES - FORCE_PAID_CHANNEL_CODES
 with st.sidebar:
     show_navigation()
 
@@ -735,14 +742,14 @@ with st.sidebar:
                         # 显示到期时间
                         expire_text = sub_svc.format_expire_time(sub_info['expire_at'])
                         st.caption(f"✅ {expire_text}")
-                    elif not channel['is_premium']:
+                    elif str(channel.get('code', '')).lower() in EFFECTIVE_FREE_CHANNEL_CODES:
                         st.caption("🆓 免费")
                     else:
                         st.caption("🔒 未订阅")
 
                 with col2:
                     # 场景 1: 白名单频道允许自助订阅/退订
-                    if str(channel.get('code', '')).lower() in FREE_SELF_SUBSCRIBE_CHANNEL_CODES:
+                    if str(channel.get('code', '')).lower() in EFFECTIVE_FREE_CHANNEL_CODES:
                         if is_subscribed:
                             if st.button("退订", key=f"unsub_{channel['id']}", type="secondary",
                                          use_container_width=True):
@@ -839,7 +846,8 @@ for i, channel in enumerate(channels):
         is_active = st.session_state.selected_channel == channel['code']
 
         # 鐘舵€佸垽鏂?
-        if not channel['is_premium']:
+        channel_code = str(channel.get("code", "")).lower()
+        if channel_code in EFFECTIVE_FREE_CHANNEL_CODES:
             status = "免费"
             status_class = "free"
         elif sub_info and sub_info['is_active']:
@@ -982,7 +990,7 @@ else:
                 current_content_channel_code = str(content.get('channel_code') or "").lower()
 
                 # 2. 鍒ゆ柇鏄惁涓虹櫧鍚嶅崟棰戦亾锛堥粯璁ゅ叧闂級
-                is_free_channel = current_content_channel_code in FREE_SELF_SUBSCRIBE_CHANNEL_CODES
+                is_free_channel = current_content_channel_code in EFFECTIVE_FREE_CHANNEL_CODES
 
                 if is_free_channel:
                     # 场景1：白名单频道，允许直接开通

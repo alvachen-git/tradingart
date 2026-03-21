@@ -21,6 +21,18 @@ _SUB_SOURCE_COLUMNS = {"source_type", "source_ref", "source_note", "granted_at",
 _HAS_SUB_SOURCE_COLUMNS: Optional[bool] = None
 _TRIAL_TABLE_READY: bool = False
 
+DEFAULT_NEW_USER_TRIAL_DAYS = int(str(os.getenv("NEW_USER_TRIAL_DAYS", "3")).strip() or 3)
+DEFAULT_NEW_USER_TRIAL_CHANNEL_CODES = [
+    item.strip()
+    for item in str(
+        os.getenv(
+            "NEW_USER_TRIAL_CHANNEL_CODES",
+            "daily_report,expiry_option_radar,broker_position_report,fund_flow_report,trade_signal",
+        )
+    ).split(",")
+    if item.strip()
+]
+
 
 def _has_subscription_source_columns(conn) -> bool:
     global _HAS_SUB_SOURCE_COLUMNS
@@ -601,6 +613,127 @@ def grant_new_user_trial(user_id: str, channel_code: str = "daily_report", days:
         return True, "already_granted"
     except Exception as exc:
         print(f"[subscription] grant_trial_failed user={user_id} trial={trial_code} err={exc}")
+        return False, "trial_grant_failed"
+
+
+def grant_new_user_trial_all_reports(
+    user_id: str,
+    days: Optional[int] = None,
+    channel_codes: Optional[List[str]] = None,
+) -> tuple[bool, str]:
+    """
+    新用户注册默认发放全报告试用权限（幂等，每账号每活动仅一次）。
+    """
+    if not user_id:
+        return False, "user_id_empty"
+
+    grant_days = int(days or DEFAULT_NEW_USER_TRIAL_DAYS)
+    if grant_days <= 0:
+        return False, "days_invalid"
+
+    codes = [str(c or "").strip() for c in (channel_codes or DEFAULT_NEW_USER_TRIAL_CHANNEL_CODES)]
+    codes = [c for c in codes if c]
+    if not codes:
+        return False, "channel_codes_empty"
+
+    campaign_code = f"new_user_all_reports_{grant_days}d_v1"
+    marker_code = f"{campaign_code}:marker"
+    operator = os.getenv("TRIAL_GRANT_OPERATOR", "system_register")
+    source_note = f"new_user_all_reports_trial:{grant_days}d"
+
+    try:
+        with engine.begin() as conn:
+            _ensure_trial_grants_table(conn)
+
+            marker = conn.execute(
+                text(
+                    """
+                    SELECT id
+                    FROM user_trial_grants
+                    WHERE user_id = :uid AND trial_code = :trial_code
+                    LIMIT 1
+                    """
+                ),
+                {"uid": user_id, "trial_code": marker_code},
+            ).fetchone()
+            if marker:
+                return True, "already_granted"
+
+            rows = conn.execute(
+                text(
+                    """
+                    SELECT id, code
+                    FROM content_channels
+                    WHERE is_active = 1
+                    """
+                )
+            ).fetchall()
+            channel_map = {str(r[1] or "").strip(): int(r[0]) for r in rows}
+
+            granted_count = 0
+            for code in codes:
+                channel_id = channel_map.get(code)
+                if not channel_id:
+                    print(f"[subscription] trial_all_reports_skip_missing_channel code={code}")
+                    continue
+
+                trial_code = f"{campaign_code}:{code}"
+                ok, msg = _add_subscription_core(
+                    conn=conn,
+                    user_id=user_id,
+                    channel_id=channel_id,
+                    days=grant_days,
+                    source_type="trial_all_reports",
+                    source_ref=trial_code,
+                    source_note=source_note,
+                    operator=operator,
+                )
+                if not ok:
+                    return False, msg
+
+                conn.execute(
+                    text(
+                        """
+                        INSERT INTO user_trial_grants
+                        (user_id, trial_code, channel_id, days, granted_at, source_note, operator)
+                        VALUES (:uid, :trial_code, :channel_id, :days, CURRENT_TIMESTAMP, :source_note, :operator)
+                        """
+                    ),
+                    {
+                        "uid": user_id,
+                        "trial_code": trial_code,
+                        "channel_id": channel_id,
+                        "days": grant_days,
+                        "source_note": source_note,
+                        "operator": operator,
+                    },
+                )
+                granted_count += 1
+
+            if granted_count <= 0:
+                return False, "no_channel_granted"
+
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO user_trial_grants
+                    (user_id, trial_code, channel_id, days, granted_at, source_note, operator)
+                    VALUES (:uid, :trial_code, 0, :days, CURRENT_TIMESTAMP, :source_note, :operator)
+                    """
+                ),
+                {
+                    "uid": user_id,
+                    "trial_code": marker_code,
+                    "days": grant_days,
+                    "source_note": source_note,
+                    "operator": operator,
+                },
+            )
+            return True, f"trial_granted:{granted_count}"
+    except IntegrityError:
+        return True, "already_granted"
+    except Exception as exc:
+        print(f"[subscription] grant_trial_all_reports_failed user={user_id} err={exc}")
         return False, "trial_grant_failed"
 
 

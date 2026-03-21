@@ -569,6 +569,13 @@ _FREE_CHANNEL_CODES = {
     for item in str(os.getenv("FREE_SELF_SUBSCRIBE_CHANNEL_CODES", "")).split(",")
     if item.strip()
 }
+_FORCE_PAID_CHANNEL_CODES = {
+    "daily_report",
+    "expiry_option_radar",
+    "broker_position_report",
+    "fund_flow_report",
+}
+_EFFECTIVE_FREE_CHANNEL_CODES = _FREE_CHANNEL_CODES - _FORCE_PAID_CHANNEL_CODES
 _INTEL_SELF_SUBSCRIBE_API_ENABLED = (
     str(os.getenv("INTEL_SELF_SUBSCRIBE_API_ENABLED", "false")).strip().lower()
     in {"1", "true", "on", "yes"}
@@ -666,7 +673,7 @@ def intel_subscribe(
     if not channel:
         raise HTTPException(status_code=404, detail="频道不存在")
 
-    if channel_code.lower() not in _FREE_CHANNEL_CODES:
+    if channel_code.lower() not in _EFFECTIVE_FREE_CHANNEL_CODES:
         raise HTTPException(status_code=403, detail="该频道需要人工开通，请联系客服")
 
     result = sub_svc.add_subscription(

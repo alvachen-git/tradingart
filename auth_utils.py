@@ -153,7 +153,7 @@ def register_with_email(email: str, password: str, email_code: str, username: st
 
             registered_username = username
 
-        trial_ok, trial_msg = sub_svc.grant_new_user_trial(registered_username)
+        trial_ok, trial_msg = sub_svc.grant_new_user_trial_all_reports(registered_username)
         if not trial_ok:
             print(
                 f"[auth][trial_grant] register_with_email user={registered_username} "
@@ -601,7 +601,7 @@ def register_user(username, password):
 
             registered_username = username
 
-        trial_ok, trial_msg = sub_svc.grant_new_user_trial(registered_username)
+        trial_ok, trial_msg = sub_svc.grant_new_user_trial_all_reports(registered_username)
         if not trial_ok:
             print(
                 f"[auth][trial_grant] register_user user={registered_username} "
