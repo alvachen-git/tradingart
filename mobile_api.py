@@ -569,6 +569,23 @@ _FREE_CHANNEL_CODES = {
     for item in str(os.getenv("FREE_SELF_SUBSCRIBE_CHANNEL_CODES", "")).split(",")
     if item.strip()
 }
+_INTEL_SELF_SUBSCRIBE_API_ENABLED = (
+    str(os.getenv("INTEL_SELF_SUBSCRIBE_API_ENABLED", "false")).strip().lower()
+    in {"1", "true", "on", "yes"}
+)
+_ALLOW_SELF_SUB_IN_PROD = (
+    str(os.getenv("INTEL_SELF_SUBSCRIBE_ALLOW_IN_PROD", "false")).strip().lower()
+    in {"1", "true", "on", "yes"}
+)
+
+
+def _is_production_env() -> bool:
+    env_val = (
+        str(os.getenv("APP_ENV", "")).strip()
+        or str(os.getenv("ENV", "")).strip()
+        or str(os.getenv("DEPLOY_ENV", "")).strip()
+    ).lower()
+    return env_val in {"prod", "production", "online"}
 
 
 @app.get("/api/intel/reports", tags=["情报站"])
@@ -637,6 +654,11 @@ def intel_subscribe(
     username: str = Depends(get_current_user),
 ):
     """订阅白名单情报频道（默认关闭，通过环境变量灰度开启）。"""
+    if not _INTEL_SELF_SUBSCRIBE_API_ENABLED:
+        raise HTTPException(status_code=403, detail="当前环境未开启自助订阅接口")
+    if _is_production_env() and not _ALLOW_SELF_SUB_IN_PROD:
+        raise HTTPException(status_code=403, detail="生产环境默认关闭该接口")
+
     channel_code = str(body.channel_code or "").strip()
     if not channel_code:
         raise HTTPException(status_code=400, detail="channel_code 不能为空")
@@ -647,7 +669,15 @@ def intel_subscribe(
     if channel_code.lower() not in _FREE_CHANNEL_CODES:
         raise HTTPException(status_code=403, detail="该频道需要人工开通，请联系客服")
 
-    result = sub_svc.add_subscription(username, channel["id"], days=3650)
+    result = sub_svc.add_subscription(
+        username,
+        channel["id"],
+        days=3650,
+        source_type="self_subscribe_whitelist",
+        source_ref=f"api:intel_subscribe:{channel_code.lower()}",
+        source_note="mobile_api_whitelist_free_subscribe",
+        operator="user_self_service",
+    )
     # add_subscription 返回 (success, message) 或单个 bool
     if isinstance(result, tuple):
         success, msg = result[0], result[1] if len(result) > 1 else "操作完成"

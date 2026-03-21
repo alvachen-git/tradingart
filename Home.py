@@ -28,6 +28,7 @@ from market_tools import get_market_snapshot,tool_query_specific_option
 from ui_components import inject_sidebar_toggle_style
 from sqlalchemy import text
 from dotenv import load_dotenv
+from pathlib import Path
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.outputs import LLMResult
 # --- AI 相关导入 ---
@@ -41,7 +42,12 @@ if hasattr(st, "user"):
 
 
 # 1. 初始化环境
-load_dotenv(override=True)
+_CURRENT_DIR = Path(__file__).resolve().parent
+_ROOT_ENV = _CURRENT_DIR.parent / ".env"
+if _ROOT_ENV.exists():
+    load_dotenv(dotenv_path=_ROOT_ENV, override=True)
+else:
+    load_dotenv(override=True)
 
 # --- 系统代理清理 ---
 for key in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"]:
@@ -1059,60 +1065,28 @@ def fast_router_check(user_query):
         if current_user == "访客" or not current_user:
             return True, "🔒 **请先登录**\n\n您需要登录后才能管理晚报订阅设置。"
 
-        # B. 启动 UI 状态条
+        if is_sub_intent:
+            return True, (
+                "### 💳 晚报订阅已升级为点数购买\n\n"
+                "请前往左侧 **个人中心 → 充值中心** 完成充值并购买订阅。\n\n"
+                "购买后权限会自动生效，内容无需人工开通。"
+            )
+
+        # 退订：保留仅关闭邮件通知，不删除订阅记录
         with st.chat_message("assistant", avatar="🤖"):
             with st.status("⚙️ 正在更新订阅设置...", expanded=True) as status:
-
-                # C. 检查是否绑定了邮箱 (保留原有的检查逻辑)
-                has_email = de.check_user_email_status(current_user)
-
-                if not has_email:
-                    time.sleep(0.5)
-                    status.update(label="❌ 缺少邮箱信息", state="error")
-                    return True, """
-                            ### ❌ 无法订阅
-
-                            您尚未绑定邮箱，AI 无法为您发送晚报。
-
-                            **如何解决：**
-                            1. 请点击左侧侧边栏的 **“个人资料”**。
-                            2. 绑定您的邮箱并完成验证。
-                            3. 回来对我再说一次“订阅晚报”。
-                            """
-
-                # D. 获取 "复盘晚报" 的频道信息
                 channel = sub_svc.get_channel_by_code("daily_report")
                 if not channel:
                     status.update(label="❌ 系统配置错误", state="error")
                     return True, "⚠️ 系统错误：找不到【复盘晚报】频道配置，请联系管理员。"
 
-                channel_id = channel['id']
+                success = sub_svc.update_notification_settings(current_user, channel["id"], notify_email=False)
+                if success:
+                    status.update(label="✅ 已关闭通知", state="complete")
+                    return True, "### ✅ 已取消订阅\n\n您的邮件通知已关闭，将不再收到复盘晚报邮件。\n\n(您依然可以在【情报站】查看历史内容)"
 
-                # E. 执行订阅逻辑
-                if is_sub_intent:
-                    # 1. 添加订阅权限 (默认给 365 天，或者你可以设置成 30 天)
-                    success_add, msg = sub_svc.add_subscription(current_user, channel_id, days=365)
-                    # 2. 强制开启邮件通知 (notify_email = 1)
-                    success_notify = sub_svc.update_notification_settings(current_user, channel_id, notify_email=True)
-
-                    if success_add and success_notify:
-                        status.update(label="✅ 订阅成功", state="complete")
-                        return True, f"### ✅ 订阅成功！\n\n权限已开通，且邮件通知已开启。\n复盘晚报将在每晚8点半后发送至您的邮箱。\n\n(有效期至：{msg.split('至 ')[-1] if '至' in msg else '长期'})"
-                    else:
-                        status.update(label="❌ 订阅失败", state="error")
-                        return True, "⚠️ 系统繁忙，订阅失败，请稍后再试。"
-
-                # F. 执行退订逻辑
-                elif is_unsub_intent:
-                    # 退订只需关闭邮件通知即可 (notify_email = 0)，无需删除订阅记录，这样用户还能在网站上看历史
-                    success = sub_svc.update_notification_settings(current_user, channel_id, notify_email=False)
-
-                    if success:
-                        status.update(label="✅ 已关闭通知", state="complete")
-                        return True, "### ✅ 已取消订阅\n\n您的邮件通知已关闭，将不再收到复盘晚报邮件。\n\n(您依然可以在【情报站】查看历史内容)"
-                    else:
-                        status.update(label="❌ 操作失败", state="error")
-                        return True, "⚠️ 系统繁忙，操作失败，请稍后再试。"
+                status.update(label="❌ 操作失败", state="error")
+                return True, "⚠️ 系统繁忙，操作失败，请稍后再试。"
 
     # 1. 定义【绝对需要 Agent 思考】的复杂词 (负面清单 - 增强版)
     # 🔥 [修改点] 增加了 "概率", "几成", "可能", "战争", "局势" 等词，防止地缘政治问题被拦截

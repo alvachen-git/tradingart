@@ -9,6 +9,7 @@ import sys
 from sqlalchemy import create_engine, text
 from kline_tools import analyze_kline_pattern
 from dotenv import load_dotenv
+from pathlib import Path
 from langchain_core.tools import tool
 from sqlalchemy.exc import SQLAlchemyError
 from langchain.agents import create_agent
@@ -42,7 +43,12 @@ if ts_token:
 
 
 # 1. 初始化
-load_dotenv(override=True)
+_CURRENT_DIR = Path(__file__).resolve().parent
+_ROOT_ENV = _CURRENT_DIR.parent / ".env"
+if _ROOT_ENV.exists():
+    load_dotenv(dotenv_path=_ROOT_ENV, override=True)
+else:
+    load_dotenv(override=True)
 
 
 

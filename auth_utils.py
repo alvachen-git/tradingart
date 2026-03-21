@@ -13,6 +13,7 @@ from datetime import datetime, timedelta
 
 # 导入数据库引擎
 from data_engine import engine
+import subscription_service as sub_svc
 
 # 导入邮箱服务
 from email_utils import (
@@ -105,6 +106,7 @@ def register_with_email(email: str, password: str, email_code: str, username: st
     hashed = hash_password(password)
 
     try:
+        registered_username = None
         with engine.begin() as conn:
             # 🔥 检查邮箱是否已注册（强制唯一）
             check_email = conn.execute(
@@ -149,7 +151,15 @@ def register_with_email(email: str, password: str, email_code: str, username: st
                                """)
             conn.execute(sql_profile, {"uid": username})
 
-            return True, f"注册成功！您的用户名是：{username}"
+            registered_username = username
+
+        trial_ok, trial_msg = sub_svc.grant_new_user_trial(registered_username)
+        if not trial_ok:
+            print(
+                f"[auth][trial_grant] register_with_email user={registered_username} "
+                f"status=failed reason={trial_msg}"
+            )
+        return True, f"注册成功！您的用户名是：{registered_username}"
 
     except Exception as e:
         print(f"注册失败: {e}")
@@ -566,6 +576,7 @@ def register_user(username, password):
     hashed = hash_password(password)
 
     try:
+        registered_username = None
         with engine.begin() as conn:
             check = conn.execute(
                 text("SELECT 1 FROM users WHERE username = :u"),
@@ -588,7 +599,15 @@ def register_user(username, password):
                                """)
             conn.execute(sql_profile, {"uid": username})
 
-            return True, "注册成功！请登录"
+            registered_username = username
+
+        trial_ok, trial_msg = sub_svc.grant_new_user_trial(registered_username)
+        if not trial_ok:
+            print(
+                f"[auth][trial_grant] register_user user={registered_username} "
+                f"status=failed reason={trial_msg}"
+            )
+        return True, "注册成功！请登录"
 
     except Exception as e:
         print(f"注册失败: {e}")
