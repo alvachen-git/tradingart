@@ -16,6 +16,16 @@ from ui_components import (
 )
 
 
+def is_mobile():
+    """检测是否为移动设备访问。"""
+    try:
+        user_agent = st.context.headers.get("User-Agent", "")
+        mobile_keywords = ["Mobile", "Android", "iPhone", "iPad", "Windows Phone"]
+        return any(keyword in user_agent for keyword in mobile_keywords)
+    except Exception:
+        return False
+
+
 # ==========================================
 # 椤甸潰閰嶇疆
 # ==========================================
@@ -831,44 +841,88 @@ channels = sub_svc.get_all_channels()
 user_subs = sub_svc.get_user_subscriptions(user)
 user_sub_map = {s['channel_id']: s for s in user_subs}
 
-# 棰戦亾鎸夐挳
-cols = st.columns(len(channels) + 1)
+# 频道筛选：手机端下拉，桌面端保持原按钮样式
+if is_mobile():
+    channel_options = [('all', '📋 全部')] + [
+        (channel['code'], f"{channel['icon']} {channel['name']}") for channel in channels
+    ]
+    option_codes = [code for code, _ in channel_options]
+    option_labels = {code: label for code, label in channel_options}
 
-with cols[0]:
-    is_all_active = st.session_state.selected_channel == 'all'
-    if st.button("📋 全部", key="ch_all", type="primary" if is_all_active else "secondary", use_container_width=True):
+    if st.session_state.selected_channel not in option_codes:
         st.session_state.selected_channel = 'all'
+
+    selected_code = st.selectbox(
+        "频道筛选",
+        options=option_codes,
+        index=option_codes.index(st.session_state.selected_channel),
+        format_func=lambda code: option_labels.get(code, code),
+        key="intel_channel_dropdown",
+    )
+
+    if selected_code != st.session_state.selected_channel:
+        st.session_state.selected_channel = selected_code
         st.rerun()
 
-for i, channel in enumerate(channels):
-    with cols[i + 1]:
-        sub_info = user_sub_map.get(channel['id'])
-        is_active = st.session_state.selected_channel == channel['code']
+    # 当前频道订阅状态（全部不展示）
+    if st.session_state.selected_channel != 'all':
+        selected_channel = next((ch for ch in channels if ch['code'] == st.session_state.selected_channel), None)
+        if selected_channel:
+            sub_info = user_sub_map.get(selected_channel['id'])
+            channel_code = str(selected_channel.get("code", "")).lower()
+            if channel_code in EFFECTIVE_FREE_CHANNEL_CODES:
+                status = "免费"
+                status_class = "free"
+            elif sub_info and sub_info['is_active']:
+                status = sub_svc.format_expire_time(sub_info['expire_at'])
+                status_class = "active"
+            elif sub_info and sub_info.get('is_expired'):
+                status = "已过期"
+                status_class = "expired"
+            else:
+                status = "未订阅"
+                status_class = "none"
 
-        # 鐘舵€佸垽鏂?
-        channel_code = str(channel.get("code", "")).lower()
-        if channel_code in EFFECTIVE_FREE_CHANNEL_CODES:
-            status = "免费"
-            status_class = "free"
-        elif sub_info and sub_info['is_active']:
-            status = sub_svc.format_expire_time(sub_info['expire_at'])
-            status_class = "active"
-        elif sub_info and sub_info.get('is_expired'):
-            status = "已过期"
-            status_class = "expired"
-        else:
-            status = "未订阅"
-            status_class = "none"
+            st.markdown(
+                f'<div style="text-align:right;margin-top:-2px;"><span class="status-badge status-{status_class}">{status}</span></div>',
+                unsafe_allow_html=True,
+            )
+else:
+    cols = st.columns(len(channels) + 1)
 
-        if st.button(f"{channel['icon']} {channel['name']}", key=f"ch_{channel['code']}",
-                     type="primary" if is_active else "secondary", use_container_width=True):
-            st.session_state.selected_channel = channel['code']
+    with cols[0]:
+        is_all_active = st.session_state.selected_channel == 'all'
+        if st.button("📋 全部", key="ch_all", type="primary" if is_all_active else "secondary", use_container_width=True):
+            st.session_state.selected_channel = 'all'
             st.rerun()
 
-        # 鐘舵€佹爣绛?
-        st.markdown(
-            f'<div style="text-align:center;margin-top:-8px;"><span class="status-badge status-{status_class}">{status}</span></div>',
-            unsafe_allow_html=True)
+    for i, channel in enumerate(channels):
+        with cols[i + 1]:
+            sub_info = user_sub_map.get(channel['id'])
+            is_active = st.session_state.selected_channel == channel['code']
+
+            channel_code = str(channel.get("code", "")).lower()
+            if channel_code in EFFECTIVE_FREE_CHANNEL_CODES:
+                status = "免费"
+                status_class = "free"
+            elif sub_info and sub_info['is_active']:
+                status = sub_svc.format_expire_time(sub_info['expire_at'])
+                status_class = "active"
+            elif sub_info and sub_info.get('is_expired'):
+                status = "已过期"
+                status_class = "expired"
+            else:
+                status = "未订阅"
+                status_class = "none"
+
+            if st.button(f"{channel['icon']} {channel['name']}", key=f"ch_{channel['code']}",
+                         type="primary" if is_active else "secondary", use_container_width=True):
+                st.session_state.selected_channel = channel['code']
+                st.rerun()
+
+            st.markdown(
+                f'<div style="text-align:center;margin-top:-8px;"><span class="status-badge status-{status_class}">{status}</span></div>',
+                unsafe_allow_html=True)
 
 st.markdown("<br>", unsafe_allow_html=True)
 
