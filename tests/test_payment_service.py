@@ -25,6 +25,11 @@ class _FakeAliPay:
         return self.verify_ok
 
 
+class _FakeAliPayWithWap(_FakeAliPay):
+    def api_alipay_trade_wap_pay(self, **kwargs):
+        return "mock_wap_query=1"
+
+
 class TestPaymentService(unittest.TestCase):
     def setUp(self):
         self.orig_engine = pay.engine
@@ -141,6 +146,12 @@ class TestPaymentService(unittest.TestCase):
         self.assertIsNotNone(out)
         self.assertIn("order_id", out)
         self.assertIn("pay_url", out)
+        self.assertIn("pay_url_pc", out)
+        self.assertIn("pay_url_wap", out)
+        self.assertIn("pay_url_app_scheme", out)
+        self.assertEqual(out["pay_url"], out["pay_url_pc"])
+        self.assertEqual(out["pay_url_wap"], out["pay_url_pc"])
+        self.assertTrue(str(out["pay_url_app_scheme"]).startswith("alipays://"))
 
         with self.engine.connect() as conn:
             row = conn.execute(
@@ -153,6 +164,14 @@ class TestPaymentService(unittest.TestCase):
     def test_create_topup_order_invalid_package(self):
         out = pay.create_topup_order("u1", "不存在套餐")
         self.assertIsNone(out)
+
+    def test_create_topup_order_mobile_prefers_wap_when_supported(self):
+        with patch.object(pay, "get_alipay_client", return_value=_FakeAliPayWithWap()):
+            out = pay.create_topup_order("u1", "标准包", client_hint="mobile")
+        self.assertIsNotNone(out)
+        self.assertIn("mock_wap_query=1", out["pay_url_wap"])
+        self.assertEqual(out["pay_url"], out["pay_url_wap"])
+        self.assertTrue(str(out["pay_url_app_scheme"]).startswith("alipays://"))
 
     def test_process_alipay_notify_success_and_idempotent(self):
         with self.engine.begin() as conn:

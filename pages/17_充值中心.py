@@ -26,6 +26,33 @@ with st.sidebar:
     show_navigation()
 inject_sidebar_toggle_style(mode="high_contrast")
 
+
+def _is_mobile_client() -> bool:
+    try:
+        user_agent = str(st.context.headers.get("User-Agent", "") or "")
+    except Exception:
+        user_agent = ""
+    if not user_agent:
+        return False
+    ua = user_agent.lower()
+    return any(
+        keyword in ua
+        for keyword in (
+            "mobile",
+            "android",
+            "iphone",
+            "ipad",
+            "ipod",
+            "windows phone",
+            "harmony",
+            "micromessenger",
+        )
+    )
+
+
+def _escape_attr_url(url: str) -> str:
+    return str(url or "").replace("&", "&amp;").replace("'", "%27")
+
 st.markdown(
     """
     <style>
@@ -440,6 +467,36 @@ st.markdown(
         line-height: 1;
     }
 
+    .alipay-pay-btn-secondary {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 8px;
+        width: 100%;
+        border-radius: 12px;
+        border: 1px solid rgba(92, 137, 212, 0.5);
+        background: linear-gradient(180deg, rgba(30, 59, 110, 0.9) 0%, rgba(19, 38, 73, 0.92) 100%);
+        color: #dce8ff !important;
+        text-decoration: none !important;
+        font-size: 15px;
+        font-weight: 700;
+        padding: 10px 12px;
+        margin-top: 8px;
+        transition: all .16s ease;
+    }
+
+    .alipay-pay-btn-secondary:hover {
+        filter: brightness(1.08);
+        border-color: rgba(120, 178, 255, 0.74);
+    }
+
+    .auto-fallback-tip {
+        color: #8fb2e8;
+        font-size: 12px;
+        margin-top: 8px;
+        line-height: 1.45;
+    }
+
     .product-head {
         border: 1px solid rgba(116, 154, 220, 0.28);
         border-radius: 12px;
@@ -639,6 +696,8 @@ if "points_last_order" not in st.session_state:
 if "points_pending_purchase" not in st.session_state:
     st.session_state.points_pending_purchase = None
 
+is_mobile_client = _is_mobile_client()
+
 points_info = pay_svc.get_user_points(user_id)
 balance = int(points_info.get("balance") or 0)
 total_earned = int(points_info.get("total_earned") or 0)
@@ -743,7 +802,11 @@ with shop_topup_tab:
                 key=f"topup_{idx}",
                 use_container_width=True,
             ):
-                result = pay_svc.create_topup_order(user_id, pkg_name)
+                result = pay_svc.create_topup_order(
+                    user_id,
+                    pkg_name,
+                    client_hint="mobile" if is_mobile_client else "pc",
+                )
                 if not result:
                     st.error("创建充值订单失败：支付未开启或支付宝配置未完成。")
                 else:
@@ -776,10 +839,61 @@ with shop_topup_tab:
             """,
             unsafe_allow_html=True,
         )
-        st.markdown(
-            f"<a class='alipay-pay-btn' href='{order['pay_url']}' target='_blank' rel='noopener noreferrer'><span class='btn-icon'>💳</span>去支付宝收银台</a>",
-            unsafe_allow_html=True,
+        pay_url_pc = _escape_attr_url(
+            order.get("pay_url_pc") or order.get("pay_url") or ""
         )
+        pay_url_wap = _escape_attr_url(
+            order.get("pay_url_wap") or order.get("pay_url_pc") or order.get("pay_url") or ""
+        )
+        pay_url_app_scheme = _escape_attr_url(order.get("pay_url_app_scheme") or "")
+
+        if is_mobile_client:
+            if pay_url_app_scheme:
+                mobile_click_js = (
+                    "setTimeout(function(){window.location.href='"
+                    + pay_url_wap
+                    + "';}, 1200);"
+                )
+                st.markdown(
+                    (
+                        "<a class='alipay-pay-btn' href='"
+                        + pay_url_app_scheme
+                        + "' target='_self' rel='noopener noreferrer' onclick=\""
+                        + mobile_click_js
+                        + "\"><span class='btn-icon'>支</span>支付宝App支付</a>"
+                    ),
+                    unsafe_allow_html=True,
+                )
+            else:
+                st.markdown(
+                    (
+                        "<a class='alipay-pay-btn' href='"
+                        + pay_url_wap
+                        + "' target='_self' rel='noopener noreferrer'><span class='btn-icon'>支</span>支付宝支付</a>"
+                    ),
+                    unsafe_allow_html=True,
+                )
+            st.markdown(
+                (
+                    "<a class='alipay-pay-btn-secondary' href='"
+                    + pay_url_wap
+                    + "' target='_blank' rel='noopener noreferrer'>浏览器支付（H5收银台）</a>"
+                ),
+                unsafe_allow_html=True,
+            )
+            st.markdown(
+                "<div class='auto-fallback-tip'>若未成功拉起支付宝App，约 1 秒后将自动打开浏览器收银台。</div>",
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(
+                (
+                    "<a class='alipay-pay-btn' href='"
+                    + pay_url_pc
+                    + "' target='_blank' rel='noopener noreferrer'><span class='btn-icon'>支</span>去支付宝收银台</a>"
+                ),
+                unsafe_allow_html=True,
+            )
         st.caption("支付完成后请点击余额旁刷新图标查看到账结果。")
 
 with shop_paid_tab:

@@ -20,6 +20,7 @@ from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Dict, Optional
+from urllib.parse import quote
 from uuid import uuid4
 
 from sqlalchemy import text
@@ -290,7 +291,58 @@ def generate_order_id() -> str:
     return f"PAY{datetime.now().strftime('%Y%m%d%H%M%S')}{secrets.token_hex(3).upper()}"
 
 
-def create_topup_order(user_id: str, package_name: str) -> Optional[Dict[str, Any]]:
+def _build_pay_url(order_string: Any) -> Optional[str]:
+    if order_string is None:
+        return None
+    order_text = str(order_string).strip()
+    if not order_text:
+        return None
+    if order_text.startswith("http"):
+        return order_text
+
+    gateway = ALIPAY_GATEWAY
+    if "?" not in gateway:
+        gateway = gateway + "?"
+    elif not gateway.endswith(("?", "&")):
+        gateway = gateway + "&"
+    return gateway + order_text.lstrip("?")
+
+
+def _build_app_scheme_url(pay_url_wap: Optional[str]) -> Optional[str]:
+    if not pay_url_wap:
+        return None
+    encoded = quote(str(pay_url_wap), safe="")
+    return f"alipays://platformapi/startapp?appId=20000067&url={encoded}"
+
+
+def _build_wap_pay_url(
+    alipay: Any,
+    *,
+    order_id: str,
+    rmb_amount: Decimal,
+    package_name: str,
+) -> Optional[str]:
+    if not hasattr(alipay, "api_alipay_trade_wap_pay"):
+        return None
+    try:
+        order_string = alipay.api_alipay_trade_wap_pay(
+            out_trade_no=order_id,
+            total_amount=f"{rmb_amount:.2f}",
+            subject=f"AiBota充值 - {package_name}",
+            return_url=ALIPAY_RETURN_URL,
+            notify_url=ALIPAY_NOTIFY_URL,
+        )
+    except Exception as exc:
+        print(f"[payment][create_topup_order] wap_pay_failed order={order_id} err={exc}")
+        return None
+    return _build_pay_url(order_string)
+
+
+def create_topup_order(
+    user_id: str,
+    package_name: str,
+    client_hint: str = "auto",
+) -> Optional[Dict[str, Any]]:
     if not is_points_payment_enabled():
         print("[payment][create_topup_order] blocked: POINTS_PAYMENT_ENABLED is not true")
         return None
@@ -308,6 +360,9 @@ def create_topup_order(user_id: str, package_name: str) -> Optional[Dict[str, An
     order_id = generate_order_id()
     rmb_amount = _as_decimal(pkg["rmb"]).quantize(Decimal("0.00"))
     points_amount = int(pkg["points"])
+    scene = str(client_hint or "auto").strip().lower()
+    if scene not in {"mobile", "pc", "auto"}:
+        scene = "auto"
     try:
         with engine.begin() as conn:
             conn.execute(
@@ -334,18 +389,32 @@ def create_topup_order(user_id: str, package_name: str) -> Optional[Dict[str, An
             return_url=ALIPAY_RETURN_URL,
             notify_url=ALIPAY_NOTIFY_URL,
         )
-        if str(order_string).startswith("http"):
-            pay_url = str(order_string)
-        else:
-            gateway = ALIPAY_GATEWAY
-            if "?" not in gateway:
-                gateway = gateway + "?"
-            elif not gateway.endswith(("?", "&")):
-                gateway = gateway + "&"
-            pay_url = gateway + str(order_string).lstrip("?")
+        pay_url_pc = _build_pay_url(order_string)
+        pay_url_wap = _build_wap_pay_url(
+            alipay,
+            order_id=order_id,
+            rmb_amount=rmb_amount,
+            package_name=package_name,
+        )
+        if not pay_url_wap:
+            pay_url_wap = pay_url_pc
+        pay_url_app_scheme = _build_app_scheme_url(pay_url_wap)
+
+        pay_url = pay_url_pc
+        if scene == "mobile" and pay_url_wap:
+            pay_url = pay_url_wap
+
+        print(
+            "[payment][create_topup_order] "
+            f"user={user_id} order={order_id} scene={scene} "
+            f"has_wap_url={bool(pay_url_wap)} has_app_scheme={bool(pay_url_app_scheme)}"
+        )
         return {
             "order_id": order_id,
             "pay_url": pay_url,
+            "pay_url_pc": pay_url_pc,
+            "pay_url_wap": pay_url_wap,
+            "pay_url_app_scheme": pay_url_app_scheme,
             "points": points_amount,
             "rmb": float(rmb_amount),
         }
