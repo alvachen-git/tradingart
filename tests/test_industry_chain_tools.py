@@ -49,7 +49,13 @@ def _seed_sqlite(engine):
                     main_business TEXT,
                     business_scope TEXT,
                     domain_tags TEXT,
-                    tags_updated_at TEXT
+                    tags_updated_at TEXT,
+                    domain_insight_text TEXT,
+                    insight_updated_at TEXT,
+                    tech_highlights TEXT,
+                    customer_profile TEXT,
+                    moat_note TEXT,
+                    boundary_risk TEXT
                 )
                 """
             )
@@ -88,10 +94,29 @@ def _seed_sqlite(engine):
             text(
                 """
                 INSERT INTO stock_company_profile_cache
-                (ts_code, company_name, main_business, business_scope, domain_tags, tags_updated_at)
+                (
+                    ts_code, company_name, main_business, business_scope, domain_tags, tags_updated_at,
+                    domain_insight_text, insight_updated_at, tech_highlights, customer_profile, moat_note, boundary_risk
+                )
                 VALUES
-                ('000001.SZ','甲公司','主营芯片设计','经营范围A','芯片设计|AI算力','2026-03-19 18:00:00'),
-                ('000002.SZ','乙公司','主营封测','经营范围B','封装测试','2026-03-19 18:00:00')
+                (
+                    '000001.SZ','甲公司','主营芯片设计','经营范围A','芯片设计|AI算力','2026-03-19 18:00:00',
+                    '甲公司聚焦高算力芯片设计，服务云侧与行业客户，依托IP与量产经验形成护城河，需关注先进制程依赖风险。',
+                    '2026-03-19 18:30:00',
+                    '高算力SoC设计|先进封装协同',
+                    '云计算与行业头部客户',
+                    'IP复用和量产验证壁垒',
+                    '需关注制程与客户集中度'
+                ),
+                (
+                    '000002.SZ','乙公司','主营封测','经营范围B','封装测试','2026-03-19 18:00:00',
+                    '',
+                    '',
+                    '',
+                    '',
+                    '',
+                    ''
+                )
                 """
             )
         )
@@ -146,6 +171,13 @@ def test_get_chain_snapshot_merges_pattern_fund_domain_tags():
     assert top["main_net_amount_1d"] == 100.0
     assert top["main_net_amount_5d"] == 150.0
     assert top["domain_tags_text"] == "芯片设计 / AI算力"
+    assert "domain_insight_text" in top
+    assert top["domain_insight_text"].startswith("甲公司聚焦高算力芯片设计")
+    assert top["tech_highlights"] == ["高算力SoC设计", "先进封装协同"]
+    assert top["customer_profile"] == "云计算与行业头部客户"
+    assert top["moat_note"] == "IP复用和量产验证壁垒"
+    assert top["boundary_risk"] == "需关注制程与客户集中度"
+    assert "insight_updated_at" in top
     assert "fund_signal" in top
     assert "net_flow_5d" in first_stage
     assert "net_flow_5d_history" in first_stage

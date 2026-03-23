@@ -73,6 +73,24 @@ def parse_domain_tags(domain_tags_text: Any) -> List[str]:
     return tags[:3]
 
 
+def _parse_pipe_items(raw: Any, max_items: int = 3) -> List[str]:
+    s = str(raw or "").strip()
+    if not s:
+        return []
+    out: List[str] = []
+    seen = set()
+    for x in s.split("|"):
+        item = str(x or "").strip()
+        if not item:
+            continue
+        if item not in seen:
+            out.append(item)
+            seen.add(item)
+        if len(out) >= max(1, int(max_items)):
+            break
+    return out
+
+
 def calc_fund_signal(main_net_amount_1d: float, main_net_amount_5d: float) -> str:
     if main_net_amount_5d > 0 and main_net_amount_1d > 0:
         return "持续流入"
@@ -217,7 +235,19 @@ def _fetch_profile_max_updated_at(engine) -> Optional[str]:
         return None
     try:
         with engine.connect() as conn:
-            ts_max = conn.execute(text("SELECT MAX(tags_updated_at) FROM stock_company_profile_cache")).scalar()
+            try:
+                ts_max = conn.execute(
+                    text(
+                        """
+                        SELECT MAX(COALESCE(insight_updated_at, tags_updated_at))
+                        FROM stock_company_profile_cache
+                        """
+                    )
+                ).scalar()
+            except Exception:
+                ts_max = conn.execute(
+                    text("SELECT MAX(tags_updated_at) FROM stock_company_profile_cache")
+                ).scalar()
         if ts_max is None:
             return None
         return str(ts_max)
@@ -303,6 +333,12 @@ def _fetch_profiles_from_tushare_and_cache(engine, pro, codes: List[str]) -> Dic
             "domain_tags": tags,
             "domain_tags_text": " / ".join(tags),
             "tags_updated_at": now_str,
+            "domain_insight_text": "",
+            "insight_updated_at": "",
+            "tech_highlights": [],
+            "customer_profile": "",
+            "moat_note": "",
+            "boundary_risk": "",
         }
 
         rows_to_save.append(
@@ -607,17 +643,34 @@ def _query_profile_map(engine, codes: List[str]) -> Dict[str, Dict[str, Any]]:
         return {}
 
     placeholders, params = _build_in_params(codes, prefix="p")
-    sql = text(
-        f"""
-        SELECT ts_code, company_name, main_business, business_scope, domain_tags, tags_updated_at
-        FROM stock_company_profile_cache
-        WHERE ts_code IN ({placeholders})
-        """
-    )
-
     try:
         with engine.connect() as conn:
-            df = pd.read_sql(sql, conn, params=params)
+            try:
+                df = pd.read_sql(
+                    text(
+                        f"""
+                        SELECT ts_code, company_name, main_business, business_scope, domain_tags, tags_updated_at,
+                               domain_insight_text, insight_updated_at, tech_highlights,
+                               customer_profile, moat_note, boundary_risk
+                        FROM stock_company_profile_cache
+                        WHERE ts_code IN ({placeholders})
+                        """
+                    ),
+                    conn,
+                    params=params,
+                )
+            except Exception:
+                df = pd.read_sql(
+                    text(
+                        f"""
+                        SELECT ts_code, company_name, main_business, business_scope, domain_tags, tags_updated_at
+                        FROM stock_company_profile_cache
+                        WHERE ts_code IN ({placeholders})
+                        """
+                    ),
+                    conn,
+                    params=params,
+                )
     except Exception:
         return {}
 
@@ -625,6 +678,7 @@ def _query_profile_map(engine, codes: List[str]) -> Dict[str, Dict[str, Any]]:
     for _, row in df.iterrows():
         code = _normalize_ts_code(row.get("ts_code"))
         tags = parse_domain_tags(row.get("domain_tags"))
+        tech_items = _parse_pipe_items(row.get("tech_highlights"), max_items=2)
         out[code] = {
             "company_name": str(row.get("company_name") or "").strip(),
             "main_business": str(row.get("main_business") or "").strip(),
@@ -632,6 +686,12 @@ def _query_profile_map(engine, codes: List[str]) -> Dict[str, Dict[str, Any]]:
             "domain_tags": tags,
             "domain_tags_text": " / ".join(tags),
             "tags_updated_at": str(row.get("tags_updated_at") or "").strip(),
+            "domain_insight_text": str(row.get("domain_insight_text") or "").strip(),
+            "insight_updated_at": str(row.get("insight_updated_at") or "").strip(),
+            "tech_highlights": tech_items,
+            "customer_profile": str(row.get("customer_profile") or "").strip(),
+            "moat_note": str(row.get("moat_note") or "").strip(),
+            "boundary_risk": str(row.get("boundary_risk") or "").strip(),
         }
     return out
 
@@ -881,9 +941,15 @@ def get_chain_snapshot(
                 "fund_signal": calc_fund_signal(main_1d, main_5d),
                 "domain_tags": profile_item.get("domain_tags", []),
                 "domain_tags_text": profile_item.get("domain_tags_text", ""),
+                "domain_insight_text": profile_item.get("domain_insight_text", ""),
                 "main_business": profile_item.get("main_business", ""),
                 "business_scope": profile_item.get("business_scope", ""),
                 "tags_updated_at": profile_item.get("tags_updated_at", ""),
+                "insight_updated_at": profile_item.get("insight_updated_at", ""),
+                "tech_highlights": profile_item.get("tech_highlights", []),
+                "customer_profile": profile_item.get("customer_profile", ""),
+                "moat_note": profile_item.get("moat_note", ""),
+                "boundary_risk": profile_item.get("boundary_risk", ""),
             }
             companies.append(company)
 
@@ -908,9 +974,15 @@ def get_chain_snapshot(
                 x["name"] = p.get("company_name") or x["name"]
                 x["domain_tags"] = p.get("domain_tags", [])
                 x["domain_tags_text"] = p.get("domain_tags_text", "")
+                x["domain_insight_text"] = p.get("domain_insight_text", "")
                 x["main_business"] = p.get("main_business", "")
                 x["business_scope"] = p.get("business_scope", "")
                 x["tags_updated_at"] = p.get("tags_updated_at", "")
+                x["insight_updated_at"] = p.get("insight_updated_at", "")
+                x["tech_highlights"] = p.get("tech_highlights", [])
+                x["customer_profile"] = p.get("customer_profile", "")
+                x["moat_note"] = p.get("moat_note", "")
+                x["boundary_risk"] = p.get("boundary_risk", "")
 
         missing_fund_count = sum(1 for x in companies if x["ts_code"] not in fund_map)
         if missing_fund_count > 0:

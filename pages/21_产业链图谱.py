@@ -466,7 +466,7 @@ def _render_stage(stage: dict):
                 "代码": c.get("ts_code", ""),
                 "公司": c.get("name", ""),
                 "总市值(亿元)": float(c.get("market_cap") or 0.0) / 10000.0,
-                "擅长业务领域": c.get("domain_tags_text") or "待补全",
+                "擅长业务领域": c.get("domain_insight_text") or c.get("domain_tags_text") or "待补全",
                 "技术形态": tech_label,
                 "形态分": int(c.get("score") or 0),
                 "主力净流(1D, 万元)": float(c.get("main_net_amount_1d") or 0.0),
@@ -547,8 +547,23 @@ def _render_stage(stage: dict):
         for c in companies:
             detail_main = (c.get("main_business") or "").strip()
             detail_scope = (c.get("business_scope") or "").strip()
+            tech_highlights = c.get("tech_highlights") or []
+            customer_profile = (c.get("customer_profile") or "").strip()
+            moat_note = (c.get("moat_note") or "").strip()
+            boundary_risk = (c.get("boundary_risk") or "").strip()
+            insight_text = (c.get("domain_insight_text") or "").strip()
             st.markdown(f"**{c.get('name', '')} ({c.get('ts_code', '')})**")
             st.caption(f"业务标签: {c.get('domain_tags_text') or '待补全'}")
+            if insight_text:
+                st.write(f"精华说明: {insight_text}")
+            if tech_highlights:
+                st.write(f"技术要点: {'；'.join([str(x) for x in tech_highlights if str(x).strip()])}")
+            if customer_profile:
+                st.write(f"客户属性: {customer_profile}")
+            if moat_note:
+                st.write(f"护城河: {moat_note}")
+            if boundary_risk:
+                st.write(f"边界风险: {boundary_risk}")
             if detail_main:
                 st.write(f"主营: {detail_main[:300]}")
             if detail_scope:
