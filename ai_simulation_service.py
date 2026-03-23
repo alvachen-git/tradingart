@@ -593,14 +593,17 @@ def _get_csi500_regime(trade_date: str) -> Dict[str, Any]:
             "close": None,
             "ma20": None,
             "ma60": None,
+            "day_ret": 0.0,
             "ret20": 0.0,
             "summary": "中证500技术面数据不足，按中性处理。",
         }
 
     d = df.sort_values("trade_date").reset_index(drop=True)
     close = _to_float(d["close_price"].iloc[-1], 0.0)
+    prev_close = _to_float(d["close_price"].iloc[-2], 0.0) if len(d) >= 2 else 0.0
     ma20 = _to_float(d["close_price"].tail(20).mean(), close)
     ma60 = _to_float(d["close_price"].tail(60).mean(), ma20)
+    day_ret = (close / prev_close - 1.0) if prev_close > 0 else 0.0
     if len(d) >= 21 and _to_float(d["close_price"].iloc[-21], 0.0) > 0:
         ret20 = close / _to_float(d["close_price"].iloc[-21], close) - 1.0
     else:
@@ -609,10 +612,10 @@ def _get_csi500_regime(trade_date: str) -> Dict[str, Any]:
     score = 0
     score += 1 if close >= ma20 else -1
     score += 1 if ma20 >= ma60 else -1
-    if ret20 >= 0.03:
-        score += 1
-    elif ret20 <= -0.03:
-        score -= 1
+    if day_ret >= 0.03:
+        score += 2
+    elif day_ret <= -0.03:
+        score -= 2
 
     if score >= 2:
         regime = "bull"
@@ -630,6 +633,7 @@ def _get_csi500_regime(trade_date: str) -> Dict[str, Any]:
         "close": close,
         "ma20": ma20,
         "ma60": ma60,
+        "day_ret": day_ret,
         "ret20": ret20,
         "summary": summary,
     }
@@ -902,7 +906,7 @@ def _build_ai_prompt(
     csi_close = _to_float(csi500_regime.get("close"), 0.0)
     csi_ma20 = _to_float(csi500_regime.get("ma20"), 0.0)
     csi_ma60 = _to_float(csi500_regime.get("ma60"), 0.0)
-    csi_ret20 = _to_float(csi500_regime.get("ret20"), 0.0)
+    csi_day_ret = _to_float(csi500_regime.get("day_ret"), 0.0)
 
     system_prompt = f"""
 你是官方AI模拟投资组合的交易决策引擎。
@@ -946,7 +950,7 @@ def _build_ai_prompt(
 
 中证500技术面:
 - 结论: {csi_summary}
-- close={csi_close:.2f}, MA20={csi_ma20:.2f}, MA60={csi_ma60:.2f}, 20日涨跌={csi_ret20:+.2%}
+- close={csi_close:.2f}, MA20={csi_ma20:.2f}, MA60={csi_ma60:.2f}, 当日涨跌={csi_day_ret:+.2%}
 
 近5日交易摘要:
 {recent_trade_memory or "近5个交易日无历史成交记录。"}
