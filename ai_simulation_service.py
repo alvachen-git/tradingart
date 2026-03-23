@@ -1,7 +1,10 @@
 import json
 import os
+import random
 import re
 import uuid
+from calendar import monthrange
+from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
@@ -1415,6 +1418,107 @@ def _compute_benchmark_values(portfolio_id: str, trade_date: str, prev_nav_row: 
     return float(hs_val), float(zz_val)
 
 
+def _should_inject_persona(
+    trade_date: str,
+    pnl_pct: float,
+    executed_trades: List[Dict[str, Any]],
+    risk_notes: List[str],
+) -> Tuple[bool, str]:
+    if abs(_to_float(pnl_pct, 0.0)) >= 0.012:
+        return True, "当日盈亏波动较大"
+
+    note_text = " ".join([str(x) for x in risk_notes if str(x).strip()])
+    stop_keywords = ["止损", "清仓", "割肉", "大幅回撤", "风控告警", "回撤"]
+    if any(k in note_text for k in stop_keywords):
+        return True, "出现明显情绪事件（止损/回撤）"
+
+    sell_count = sum(1 for x in executed_trades if str(x.get("side") or "").lower() == "sell")
+    if sell_count >= 3:
+        return True, "当日卖出动作较多"
+
+    digits = re.sub(r"[^0-9]", "", str(trade_date or ""))[:8]
+    if len(digits) == 8:
+        try:
+            dt = datetime.strptime(digits, "%Y%m%d")
+            if dt.weekday() == 4:
+                return True, "周五收官日"
+            if dt.day == monthrange(dt.year, dt.month)[1]:
+                return True, "月末节点"
+        except Exception:
+            pass
+    return False, ""
+
+
+def _load_recent_diary_snippets(portfolio_id: str, trade_date: str, days: int = 7) -> List[str]:
+    ensure_ai_sim_tables()
+    sql = text(
+        """
+        SELECT summary_md, buys_md, sells_md, risk_md
+        FROM ai_sim_review_daily
+        WHERE portfolio_id = :pid AND trade_date < :td
+        ORDER BY trade_date DESC
+        LIMIT :lim
+        """
+    )
+    with engine.connect() as conn:
+        df = pd.read_sql(sql, conn, params={"pid": portfolio_id, "td": trade_date, "lim": int(max(days, 1))})
+    if df.empty:
+        return []
+
+    phrases: List[str] = []
+    for _, row in df.iterrows():
+        text_blob = "\n".join(
+            [
+                str(row.get("summary_md") or ""),
+                str(row.get("buys_md") or ""),
+                str(row.get("sells_md") or ""),
+                str(row.get("risk_md") or ""),
+            ]
+        )
+        text_blob = re.sub(r"#{1,6}\s*", "", text_blob)
+        text_blob = re.sub(r"[`*_>\-]", "", text_blob)
+        parts = re.split(r"[，。！？；\n]", text_blob)
+        for p in parts:
+            pp = str(p or "").strip()
+            if 8 <= len(pp) <= 36:
+                phrases.append(pp)
+
+    if not phrases:
+        return []
+
+    freq = Counter(phrases)
+    blocked = [p for p, c in freq.items() if c >= 2]
+    blocked.sort(key=lambda x: (-freq[x], -len(x), x))
+
+    strong_banned = [
+        "我还是那个单身交易员，喜欢运动，早上跑步、晚上复盘，心里一直惦记着那天能开着自己的游艇去环游世界",
+    ]
+    out = strong_banned + blocked[:18]
+    deduped: List[str] = []
+    seen = set()
+    for p in out:
+        if p not in seen:
+            deduped.append(p)
+            seen.add(p)
+    return deduped
+
+
+def _dedupe_phrase(text: str, blocked_phrases: List[str]) -> str:
+    out = str(text or "")
+    if not out or not blocked_phrases:
+        return out
+    for p in blocked_phrases:
+        phrase = str(p or "").strip()
+        if len(phrase) < 6:
+            continue
+        if phrase in out:
+            out = out.replace(phrase, "")
+    out = re.sub(r"[ \t]+", " ", out)
+    out = re.sub(r"([，。！？；]){2,}", r"\1", out)
+    out = re.sub(r"\n{3,}", "\n\n", out).strip()
+    return out
+
+
 def _build_review_payload(
     trade_date: str,
     nav_prev: float,
@@ -1427,6 +1531,7 @@ def _build_review_payload(
     final_positions: Dict[str, Dict[str, Any]],
     config: Optional[Dict[str, Any]] = None,
     tool_calls: Optional[List[Dict[str, Any]]] = None,
+    portfolio_id: str = OFFICIAL_PORTFOLIO_ID,
 ) -> Dict[str, Any]:
     config = config or {}
     tool_calls = tool_calls or []
@@ -1434,6 +1539,14 @@ def _build_review_payload(
     pnl = nav_now - nav_prev
     pnl_pct = (pnl / nav_prev) if nav_prev > 0 else 0.0
     is_profit_day = pnl >= 0
+    persona_trigger, persona_reason = _should_inject_persona(
+        trade_date=trade_date,
+        pnl_pct=pnl_pct,
+        executed_trades=executed_trades,
+        risk_notes=risk_notes,
+    )
+    blocked_phrases = _load_recent_diary_snippets(portfolio_id=portfolio_id, trade_date=trade_date, days=7)
+    rng = random.Random(f"{trade_date}|{nav_now:.2f}|{len(executed_trades)}")
 
     rejected = [o for o in orders_audited if o.get("gate_status") == "rejected"]
     adjusted = [o for o in orders_audited if o.get("gate_status") == "adjusted"]
@@ -1553,30 +1666,68 @@ def _build_review_payload(
             return "技术面上我们更偏左侧交易，趁回撤分批建仓。"
         return "技术面上今天以结构性机会为主，主要做强弱切换。"
 
+    def _hot_topic_reflection() -> str:
+        tool_names = {str(x.get("name") or "") for x in tool_calls}
+        ai_text = f"{str(ai_payload.get('summary') or '')} {str(ai_payload.get('risk_notes') or '')}"
+        hot_keywords = [
+            "政策", "关税", "降息", "加息", "监管", "并购", "地缘", "冲突", "战争",
+            "科技", "AI", "消费", "地产", "就业", "通胀", "财政", "货币",
+        ]
+        has_hotspot = ("get_financial_news" in tool_names) or any(k in ai_text for k in hot_keywords)
+        if not has_hotspot:
+            return ""
+        reflections = [
+            "热点越热，越要提醒自己尊重规则。我一直讨厌不公平，也更愿意在信息对等、机会平等的框架里做判断。",
+            "新闻里情绪很满，但我还是把交易当作长期游戏：钱只是筹码，真正重要的是一路看到的风景和人与人之间的真诚连接。",
+            "面对热点分歧，我更在意价值是否站得住。市场会给价格，时间会给答案，公平和尊重永远比一时输赢更稀缺。",
+        ]
+        return rng.choice(reflections)
+
     buys = [x for x in executed_trades if x["side"] == "buy"]
     sells = [x for x in executed_trades if x["side"] == "sell"]
 
-    persona_line = (
-        "我还是那个单身交易员，喜欢运动，早上跑步、晚上复盘，心里一直惦记着那天能开着自己的游艇去环游世界。"
-    )
+    openers = [
+        f"今天收盘后先把账本过了一遍，组合净值来到 {nav_now:,.2f}，相比昨天 {'+' if pnl >= 0 else ''}{pnl:,.2f}（{'+' if pnl_pct >= 0 else ''}{pnl_pct:.2%}）。",
+        f"盘后第一件事还是看净值，今天收在 {nav_now:,.2f}，日内变化 {'+' if pnl >= 0 else ''}{pnl:,.2f}（{'+' if pnl_pct >= 0 else ''}{pnl_pct:.2%}）。",
+        f"结算完成后账户定格在 {nav_now:,.2f}，和昨天比 {'+' if pnl >= 0 else ''}{pnl:,.2f}（{'+' if pnl_pct >= 0 else ''}{pnl_pct:.2%}），先把节奏记下来。",
+    ]
     if is_profit_day:
-        mood_line = "今天账面是红的，心态也更笃定一些，节奏在我这边。"
-    else:
-        mood_line = "今天又给市场交了点学费，先自嘲一句手还不够稳，但纪律不能丢。"
-
-    summary_md = "\n\n".join(
-        [
-            f"### 复盘日记（{trade_date}）",
-            f"今天收盘后先看了下账本，组合净值来到 {nav_now:,.2f}，相比昨天 {'+' if pnl >= 0 else ''}{pnl:,.2f}（{'+' if pnl_pct >= 0 else ''}{pnl_pct:.2%}）。",
-            persona_line,
-            mood_line,
-            _macro_policy_brief(),
-            _money_flow_brief(),
-            _industry_brief(),
-            _technical_brief(),
-            f"AI 今天给出的核心判断是：{str(ai_payload.get('summary') or '暂无明确主线判断')}。",
+        mood_pool = [
+            "今天盘感和执行都在线，信号与动作基本对得上。",
+            "今天是偏顺手的一天，仓位节奏踩得还算稳。",
+            "今天收益是正的，心态上更敢做确认后的动作。",
         ]
-    )
+    else:
+        mood_pool = [
+            "今天又给市场交了点学费，先自嘲一句手还不够稳，但纪律不能丢。",
+            "今天并不顺，脸上笑不出来，但复盘要比情绪更诚实。",
+            "今天吃了点亏，先认，再拆动作，明天才有机会把节奏拿回来。",
+        ]
+
+    persona_pool = [
+        "收盘后照例去慢跑了几公里，把噪音先甩掉，再回来拆每一笔交易。",
+        "跑步时一直在复盘仓位切换，脑子里那条“总有一天开游艇远航”的线，反而让我更愿意把每一步走稳。",
+        "今天这种盘面最考验心态，运动完再看持仓，很多判断会更干净。",
+    ]
+
+    narrative_blocks = [
+        rng.choice(openers),
+        rng.choice(mood_pool),
+        _macro_policy_brief(),
+        _money_flow_brief(),
+        _industry_brief(),
+        _technical_brief(),
+        f"AI 今天给出的核心判断是：{str(ai_payload.get('summary') or '暂无明确主线判断')}。",
+    ]
+    hot_reflection = _hot_topic_reflection()
+    if hot_reflection:
+        narrative_blocks.append(hot_reflection)
+    if persona_trigger:
+        insert_at = min(len(narrative_blocks), 2 + rng.randint(0, 2))
+        narrative_blocks.insert(insert_at, rng.choice(persona_pool))
+
+    summary_md = "\n\n".join([f"### 复盘日记（{trade_date}）"] + narrative_blocks)
+    summary_md = _dedupe_phrase(summary_md, blocked_phrases)
 
     if buys:
         buy_sentences = []
@@ -1587,7 +1738,13 @@ def _build_review_payload(
             )
         buys_md = "### 今天为什么买\n\n" + "；".join(buy_sentences) + "。"
     else:
-        buys_md = "### 今天为什么买\n\n今天没有新增买入，主要是想把节奏放慢，等更清晰的信号。"
+        buy_idle_pool = [
+            "今天没有新增买入，主要是想把节奏放慢，等更清晰的信号。",
+            "今天没有新开仓，信号还没到“必须出手”的程度，先耐心一点。",
+            "今天选择不加仓，先把仓位和波动压住，等更高确定性的窗口。",
+        ]
+        buys_md = "### 今天为什么买\n\n" + rng.choice(buy_idle_pool)
+    buys_md = _dedupe_phrase(buys_md, blocked_phrases)
 
     if sells:
         sell_sentences = []
@@ -1598,7 +1755,13 @@ def _build_review_payload(
             )
         sells_md = "### 今天为什么卖\n\n" + "；".join(sell_sentences) + "。"
     else:
-        sells_md = "### 今天为什么卖\n\n今天没有主动减仓，主要是现有仓位和风险预算还在可接受区间。"
+        sell_idle_pool = [
+            "今天没有主动减仓，主要是现有仓位和风险预算还在可接受区间。",
+            "今天没有卖出动作，持仓结构暂时还能承受当前波动。",
+            "今天先不动减仓按钮，优先观察信号是否延续。",
+        ]
+        sells_md = "### 今天为什么卖\n\n" + rng.choice(sell_idle_pool)
+    sells_md = _dedupe_phrase(sells_md, blocked_phrases)
 
     gate_notes_text = "；".join([str(x) for x in risk_notes if str(x).strip()])
     gate_tail = []
@@ -1621,6 +1784,7 @@ def _build_review_payload(
         risk_body += f" 明天优先盯住 {watch_sentence}。"
 
     risk_md = "### 明天继续盯什么\n\n" + risk_body
+    risk_md = _dedupe_phrase(risk_md, blocked_phrases)
 
     def _build_llm_diary() -> Optional[Dict[str, str]]:
         if int(config.get("review_use_llm", 1)) != 1:
@@ -1642,6 +1806,14 @@ def _build_review_payload(
             "ai_risk_notes": str(ai_payload.get("risk_notes") or ""),
             "risk_notes": risk_notes,
             "tool_calls": [str(x.get("name") or "") for x in tool_calls][:12],
+            "persona_trigger": persona_trigger,
+            "persona_reason": persona_reason,
+            "recent_diary_snippets": blocked_phrases,
+            "value_principles": [
+                "讨厌不公平，追求平等",
+                "金钱只是世界游戏里的筹码",
+                "体验与人类情感比短期输赢更重要",
+            ],
             "executed_trades": [
                 {
                     "symbol": str(t.get("symbol") or ""),
@@ -1667,13 +1839,14 @@ def _build_review_payload(
         }
         prompt = (
             "你是交易员本人，要写一篇当天收盘后的复盘日记，语气平实、自然、有温度，像公众号散文，不要写成报告。"
-            "你的人设固定为：单身炒股交易员，喜欢运动，梦想是开游艇环游世界。"
             "请你严格只输出 JSON，格式如下："
             '{"summary_md":"...","buys_md":"...","sells_md":"...","risk_md":"..."}。'
             "要求："
-            "1) summary_md 必须自然覆盖宏观、政策、资金流、板块潜力、技术面这五个维度；"
-            "1.1) summary_md 要自然带出上述人设，不要生硬口号；"
-            f"1.2) 当天盈亏={pnl:+.2f}，若盈利请更自信；若亏损请带一点自嘲但保持专业克制；"
+            "1) summary_md 采用自由日记体，不要求固定段落模板，但要自然覆盖宏观、政策、资金流、板块潜力、技术面这五个维度；"
+            "1.1) 若 persona_trigger=true，才允许轻描淡写提一次“单身/运动/游艇梦想”；若 persona_trigger=false，严禁出现这些词；"
+            "1.2) 避免复用 recent_diary_snippets 里的高频句式；"
+            "1.3) 若当日存在新闻热点，可加入一小段感想，价值观立场保持：讨厌不公平、追求平等、金钱只是筹码、体验与情感更重要；但不要说教，不要每段都讲价值观；"
+            f"1.4) 当天盈亏={pnl:+.2f}，若盈利请更自信；若亏损请带一点自嘲但保持专业克制；"
             "2) buys_md/sells_md 要写清楚为什么买这只、为什么卖那只，并出现股票代码；"
             "3) 不要使用列表符号开头，不要公文腔；"
             "4) 事实不足时明确写“未看到明确增量”，不要编造。"
@@ -1689,6 +1862,10 @@ def _build_review_payload(
             buys_text = str(parsed.get("buys_md") or "").strip()
             sells_text = str(parsed.get("sells_md") or "").strip()
             risk_text = str(parsed.get("risk_md") or "").strip()
+            summary = _dedupe_phrase(summary, blocked_phrases)
+            buys_text = _dedupe_phrase(buys_text, blocked_phrases)
+            sells_text = _dedupe_phrase(sells_text, blocked_phrases)
+            risk_text = _dedupe_phrase(risk_text, blocked_phrases)
             if summary and buys_text and sells_text and risk_text:
                 return {
                     "summary_md": summary,
@@ -1924,6 +2101,7 @@ def run_daily_simulation(
         final_positions=final_positions,
         config=config,
         tool_calls=tool_calls,
+        portfolio_id=portfolio_id,
     )
 
     _delete_existing_day(portfolio_id, td)
