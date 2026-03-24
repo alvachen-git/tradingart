@@ -165,6 +165,34 @@ def resolve_commodity_name(underlying: str) -> str:
     return COMMODITY_NAME_MAP.get(code, str(underlying))
 
 
+def _format_strike_text(value) -> str:
+    """Format strike to concise display text like 3.2 / 2.95."""
+    try:
+        num = float(value)
+    except Exception:
+        return str(value)
+    return f"{num:.4f}".rstrip("0").rstrip(".")
+
+
+def _build_contract_display_name(row: pd.Series, option_type: str) -> str:
+    """Build user-facing contract label; ETF prefers strike+认购/认沽."""
+    ts_code = str(row.get("ts_code") or "").strip()
+    strike_txt = _format_strike_text(row.get("exercise_price"))
+    cp = str(row.get("call_put") or "").upper()
+    cp_label = "认购" if cp == "C" else "认沽" if cp == "P" else ""
+
+    if option_type == "ETF期权":
+        if cp_label and ts_code:
+            return f"{strike_txt}{cp_label}（{ts_code}）"
+        if cp_label:
+            return f"{strike_txt}{cp_label}"
+    if ts_code and cp_label:
+        return f"{ts_code}（{cp_label}）"
+    if ts_code:
+        return ts_code
+    return f"{strike_txt}{cp_label}" if cp_label else strike_txt
+
+
 # 股指期权 → 对应期货代码（用于查现价和K线分析）
 INDEX_OPT_FUTURES_MAP = {
     "IO": "IF",   # 沪深300股指期权 → 沪深300期货
@@ -416,7 +444,9 @@ def tool_get_recommended_strikes(underlying_code: str, option_type: str, maturit
         def fmt_contract(row):
             premium = f"{row['premium']:.4f}" if pd.notna(row.get("premium")) else "N/A"
             oi = int(row["oi"]) if pd.notna(row.get("oi")) else 0
-            return (f"  合约:{row['ts_code']} | 行权价:{row['exercise_price']} | "
+            strike_txt = _format_strike_text(row.get("exercise_price"))
+            contract_name = _build_contract_display_name(row, option_type)
+            return (f"  合约:{contract_name} | 行权价:{strike_txt} | "
                     f"权利金:{premium} | 持仓量:{oi}手")
 
         def pick_otm_call(depth: int = 1):
@@ -1159,6 +1189,42 @@ def enforce_symbol_label_consistency(html: str, sections: list[dict]) -> str:
     return fixed
 
 
+def enforce_etf_contract_display_consistency(html: str, sections: list[dict]) -> str:
+    """
+    Normalize ETF contract names from raw ts_code to strike+认购/认沽 form.
+    Example: 10010581.SH（认购） -> 2.9认购（10010581.SH）
+    """
+    fixed = html or ""
+    code_to_label: dict[str, str] = {}
+    line_re = re.compile(r"合约:([^\n|]+)\s*\|\s*行权价:([0-9]+(?:\.[0-9]+)?)")
+    code_re = re.compile(r"([0-9]{8}\.(?:SH|SZ))", re.IGNORECASE)
+
+    for section in sections or []:
+        if str(section.get("option_type") or "").strip() != "ETF期权":
+            continue
+        contracts_text = str(section.get("recommended_contracts") or "")
+        for m in line_re.finditer(contracts_text):
+            left = str(m.group(1) or "").strip()
+            strike_txt = _format_strike_text(m.group(2))
+            cp_label = "认购" if "认购" in left else "认沽" if "认沽" in left else ""
+            code_m = code_re.search(left)
+            if not code_m or not cp_label:
+                continue
+            code = code_m.group(1).upper()
+            code_to_label[code] = f"{strike_txt}{cp_label}（{code}）"
+
+    if not code_to_label:
+        return fixed
+
+    for code, label in code_to_label.items():
+        pattern = re.compile(
+            rf'(<div class="contract-name">\s*){re.escape(code)}(?:\s*[（(](?:认购|认沽)[）)])?\s*(</div>)',
+            flags=re.IGNORECASE,
+        )
+        fixed = pattern.sub(lambda m, s=label: f"{m.group(1)}{s}{m.group(2)}", fixed)
+    return fixed
+
+
 def build_repair_prompt(original_html: str, sections: list[dict], missing: list[dict]) -> str:
     lines = [
         "你刚生成的末日期权晚报 HTML 存在多腿策略缺腿问题。",
@@ -1268,7 +1334,7 @@ def build_prompt(sections: list[dict]) -> str:
       <div class="contract-box">
         <div style="color:#94a3b8; font-size:11px; margin-bottom:8px;">📌 推荐合约</div>
         <div class="contract-row">
-          <div class="contract-name">M2506C3250（认购）</div>
+          <div class="contract-name">3.2认购（1000xxxx.SH）</div>
           <div class="contract-meta">
             <span style="color:#fbbf24; font-size:13px;">权利金 ≈ 42元</span>
             <span style="color:#64748b; font-size:12px;">持仓 1,200手</span>
@@ -1298,6 +1364,8 @@ def build_prompt(sections: list[dict]) -> str:
         if s['recommended_contracts']:
             lines.append("推荐合约（必须完整保留下面每一条，不得省略）：")
             lines.append(str(s['recommended_contracts']))
+            if str(s.get("option_type") or "").strip() == "ETF期权":
+                lines.append("ETF格式要求：contract-name优先展示“行权价+认购/认沽”（例如 3.2认购），官方合约代码仅可放在括号中。")
             multi_leg_codes = get_complete_multi_leg_codes(s)
             if multi_leg_codes:
                 lines.append(
@@ -1369,6 +1437,11 @@ def generate_report(sections: list[dict]) -> str:
     if fixed_html != html:
         print("  ⚠️ 检测到标的名称错配，已按代码映射自动纠偏。")
         html = fixed_html
+
+    normalized_html = enforce_etf_contract_display_consistency(html, sections)
+    if normalized_html != html:
+        print("  ⚠️ 检测到ETF合约名仍为代码主显，已自动改为行权价样式。")
+        html = normalized_html
 
     return html
 
