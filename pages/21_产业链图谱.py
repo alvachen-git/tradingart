@@ -197,6 +197,35 @@ def _inject_chain_page_style() -> None:
             overflow: hidden;
             text-overflow: ellipsis;
         }
+        .chain-table .tag-cell {
+            min-width: 220px;
+            white-space: nowrap;
+        }
+        .chain-table .tag-chip {
+            display: inline-block;
+            margin: 2px 6px 2px 0;
+            padding: 2px 8px;
+            border-radius: 999px;
+            border: 1px solid rgba(96, 165, 250, 0.46);
+            background: rgba(44, 110, 214, 0.18);
+            color: #dbeafe;
+            font-size: 12px;
+            line-height: 1.2;
+            font-weight: 600;
+            letter-spacing: 0.01em;
+        }
+        .chain-table .tag-chip-empty {
+            border-color: rgba(148, 163, 184, 0.42);
+            background: rgba(71, 85, 105, 0.24);
+            color: #cbd5e1;
+        }
+        .chain-table .tag-detail-hint {
+            display: inline-block;
+            margin-left: 6px;
+            color: #93c5fd;
+            font-size: 11px;
+            opacity: 0.82;
+        }
         .chain-table .pos {
             color: #2dd4bf;
             font-weight: 700;
@@ -327,18 +356,18 @@ def _build_flow_bubble_chart(snapshot: dict, flow_window: str, scale_mode: str) 
         for v in values:
             if v > 0:
                 if is_hollow:
-                    colors.append("rgba(96,165,250,0.98)")
-                    line_colors.append("rgba(96,165,250,0.98)")
-                else:
-                    colors.append(f"rgba(37,99,235,{float(p['alpha']):.3f})")
-                    line_colors.append("rgba(147,197,253,0.92)")
-            elif v < 0:
-                if is_hollow:
                     colors.append("rgba(251,113,133,0.98)")
                     line_colors.append("rgba(251,113,133,0.98)")
                 else:
                     colors.append(f"rgba(220,38,38,{float(p['alpha']):.3f})")
                     line_colors.append("rgba(253,164,175,0.92)")
+            elif v < 0:
+                if is_hollow:
+                    colors.append("rgba(74,222,128,0.98)")
+                    line_colors.append("rgba(74,222,128,0.98)")
+                else:
+                    colors.append(f"rgba(22,163,74,{float(p['alpha']):.3f})")
+                    line_colors.append("rgba(134,239,172,0.92)")
             else:
                 if is_hollow:
                     colors.append("rgba(203,213,225,0.92)")
@@ -461,12 +490,20 @@ def _render_stage(stage: dict):
     rows = []
     for c in companies:
         tech_label = c.get("pattern") or c.get("ma_trend") or "待更新"
+        raw_tags = c.get("domain_tags") or []
+        if not raw_tags and c.get("domain_tags_text"):
+            raw_tags = [
+                x.strip()
+                for x in str(c.get("domain_tags_text") or "").replace("/", "|").split("|")
+                if x.strip()
+            ]
+        slim_tags = [str(x).strip() for x in raw_tags if str(x).strip()][:3]
         rows.append(
             {
                 "代码": c.get("ts_code", ""),
                 "公司": c.get("name", ""),
                 "总市值(亿元)": float(c.get("market_cap") or 0.0) / 10000.0,
-                "擅长业务领域": c.get("domain_insight_text") or c.get("domain_tags_text") or "待补全",
+                "擅长业务领域标签": slim_tags,
                 "技术形态": tech_label,
                 "形态分": int(c.get("score") or 0),
                 "主力净流(1D, 万元)": float(c.get("main_net_amount_1d") or 0.0),
@@ -498,7 +535,13 @@ def _render_stage(stage: dict):
     for r in rows:
         code = escape(str(r["代码"]))
         name = escape(str(r["公司"]))
-        domain = escape(str(r["擅长业务领域"]))
+        tags = r["擅长业务领域标签"] or []
+        if tags:
+            tag_html = "".join(
+                [f"<span class='tag-chip'>{escape(str(tag))}</span>" for tag in tags]
+            )
+        else:
+            tag_html = "<span class='tag-chip tag-chip-empty'>待补全</span>"
         pattern_raw = str(r["技术形态"])
         pattern = escape(pattern_raw)
         score = int(r["形态分"])
@@ -513,7 +556,7 @@ def _render_stage(stage: dict):
                 f"<td class='mono'>{code}</td>"
                 f"<td class='company-col' title='{name}'>{name}</td>"
                 f"<td class='num mono'>{mv:,.2f}</td>"
-                f"<td title='{domain}'>{domain}</td>"
+                f"<td class='tag-cell'>{tag_html}</td>"
                 f"<td class='pattern' title='{pattern}'>{pattern}</td>"
                 f"<td class='num mono'>{score}</td>"
                 f"<td class='num mono {_tone_class_num(f1)}'>{f1:,.2f}</td>"
