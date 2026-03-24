@@ -227,11 +227,11 @@ def _inject_chain_page_style() -> None:
             opacity: 0.82;
         }
         .chain-table .pos {
-            color: #2dd4bf;
+            color: #ef4444;
             font-weight: 700;
         }
         .chain-table .neg {
-            color: #fb7185;
+            color: #22c55e;
             font-weight: 700;
         }
         .chain-table .flat {
@@ -239,11 +239,11 @@ def _inject_chain_page_style() -> None:
             font-weight: 600;
         }
         .chain-table .sig-in {
-            color: #7dd3fc;
+            color: #fda4af;
             font-weight: 700;
         }
         .chain-table .sig-out {
-            color: #fda4af;
+            color: #86efac;
             font-weight: 700;
         }
         .chain-table .sig-mid {
@@ -506,8 +506,8 @@ def _render_stage(stage: dict):
                 "擅长业务领域标签": slim_tags,
                 "技术形态": tech_label,
                 "形态分": int(c.get("score") or 0),
-                "主力净流(1D, 万元)": float(c.get("main_net_amount_1d") or 0.0),
-                "主力净流(5D, 万元)": float(c.get("main_net_amount_5d") or 0.0),
+                "主力净流(1D, 万)": float(c.get("main_net_amount_1d") or 0.0),
+                "主力净流(5D, 万)": float(c.get("main_net_amount_5d") or 0.0),
                 "资金信号": c.get("fund_signal") or "待更新",
             }
         )
@@ -546,8 +546,8 @@ def _render_stage(stage: dict):
         pattern = escape(pattern_raw)
         score = int(r["形态分"])
         mv = float(r["总市值(亿元)"])
-        f1 = float(r["主力净流(1D, 万元)"])
-        f5 = float(r["主力净流(5D, 万元)"])
+        f1 = float(r["主力净流(1D, 万)"])
+        f5 = float(r["主力净流(5D, 万)"])
         signal = escape(str(r["资金信号"]))
 
         table_rows.append(
@@ -576,8 +576,8 @@ def _render_stage(stage: dict):
         "<th>擅长业务领域</th>"
         "<th>技术形态</th>"
         "<th>形态分</th>"
-        "<th>主力净流(1D, 万元)</th>"
-        "<th>主力净流(5D, 万元)</th>"
+        "<th>主力净流(1D, 万)</th>"
+        "<th>主力净流(5D, 万)</th>"
         "<th>资金信号</th>"
         "</tr></thead>"
         f"<tbody>{''.join(table_rows)}</tbody>"
