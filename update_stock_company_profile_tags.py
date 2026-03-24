@@ -43,6 +43,7 @@ def _configure_langsmith_tracing() -> None:
 _configure_langsmith_tracing()
 
 from llm_compat import ChatTongyiCompat
+from industry_chain_tools import load_chain_templates, fetch_stage_members_from_tushare
 
 TEMPLATE_PATH = Path(__file__).resolve().parent / "static" / "industry_chain_templates.json"
 INSIGHT_MODEL_ENV = "DOMAIN_INSIGHT_MODEL"
@@ -967,30 +968,29 @@ def pick_candidates(
 
 
 def load_sector_component_codes(pro, sector_name: str) -> List[str]:
-    if not TEMPLATE_PATH.exists():
-        return []
-
     try:
-        templates = json.loads(TEMPLATE_PATH.read_text(encoding="utf-8"))
+        templates = load_chain_templates(str(TEMPLATE_PATH))
     except Exception:
         return []
 
     sector = templates.get(sector_name) or {}
     stages = sector.get("stages") or []
 
+    if pro is None:
+        return []
+
+    stage_member_map, _ = fetch_stage_members_from_tushare(
+        stages=stages,
+        pro=pro,
+        sector_name=sector_name,
+        collect_meta=False,
+    )
     code_name_map: Dict[str, str] = {}
-    for stage in stages:
-        for idx_code in stage.get("ths_index_codes") or []:
-            try:
-                df = pro.ths_member(ts_code=idx_code)
-            except Exception:
-                continue
-            if df is None or df.empty:
-                continue
-            for _, row in df.iterrows():
-                c = _norm_code(row.get("con_code"))
-                if c.endswith((".SH", ".SZ")):
-                    code_name_map[c] = str(row.get("con_name") or "").strip()
+    for members in stage_member_map.values():
+        for row in members or []:
+            c = _norm_code(row.get("ts_code"))
+            if c.endswith((".SH", ".SZ")):
+                code_name_map[c] = str(row.get("name") or "").strip()
 
     return sorted(code_name_map.keys())
 

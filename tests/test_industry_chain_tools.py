@@ -1,9 +1,15 @@
+import pandas as pd
 from sqlalchemy import create_engine, text
 
+import industry_chain_tools as tools
 from industry_chain_tools import (
+    _match_index_codes_by_keywords,
+    _apply_company_stage_cap,
     _build_flow_edges,
+    _score_stage_relevance,
     _sort_stage_companies,
     calc_fund_signal,
+    fetch_stage_members_from_tushare,
     get_chain_snapshot,
     scale_flow_width,
     split_net_flow,
@@ -307,3 +313,150 @@ def test_snapshot_contains_three_day_fund_history_metadata():
     assert isinstance(stage_hist, list)
     assert stage_hist
     assert stage_hist[0]["trade_date"] == "20260319"
+
+
+def test_match_index_codes_by_keywords_hits_expected_codes():
+    catalog = pd.DataFrame(
+        [
+            {"ts_code": "990001.TI", "name": "AI服务器"},
+            {"ts_code": "990002.TI", "name": "液冷温控"},
+            {"ts_code": "990003.TI", "name": "光模块"},
+        ]
+    )
+    matched = _match_index_codes_by_keywords(catalog, ["液冷", "服务器"])
+    assert matched == ["990001.TI", "990002.TI"]
+
+
+def test_match_index_codes_by_keywords_supports_exclude():
+    catalog = pd.DataFrame(
+        [
+            {"ts_code": "990001.TI", "name": "服务器PCB"},
+            {"ts_code": "990002.TI", "name": "GPU芯片"},
+            {"ts_code": "990003.TI", "name": "CPO高速连接"},
+        ]
+    )
+    matched = _match_index_codes_by_keywords(
+        catalog,
+        include_keywords=["PCB", "CPO", "GPU"],
+        exclude_keywords=["GPU"],
+    )
+    assert matched == ["990001.TI", "990003.TI"]
+
+
+def test_dynamic_stage_uses_whitelist_when_keyword_miss(monkeypatch):
+    rules = {
+        "测试板块": {
+            "stage_a": {
+                "keywords": ["不会命中"],
+                "whitelist_codes": ["990010.TI"],
+            }
+        }
+    }
+    monkeypatch.setattr(tools, "AI_CHAIN_DYNAMIC_RULES", rules)
+
+    class FakePro:
+        def ths_index(self, **kwargs):
+            return pd.DataFrame([{"ts_code": "990001.TI", "name": "AI服务器"}])
+
+        def ths_member(self, ts_code):
+            if ts_code == "990010.TI":
+                return pd.DataFrame(
+                    [{"con_code": "000001.SZ", "con_name": "白名单公司"}]
+                )
+            return pd.DataFrame(columns=["con_code", "con_name"])
+
+    members, warnings, dynamic_info, _ = fetch_stage_members_from_tushare(
+        stages=[{"id": "stage_a", "name": "阶段A", "ths_index_codes": []}],
+        pro=FakePro(),
+        sector_name="测试板块",
+        collect_meta=True,
+    )
+    assert members["stage_a"][0]["ts_code"] == "000001.SZ"
+    assert dynamic_info["stage_a"]["source_mode"] == "whitelist"
+    assert any("动态筛选无命中" in w for w in warnings)
+
+
+def test_stage_relevance_score_filters_chip_from_pcb_stage():
+    rule = tools.AI_CHAIN_DYNAMIC_RULES["AI服务器"]["up_pcb_connect"]
+    chip_company = {
+        "domain_tags_text": "GPU / 芯片设计",
+        "domain_insight_text": "公司聚焦AI芯片与加速器设计",
+        "main_business": "高性能GPU研发",
+        "business_scope": "芯片设计",
+        "industry": "半导体",
+        "name": "芯片公司",
+    }
+    pcb_company = {
+        "domain_tags_text": "PCB / 连接器",
+        "domain_insight_text": "公司深耕服务器主板PCB与高速连接器，并参与CPO配套",
+        "main_business": "主板PCB与高速铜缆",
+        "business_scope": "连接器",
+        "industry": "电子元件",
+        "name": "PCB公司",
+    }
+    assert _score_stage_relevance(chip_company, rule) < 1
+    assert _score_stage_relevance(pcb_company, rule) >= 1
+
+
+def test_company_stage_cap_keeps_at_most_two_stages():
+    stage_company_map = {
+        "s1": [{"ts_code": "000001.SZ", "stage_relevance_score": 10, "market_cap": 100}],
+        "s2": [{"ts_code": "000001.SZ", "stage_relevance_score": 8, "market_cap": 90}],
+        "s3": [{"ts_code": "000001.SZ", "stage_relevance_score": 5, "market_cap": 80}],
+    }
+    removed = _apply_company_stage_cap(stage_company_map, keep_max=2)
+    remain = sum(
+        1 for rows in stage_company_map.values() for x in rows if x.get("ts_code") == "000001.SZ"
+    )
+    assert remain == 2
+    assert sum(int(v) for v in removed.values()) == 1
+
+
+def test_ai_sector_snapshot_stable_when_dynamic_source_empty():
+    class EmptyPro:
+        def ths_index(self, **kwargs):
+            return pd.DataFrame(columns=["ts_code", "name"])
+
+        def ths_member(self, ts_code):
+            return pd.DataFrame(columns=["con_code", "con_name"])
+
+    snap = get_chain_snapshot(
+        sector_name="AI服务器",
+        limit_per_stage=10,
+        engine=None,
+        pro=EmptyPro(),
+    )
+    assert len(snap["stages"]) == 6
+    assert snap["meta"]["member_source_mode"] == "mixed"
+    assert isinstance(snap["meta"].get("dynamic_match_info"), dict)
+    assert "index_hit_count" in snap["meta"]["dynamic_match_info"].get("up_chip_storage", {})
+    assert "candidate_company_count" in snap["meta"]["dynamic_match_info"].get("up_chip_storage", {})
+    assert "filtered_company_count" in snap["meta"]["dynamic_match_info"].get("up_chip_storage", {})
+    assert "fallback_company_count" in snap["meta"]["dynamic_match_info"].get("up_chip_storage", {})
+    assert any("动态筛选无命中" in w for w in snap["meta"].get("warnings", []))
+    for stage in snap["stages"]:
+        assert "companies" in stage
+        assert isinstance(stage["companies"], list)
+
+
+def test_stage_member_second_level_cache_by_sector_and_trade_date(monkeypatch):
+    tools._STAGE_MEMBER_CACHE.clear()
+    calls = {"n": 0}
+
+    def _fake_fetch(stages, pro, sector_name="", collect_meta=False):
+        calls["n"] += 1
+        return (
+            {"s1": [{"ts_code": "000001.SZ", "name": "A", "match_source": "dynamic"}]},
+            [],
+            {"s1": {"source_mode": "dynamic"}},
+            "mixed",
+        )
+
+    monkeypatch.setattr(tools, "fetch_stage_members_from_tushare", _fake_fetch)
+    stages = [{"id": "s1", "name": "阶段1", "ths_index_codes": []}]
+
+    m1, w1, d1, s1 = tools._get_stage_members_cached(stages, pro=object(), sector_name="AI服务器", screener_trade_date="20260324")
+    m2, w2, d2, s2 = tools._get_stage_members_cached(stages, pro=object(), sector_name="AI服务器", screener_trade_date="20260324")
+
+    assert calls["n"] == 1
+    assert m1 == m2 and w1 == w2 and d1 == d2 and s1 == s2

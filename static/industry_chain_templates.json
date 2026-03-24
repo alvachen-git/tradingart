@@ -47,5 +47,89 @@
       ["mid_fab", "mid_packaging"],
       ["mid_packaging", "downstream"]
     ]
+  },
+  "AI服务器": {
+    "display_name": "AI服务器产业链",
+    "stages": [
+      {
+        "id": "up_chip_storage",
+        "name": "上游-芯片与存储",
+        "ths_index_codes": []
+      },
+      {
+        "id": "up_pcb_connect",
+        "name": "上游-主板PCB/CPO与连接",
+        "ths_index_codes": []
+      },
+      {
+        "id": "mid_components",
+        "name": "中游-服务器部件（电源/机箱/散热器）",
+        "ths_index_codes": []
+      },
+      {
+        "id": "mid_odm_oem",
+        "name": "中游-整机ODM/OEM",
+        "ths_index_codes": []
+      },
+      {
+        "id": "mid_liquid_cooling",
+        "name": "中游-液冷与温控",
+        "ths_index_codes": []
+      },
+      {
+        "id": "down_deploy_app",
+        "name": "下游-部署与应用（云/运营商/政企）",
+        "ths_index_codes": []
+      }
+    ],
+    "edges": [
+      ["up_chip_storage", "up_pcb_connect"],
+      ["up_pcb_connect", "mid_components"],
+      ["mid_components", "mid_odm_oem"],
+      ["mid_odm_oem", "mid_liquid_cooling"],
+      ["mid_liquid_cooling", "down_deploy_app"]
+    ]
+  },
+  "AI算力": {
+    "display_name": "AI算力产业链",
+    "stages": [
+      {
+        "id": "up_compute_chip",
+        "name": "上游-算力芯片",
+        "ths_index_codes": []
+      },
+      {
+        "id": "up_packaging_hbm",
+        "name": "上游-先进封装与HBM链",
+        "ths_index_codes": []
+      },
+      {
+        "id": "mid_server_cluster",
+        "name": "中游-算力服务器与集群",
+        "ths_index_codes": []
+      },
+      {
+        "id": "mid_interconnect",
+        "name": "中游-高速互联（交换/光模块/CPO）",
+        "ths_index_codes": []
+      },
+      {
+        "id": "mid_dc_infra",
+        "name": "中游-数据中心基础设施",
+        "ths_index_codes": []
+      },
+      {
+        "id": "down_model_service",
+        "name": "下游-模型与应用服务",
+        "ths_index_codes": []
+      }
+    ],
+    "edges": [
+      ["up_compute_chip", "up_packaging_hbm"],
+      ["up_packaging_hbm", "mid_server_cluster"],
+      ["mid_server_cluster", "mid_interconnect"],
+      ["mid_interconnect", "mid_dc_infra"],
+      ["mid_dc_infra", "down_model_service"]
+    ]
   }
 }

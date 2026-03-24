@@ -5,6 +5,7 @@ import math
 import os
 import re
 import time
+import copy
 from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
@@ -27,6 +28,150 @@ _TEMPLATE_PATH = os.path.join(
 _FLOW_EPS = 1e-6
 _EXTERNAL_IN_ID = "external_in"
 _EXTERNAL_OUT_ID = "external_out"
+_DYNAMIC_CACHE_TTL_SEC = int(os.getenv("AI_CHAIN_DYNAMIC_CACHE_TTL_SEC", "21600"))
+_DEFAULT_MAX_INDEX_CODES = 6
+_DEFAULT_MIN_COMPANIES_BEFORE_FALLBACK = 8
+_DEFAULT_COMPANY_KEEP_MAX_STAGES = 2
+_DEFAULT_STAGE_RELEVANCE_THRESHOLD = 1
+_STRONG_STAGE_FILTER_SECTORS = {"AI服务器", "AI算力"}
+
+# 主题指数动态筛选规则（关键词）+ 白名单兜底（同花顺指数代码）
+# 字段：
+# include_keywords/exclude_keywords -> 指数名匹配规则
+# company_include_keywords/company_exclude_keywords -> 公司文本二次分类规则
+# max_index_codes -> 动态命中指数上限
+# min_companies_before_fallback -> 动态候选公司数不足时启用白名单补足
+# company_keep_max_stages -> 单公司跨环节最多保留数
+AI_CHAIN_DYNAMIC_RULES: Dict[str, Dict[str, Dict[str, Any]]] = {
+    "AI服务器": {
+        "up_chip_storage": {
+            "include_keywords": ["算力芯片", "AI芯片", "GPU", "CPU", "存储", "HBM", "DRAM", "NAND", "服务器芯片"],
+            "exclude_keywords": ["PCB", "连接器", "CPO", "铜缆", "光模块", "交换机"],
+            "company_include_keywords": ["GPU", "CPU", "AI芯片", "HBM", "DRAM", "NAND", "存储", "晶圆代工"],
+            "company_exclude_keywords": ["PCB", "覆铜板", "连接器", "铜缆", "CPO", "光模块"],
+            "whitelist_codes": ["884287.TI", "884288.TI"],
+            "max_index_codes": 6,
+            "min_companies_before_fallback": 10,
+            "company_keep_max_stages": 2,
+        },
+        "up_pcb_connect": {
+            "include_keywords": ["PCB", "覆铜板", "CCL", "连接器", "高速连接", "高速铜缆", "光模块", "硅光", "CPO"],
+            "exclude_keywords": ["晶圆代工", "芯片设计", "GPU", "CPU", "NPU", "存储芯片", "存储器"],
+            "company_include_keywords": ["PCB", "覆铜板", "连接器", "铜缆", "光模块", "硅光", "CPO"],
+            "company_exclude_keywords": ["晶圆代工", "芯片设计", "GPU", "CPU", "NPU", "存储芯片"],
+            "whitelist_codes": ["881121.TI"],
+            "max_index_codes": 5,
+            "min_companies_before_fallback": 8,
+            "company_keep_max_stages": 2,
+        },
+        "mid_components": {
+            "include_keywords": ["服务器电源", "机箱", "散热", "热管理", "风扇", "电源设备"],
+            "exclude_keywords": ["GPU", "CPU", "晶圆代工"],
+            "company_include_keywords": ["服务器电源", "机箱", "散热", "热管理", "风扇", "PDU"],
+            "company_exclude_keywords": ["GPU", "CPU", "晶圆代工", "芯片设计"],
+            "whitelist_codes": ["884229.TI"],
+            "max_index_codes": 5,
+            "min_companies_before_fallback": 8,
+            "company_keep_max_stages": 2,
+        },
+        "mid_odm_oem": {
+            "include_keywords": ["服务器", "ODM", "OEM", "整机", "算力服务器", "AI服务器"],
+            "exclude_keywords": ["PCB", "覆铜板", "连接器", "晶圆代工"],
+            "company_include_keywords": ["服务器", "整机", "ODM", "OEM", "机架", "集群"],
+            "company_exclude_keywords": ["PCB", "连接器", "晶圆代工", "芯片设计"],
+            "whitelist_codes": ["881121.TI"],
+            "max_index_codes": 6,
+            "min_companies_before_fallback": 8,
+            "company_keep_max_stages": 2,
+        },
+        "mid_liquid_cooling": {
+            "include_keywords": ["液冷", "温控", "冷板", "浸没式", "制冷", "热管理"],
+            "exclude_keywords": ["GPU", "CPU", "存储芯片"],
+            "company_include_keywords": ["液冷", "温控", "冷板", "浸没式", "制冷", "换热"],
+            "company_exclude_keywords": ["GPU", "CPU", "存储芯片", "晶圆代工"],
+            "whitelist_codes": ["884229.TI"],
+            "max_index_codes": 5,
+            "min_companies_before_fallback": 8,
+            "company_keep_max_stages": 2,
+        },
+        "down_deploy_app": {
+            "include_keywords": ["云计算", "运营商", "政企", "IDC", "数据中心", "算力租赁"],
+            "exclude_keywords": ["PCB", "连接器", "晶圆代工", "封装测试"],
+            "company_include_keywords": ["云计算", "政企", "运营商", "IDC", "数据中心", "算力租赁", "云服务"],
+            "company_exclude_keywords": ["PCB", "连接器", "晶圆代工", "封装测试"],
+            "whitelist_codes": ["881121.TI"],
+            "max_index_codes": 6,
+            "min_companies_before_fallback": 8,
+            "company_keep_max_stages": 2,
+        },
+    },
+    "AI算力": {
+        "up_compute_chip": {
+            "include_keywords": ["算力芯片", "GPU", "AI芯片", "ASIC", "NPU", "CPU"],
+            "exclude_keywords": ["PCB", "连接器", "CPO", "光模块"],
+            "company_include_keywords": ["GPU", "CPU", "AI芯片", "ASIC", "NPU", "加速卡"],
+            "company_exclude_keywords": ["PCB", "连接器", "CPO", "光模块"],
+            "whitelist_codes": ["884287.TI", "884288.TI"],
+            "max_index_codes": 6,
+            "min_companies_before_fallback": 8,
+            "company_keep_max_stages": 2,
+        },
+        "up_packaging_hbm": {
+            "include_keywords": ["先进封装", "HBM", "CoWoS", "封装测试", "封测"],
+            "exclude_keywords": ["PCB", "连接器", "IDC"],
+            "company_include_keywords": ["先进封装", "HBM", "封装测试", "封测", "CoWoS"],
+            "company_exclude_keywords": ["PCB", "连接器", "IDC"],
+            "whitelist_codes": ["884228.TI"],
+            "max_index_codes": 6,
+            "min_companies_before_fallback": 8,
+            "company_keep_max_stages": 2,
+        },
+        "mid_server_cluster": {
+            "include_keywords": ["AI服务器", "算力服务器", "智算", "集群", "服务器"],
+            "exclude_keywords": ["PCB", "连接器", "晶圆代工"],
+            "company_include_keywords": ["AI服务器", "算力服务器", "智算", "集群", "服务器"],
+            "company_exclude_keywords": ["PCB", "连接器", "晶圆代工"],
+            "whitelist_codes": ["881121.TI"],
+            "max_index_codes": 6,
+            "min_companies_before_fallback": 8,
+            "company_keep_max_stages": 2,
+        },
+        "mid_interconnect": {
+            "include_keywords": ["高速互联", "交换机", "光模块", "CPO", "光通信"],
+            "exclude_keywords": ["晶圆代工", "CPU", "GPU"],
+            "company_include_keywords": ["交换机", "光模块", "CPO", "光通信", "高速互联"],
+            "company_exclude_keywords": ["晶圆代工", "CPU", "GPU"],
+            "whitelist_codes": ["881121.TI"],
+            "max_index_codes": 6,
+            "min_companies_before_fallback": 8,
+            "company_keep_max_stages": 2,
+        },
+        "mid_dc_infra": {
+            "include_keywords": ["数据中心", "UPS", "配电", "制冷", "机柜", "温控"],
+            "exclude_keywords": ["芯片设计", "GPU", "CPU"],
+            "company_include_keywords": ["数据中心", "UPS", "配电", "制冷", "机柜", "温控"],
+            "company_exclude_keywords": ["芯片设计", "GPU", "CPU"],
+            "whitelist_codes": ["881121.TI"],
+            "max_index_codes": 6,
+            "min_companies_before_fallback": 8,
+            "company_keep_max_stages": 2,
+        },
+        "down_model_service": {
+            "include_keywords": ["大模型", "模型服务", "AI应用", "AIGC", "云服务"],
+            "exclude_keywords": ["PCB", "连接器", "封装测试"],
+            "company_include_keywords": ["大模型", "模型服务", "AI应用", "AIGC", "云服务"],
+            "company_exclude_keywords": ["PCB", "连接器", "封装测试"],
+            "whitelist_codes": ["881121.TI"],
+            "max_index_codes": 6,
+            "min_companies_before_fallback": 8,
+            "company_keep_max_stages": 2,
+        },
+    },
+}
+
+_THS_CATALOG_CACHE: Dict[str, Any] = {"expires_at": 0.0, "df": pd.DataFrame()}
+_THS_KEYWORD_CACHE: Dict[str, Dict[str, Any]] = {}
+_STAGE_MEMBER_CACHE: Dict[str, Dict[str, Any]] = {}
 
 
 def get_db_engine():
@@ -52,6 +197,192 @@ def get_tushare_pro():
 def load_chain_templates(path: str = _TEMPLATE_PATH) -> Dict[str, Any]:
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
+
+
+def _normalize_text_for_match(value: Any) -> str:
+    return re.sub(r"\s+", "", str(value or "").lower())
+
+
+def _normalize_index_code(value: Any) -> str:
+    code = str(value or "").strip().upper()
+    if not code:
+        return ""
+    if "." not in code and code.isdigit():
+        return f"{code}.TI"
+    return code
+
+
+def _query_ths_index_catalog(pro) -> pd.DataFrame:
+    now_ts = time.time()
+    cached_df = _THS_CATALOG_CACHE.get("df")
+    if isinstance(cached_df, pd.DataFrame) and now_ts < float(_THS_CATALOG_CACHE.get("expires_at", 0)):
+        return cached_df.copy()
+
+    if pro is None:
+        return pd.DataFrame()
+
+    fetch_kwargs = [
+        {"exchange": "A", "type": "N", "fields": "ts_code,name"},
+        {"exchange": "", "type": "N", "fields": "ts_code,name"},
+        {"type": "N", "fields": "ts_code,name"},
+        {"fields": "ts_code,name"},
+        {"exchange": "A", "type": "N"},
+        {"exchange": "", "type": "N"},
+        {"type": "N"},
+        {},
+    ]
+
+    for kwargs in fetch_kwargs:
+        try:
+            df = pro.ths_index(**kwargs)
+        except Exception:
+            continue
+        if df is None or df.empty:
+            continue
+        out = df.copy()
+        if "ts_code" not in out.columns or "name" not in out.columns:
+            continue
+        out["ts_code"] = out["ts_code"].map(_normalize_index_code)
+        out = out[out["ts_code"] != ""]
+        if out.empty:
+            continue
+        _THS_CATALOG_CACHE["df"] = out[["ts_code", "name"]].copy()
+        _THS_CATALOG_CACHE["expires_at"] = now_ts + _DYNAMIC_CACHE_TTL_SEC
+        return _THS_CATALOG_CACHE["df"].copy()
+
+    return pd.DataFrame()
+
+
+def _as_keyword_list(raw: Any) -> List[str]:
+    out: List[str] = []
+    for item in (raw or []):
+        s = str(item or "").strip()
+        if s:
+            out.append(s)
+    return out
+
+
+def _get_stage_dynamic_rule(sector_name: str, stage_id: str) -> Dict[str, Any]:
+    return dict((AI_CHAIN_DYNAMIC_RULES.get(sector_name) or {}).get(stage_id) or {})
+
+
+def _match_index_codes_by_keywords(
+    catalog: pd.DataFrame,
+    include_keywords: List[str],
+    exclude_keywords: Optional[List[str]] = None,
+    max_codes: int = 0,
+) -> List[str]:
+    if catalog is None or catalog.empty:
+        return []
+    include_norm = [_normalize_text_for_match(x) for x in (include_keywords or []) if str(x or "").strip()]
+    exclude_norm = [_normalize_text_for_match(x) for x in (exclude_keywords or []) if str(x or "").strip()]
+    if not include_norm:
+        return []
+
+    matched_codes: List[str] = []
+    for _, row in catalog.iterrows():
+        code = _normalize_index_code(row.get("ts_code"))
+        if not code:
+            continue
+        hay = _normalize_text_for_match(row.get("name"))
+        if not hay:
+            continue
+        include_hit = any(kw in hay for kw in include_norm)
+        exclude_hit = any(kw in hay for kw in exclude_norm) if exclude_norm else False
+        if include_hit and not exclude_hit:
+            matched_codes.append(code)
+
+    unique_codes = sorted(set(matched_codes))
+    if int(max_codes or 0) > 0:
+        return unique_codes[: int(max_codes)]
+    return unique_codes
+
+
+def _resolve_stage_index_codes_with_meta(
+    stage: Dict[str, Any],
+    sector_name: str,
+    pro,
+) -> Tuple[List[str], Dict[str, Any]]:
+    fixed_codes = [_normalize_index_code(x) for x in (stage.get("ths_index_codes") or []) if _normalize_index_code(x)]
+    stage_id = str(stage.get("id") or "")
+    info: Dict[str, Any] = {
+        "source_mode": "fixed" if fixed_codes else "empty",
+        "keywords_hit": 0,
+        "index_codes": 0,
+        "whitelist_codes": 0,
+        "final_index_codes": len(fixed_codes),
+    }
+    info.update(
+        {
+            "index_hit_count": len(fixed_codes),
+            "candidate_company_count": 0,
+            "filtered_company_count": 0,
+            "fallback_company_count": 0,
+        }
+    )
+    if fixed_codes:
+        return sorted(set(fixed_codes)), info
+
+    rule = _get_stage_dynamic_rule(sector_name=sector_name, stage_id=stage_id)
+    include_keywords = _as_keyword_list(rule.get("include_keywords") or rule.get("keywords"))
+    exclude_keywords = _as_keyword_list(rule.get("exclude_keywords"))
+    whitelist_codes = sorted(
+        set(_normalize_index_code(x) for x in (rule.get("whitelist_codes") or []) if _normalize_index_code(x))
+    )
+    max_index_codes = int(rule.get("max_index_codes") or _DEFAULT_MAX_INDEX_CODES)
+    min_companies_before_fallback = int(
+        rule.get("min_companies_before_fallback") or _DEFAULT_MIN_COMPANIES_BEFORE_FALLBACK
+    )
+    keep_max_stages = int(rule.get("company_keep_max_stages") or _DEFAULT_COMPANY_KEEP_MAX_STAGES)
+
+    dynamic_codes: List[str] = []
+    if include_keywords:
+        cache_key = (
+            f"{sector_name}|{stage_id}|"
+            f"{'|'.join(sorted(set(include_keywords)))}|"
+            f"{'|'.join(sorted(set(exclude_keywords)))}|{max_index_codes}"
+        )
+        cached = _THS_KEYWORD_CACHE.get(cache_key) or {}
+        now_ts = time.time()
+        if now_ts < float(cached.get("expires_at", 0)):
+            dynamic_codes = list(cached.get("codes") or [])
+        else:
+            catalog = _query_ths_index_catalog(pro)
+            dynamic_codes = _match_index_codes_by_keywords(
+                catalog=catalog,
+                include_keywords=include_keywords,
+                exclude_keywords=exclude_keywords,
+                max_codes=max_index_codes,
+            )
+            _THS_KEYWORD_CACHE[cache_key] = {
+                "codes": dynamic_codes,
+                "expires_at": now_ts + _DYNAMIC_CACHE_TTL_SEC,
+            }
+
+    merged_codes = sorted(set(dynamic_codes + whitelist_codes))
+    info["keywords_hit"] = len(include_keywords)
+    info["index_codes"] = len(dynamic_codes)
+    info["index_hit_count"] = len(dynamic_codes)
+    info["whitelist_codes"] = len(whitelist_codes)
+    info["final_index_codes"] = len(merged_codes)
+    info["dynamic_index_codes"] = dynamic_codes
+    info["whitelist_index_codes"] = whitelist_codes
+    info["min_companies_before_fallback"] = max(1, min_companies_before_fallback)
+    info["company_keep_max_stages"] = max(1, keep_max_stages)
+    if dynamic_codes and whitelist_codes:
+        info["source_mode"] = "mixed"
+    elif dynamic_codes:
+        info["source_mode"] = "dynamic"
+    elif whitelist_codes:
+        info["source_mode"] = "whitelist"
+    else:
+        info["source_mode"] = "empty"
+    return merged_codes, info
+
+
+def _resolve_stage_index_codes(stage: Dict[str, Any], sector_name: str, pro) -> List[str]:
+    codes, _ = _resolve_stage_index_codes_with_meta(stage=stage, sector_name=sector_name, pro=pro)
+    return codes
 
 
 def parse_domain_tags(domain_tags_text: Any) -> List[str]:
@@ -390,39 +721,121 @@ def _fetch_profiles_from_tushare_and_cache(engine, pro, codes: List[str]) -> Dic
 def fetch_stage_members_from_tushare(
     stages: List[Dict[str, Any]],
     pro,
-) -> Tuple[Dict[str, List[Dict[str, str]]], List[str]]:
+    sector_name: str = "",
+    collect_meta: bool = False,
+) -> Tuple[Any, ...]:
     members: Dict[str, List[Dict[str, str]]] = {}
     warnings: List[str] = []
+    dynamic_match_info: Dict[str, Dict[str, Any]] = {}
+    stage_source_modes: List[str] = []
 
     if pro is None:
         warnings.append("Tushare 不可用，无法拉取产业链成分股。")
         for stage in stages:
             members[stage["id"]] = []
+            dynamic_match_info[stage["id"]] = {
+                "keywords_hit": 0,
+                "index_codes": 0,
+                "index_hit_count": 0,
+                "whitelist_codes": 0,
+                "final_index_codes": 0,
+                "candidate_company_count": 0,
+                "filtered_company_count": 0,
+                "fallback_company_count": 0,
+                "source_mode": "empty",
+            }
+        if collect_meta:
+            return members, warnings, dynamic_match_info, "fixed"
         return members, warnings
 
     for stage in stages:
         stage_id = stage["id"]
         code_set: Dict[str, str] = {}
-        for idx_code in stage.get("ths_index_codes", []):
-            try:
-                df = pro.ths_member(ts_code=idx_code)
-            except Exception as e:
-                warnings.append(f"阶段 {stage_id} 拉取 {idx_code} 失败: {e}")
-                continue
+        code_source_map: Dict[str, str] = {}
+        idx_codes, stage_meta = _resolve_stage_index_codes_with_meta(
+            stage=stage,
+            sector_name=sector_name,
+            pro=pro,
+        )
+        dynamic_match_info[stage_id] = stage_meta
+        has_fixed_codes = bool(stage.get("ths_index_codes"))
+        has_dynamic_rule = bool(_get_stage_dynamic_rule(sector_name, stage_id))
 
-            if df is None or df.empty:
-                continue
-
-            for _, row in df.iterrows():
-                ts_code = _normalize_ts_code(row.get("con_code"))
-                if not ts_code.endswith((".SH", ".SZ")):
+        def _ingest_index_members(index_codes: List[str], source_label: str) -> None:
+            for idx_code in index_codes:
+                try:
+                    df = pro.ths_member(ts_code=idx_code)
+                except Exception as e:
+                    warnings.append(f"阶段 {stage_id} 拉取 {idx_code} 失败: {e}")
                     continue
-                name = str(row.get("con_name") or "").strip()
-                if ts_code and ts_code not in code_set:
-                    code_set[ts_code] = name
+                if df is None or df.empty:
+                    continue
+                for _, row in df.iterrows():
+                    ts_code = _normalize_ts_code(row.get("con_code"))
+                    if not ts_code.endswith((".SH", ".SZ")):
+                        continue
+                    name = str(row.get("con_name") or "").strip()
+                    if not ts_code:
+                        continue
+                    if ts_code not in code_set:
+                        code_set[ts_code] = name
+                        code_source_map[ts_code] = source_label
+                    elif code_source_map.get(ts_code) != source_label:
+                        code_source_map[ts_code] = "mixed"
+
+        if has_fixed_codes:
+            _ingest_index_members(idx_codes, "fixed")
+            stage_meta["source_mode"] = "fixed"
+        else:
+            dynamic_codes = list(stage_meta.get("dynamic_index_codes") or [])
+            whitelist_codes = list(stage_meta.get("whitelist_index_codes") or [])
+            min_companies = int(stage_meta.get("min_companies_before_fallback") or _DEFAULT_MIN_COMPANIES_BEFORE_FALLBACK)
+
+            if dynamic_codes:
+                _ingest_index_members(dynamic_codes, "dynamic")
+            else:
+                if has_dynamic_rule:
+                    warnings.append(f"阶段 {stage_id} 动态筛选无命中。")
+                elif not idx_codes:
+                    warnings.append(f"阶段 {stage_id} 未匹配到主题指数，返回空结果。")
+
+            candidate_count = len(code_set)
+            stage_meta["candidate_company_count"] = candidate_count
+
+            fallback_added = 0
+            fallback_used = False
+            if whitelist_codes and candidate_count < max(1, min_companies):
+                before_fallback = len(code_set)
+                _ingest_index_members(whitelist_codes, "whitelist")
+                fallback_added = max(0, len(code_set) - before_fallback)
+                fallback_used = fallback_added > 0
+                if fallback_used:
+                    warnings.append(
+                        f"阶段 {stage_id} 动态候选 {candidate_count} 家，白名单补足 {fallback_added} 家。"
+                    )
+                elif candidate_count == 0:
+                    warnings.append(f"阶段 {stage_id} 动态筛选无命中且白名单未补足，返回空结果。")
+
+            stage_meta["fallback_company_count"] = fallback_added
+            if candidate_count == 0 and not fallback_used and whitelist_codes and has_dynamic_rule:
+                stage_meta["source_mode"] = "whitelist"
+            elif candidate_count > 0 and fallback_used:
+                stage_meta["source_mode"] = "mixed"
+            elif candidate_count > 0:
+                stage_meta["source_mode"] = "dynamic"
+            elif whitelist_codes:
+                stage_meta["source_mode"] = "whitelist"
+            else:
+                stage_meta["source_mode"] = "empty"
+
+        stage_meta["final_index_codes"] = len(
+            set((stage_meta.get("dynamic_index_codes") or []) + (stage_meta.get("whitelist_index_codes") or []))
+        )
+        stage_meta["candidate_company_count"] = int(stage_meta.get("candidate_company_count") or len(code_set))
+        stage_source_modes.append(str(stage_meta.get("source_mode") or "empty"))
 
         members[stage_id] = [
-            {"ts_code": code, "name": name}
+            {"ts_code": code, "name": name, "match_source": code_source_map.get(code, "unknown")}
             for code, name in sorted(code_set.items(), key=lambda x: x[0])
         ]
 
@@ -437,7 +850,54 @@ def fetch_stage_members_from_tushare(
             excluded_codes.update(x["ts_code"] for x in members.get(ex, []))
         members[stage_id] = [x for x in members.get(stage_id, []) if x["ts_code"] not in excluded_codes]
 
+    member_source_mode = "fixed"
+    source_set = set(stage_source_modes)
+    if any(x in source_set for x in {"dynamic", "whitelist", "mixed"}):
+        member_source_mode = "mixed"
+    elif source_set and source_set == {"fixed"}:
+        member_source_mode = "fixed"
+
+    if collect_meta:
+        return members, warnings, dynamic_match_info, member_source_mode
     return members, warnings
+
+
+def _get_stage_members_cached(
+    stages: List[Dict[str, Any]],
+    pro,
+    sector_name: str,
+    screener_trade_date: str,
+) -> Tuple[Dict[str, List[Dict[str, str]]], List[str], Dict[str, Dict[str, Any]], str]:
+    """
+    成分股二级缓存（按板块+交易日）：
+    - 缓存成员映射、告警、动态匹配信息、来源模式
+    - TTL 复用 _DYNAMIC_CACHE_TTL_SEC
+    """
+    cache_key = f"{sector_name}|{str(screener_trade_date or '').strip()}"
+    now_ts = time.time()
+    cached = _STAGE_MEMBER_CACHE.get(cache_key) or {}
+    if now_ts < float(cached.get("expires_at", 0)):
+        return (
+            copy.deepcopy(cached.get("members") or {}),
+            list(cached.get("warnings") or []),
+            copy.deepcopy(cached.get("dynamic_match_info") or {}),
+            str(cached.get("member_source_mode") or "fixed"),
+        )
+
+    members, stage_warnings, dynamic_match_info, member_source_mode = fetch_stage_members_from_tushare(
+        stages=stages,
+        pro=pro,
+        sector_name=sector_name,
+        collect_meta=True,
+    )
+    _STAGE_MEMBER_CACHE[cache_key] = {
+        "expires_at": now_ts + _DYNAMIC_CACHE_TTL_SEC,
+        "members": copy.deepcopy(members),
+        "warnings": list(stage_warnings or []),
+        "dynamic_match_info": copy.deepcopy(dynamic_match_info or {}),
+        "member_source_mode": str(member_source_mode or "fixed"),
+    }
+    return members, stage_warnings, dynamic_match_info, member_source_mode
 
 
 def _query_screener_map(engine, codes: List[str], trade_date: Optional[str]) -> Dict[str, Dict[str, Any]]:
@@ -696,6 +1156,85 @@ def _query_profile_map(engine, codes: List[str]) -> Dict[str, Dict[str, Any]]:
     return out
 
 
+def _get_company_match_text(company: Dict[str, Any]) -> str:
+    fields = [
+        "domain_tags_text",
+        "domain_insight_text",
+        "main_business",
+        "business_scope",
+        "industry",
+        "name",
+    ]
+    parts = [str(company.get(k) or "") for k in fields]
+    return _normalize_text_for_match(" ".join(parts))
+
+
+def _score_stage_relevance(company: Dict[str, Any], stage_rule: Dict[str, Any]) -> int:
+    if not stage_rule:
+        return 0
+    text = _get_company_match_text(company)
+    include_keywords = _as_keyword_list(stage_rule.get("company_include_keywords") or stage_rule.get("include_keywords"))
+    exclude_keywords = _as_keyword_list(stage_rule.get("company_exclude_keywords") or stage_rule.get("exclude_keywords"))
+    if not text:
+        return 0
+
+    score = 0
+    include_hit = 0
+    for kw in include_keywords:
+        if _normalize_text_for_match(kw) in text:
+            include_hit += 1
+            score += 2
+
+    for kw in exclude_keywords:
+        if _normalize_text_for_match(kw) in text:
+            score -= 3
+
+    if include_keywords and include_hit == 0:
+        score -= 1
+    return score
+
+
+def _apply_company_stage_cap(
+    stage_company_map: Dict[str, List[Dict[str, Any]]],
+    keep_max: int,
+) -> Dict[str, int]:
+    keep_max = max(1, int(keep_max))
+    code_entries: Dict[str, List[Tuple[str, Dict[str, Any]]]] = {}
+    for stage_id, rows in stage_company_map.items():
+        for row in rows:
+            code = _normalize_ts_code(row.get("ts_code"))
+            if not code:
+                continue
+            code_entries.setdefault(code, []).append((stage_id, row))
+
+    keep_assignment: Dict[str, set] = {}
+    for code, entries in code_entries.items():
+        ranked = sorted(
+            entries,
+            key=lambda x: (
+                -int(_to_float(x[1].get("stage_relevance_score", 0))),
+                -_to_float(x[1].get("market_cap", 0.0)),
+                -_to_float(x[1].get("main_net_amount_5d", 0.0)),
+                -_to_float(x[1].get("main_net_amount_1d", 0.0)),
+                str(x[0]),
+            ),
+        )
+        keep_assignment[code] = {sid for sid, _ in ranked[:keep_max]}
+
+    removed_count_by_stage: Dict[str, int] = {k: 0 for k in stage_company_map.keys()}
+    for sid, rows in list(stage_company_map.items()):
+        kept_rows: List[Dict[str, Any]] = []
+        for row in rows:
+            code = _normalize_ts_code(row.get("ts_code"))
+            allowed_stages = keep_assignment.get(code, set())
+            if allowed_stages and sid not in allowed_stages:
+                removed_count_by_stage[sid] = removed_count_by_stage.get(sid, 0) + 1
+                continue
+            kept_rows.append(row)
+        stage_company_map[sid] = kept_rows
+    return removed_count_by_stage
+
+
 def _sort_stage_companies(rows: List[Dict[str, Any]], limit_per_stage: int) -> List[Dict[str, Any]]:
     rows = sorted(
         rows,
@@ -871,18 +1410,8 @@ def get_chain_snapshot(
     warnings: List[str] = []
     flow_window = _normalize_flow_window(flow_window)
     flow_mode = "fund_flow"
-
-    if stage_member_map is None:
-        stage_member_map, stage_warnings = fetch_stage_members_from_tushare(stages=stages, pro=pro)
-        warnings.extend(stage_warnings)
-
-    all_codes: List[str] = []
-    for stage in stages:
-        for item in stage_member_map.get(stage["id"], []):
-            code = _normalize_ts_code(item.get("ts_code"))
-            if code:
-                all_codes.append(code)
-    all_codes = sorted(set(all_codes))
+    member_source_mode = "fixed"
+    dynamic_match_info: Dict[str, Dict[str, Any]] = {}
 
     fund_trade_date = _fetch_max_trade_date(engine, "stock_moneyflow_daily")
     if force_screener_trade_date:
@@ -892,6 +1421,43 @@ def get_chain_snapshot(
         if not screener_trade_date:
             screener_trade_date = _fetch_max_trade_date(engine, "daily_stock_screener")
     profile_updated_at = _fetch_profile_max_updated_at(engine)
+
+    if stage_member_map is None:
+        (
+            stage_member_map,
+            stage_warnings,
+            dynamic_match_info,
+            member_source_mode,
+        ) = _get_stage_members_cached(
+            stages=stages,
+            pro=pro,
+            sector_name=sector_name,
+            screener_trade_date=screener_trade_date or "",
+        )
+        warnings.extend(stage_warnings)
+    else:
+        dynamic_match_info = {
+            str(stage.get("id") or ""): {
+                "keywords_hit": 0,
+                "index_codes": 0,
+                "index_hit_count": 0,
+                "whitelist_codes": 0,
+                "final_index_codes": len(stage_member_map.get(str(stage.get("id") or ""), [])),
+                "candidate_company_count": len(stage_member_map.get(str(stage.get("id") or ""), [])),
+                "filtered_company_count": 0,
+                "fallback_company_count": 0,
+                "source_mode": "fixed",
+            }
+            for stage in stages
+        }
+
+    all_codes: List[str] = []
+    for stage in stages:
+        for item in stage_member_map.get(stage["id"], []):
+            code = _normalize_ts_code(item.get("ts_code"))
+            if code:
+                all_codes.append(code)
+    all_codes = sorted(set(all_codes))
 
     screener_map = _query_screener_map(engine, all_codes, screener_trade_date)
     fund_map = _query_fund_map(engine, all_codes, fund_trade_date)
@@ -906,11 +1472,24 @@ def get_chain_snapshot(
 
     stage_results: List[Dict[str, Any]] = []
     stage_count_map: Dict[str, int] = {}
+    stage_company_map: Dict[str, List[Dict[str, Any]]] = {}
+    stage_name_map: Dict[str, str] = {}
 
     for stage in stages:
-        stage_id = stage["id"]
-        stage_name = stage["name"]
+        stage_id = str(stage["id"])
+        stage_name = str(stage["name"])
+        stage_name_map[stage_id] = stage_name
         stage_members = stage_member_map.get(stage_id, [])
+        member_source_map = {
+            _normalize_ts_code(x.get("ts_code")): str(x.get("match_source") or "unknown")
+            for x in stage_members
+        }
+
+        stage_meta = dynamic_match_info.setdefault(stage_id, {})
+        stage_meta.setdefault("candidate_company_count", len(stage_members))
+        stage_meta.setdefault("filtered_company_count", 0)
+        stage_meta.setdefault("fallback_company_count", 0)
+        stage_meta.setdefault("index_hit_count", int(stage_meta.get("index_codes") or 0))
 
         companies: List[Dict[str, Any]] = []
         for item in stage_members:
@@ -950,10 +1529,46 @@ def get_chain_snapshot(
                 "customer_profile": profile_item.get("customer_profile", ""),
                 "moat_note": profile_item.get("moat_note", ""),
                 "boundary_risk": profile_item.get("boundary_risk", ""),
+                "stage_relevance_score": 0,
+                "stage_match_source": member_source_map.get(code, "unknown"),
             }
             companies.append(company)
 
-        companies = _sort_stage_companies(companies, limit_per_stage)
+        if sector_name in _STRONG_STAGE_FILTER_SECTORS:
+            rule = _get_stage_dynamic_rule(sector_name=sector_name, stage_id=stage_id)
+            threshold = int(rule.get("stage_relevance_threshold") or _DEFAULT_STAGE_RELEVANCE_THRESHOLD)
+            before_count = len(companies)
+            filtered_rows: List[Dict[str, Any]] = []
+            for c in companies:
+                score = _score_stage_relevance(c, rule)
+                c["stage_relevance_score"] = int(score)
+                if score >= threshold:
+                    filtered_rows.append(c)
+            removed = max(0, before_count - len(filtered_rows))
+            if removed > 0:
+                stage_meta["filtered_company_count"] = int(stage_meta.get("filtered_company_count") or 0) + removed
+            companies = filtered_rows
+
+        stage_company_map[stage_id] = companies
+
+    if sector_name in _STRONG_STAGE_FILTER_SECTORS:
+        stage_rules = AI_CHAIN_DYNAMIC_RULES.get(sector_name) or {}
+        keep_max_values = [
+            int((stage_rules.get(str(stage.get("id") or "")) or {}).get("company_keep_max_stages") or 0)
+            for stage in stages
+        ]
+        keep_max = max([x for x in keep_max_values if x > 0] or [_DEFAULT_COMPANY_KEEP_MAX_STAGES])
+        removed_by_stage = _apply_company_stage_cap(stage_company_map=stage_company_map, keep_max=keep_max)
+        for sid, removed in removed_by_stage.items():
+            if removed <= 0:
+                continue
+            stage_meta = dynamic_match_info.setdefault(sid, {})
+            stage_meta["filtered_company_count"] = int(stage_meta.get("filtered_company_count") or 0) + int(removed)
+
+    for stage in stages:
+        stage_id = str(stage["id"])
+        stage_name = str(stage["name"])
+        companies = _sort_stage_companies(stage_company_map.get(stage_id, []), limit_per_stage)
 
         # 业务标签兜底：仅对最终展示的少量公司按代码补拉并回填缓存
         missing_profile_codes = [
@@ -1090,6 +1705,8 @@ def get_chain_snapshot(
             "flow_mode": flow_mode,
             "flow_window": flow_window,
             "flow_semantics": "估算承接流量（非逐笔交易事实）",
+            "member_source_mode": member_source_mode,
+            "dynamic_match_info": dynamic_match_info,
             "warnings": dedup_warnings,
         },
         "stages": stage_results,

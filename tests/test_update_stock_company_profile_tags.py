@@ -2,6 +2,7 @@ from datetime import datetime, timedelta
 
 import pandas as pd
 
+import update_stock_company_profile_tags as profile_tags_mod
 from update_stock_company_profile_tags import (
     EvidenceItem,
     compute_profile_hash,
@@ -15,6 +16,7 @@ from update_stock_company_profile_tags import (
     pick_candidates,
     should_refresh,
     should_refresh_insight,
+    load_sector_component_codes,
 )
 
 
@@ -182,3 +184,29 @@ def test_should_refresh_insight_with_days_and_hash():
     assert should_refresh_insight(old, profile_hash, "other", now_dt, 90, False)
     assert should_refresh_insight(old, profile_hash, ih, now_dt, 1, False)
     assert should_refresh_insight(old, profile_hash, ih, now_dt, 90, True)
+
+
+def test_load_sector_component_codes_supports_dynamic_resolver(monkeypatch):
+    templates = {
+        "AI服务器": {
+            "stages": [
+                {"id": "s1", "name": "阶段1", "ths_index_codes": []},
+                {"id": "s2", "name": "阶段2", "ths_index_codes": []},
+            ]
+        }
+    }
+    monkeypatch.setattr(profile_tags_mod, "load_chain_templates", lambda path=None: templates)
+    monkeypatch.setattr(
+        profile_tags_mod,
+        "fetch_stage_members_from_tushare",
+        lambda stages, pro, sector_name, collect_meta=False: (
+            {
+                "s1": [{"ts_code": "000001.SZ", "name": "A"}],
+                "s2": [{"ts_code": "000002.SZ", "name": "B"}],
+            },
+            [],
+        ),
+    )
+
+    codes = load_sector_component_codes(object(), "AI服务器")
+    assert codes == ["000001.SZ", "000002.SZ"]

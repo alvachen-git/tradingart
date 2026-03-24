@@ -463,7 +463,7 @@ def _build_flow_bubble_chart(snapshot: dict, flow_window: str, scale_mode: str) 
     return fig
 
 
-@st.cache_data(ttl=900)
+@st.cache_data(ttl=1800)
 def _get_snapshot_cached(
     sector_name: str, limit_per_stage: int, screener_trade_date: str, flow_window: str, cache_version: str = "v2"
 ) -> dict:
