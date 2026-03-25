@@ -74,6 +74,65 @@ def _get_chinese_name(code_str):
     # 4. 兜底：如果啥都没查到，返回原始代码
     return code_str
 
+
+def _extract_symbol_candidates(raw_query: str):
+    """
+    从自然语言问题里抽取候选标的，提升类似“沐曦股份技术面如何”的识别成功率。
+    返回按优先级排序的候选列表（第一个通常是原始 query）。
+    """
+    text = str(raw_query or "").strip()
+    if not text:
+        return []
+
+    candidates = [text]
+    upper_text = text.upper()
+
+    # 1) 优先提取显式代码（股票/ETF/期货简写）
+    code_matches = re.findall(
+        r"(?<![A-Z0-9])([A-Z]{1,6}\d{0,4}|\d{6}(?:\.(?:SH|SZ|BJ|HK))?)(?![A-Z0-9])",
+        upper_text
+    )
+    for code in code_matches:
+        c = str(code).strip()
+        if c:
+            candidates.append(c)
+
+    # 2) 针对“XXX技术面如何/走势怎样”等句式，抽取前缀实体
+    prefix_match = re.match(
+        r"^\s*([\u4e00-\u9fffA-Za-z0-9\.\-]{2,40}?)(?:技术面|技术分析|走势|k线|K线|分析|如何|怎么样|怎样|怎么看)",
+        text
+    )
+    if prefix_match:
+        prefix = prefix_match.group(1).strip(" ，,。！？?：:")
+        if prefix:
+            candidates.append(prefix)
+
+    # 3) 在别名字典里做“最长包含匹配”，避免整句传入时无法命中
+    alias_map = getattr(symbol_map, "COMMON_ALIASES", {}) or {}
+    best_alias = ""
+    for alias in alias_map.keys():
+        alias_str = str(alias or "").strip()
+        if not alias_str:
+            continue
+        # 单字符别名误命中风险高，这里跳过
+        if len(alias_str) == 1:
+            continue
+        if alias_str.upper() in upper_text and len(alias_str) > len(best_alias):
+            best_alias = alias_str
+    if best_alias:
+        candidates.append(best_alias)
+
+    # 去重并保持顺序
+    seen = set()
+    ordered = []
+    for item in candidates:
+        norm = str(item).strip()
+        if not norm or norm in seen:
+            continue
+        seen.add(norm)
+        ordered.append(norm)
+    return ordered
+
 # --- 2. 核心工具定义 ---
 
 @tool
@@ -94,8 +153,14 @@ def analyze_kline_pattern(query: str, trade_date: str = None):
     if not query: return "请输入有效的品种名称或代码。"  # 【新增】空值拦截
 
     # 1. 智能解析名称
-    # 【核心修复】安全拆包
+    # 【核心修复】支持自然语言句式二次抽取（如“沐曦股份技术面如何”）
     result = symbol_map.resolve_symbol(query)
+    if not result or result[0] is None:
+        for candidate in _extract_symbol_candidates(query):
+            result = symbol_map.resolve_symbol(candidate)
+            if result and result[0] is not None:
+                query = candidate  # 用于后续提示/查询一致
+                break
     if not result or result[0] is None:
         return f"未找到与'{query}'相关的品种，请尝试输入全名。"
 
@@ -516,7 +581,7 @@ def analyze_kline_pattern(query: str, trade_date: str = None):
 
         # 4. 长下影
         if lower_pct > 2.0 and upper_pct < 1.0 and body_pct < 0.3 and body_pct > 0.01:
-            if curr['MA5'] < curr['MA20']:
+            if close < curr['MA5']:
                 patterns.append("【锤子】(多头抵抗)")
             elif curr['MA5'] > curr['MA20']:
                 patterns.append("【吊人线】(高位抛压预警)")
