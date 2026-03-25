@@ -117,14 +117,16 @@ class TestSubscriptionTrial(unittest.TestCase):
                     """
                 )
             ).scalar_one()
+            expected_marker = f"new_user_all_reports_{sub.DEFAULT_NEW_USER_TRIAL_DAYS}d_v1:marker"
             cnt_marker = conn.execute(
                 text(
                     """
                     SELECT COUNT(*) FROM user_trial_grants
                     WHERE user_id='new_user_all'
-                      AND trial_code='new_user_all_reports_3d_v1:marker'
+                      AND trial_code=:marker
                     """
-                )
+                ),
+                {"marker": expected_marker},
             ).scalar_one()
             cnt_trial_rows = conn.execute(
                 text(

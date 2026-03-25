@@ -21,17 +21,53 @@ _SUB_SOURCE_COLUMNS = {"source_type", "source_ref", "source_note", "granted_at",
 _HAS_SUB_SOURCE_COLUMNS: Optional[bool] = None
 _TRIAL_TABLE_READY: bool = False
 
-DEFAULT_NEW_USER_TRIAL_DAYS = int(str(os.getenv("NEW_USER_TRIAL_DAYS", "3")).strip() or 3)
+DEFAULT_NEW_USER_TRIAL_DAYS = int(str(os.getenv("NEW_USER_TRIAL_DAYS", "7")).strip() or 7)
 DEFAULT_NEW_USER_TRIAL_CHANNEL_CODES = [
     item.strip()
     for item in str(
         os.getenv(
             "NEW_USER_TRIAL_CHANNEL_CODES",
-            "daily_report,expiry_option_radar,broker_position_report,fund_flow_report,trade_signal",
+            "",
         )
     ).split(",")
     if item.strip()
 ]
+
+
+def _normalize_channel_codes(codes: Optional[List[str]]) -> List[str]:
+    seen = set()
+    normalized: List[str] = []
+    for code in (codes or []):
+        code_norm = str(code or "").strip().lower()
+        if not code_norm or code_norm in seen:
+            continue
+        normalized.append(code_norm)
+        seen.add(code_norm)
+    return normalized
+
+
+def _resolve_new_user_trial_channel_codes(conn, channel_codes: Optional[List[str]]) -> List[str]:
+    # Priority: explicit argument > env-configured list > dynamic active premium channels.
+    explicit = _normalize_channel_codes(channel_codes)
+    if explicit:
+        return explicit
+
+    configured = _normalize_channel_codes(DEFAULT_NEW_USER_TRIAL_CHANNEL_CODES)
+    if configured:
+        return configured
+
+    rows = conn.execute(
+        text(
+            """
+            SELECT code
+            FROM content_channels
+            WHERE is_active = 1
+              AND is_premium = 1
+            ORDER BY id
+            """
+        )
+    ).fetchall()
+    return _normalize_channel_codes([r[0] for r in rows])
 
 
 def _has_subscription_source_columns(conn) -> bool:
@@ -631,11 +667,6 @@ def grant_new_user_trial_all_reports(
     if grant_days <= 0:
         return False, "days_invalid"
 
-    codes = [str(c or "").strip() for c in (channel_codes or DEFAULT_NEW_USER_TRIAL_CHANNEL_CODES)]
-    codes = [c for c in codes if c]
-    if not codes:
-        return False, "channel_codes_empty"
-
     campaign_code = f"new_user_all_reports_{grant_days}d_v1"
     marker_code = f"{campaign_code}:marker"
     operator = os.getenv("TRIAL_GRANT_OPERATOR", "system_register")
@@ -659,6 +690,10 @@ def grant_new_user_trial_all_reports(
             if marker:
                 return True, "already_granted"
 
+            codes = _resolve_new_user_trial_channel_codes(conn, channel_codes)
+            if not codes:
+                return False, "channel_codes_empty"
+
             rows = conn.execute(
                 text(
                     """
@@ -668,16 +703,17 @@ def grant_new_user_trial_all_reports(
                     """
                 )
             ).fetchall()
-            channel_map = {str(r[1] or "").strip(): int(r[0]) for r in rows}
+            channel_map = {str(r[1] or "").strip().lower(): int(r[0]) for r in rows}
 
             granted_count = 0
             for code in codes:
-                channel_id = channel_map.get(code)
+                code_norm = str(code or "").strip().lower()
+                channel_id = channel_map.get(code_norm)
                 if not channel_id:
-                    print(f"[subscription] trial_all_reports_skip_missing_channel code={code}")
+                    print(f"[subscription] trial_all_reports_skip_missing_channel code={code_norm}")
                     continue
 
-                trial_code = f"{campaign_code}:{code}"
+                trial_code = f"{campaign_code}:{code_norm}"
                 ok, msg = _add_subscription_core(
                     conn=conn,
                     user_id=user_id,
