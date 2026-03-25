@@ -7,10 +7,14 @@ from industry_chain_tools import (
     _apply_company_stage_cap,
     _build_flow_edges,
     _score_stage_relevance,
+    ensure_industry_chain_snapshot_cache_table,
     _sort_stage_companies,
     calc_fund_signal,
     fetch_stage_members_from_tushare,
     get_chain_snapshot,
+    get_chain_snapshot_with_cache,
+    load_chain_snapshot_cache,
+    save_chain_snapshot_cache,
     scale_flow_width,
     split_net_flow,
 )
@@ -460,3 +464,155 @@ def test_stage_member_second_level_cache_by_sector_and_trade_date(monkeypatch):
 
     assert calls["n"] == 1
     assert m1 == m2 and w1 == w2 and d1 == d2 and s1 == s2
+
+
+def _mock_cached_snapshot():
+    return {
+        "meta": {
+            "sector": "半导体",
+            "fund_trade_date": "20260324",
+            "screener_trade_date": "20260324",
+            "fund_history_dates": ["20260324", "20260323", "20260322"],
+            "flow_window": "5D",
+            "warnings": [],
+        },
+        "stages": [
+            {
+                "id": "up",
+                "name": "上游",
+                "companies": [
+                    {
+                        "ts_code": "000001.SZ",
+                        "name": "甲公司",
+                        "main_net_amount_1d": 100.0,
+                        "main_net_amount_5d": 300.0,
+                        "main_net_amount_5d_hist": {"20260324": 300.0, "20260323": 220.0, "20260322": 160.0},
+                    },
+                    {
+                        "ts_code": "000002.SZ",
+                        "name": "乙公司",
+                        "main_net_amount_1d": -50.0,
+                        "main_net_amount_5d": -80.0,
+                        "main_net_amount_5d_hist": {"20260324": -80.0, "20260323": -40.0, "20260322": 10.0},
+                    },
+                ],
+                "company_count": 2,
+                "net_flow_1d": 50.0,
+                "net_flow_5d": 220.0,
+                "net_flow_5d_history": [
+                    {"trade_date": "20260324", "net_flow_5d": 220.0},
+                    {"trade_date": "20260323", "net_flow_5d": 180.0},
+                    {"trade_date": "20260322", "net_flow_5d": 170.0},
+                ],
+                "flow_in_external": 220.0,
+                "flow_out_external": 0.0,
+            },
+            {
+                "id": "mid",
+                "name": "中游",
+                "companies": [
+                    {
+                        "ts_code": "000003.SZ",
+                        "name": "丙公司",
+                        "main_net_amount_1d": 10.0,
+                        "main_net_amount_5d": 60.0,
+                        "main_net_amount_5d_hist": {"20260324": 60.0, "20260323": 55.0, "20260322": 40.0},
+                    }
+                ],
+                "company_count": 1,
+                "net_flow_1d": 10.0,
+                "net_flow_5d": 60.0,
+                "net_flow_5d_history": [
+                    {"trade_date": "20260324", "net_flow_5d": 60.0},
+                    {"trade_date": "20260323", "net_flow_5d": 55.0},
+                    {"trade_date": "20260322", "net_flow_5d": 40.0},
+                ],
+                "flow_in_external": 0.0,
+                "flow_out_external": 0.0,
+            },
+        ],
+        "edges": [
+            {"source": "up", "target": "mid", "value": 1.0, "flow_value": 60.0, "flow_value_abs": 60.0, "flow_type": "internal"},
+            {"source": "external_in", "target": "up", "value": 1.0, "flow_value": 160.0, "flow_value_abs": 160.0, "flow_type": "external_in"},
+        ],
+    }
+
+
+def test_snapshot_cache_save_load_idempotent():
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    assert ensure_industry_chain_snapshot_cache_table(engine)
+
+    snap = _mock_cached_snapshot()
+    ok1 = save_chain_snapshot_cache("20260324", "半导体", "5D", snap, engine=engine)
+    assert ok1
+    loaded1 = load_chain_snapshot_cache("半导体", "5D", "20260324", engine=engine)
+    assert loaded1 is not None
+    assert loaded1["meta"]["sector"] == "半导体"
+
+    snap2 = _mock_cached_snapshot()
+    snap2["meta"]["generated_at"] = "changed"
+    ok2 = save_chain_snapshot_cache("20260324", "半导体", "5D", snap2, engine=engine)
+    assert ok2
+    loaded2 = load_chain_snapshot_cache("半导体", "5D", "20260324", engine=engine)
+    assert loaded2 is not None
+    assert loaded2["meta"]["generated_at"] == "changed"
+
+
+def test_get_chain_snapshot_with_cache_hit_skips_realtime(monkeypatch):
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    ensure_industry_chain_snapshot_cache_table(engine)
+    save_chain_snapshot_cache("20260324", "半导体", "5D", _mock_cached_snapshot(), engine=engine)
+
+    def _fail_realtime(*args, **kwargs):
+        raise AssertionError("cache hit should not call realtime builder")
+
+    monkeypatch.setattr(tools, "get_chain_snapshot", _fail_realtime)
+    snap = get_chain_snapshot_with_cache(
+        sector_name="半导体",
+        limit_per_stage=1,
+        flow_window="5D",
+        screener_trade_date="20260324",
+        engine=engine,
+    )
+    assert snap["meta"]["cache_hit"] is True
+    assert snap["meta"]["snapshot_source"] == "cache"
+    assert snap["stages"][0]["company_count"] == 1
+
+
+def test_get_chain_snapshot_with_cache_miss_fallback(monkeypatch):
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    ensure_industry_chain_snapshot_cache_table(engine)
+
+    def _fake_realtime(*args, **kwargs):
+        return _mock_cached_snapshot()
+
+    monkeypatch.setattr(tools, "get_chain_snapshot", _fake_realtime)
+    snap = get_chain_snapshot_with_cache(
+        sector_name="半导体",
+        limit_per_stage=10,
+        flow_window="5D",
+        screener_trade_date="20260324",
+        engine=engine,
+    )
+    assert snap["meta"]["cache_hit"] is False
+    assert snap["meta"]["snapshot_source"] == "realtime"
+    assert any("今日快照未生成" in w for w in snap["meta"].get("warnings", []))
+
+
+def test_cached_snapshot_limit_slice_rebuilds_metrics():
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    ensure_industry_chain_snapshot_cache_table(engine)
+    save_chain_snapshot_cache("20260324", "半导体", "5D", _mock_cached_snapshot(), engine=engine)
+
+    snap = get_chain_snapshot_with_cache(
+        sector_name="半导体",
+        limit_per_stage=1,
+        flow_window="5D",
+        screener_trade_date="20260324",
+        engine=engine,
+    )
+    up_stage = snap["stages"][0]
+    assert up_stage["company_count"] == 1
+    assert abs(float(up_stage["net_flow_1d"]) - 100.0) < 1e-6
+    assert abs(float(up_stage["net_flow_5d"]) - 300.0) < 1e-6
+    assert up_stage["net_flow_5d_history"][0]["net_flow_5d"] == 300.0

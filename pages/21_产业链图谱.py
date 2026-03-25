@@ -8,7 +8,12 @@ import streamlit as st
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from industry_chain_tools import get_chain_snapshot, get_recent_screener_dates, load_chain_templates, scale_flow_width
+from industry_chain_tools import (
+    get_chain_snapshot_with_cache,
+    get_recent_screener_dates,
+    load_chain_templates,
+    scale_flow_width,
+)
 from sidebar_navigation import show_navigation
 from ui_components import inject_quant_ops_header_style, render_quant_ops_header
 
@@ -469,11 +474,11 @@ def _get_snapshot_cached(
 ) -> dict:
     _ = cache_version
     force_date = screener_trade_date if screener_trade_date and screener_trade_date != "AUTO" else None
-    return get_chain_snapshot(
+    return get_chain_snapshot_with_cache(
         sector_name=sector_name,
         limit_per_stage=limit_per_stage,
-        force_screener_trade_date=force_date,
         flow_window=flow_window,
+        screener_trade_date=force_date,
     )
 
 
@@ -661,6 +666,8 @@ def main():
         )
 
     meta = snapshot.get("meta", {})
+    if str(meta.get("snapshot_source") or "") == "realtime":
+        st.info("今日快照未生成，当前使用实时计算数据。")
     right_meta_col1, right_meta_col2 = st.columns([4, 2])
     with right_meta_col2:
         st.markdown(

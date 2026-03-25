@@ -34,6 +34,7 @@ _DEFAULT_MIN_COMPANIES_BEFORE_FALLBACK = 8
 _DEFAULT_COMPANY_KEEP_MAX_STAGES = 2
 _DEFAULT_STAGE_RELEVANCE_THRESHOLD = 1
 _STRONG_STAGE_FILTER_SECTORS = {"AI服务器", "AI算力"}
+_SNAPSHOT_CACHE_TABLE = "industry_chain_snapshot_cache"
 
 # 主题指数动态筛选规则（关键词）+ 白名单兜底（同花顺指数代码）
 # 字段：
@@ -190,6 +191,187 @@ def get_tushare_pro():
     try:
         ts.set_token(token)
         return ts.pro_api()
+    except Exception:
+        return None
+
+
+def _normalize_trade_date(value: Any) -> str:
+    s = str(value or "").strip().replace("-", "")
+    return s if re.fullmatch(r"\d{8}", s) else ""
+
+
+def ensure_industry_chain_snapshot_cache_table(engine=None) -> bool:
+    engine = engine if engine is not None else get_db_engine()
+    if engine is None:
+        return False
+
+    ddl = text(
+        f"""
+        CREATE TABLE IF NOT EXISTS {_SNAPSHOT_CACHE_TABLE} (
+            trade_date VARCHAR(8) NOT NULL,
+            sector_name VARCHAR(64) NOT NULL,
+            flow_window VARCHAR(8) NOT NULL DEFAULT '5D',
+            snapshot_json LONGTEXT NOT NULL,
+            fund_trade_date VARCHAR(8) DEFAULT '',
+            screener_trade_date VARCHAR(8) DEFAULT '',
+            generated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (trade_date, sector_name, flow_window)
+        )
+        """
+    )
+    idx1 = text(
+        f"""
+        CREATE INDEX idx_sector_generated
+        ON {_SNAPSHOT_CACHE_TABLE} (sector_name, generated_at)
+        """
+    )
+    idx2 = text(
+        f"""
+        CREATE INDEX idx_trade_date_sector
+        ON {_SNAPSHOT_CACHE_TABLE} (trade_date, sector_name)
+        """
+    )
+
+    try:
+        with engine.begin() as conn:
+            conn.execute(ddl)
+            try:
+                conn.execute(idx1)
+            except Exception:
+                pass
+            try:
+                conn.execute(idx2)
+            except Exception:
+                pass
+        return True
+    except Exception:
+        return False
+
+
+def save_chain_snapshot_cache(
+    trade_date: str,
+    sector_name: str,
+    flow_window: str,
+    snapshot: Dict[str, Any],
+    engine=None,
+) -> bool:
+    engine = engine if engine is not None else get_db_engine()
+    if engine is None:
+        return False
+    if not ensure_industry_chain_snapshot_cache_table(engine):
+        return False
+
+    flow_window = _normalize_flow_window(flow_window)
+    trade_date = _normalize_trade_date(trade_date)
+    if not trade_date:
+        meta = snapshot.get("meta") or {}
+        trade_date = (
+            _normalize_trade_date(meta.get("fund_trade_date"))
+            or _normalize_trade_date(meta.get("screener_trade_date"))
+            or datetime.now().strftime("%Y%m%d")
+        )
+
+    payload = json.dumps(snapshot or {}, ensure_ascii=False)
+    meta = snapshot.get("meta") or {}
+    params = {
+        "trade_date": trade_date,
+        "sector_name": str(sector_name or "").strip(),
+        "flow_window": flow_window,
+        "snapshot_json": payload,
+        "fund_trade_date": _normalize_trade_date(meta.get("fund_trade_date")),
+        "screener_trade_date": _normalize_trade_date(meta.get("screener_trade_date")),
+    }
+
+    dialect = str(getattr(engine.dialect, "name", "")).lower()
+    mysql_sql = text(
+        f"""
+        INSERT INTO {_SNAPSHOT_CACHE_TABLE}
+        (trade_date, sector_name, flow_window, snapshot_json, fund_trade_date, screener_trade_date, generated_at)
+        VALUES
+        (:trade_date, :sector_name, :flow_window, :snapshot_json, :fund_trade_date, :screener_trade_date, CURRENT_TIMESTAMP)
+        ON DUPLICATE KEY UPDATE
+            snapshot_json=VALUES(snapshot_json),
+            fund_trade_date=VALUES(fund_trade_date),
+            screener_trade_date=VALUES(screener_trade_date),
+            generated_at=CURRENT_TIMESTAMP
+        """
+    )
+    sqlite_sql = text(
+        f"""
+        INSERT INTO {_SNAPSHOT_CACHE_TABLE}
+        (trade_date, sector_name, flow_window, snapshot_json, fund_trade_date, screener_trade_date, generated_at)
+        VALUES
+        (:trade_date, :sector_name, :flow_window, :snapshot_json, :fund_trade_date, :screener_trade_date, CURRENT_TIMESTAMP)
+        ON CONFLICT(trade_date, sector_name, flow_window) DO UPDATE SET
+            snapshot_json=excluded.snapshot_json,
+            fund_trade_date=excluded.fund_trade_date,
+            screener_trade_date=excluded.screener_trade_date,
+            generated_at=CURRENT_TIMESTAMP
+        """
+    )
+
+    try:
+        with engine.begin() as conn:
+            conn.execute(sqlite_sql if dialect == "sqlite" else mysql_sql, params)
+        return True
+    except Exception:
+        return False
+
+
+def load_chain_snapshot_cache(
+    sector_name: str,
+    flow_window: str = "5D",
+    trade_date: Optional[str] = None,
+    engine=None,
+) -> Optional[Dict[str, Any]]:
+    engine = engine if engine is not None else get_db_engine()
+    if engine is None:
+        return None
+    if not ensure_industry_chain_snapshot_cache_table(engine):
+        return None
+
+    flow_window = _normalize_flow_window(flow_window)
+    trade_date = _normalize_trade_date(trade_date)
+    base_params = {
+        "sector_name": str(sector_name or "").strip(),
+        "flow_window": flow_window,
+    }
+
+    if trade_date:
+        sql = text(
+            f"""
+            SELECT snapshot_json
+            FROM {_SNAPSHOT_CACHE_TABLE}
+            WHERE sector_name=:sector_name
+              AND flow_window=:flow_window
+              AND trade_date=:trade_date
+            LIMIT 1
+            """
+        )
+        base_params["trade_date"] = trade_date
+    else:
+        sql = text(
+            f"""
+            SELECT snapshot_json
+            FROM {_SNAPSHOT_CACHE_TABLE}
+            WHERE sector_name=:sector_name
+              AND flow_window=:flow_window
+            ORDER BY trade_date DESC, generated_at DESC
+            LIMIT 1
+            """
+        )
+
+    try:
+        with engine.connect() as conn:
+            payload = conn.execute(sql, base_params).scalar()
+    except Exception:
+        return None
+
+    if not payload:
+        return None
+    try:
+        parsed = json.loads(payload)
+        return parsed if isinstance(parsed, dict) else None
     except Exception:
         return None
 
@@ -1517,6 +1699,7 @@ def get_chain_snapshot(
                 "market_cap": _to_float(market_cap_map.get(code, 0.0)),
                 "main_net_amount_1d": main_1d,
                 "main_net_amount_5d": main_5d,
+                "main_net_amount_5d_hist": fund_5d_history_map.get(code, {}),
                 "fund_signal": calc_fund_signal(main_1d, main_5d),
                 "domain_tags": profile_item.get("domain_tags", []),
                 "domain_tags_text": profile_item.get("domain_tags_text", ""),
@@ -1712,3 +1895,139 @@ def get_chain_snapshot(
         "stages": stage_results,
         "edges": edge_results,
     }
+
+
+def _rebuild_stage_aggregates_for_limit(snapshot: Dict[str, Any], limit_per_stage: int) -> Dict[str, Any]:
+    snap = copy.deepcopy(snapshot or {})
+    stages = snap.get("stages") or []
+    meta = snap.get("meta") or {}
+    hist_dates = [str(x).strip() for x in (meta.get("fund_history_dates") or []) if str(x).strip()]
+    limit_n = max(1, int(limit_per_stage))
+
+    for stage in stages:
+        companies = list(stage.get("companies") or [])[:limit_n]
+        stage["companies"] = companies
+        stage["company_count"] = len(companies)
+        stage["net_flow_1d"] = sum(_to_float(x.get("main_net_amount_1d")) for x in companies)
+        stage["net_flow_5d"] = sum(_to_float(x.get("main_net_amount_5d")) for x in companies)
+        if hist_dates:
+            hist_rows: List[Dict[str, Any]] = []
+            for d in hist_dates:
+                d_total = sum(
+                    _to_float((x.get("main_net_amount_5d_hist") or {}).get(d, 0.0))
+                    for x in companies
+                )
+                hist_rows.append({"trade_date": d, "net_flow_5d": d_total})
+            stage["net_flow_5d_history"] = hist_rows
+    structure_edges: List[List[str]] = []
+    for edge in (snap.get("edges") or []):
+        src = str(edge.get("source") or "")
+        dst = str(edge.get("target") or "")
+        if not src or not dst:
+            continue
+        if src in {_EXTERNAL_IN_ID, _EXTERNAL_OUT_ID} or dst in {_EXTERNAL_IN_ID, _EXTERNAL_OUT_ID}:
+            continue
+        structure_edges.append([src, dst])
+
+    flow_window = _normalize_flow_window(meta.get("flow_window") or "5D")
+    flow_edges, flow_in_external_map, flow_out_external_map = _build_flow_edges(
+        stage_results=stages,
+        structure_edges=structure_edges,
+        flow_window=flow_window,
+    )
+
+    for stage in stages:
+        sid = str(stage.get("id") or "")
+        stage["flow_in_external"] = _to_float(flow_in_external_map.get(sid, 0.0))
+        stage["flow_out_external"] = _to_float(flow_out_external_map.get(sid, 0.0))
+
+    stage_count_map = {str(s.get("id") or ""): int(s.get("company_count") or 0) for s in stages}
+    internal_edge_map: Dict[Tuple[str, str], Dict[str, Any]] = {
+        (str(x.get("source")), str(x.get("target"))): x
+        for x in flow_edges
+        if x.get("flow_type") == "internal"
+    }
+    edge_results: List[Dict[str, Any]] = []
+    for src, dst in structure_edges:
+        flow_edge = internal_edge_map.get((src, dst), {})
+        flow_value = _to_float(flow_edge.get("flow_value", 0.0))
+        value = min(stage_count_map.get(src, 0), stage_count_map.get(dst, 0)) or 1
+        edge_results.append(
+            {
+                "source": src,
+                "target": dst,
+                "value": float(value),
+                "flow_value": flow_value,
+                "flow_value_abs": abs(flow_value),
+                "flow_type": "internal",
+                "is_estimated": True,
+            }
+        )
+
+    for edge in flow_edges:
+        if edge.get("flow_type") == "internal":
+            continue
+        edge_results.append(
+            {
+                "source": edge.get("source"),
+                "target": edge.get("target"),
+                "value": 1.0,
+                "flow_value": _to_float(edge.get("flow_value", 0.0)),
+                "flow_value_abs": _to_float(edge.get("flow_value_abs", 0.0)),
+                "flow_type": edge.get("flow_type"),
+                "is_estimated": bool(edge.get("is_estimated", True)),
+            }
+        )
+
+    snap["edges"] = edge_results
+    snap.setdefault("meta", {})
+    snap["meta"]["limit_per_stage"] = limit_n
+    return snap
+
+
+def get_chain_snapshot_with_cache(
+    sector_name: str,
+    limit_per_stage: int = 10,
+    flow_window: str = "5D",
+    screener_trade_date: Optional[str] = None,
+    engine=None,
+    pro=None,
+    templates: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    engine = engine if engine is not None else get_db_engine()
+    flow_window = _normalize_flow_window(flow_window)
+    requested_trade_date = _normalize_trade_date(screener_trade_date)
+
+    cached_snapshot = load_chain_snapshot_cache(
+        sector_name=sector_name,
+        flow_window=flow_window,
+        trade_date=requested_trade_date or None,
+        engine=engine,
+    )
+    if cached_snapshot:
+        snap = _rebuild_stage_aggregates_for_limit(cached_snapshot, limit_per_stage=limit_per_stage)
+        snap.setdefault("meta", {})
+        snap["meta"]["snapshot_source"] = "cache"
+        snap["meta"]["flow_window"] = flow_window
+        snap["meta"]["cache_hit"] = True
+        return snap
+
+    force_date = requested_trade_date or None
+    snap = get_chain_snapshot(
+        sector_name=sector_name,
+        limit_per_stage=limit_per_stage,
+        engine=engine,
+        pro=pro,
+        templates=templates,
+        force_screener_trade_date=force_date,
+        flow_window=flow_window,
+    )
+    snap.setdefault("meta", {})
+    meta_warnings = list(snap["meta"].get("warnings") or [])
+    cache_msg = "今日快照未生成，已使用实时计算（可能较慢）。"
+    if cache_msg not in meta_warnings:
+        meta_warnings.insert(0, cache_msg)
+    snap["meta"]["warnings"] = meta_warnings
+    snap["meta"]["snapshot_source"] = "realtime"
+    snap["meta"]["cache_hit"] = False
+    return snap
