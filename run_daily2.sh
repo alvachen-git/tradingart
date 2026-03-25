@@ -36,6 +36,38 @@ run_step() {
   fi
 }
 
+check_dxy_freshness() {
+  local source_line backfill_line latest_line
+  local dxy_source dxy_backfilled latest_date
+  local now_epoch latest_epoch age_days
+
+  source_line=$(grep -E "DXY_SOURCE=" "${LOG_FILE}" | tail -n 1 || true)
+  backfill_line=$(grep -E "DXY_BACKFILLED_DATES=" "${LOG_FILE}" | tail -n 1 || true)
+  latest_line=$(grep -E "DXY_LATEST_DATE=" "${LOG_FILE}" | tail -n 1 || true)
+
+  dxy_source="${source_line#*=}"
+  dxy_backfilled="${backfill_line#*=}"
+  latest_date="${latest_line#*=}"
+
+  if [ -z "${latest_line}" ] || [ -z "${latest_date}" ] || [ "${latest_date}" = "NONE" ]; then
+    echo "⚠️ DXY 新鲜度检查: 未获取到最新日期标记(DXY_LATEST_DATE)" >> "${LOG_FILE}"
+    return 0
+  fi
+
+  latest_epoch=$(date -d "${latest_date}" +%s 2>/dev/null || echo "")
+  now_epoch=$(date +%s)
+  if [ -z "${latest_epoch}" ]; then
+    echo "⚠️ DXY 新鲜度检查: 无法解析日期 ${latest_date}" >> "${LOG_FILE}"
+    return 0
+  fi
+
+  age_days=$(( (now_epoch - latest_epoch) / 86400 ))
+  echo "ℹ️ DXY 状态: source=${dxy_source:-unknown}, backfilled=${dxy_backfilled:-0}, latest=${latest_date}, age_days=${age_days}" >> "${LOG_FILE}"
+  if [ ${age_days} -gt 3 ]; then
+    echo "⚠️ DXY 新鲜度告警: 最新日期距今 ${age_days} 天(>3天)，请人工检查宏观数据源" >> "${LOG_FILE}"
+  fi
+}
+
 echo "" >> "${LOG_FILE}"
 echo "========================================" >> "${LOG_FILE}"
 echo "⏰ 任务开始: $(date)" >> "${LOG_FILE}"
@@ -48,6 +80,7 @@ run_step 4 7 "更新美股价格数据" "update_stock_tiingo.py"
 run_step 5 7 "更新债券收益数据" "update_bond_data.py"
 run_step 6 7 "更新热搜数据" "trend_monitor.py"
 run_step 7 7 "更新宏观数据" "update_micro_daily.py"
+check_dxy_freshness
 
 if [ ${FAILED_STEPS} -gt 0 ]; then
   echo "⚠️ 本次任务失败步骤数: ${FAILED_STEPS}" >> "${LOG_FILE}"
