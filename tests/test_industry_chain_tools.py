@@ -12,6 +12,7 @@ from industry_chain_tools import (
     calc_fund_signal,
     fetch_stage_members_from_tushare,
     get_chain_snapshot,
+    get_chain_snapshot_cache_marker,
     get_chain_snapshot_with_cache,
     load_chain_snapshot_cache,
     save_chain_snapshot_cache,
@@ -616,3 +617,20 @@ def test_cached_snapshot_limit_slice_rebuilds_metrics():
     assert abs(float(up_stage["net_flow_1d"]) - 100.0) < 1e-6
     assert abs(float(up_stage["net_flow_5d"]) - 300.0) < 1e-6
     assert up_stage["net_flow_5d_history"][0]["net_flow_5d"] == 300.0
+
+
+def test_snapshot_cache_marker_changes_after_rewrite():
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    ensure_industry_chain_snapshot_cache_table(engine)
+
+    snap = _mock_cached_snapshot()
+    assert save_chain_snapshot_cache("20260324", "半导体", "5D", snap, engine=engine)
+    marker1 = get_chain_snapshot_cache_marker("半导体", "5D", "20260324", engine=engine)
+    assert marker1.startswith("20260324|")
+
+    snap2 = _mock_cached_snapshot()
+    snap2["meta"]["generated_at"] = "changed"
+    assert save_chain_snapshot_cache("20260324", "半导体", "5D", snap2, engine=engine)
+    marker2 = get_chain_snapshot_cache_marker("半导体", "5D", "20260324", engine=engine)
+    assert marker2.startswith("20260324|")
+    assert marker2 >= marker1

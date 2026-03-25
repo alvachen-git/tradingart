@@ -9,6 +9,7 @@ import streamlit as st
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from industry_chain_tools import (
+    get_chain_snapshot_cache_marker,
     get_chain_snapshot_with_cache,
     get_recent_screener_dates,
     load_chain_templates,
@@ -655,6 +656,12 @@ def main():
         scale_mode = st.selectbox("缩放", options=["对数", "线性", "分档"], index=1)
 
     flow_window = "5D"
+    force_date = screener_trade_date if screener_trade_date and screener_trade_date != "AUTO" else None
+    snapshot_marker = get_chain_snapshot_cache_marker(
+        sector_name=selected_sector,
+        flow_window=flow_window,
+        trade_date=force_date,
+    )
 
     with st.spinner("正在构建产业链图谱..."):
         snapshot = _get_snapshot_cached(
@@ -662,7 +669,7 @@ def main():
             int(limit_per_stage),
             screener_trade_date,
             flow_window,
-            "v2",
+            f"v3|{snapshot_marker}",
         )
 
     meta = snapshot.get("meta", {})

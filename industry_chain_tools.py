@@ -376,6 +376,65 @@ def load_chain_snapshot_cache(
         return None
 
 
+def get_chain_snapshot_cache_marker(
+    sector_name: str,
+    flow_window: str = "5D",
+    trade_date: Optional[str] = None,
+    engine=None,
+) -> str:
+    """
+    返回快照版本标记（trade_date + generated_at）。
+    页面把它作为缓存key的一部分，可在快照更新后自动失效页面缓存。
+    """
+    engine = engine if engine is not None else get_db_engine()
+    if engine is None:
+        return ""
+    if not ensure_industry_chain_snapshot_cache_table(engine):
+        return ""
+
+    flow_window = _normalize_flow_window(flow_window)
+    trade_date = _normalize_trade_date(trade_date)
+    params = {
+        "sector_name": str(sector_name or "").strip(),
+        "flow_window": flow_window,
+    }
+    if trade_date:
+        sql = text(
+            f"""
+            SELECT trade_date, generated_at
+            FROM {_SNAPSHOT_CACHE_TABLE}
+            WHERE sector_name=:sector_name
+              AND flow_window=:flow_window
+              AND trade_date=:trade_date
+            ORDER BY generated_at DESC
+            LIMIT 1
+            """
+        )
+        params["trade_date"] = trade_date
+    else:
+        sql = text(
+            f"""
+            SELECT trade_date, generated_at
+            FROM {_SNAPSHOT_CACHE_TABLE}
+            WHERE sector_name=:sector_name
+              AND flow_window=:flow_window
+            ORDER BY trade_date DESC, generated_at DESC
+            LIMIT 1
+            """
+        )
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(sql, params).fetchone()
+    except Exception:
+        return ""
+    if not row:
+        return ""
+
+    d = _normalize_trade_date(row[0])
+    g = str(row[1] or "").strip()
+    return f"{d}|{g}"
+
+
 def load_chain_templates(path: str = _TEMPLATE_PATH) -> Dict[str, Any]:
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
