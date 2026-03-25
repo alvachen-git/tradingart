@@ -10,7 +10,6 @@ import plotly.io as pio
 import os
 import json
 import random
-import io
 import markdown
 import sys
 import auth_utils as auth
@@ -35,7 +34,6 @@ from langchain_core.outputs import LLMResult
 # --- AI 相关导入 ---
 from llm_compat import ChatTongyiCompat as ChatTongyi
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
-from captcha_utils import generate_captcha_image
 
 # Streamlit 运行时/第三方组件仍可能访问旧别名，提前映射以避免弃用日志噪音。
 if hasattr(st, "user"):
@@ -189,17 +187,6 @@ def check_and_show_announcement():
 # ==========================================
 #  1. 页面配置 (必须在第一行) [修改点：改为 centered 布局]
 # ==========================================
-def refresh_register_image_captcha():
-    """Refresh register image captcha and rotate nonce safely."""
-    image, code = generate_captcha_image(length=5)
-    buf = io.BytesIO()
-    image.save(buf, format="PNG")
-    st.session_state["reg_image_captcha_code"] = str(code or "").upper()
-    st.session_state["reg_image_captcha_bytes"] = buf.getvalue()
-    # Never write to a mounted text_input key directly.
-    st.session_state["reg_image_captcha_nonce"] = int(st.session_state.get("reg_image_captcha_nonce", 0)) + 1
-
-
 st.set_page_config(
     page_title="爱波塔-懂期权的AI | K线分析+期权策略",
     page_icon="favicon.ico",
@@ -477,32 +464,6 @@ st.markdown("""
         border-radius: 8px;
     }
 
-    /* 注册区：图形验证码刷新按钮（小圆形 icon） */
-    .st-key-btn_refresh_reg_captcha div.stButton > button {
-        width: 40px !important;
-        min-width: 40px !important;
-        height: 40px !important;
-        padding: 0 !important;
-        border-radius: 999px !important;
-        font-size: 18px !important;
-        line-height: 1 !important;
-        white-space: nowrap !important;
-        margin-top: 6px !important;
-        border: 1px solid rgba(59, 130, 246, 0.55) !important;
-        background: linear-gradient(135deg, rgba(37, 99, 235, 0.35), rgba(30, 41, 59, 0.9)) !important;
-        box-shadow: 0 4px 10px rgba(30, 64, 175, 0.25) !important;
-    }
-    .st-key-btn_refresh_reg_captcha div.stButton > button::after {
-        content: none !important;
-    }
-    .st-key-btn_refresh_reg_captcha div.stButton > button:hover {
-        transform: scale(1.04) !important;
-        border-color: rgba(96, 165, 250, 0.9) !important;
-        box-shadow: 0 6px 14px rgba(59, 130, 246, 0.35) !important;
-    }
-    .st-key-btn_refresh_reg_captcha div.stButton > button:active {
-        transform: scale(0.98) !important;
-    }
 
     /* 🔥 隐藏 Streamlit 默认的页面导航（使用自定义分组导航） */
     [data-testid="stSidebarNav"] {
@@ -1718,175 +1679,207 @@ def show_welcome_screen():
 # ==========================================
 
 # A. 侧边栏：登录/设置 (折叠起来保持清爽)
-if "reg_image_captcha_code" not in st.session_state or "reg_image_captcha_bytes" not in st.session_state:
-    refresh_register_image_captcha()
-
 with st.sidebar:
     # 🔥 [新增] 统一的分组导航菜单
     from sidebar_navigation import show_navigation
     show_navigation()
 
     if not st.session_state['is_logged_in']:
-        # --- A. 未登录状态 ---
-        tab1, tab2, tab3 = st.tabs(["🔐 登录", "📝 注册", "🔑 找回"])
+        # --- A. 未登录状态：账号体系 ---
+        account_tab_login, account_tab_register = st.tabs(["登录", "注册"])
 
-        # ============ Tab1: 登录（仅密码方式）============
-        with tab1:
-            with st.form("login_form_sidebar"):
-                u = st.text_input("用户名/邮箱", key="login_user", placeholder="输入用户名或邮箱")
-                p = st.text_input("密码", type="password", key="login_pass")
-                login_btn = st.form_submit_button("登录", type="primary", use_container_width=True)
+        # ============ 账号登录 ============
+        with account_tab_login:
+            login_account = st.text_input(
+                "账号",
+                key="account_login_username",
+                placeholder="输入账号",
+            )
+            login_password = st.text_input(
+                "密码",
+                type="password",
+                key="account_login_password",
+                placeholder="输入登录密码",
+            )
 
-            if login_btn:
-                if u and p:
-                    # 🔥 login_user 现在返回4个值：success, msg, token, username
-                    success, msg, token, real_username = auth.login_user(u, p)
+            if st.button("登录", type="primary", use_container_width=True, key="btn_account_login_pwd"):
+                if not login_account:
+                    st.warning("请输入账号")
+                elif not login_password:
+                    st.warning("请输入密码")
+                else:
+                    success, msg, token, real_username = auth.login_user(login_account, login_password)
                     if success:
                         st.session_state['is_logged_in'] = True
-                        st.session_state['user_id'] = real_username  # 🔥 使用真正的用户名
+                        st.session_state['user_id'] = real_username
                         st.session_state['token'] = token
-
-                        # 🔥 [关键修复] 标记这是手动登录，下次 rerun 后才显示公告
                         st.session_state['just_manual_logged_in'] = True
 
-                        # 写入 Cookie（也用真正的用户名）
                         expires = datetime.now() + timedelta(days=30)
                         cookie_manager.set("username", real_username, expires_at=expires, key="set_user_cookie")
                         cookie_manager.set("token", token, expires_at=expires, key="set_token_cookie")
-
                         st.success("登录成功")
-                        time.sleep(0.5)
+                        time.sleep(0.3)
                         st.rerun()
                     else:
                         st.error(msg)
-                else:
-                    st.warning("请输入账号和密码")
 
-        # ============ Tab2: 注册（用户名必填，邮箱选填）============
-        with tab2:
-            st.caption("📝 创建新账号")
+        # ============ 账号注册（两步） ============
+        with account_tab_register:
+            step1_ok = st.session_state.get("reg_step1_ok", False)
+            verified_phone = st.session_state.get("reg_verified_phone", "")
 
-            reg_username = st.text_input("用户名（必填）", key="reg_username", placeholder="请输入用户名")
-            reg_password = st.text_input("设置密码", type="password", key="reg_password", placeholder="至少6位")
-            reg_password2 = st.text_input("确认密码", type="password", key="reg_password2")
-
-            st.caption("🔒 图形验证码（英文数字）")
-            captcha_col1, captcha_col2 = st.columns([4, 1], vertical_alignment="bottom")
-            with captcha_col1:
-                st.image(
-                    st.session_state.get("reg_image_captcha_bytes"),
-                    use_container_width=True,
-                )
-            with captcha_col2:
-                if st.button("↻", key="btn_refresh_reg_captcha", help="换一张验证码"):
-                    refresh_register_image_captcha()
+            st.caption("步骤1：填写账号和密码")
+            if step1_ok:
+                step1_user = st.session_state.get("reg_step1_username", "")
+                st.success(f"步骤1已完成：账号 {step1_user}")
+                if st.button("修改账号/密码", key="btn_reg_reset_step1"):
+                    st.session_state.pop("reg_step1_ok", None)
+                    st.session_state.pop("reg_step1_username", None)
+                    st.session_state.pop("reg_step1_password", None)
+                    st.session_state.pop("reg_verified_phone", None)
+                    st.session_state.pop("reg_phone", None)
+                    st.session_state.pop("reg_sms_code", None)
                     st.rerun()
-            st.caption("看不清可点右侧刷新图标")
+            else:
+                reg_username = st.text_input(
+                    "账号（必填）",
+                    key="reg_step1_username_input",
+                    placeholder="至少3个字符",
+                )
+                reg_password = st.text_input(
+                    "设置密码",
+                    type="password",
+                    key="reg_step1_password_input",
+                    placeholder="至少6位",
+                )
+                reg_password2 = st.text_input(
+                    "确认密码",
+                    type="password",
+                    key="reg_step1_password2_input",
+                    placeholder="再次输入密码",
+                )
 
-            answer_key = f"reg_image_captcha_answer_{st.session_state.get('reg_image_captcha_nonce', 0)}"
-            reg_image_captcha_answer = st.text_input(
-                "验证码",
-                key=answer_key,
-                placeholder="输入图片中的英文数字",
-                max_chars=6,
-            )
-            # 邮箱选填区域
-            with st.expander("📧 绑定邮箱（选填）", expanded=False):
-                st.caption("绑定后可用邮箱登录和找回密码，也可注册后在个人资料中绑定")
-                reg_email = st.text_input("邮箱", key="reg_email", placeholder="your@email.com")
-
-                col1, col2 = st.columns([2, 1])
-                with col1:
-                    reg_code = st.text_input("验证码", key="reg_code", max_chars=6)
-                with col2:
-                    st.write("")
-                    if st.button("发送", key="btn_send_reg_code", use_container_width=True):
-                        if reg_email:
-                            from email_utils import send_register_code
-
-                            success, msg = send_register_code(reg_email)
-                            if success:
-                                st.success("已发送")
-                            else:
-                                st.error(msg)
-                        else:
-                            st.warning("请输入邮箱")
-
-            if st.button("注册", type="primary", use_container_width=True, key="btn_register"):
-                if not reg_username:
-                    st.warning("👤 用户名是必填项")
-                elif len(reg_username) < 3:
-                    st.warning("用户名至少3个字符")
-                elif not reg_password:
-                    st.warning("请设置密码")
-                elif len(reg_password) < 6:
-                    st.warning("密码至少6位")
-                elif reg_password != reg_password2:
-                    st.error("两次密码不一致")
-                elif not reg_image_captcha_answer:
-                    st.warning("请输入图形验证码")
-                elif str(reg_image_captcha_answer).strip().upper() != str(st.session_state.get("reg_image_captcha_code", "")).upper():
-                    st.error("图形验证码错误，请重试")
-                    refresh_register_image_captcha()
-                elif reg_email and not reg_code:
-                    st.warning("填写了邮箱请输入验证码，或清空邮箱")
-                else:
-                    # 根据是否填写邮箱选择注册方式
-                    if reg_email and reg_code:
-                        # 带邮箱注册
-                        success, msg = auth.register_with_email(
-                            email=reg_email,
-                            password=reg_password,
-                            email_code=reg_code,
-                            username=reg_username
-                        )
-                    else:
-                        # 普通注册（不带邮箱）
-                        success, msg = auth.register_user(reg_username, reg_password)
-
-                    if success:
-                        refresh_register_image_captcha()
-                        st.success(msg if msg else "注册成功！")
-                        st.balloons()
-                        # 自动登录
-                        try:
-                            login_success, login_msg, token, real_username = auth.login_user(reg_username, reg_password)
-                            if login_success:
-                                st.session_state['is_logged_in'] = True
-                                st.session_state['user_id'] = real_username
-                                st.session_state['token'] = token
-
-                                # 🔥 [关键修复] 注册后自动登录，也需要标记避免公告闪现
-                                st.session_state['just_manual_logged_in'] = True
-
-                                expires = datetime.now() + timedelta(days=30)
-                                cookie_manager.set("username", real_username, expires_at=expires, key="reg_set_user")
-                                cookie_manager.set("token", token, expires_at=expires, key="reg_set_token")
-
-                                time.sleep(0.5)
-                                st.rerun()
-                        except:
-                            st.info("请切换到登录页登录")
+                if st.button("继续", use_container_width=True, key="btn_reg_step1_confirm"):
+                    ok, msg, normalized_username = auth.validate_register_step1(
+                        reg_username,
+                        reg_password,
+                        reg_password2,
+                    )
+                    if ok:
+                        st.session_state["reg_step1_ok"] = True
+                        st.session_state["reg_step1_username"] = normalized_username
+                        st.session_state["reg_step1_password"] = reg_password
+                        st.success("步骤1验证通过，请继续步骤2")
+                        st.rerun()
                     else:
                         st.error(msg)
 
-        # ============ Tab3: 找回密码 ============
-        with tab3:
-            st.caption("📧 通过邮箱重置密码")
+            if st.session_state.get("reg_step1_ok"):
+                st.caption("步骤2：绑定手机号并验证")
+                if verified_phone:
+                    st.success(f"手机号已验证：{verified_phone}")
+                    if st.button("更换手机号", key="btn_reg_reset_phone"):
+                        st.session_state.pop("reg_verified_phone", None)
+                        st.session_state.pop("reg_phone", None)
+                        st.session_state.pop("reg_sms_code", None)
+                        st.rerun()
+                else:
+                    reg_phone = st.text_input(
+                        "手机号（仅 +86）",
+                        key="reg_phone",
+                        placeholder="例如 13800138000",
+                    )
+                    reg_sms_code = st.text_input(
+                        "短信验证码",
+                        key="reg_sms_code",
+                        max_chars=6,
+                        placeholder="输入6位验证码",
+                    )
+                    send_col, verify_col = st.columns(2)
+                    with send_col:
+                        if st.button("发验证码", use_container_width=True, key="btn_reg_send_code"):
+                            if not reg_phone:
+                                st.warning("请先输入手机号")
+                            else:
+                                ok, msg = auth.send_register_phone_code(reg_phone)
+                                if ok:
+                                    st.success("验证码已发送，请注意查收")
+                                else:
+                                    st.error(msg)
+                    with verify_col:
+                        if st.button("验证", use_container_width=True, key="btn_reg_verify_code"):
+                            if not reg_phone:
+                                st.warning("请先输入手机号")
+                            elif not reg_sms_code:
+                                st.warning("请输入短信验证码")
+                            else:
+                                ok, msg, normalized_phone = auth.verify_register_phone_code(reg_phone, reg_sms_code)
+                                if ok:
+                                    st.session_state["reg_verified_phone"] = normalized_phone
+                                    st.success("手机号验证通过，可完成注册")
+                                    st.rerun()
+                                else:
+                                    st.error(msg)
 
+                if st.session_state.get("reg_verified_phone"):
+                    if st.button("完成注册并登录", type="primary", use_container_width=True, key="btn_reg_finish"):
+                        final_username = st.session_state.get("reg_step1_username", "")
+                        final_password = st.session_state.get("reg_step1_password", "")
+                        final_phone = st.session_state.get("reg_verified_phone", "")
+                        success, msg = auth.register_with_username_phone(
+                            final_username,
+                            final_password,
+                            final_phone,
+                        )
+                        if success:
+                            st.success(msg if msg else "注册成功")
+                            st.balloons()
+
+                            sess_ok, sess_msg, token = auth.create_user_session(final_username)
+                            if sess_ok:
+                                st.session_state['is_logged_in'] = True
+                                st.session_state['user_id'] = final_username
+                                st.session_state['token'] = token
+                                st.session_state['just_manual_logged_in'] = True
+
+                                for k in [
+                                    "reg_step1_ok",
+                                    "reg_step1_username",
+                                    "reg_step1_password",
+                                    "reg_verified_phone",
+                                    "reg_phone",
+                                    "reg_sms_code",
+                                    "reg_step1_username_input",
+                                    "reg_step1_password_input",
+                                    "reg_step1_password2_input",
+                                ]:
+                                    st.session_state.pop(k, None)
+
+                                expires = datetime.now() + timedelta(days=30)
+                                cookie_manager.set("username", final_username, expires_at=expires, key="reg_set_user")
+                                cookie_manager.set("token", token, expires_at=expires, key="reg_set_token")
+                                time.sleep(0.3)
+                                st.rerun()
+                            else:
+                                st.warning(sess_msg if sess_msg else "注册成功，请登录")
+                        else:
+                            st.error(msg)
+
+        with st.expander("✉️ 忘记密码", expanded=False):
+            st.caption("当前仅保留邮箱找回密码")
             reset_email = st.text_input("注册邮箱", key="reset_email", placeholder="your@email.com")
-
-            col1, col2 = st.columns([2, 1])
-            with col1:
+            reset_c1, reset_c2 = st.columns([2, 1])
+            with reset_c1:
                 reset_code = st.text_input("验证码", key="reset_code", max_chars=6)
-            with col2:
+            with reset_c2:
                 st.write("")
                 if st.button("发送", key="btn_send_reset_code", use_container_width=True):
                     if reset_email:
                         from email_utils import send_reset_password_code
 
-                        success, msg = send_reset_password_code(reset_email)
-                        if success:
+                        ok, msg = send_reset_password_code(reset_email)
+                        if ok:
                             st.success("已发送")
                         else:
                             st.error(msg)
@@ -1895,7 +1888,6 @@ with st.sidebar:
 
             new_pwd = st.text_input("新密码", type="password", key="reset_new_pwd")
             new_pwd2 = st.text_input("确认密码", type="password", key="reset_new_pwd2")
-
             if st.button("重置密码", type="primary", use_container_width=True, key="btn_reset_pwd"):
                 if not reset_email:
                     st.warning("请输入邮箱")
@@ -1906,8 +1898,8 @@ with st.sidebar:
                 elif new_pwd != new_pwd2:
                     st.error("两次密码不一致")
                 else:
-                    success, msg = auth.reset_password_with_email(reset_email, reset_code, new_pwd)
-                    if success:
+                    ok, msg = auth.reset_password_with_email(reset_email, reset_code, new_pwd)
+                    if ok:
                         st.success(msg)
                         st.balloons()
                     else:
