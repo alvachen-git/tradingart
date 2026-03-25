@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-14:25 期货突破提醒任务（两阶段提速版）
-- 阶段1：形态+实时融合预筛（压缩箱体/上升三法/下降三法）
-- 阶段2：LLM复核（仅候选）
+14:25 期货突破提醒任务
+- V2：规则引擎直接出信号（区间突破 + 三法并联），LLM只补解释
+- V1：兼容旧两阶段模式（可回滚）
 - 推送：站内频道 + 邮件
 """
 
@@ -23,6 +23,8 @@ import requests
 from dotenv import load_dotenv
 from sqlalchemy import text
 
+from breakout_rules_v2 import BreakoutEngineV2
+
 try:
     from email_utils2 import send_email as send_email_html
 except Exception:
@@ -36,10 +38,13 @@ DEFAULT_MIN_CONFIDENCE = 0.60
 DEFAULT_THRESHOLD_ATR = 0.30
 DEFAULT_CHANNEL_CODE = "trade_signal"
 DEFAULT_STATE_FILE = "/tmp/tradingart_breakout_state.json"
+DEFAULT_ENGINE_MODE = "v2"
+DEFAULT_TOP_K = 6
 PATTERN_BONUS_PER_HIT = 0.10
 MIN_CONSOLIDATION_BARS = 8
 MAX_CONSOLIDATION_RANGE_ATR = 3.0
 MAX_CONSOLIDATION_DRIFT_ATR = 0.5
+DEFAULT_RULE_MAX_BOX_ATR = 2.2
 
 BULLISH_PATTERN_KEYWORDS = (
     "平台突破",
@@ -54,6 +59,13 @@ BEARISH_PATTERN_KEYWORDS = (
 def _normalize_trade_date(value: Any) -> str:
     digits = re.sub(r"\D", "", str(value or ""))
     return digits[:8] if len(digits) >= 8 else ""
+
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except Exception:
+        return float(default)
 
 
 def _build_sina_session() -> requests.Session:
@@ -95,6 +107,11 @@ def _signal_hash(trade_date: str, signals: List[Dict[str, Any]]) -> str:
         for x in sorted(signals, key=lambda v: (str(v.get("symbol", "")), str(v.get("direction", ""))))
     ]
     payload = json.dumps({"trade_date": trade_date, "signals": normalized}, ensure_ascii=False, sort_keys=True)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _empty_report_hash(trade_date: str, scan_count: int) -> str:
+    payload = json.dumps({"trade_date": trade_date, "scan_count": int(scan_count), "type": "empty_report_v2"}, sort_keys=True)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
@@ -359,6 +376,83 @@ def fetch_realtime_prices(
     return result
 
 
+def _load_replay_prices_from_db(
+    engine: Any,
+    trade_date: str,
+    symbols: List[str],
+    preferred_contracts: Optional[Dict[str, str]] = None,
+) -> Dict[str, Optional[Dict[str, Any]]]:
+    """
+    历史回放价（用于 dry-run 历史交易日）：
+    - 优先使用当日主力合约 close_price；
+    - 主力缺失时回退到品种主码 close_price。
+    """
+    result: Dict[str, Optional[Dict[str, Any]]] = {str(s).upper(): None for s in symbols}
+    if not symbols:
+        return result
+
+    pref = {str(k).upper(): str(v).upper() for k, v in (preferred_contracts or {}).items()}
+    target_codes = set(str(x).upper() for x in symbols)
+    target_codes.update([str(x).upper() for x in pref.values() if str(x).strip()])
+
+    if not target_codes:
+        return result
+
+    params: Dict[str, Any] = {"trade_date": trade_date}
+    placeholders: List[str] = []
+    for i, code in enumerate(sorted(target_codes)):
+        key = f"c{i}"
+        params[key] = code
+        placeholders.append(f":{key}")
+
+    sql = text(
+        f"""
+        SELECT UPPER(SUBSTRING_INDEX(ts_code, '.', 1)) AS code, close_price
+        FROM futures_price
+        WHERE trade_date = :trade_date
+          AND UPPER(SUBSTRING_INDEX(ts_code, '.', 1)) IN ({",".join(placeholders)})
+        """
+    )
+    try:
+        df = pd.read_sql(sql, engine, params=params)
+    except Exception:
+        return result
+    if df.empty:
+        return result
+
+    close_map: Dict[str, float] = {}
+    for _, r in df.iterrows():
+        code = str(r.get("code", "")).upper().strip()
+        px = _safe_float(r.get("close_price", 0.0), 0.0)
+        if not code or px <= 0:
+            continue
+        close_map[code] = px
+
+    for symbol in symbols:
+        code = str(symbol).upper()
+        contract = pref.get(code, "")
+        if contract and contract in close_map:
+            result[code] = {
+                "name": contract,
+                "price": float(close_map[contract]),
+                "sina_code": "",
+                "contract_code": contract,
+                "quote_date": trade_date,
+                "source": "db_replay_close",
+            }
+            continue
+        if code in close_map:
+            result[code] = {
+                "name": code,
+                "price": float(close_map[code]),
+                "sina_code": "",
+                "contract_code": code,
+                "quote_date": trade_date,
+                "source": "db_replay_close",
+            }
+    return result
+
+
 def _fetch_history_df(engine: Any, symbol: str, end_date: str, bars: int = HISTORY_BARS) -> pd.DataFrame:
     sql = text(
         """
@@ -435,13 +529,11 @@ def _calc_consolidation_gate(df: pd.DataFrame, atr_latest: float, bars: int = MI
 
 def _calc_kline_signals(df: pd.DataFrame) -> Dict[str, Any]:
     """
-    复用既有 K 线算法（kline_algo.py），避免重写形态识别。
+    突破任务专用：按 kline_tools 关键阈值提取形态。
     """
     try:
-        from kline_algo import calculate_kline_signals
-
-        use_df = df[["open_price", "high_price", "low_price", "close_price"]].copy()
-        return calculate_kline_signals(use_df)
+        patterns = _calc_kline_patterns_tools_compatible(df)
+        return {"patterns": patterns, "trends": [], "score": 50}
     except Exception:
         return {"patterns": [], "trends": [], "score": 50}
 
@@ -472,8 +564,13 @@ def _build_intraday_kline_df(df: pd.DataFrame, realtime_price: float, trade_date
         return work
 
     open_price = last_close
-    high_price = max(open_price, realtime_price)
-    low_price = min(open_price, realtime_price)
+    # 无当日K线时仅有实时价，给合成K加保守上下影，避免 body_pct=1 造成平台突破误判。
+    base_high = max(open_price, realtime_price)
+    base_low = min(open_price, realtime_price)
+    body_size = abs(realtime_price - open_price)
+    shadow = max(body_size * 0.35, max(abs(open_price) * 0.0005, 1e-6))
+    high_price = base_high + shadow
+    low_price = max(0.0, base_low - shadow)
     append_row = pd.DataFrame(
         [
             {
@@ -486,6 +583,231 @@ def _build_intraday_kline_df(df: pd.DataFrame, realtime_price: float, trade_date
         ]
     )
     return pd.concat([work, append_row], ignore_index=True)
+
+
+def _safe_div(numerator: float, denominator: float) -> float:
+    d = float(denominator or 0.0)
+    if abs(d) < 1e-12:
+        return 0.0
+    return float(numerator) / d
+
+
+def _calc_kline_patterns_tools_compatible(df: pd.DataFrame) -> List[str]:
+    """
+    仅提取突破任务依赖的关键形态，阈值对齐 kline_tools.py：
+    - 上升三法/下降三法
+    - ATR 动态平台突破/跌破
+    - 假突破/假跌破
+    """
+    if df is None or df.empty or len(df) < 7:
+        return []
+
+    work = df[["open_price", "high_price", "low_price", "close_price"]].copy().reset_index(drop=True)
+    for col in ["open_price", "high_price", "low_price", "close_price"]:
+        work[col] = pd.to_numeric(work[col], errors="coerce")
+    work = work.dropna(subset=["open_price", "high_price", "low_price", "close_price"]).reset_index(drop=True)
+    if len(work) < 7:
+        return []
+
+    work["MA5"] = work["close_price"].rolling(window=5).mean()
+    work["MA10"] = work["close_price"].rolling(window=10).mean()
+
+    curr = work.iloc[-1]
+    prev = work.iloc[-2]
+    pprev = work.iloc[-3]
+    tprev = work.iloc[-4]
+    pppprev = work.iloc[-5]
+    fprev = work.iloc[-6]
+
+    close = float(curr["close_price"])
+    open_p = float(curr["open_price"])
+    high = float(curr["high_price"])
+    low = float(curr["low_price"])
+    prev_close = float(prev["close_price"])
+    prev_open = float(prev["open_price"])
+    pprev_close = float(pprev["close_price"])
+    pprev_open = float(pprev["open_price"])
+    tprev_close = float(tprev["close_price"])
+    tprev_open = float(tprev["open_price"])
+    pppprev_close = float(pppprev["close_price"])
+    pppprev_open = float(pppprev["open_price"])
+    fprev_close = float(fprev["close_price"])
+    fprev_open = float(fprev["open_price"])
+    prev_high = float(prev["high_price"])
+    prev_low = float(prev["low_price"])
+    tprev_high = float(tprev["high_price"])
+    tprev_low = float(tprev["low_price"])
+    pppprev_high = float(pppprev["high_price"])
+    pppprev_low = float(pppprev["low_price"])
+    fprev_high = float(fprev["high_price"])
+    fprev_low = float(fprev["low_price"])
+
+    total_range = max(high - low, 0.01)
+    body_size = abs(close - open_p)
+    body_pct = _safe_div(body_size, total_range)
+    chg_pct = _safe_div(close - prev_close, prev_close)
+    prev_chg_pct = _safe_div(prev_close - prev_open, prev_open)
+    pprev_chg_pct = _safe_div(pprev_close - pprev_open, pprev_open)
+    tprev_chg_pct = _safe_div(tprev_close - tprev_open, tprev_open)
+    pppprev_chg_pct = _safe_div(pppprev_close - pppprev_open, pppprev_open)
+    fprev_chg_pct = _safe_div(fprev_close - fprev_open, fprev_open)
+
+    prev_2_days_high = float(work["high_price"].iloc[-3:-1].max())
+    prev_2_days_low = float(work["low_price"].iloc[-3:-1].min())
+    prev_3_days_high = float(work["high_price"].iloc[-4:-1].max())
+    prev_3_days_low = float(work["low_price"].iloc[-4:-1].min())
+    prev_4_days_high = float(work["high_price"].iloc[-5:-1].max())
+    prev_4_days_low = float(work["low_price"].iloc[-5:-1].min())
+    prev_5_days_high = float(work["high_price"].iloc[-6:-1].max())
+    prev_5_days_low = float(work["low_price"].iloc[-6:-1].min())
+
+    patterns: List[str] = []
+    ma5 = float(curr.get("MA5", 0.0) or 0.0)
+    ma10 = float(curr.get("MA10", 0.0) or 0.0)
+
+    # 上升三法（阈值对齐 kline_tools：0.01/0.015）
+    if ma5 > ma10 and chg_pct > 0.01:
+        if pprev_chg_pct > 0.015 and prev_close < pprev_close and prev_open < pprev_close and close > prev_2_days_high:
+            patterns.append("【上升三法】(中继再涨，多头持续上攻！)")
+        elif tprev_chg_pct > 0.015 and pprev_close < tprev_high and prev_close < tprev_high and close > prev_3_days_high:
+            patterns.append("【上升三法】(中继再涨，多头持续上攻！！)")
+        elif (
+            pppprev_chg_pct > 0.015
+            and tprev_close < pppprev_high
+            and pprev_close < pppprev_high
+            and prev_close < pppprev_high
+            and close > prev_4_days_high
+        ):
+            patterns.append("【上升三法】(中继再涨，多头持续上攻！！)")
+        elif (
+            fprev_chg_pct > 0.015
+            and pppprev_close < fprev_high
+            and tprev_close < fprev_high
+            and pprev_close < fprev_high
+            and prev_close < fprev_high
+            and close > prev_5_days_high
+        ):
+            patterns.append("【上升三法】(中继再涨，多头持续上攻！！)")
+
+    # 下降三法（阈值对齐 kline_tools：-0.01/-0.015）
+    if ma5 < ma10 and chg_pct < -0.01:
+        if pprev_chg_pct < -0.015 and prev_close > pprev_close and prev_open > pprev_close and close < prev_2_days_low:
+            patterns.append("【下降三法】(中继再跌，空头持续发力！)")
+        elif tprev_chg_pct < -0.015 and pprev_close > tprev_low and prev_close > tprev_low and close < prev_3_days_low:
+            patterns.append("【下降三法】(中继再跌，空头持续发力！)")
+        elif (
+            pppprev_chg_pct < -0.015
+            and tprev_close > pppprev_low
+            and pprev_close > pppprev_low
+            and prev_close > pppprev_low
+            and close < prev_4_days_low
+        ):
+            patterns.append("【下降三法】(中继再跌，空头持续发力！)")
+        elif (
+            fprev_chg_pct < -0.015
+            and pppprev_close > fprev_low
+            and tprev_close > fprev_low
+            and pprev_close > fprev_low
+            and prev_close > fprev_low
+            and close < prev_5_days_low
+        ):
+            patterns.append("【下降三法】(中继再跌，空头持续发力！)")
+
+    # ATR 动态平台突破 / 假突破
+    work["h_l"] = work["high_price"] - work["low_price"]
+    work["h_pc"] = (work["high_price"] - work["close_price"].shift(1)).abs()
+    work["l_pc"] = (work["low_price"] - work["close_price"].shift(1)).abs()
+    work["tr"] = work[["h_l", "h_pc", "l_pc"]].max(axis=1)
+    work["atr"] = work["tr"].rolling(window=14).mean()
+
+    ref_atr = float(work["atr"].iloc[-2]) if len(work) > 2 and pd.notna(work["atr"].iloc[-2]) else 0.0
+    if ref_atr > 0:
+        for period in SCAN_PERIODS:
+            if len(work) <= period + 1:
+                continue
+
+            recent_box = work.iloc[-(period + 1) : -1]
+            box_high = float(recent_box["high_price"].max())
+            box_low = float(recent_box["low_price"].min())
+            box_height = box_high - box_low
+            atr_ratio = _safe_div(box_height, ref_atr)
+            max_mul = _max_atr_multiple(period)
+
+            if atr_ratio <= max_mul:
+                if close > box_high and body_pct > 0.6:
+                    patterns.append(f"{period}日平台突破")
+                    break
+                if close < box_low and body_pct > 0.6:
+                    patterns.append(f"{period}日平台跌破")
+                    break
+
+            ref_atr_prev = float(work["atr"].iloc[-3]) if len(work) > 3 and pd.notna(work["atr"].iloc[-3]) else 0.0
+            if ref_atr_prev <= 0 or len(work) <= period + 2:
+                continue
+
+            box_prev_days = work.iloc[-(period + 2) : -2]
+            box_high_prev = float(box_prev_days["high_price"].max())
+            box_low_prev = float(box_prev_days["low_price"].min())
+            box_height_prev = box_high_prev - box_low_prev
+            atr_ratio_prev = _safe_div(box_height_prev, ref_atr_prev)
+            if atr_ratio_prev <= max_mul:
+                if prev_close > box_high_prev and close < box_high_prev:
+                    patterns.append("假突破(诱多)")
+                    break
+                if prev_close < box_low_prev and close > box_low_prev:
+                    patterns.append("假跌破(诱空)")
+                    break
+
+    return patterns
+
+
+def _allow_rule_breakout(item: Dict[str, Any], rule_max_box_atr: float, threshold_atr: float) -> bool:
+    diag = _rule_breakout_diag(item=item, rule_max_box_atr=rule_max_box_atr, threshold_atr=threshold_atr)
+    return bool(diag["pass"])
+
+
+def _rule_breakout_diag(item: Optional[Dict[str, Any]], rule_max_box_atr: float, threshold_atr: float) -> Dict[str, Any]:
+    """
+    规则分支门禁：
+    - 至少 8bar 周期；
+    - 箱体宽度受控；
+    - 若横盘硬门禁通过，直接允许；
+    - 若硬门禁未通过，只放行“轻度未通过 + 足够强度”的边缘案例。
+    """
+    if not item:
+        return {"pass": False, "reasons": ["missing_item"]}
+
+    period = int(item.get("period", 0) or 0)
+    if period < MIN_CONSOLIDATION_BARS:
+        return {"pass": False, "reasons": [f"period_lt_{MIN_CONSOLIDATION_BARS}"]}
+
+    atr_ratio = float(item.get("atr_ratio", 999.0) or 999.0)
+    if atr_ratio > float(rule_max_box_atr):
+        return {"pass": False, "reasons": [f"atr_ratio_gt_rule_max:{atr_ratio:.3f}>{float(rule_max_box_atr):.3f}"]}
+
+    if bool(item.get("consolidation_ok", False)):
+        return {"pass": True, "reasons": ["consolidation_ok"]}
+
+    # 软放行仅用于短周期（5/10日）边缘破位，避免长周期趋势行情被误判成横盘突破。
+    if period > 10:
+        return {"pass": False, "reasons": ["soft_fallback_period_gt_10"]}
+
+    range_atr = float(item.get("consolidation_range_atr", 999.0) or 999.0)
+    drift_atr = float(item.get("consolidation_drift_atr", 999.0) or 999.0)
+    strength_raw = abs(float(item.get("strength_raw", 0.0) or 0.0))
+    soft_range_cap = min(float(rule_max_box_atr), 2.0)
+    soft_strength_floor = float(threshold_atr)
+    ok = range_atr <= soft_range_cap and drift_atr <= 0.8 and strength_raw >= soft_strength_floor
+    reasons = []
+    if range_atr > soft_range_cap:
+        reasons.append(f"range_atr_gt_cap:{range_atr:.3f}>{soft_range_cap:.3f}")
+    if drift_atr > 0.8:
+        reasons.append(f"drift_atr_gt_cap:{drift_atr:.3f}>0.800")
+    if strength_raw < soft_strength_floor:
+        reasons.append(f"strength_lt_floor:{strength_raw:.3f}<{soft_strength_floor:.3f}")
+    if ok:
+        reasons = ["soft_fallback_pass"]
+    return {"pass": bool(ok), "reasons": reasons}
 
 
 def _extract_pattern_signal(patterns: List[str]) -> Dict[str, Any]:
@@ -507,12 +829,31 @@ def _extract_pattern_signal(patterns: List[str]) -> Dict[str, Any]:
     else:
         direction = "none"
 
+    up_platform_periods = sorted(
+        {
+            int(m.group(1))
+            for p in up_platform_hits
+            for m in [re.search(r"(\d+)\s*日平台突破", str(p))]
+            if m
+        }
+    )
+    down_platform_periods = sorted(
+        {
+            int(m.group(1))
+            for p in down_platform_hits
+            for m in [re.search(r"(\d+)\s*日平台跌破", str(p))]
+            if m
+        }
+    )
+
     return {
         "direction": direction,
         "up_hits": up_hits,
         "down_hits": down_hits,
         "up_platform_hits": up_platform_hits,
         "down_platform_hits": down_platform_hits,
+        "up_platform_periods": up_platform_periods,
+        "down_platform_periods": down_platform_periods,
         "up_three_hits": up_three_hits,
         "down_three_hits": down_three_hits,
         "veto_up": veto_up,
@@ -526,60 +867,142 @@ def build_prefilter_candidates(
     threshold_atr: float = DEFAULT_THRESHOLD_ATR,
     max_candidates: int = DEFAULT_MAX_CANDIDATES,
     trade_date: str = "",
+    symbol_name_map: Optional[Dict[str, str]] = None,
+    scan_symbols: Optional[List[str]] = None,
+    debug_rows: Optional[List[Dict[str, Any]]] = None,
 ) -> List[Dict[str, Any]]:
     candidates: List[Dict[str, Any]] = []
+    symbol_name_map = symbol_name_map or {}
+    rule_max_box_atr = float(os.getenv("BREAKOUT_RULE_MAX_BOX_ATR", str(DEFAULT_RULE_MAX_BOX_ATR)))
+    symbols_iter = [str(s).upper() for s in (scan_symbols or list(history_map.keys()))]
+    min_history_need = int(max(SCAN_PERIODS))
 
-    for symbol, df in history_map.items():
+    for symbol in symbols_iter:
+        df = history_map.get(symbol)
+        debug_row: Dict[str, Any] = {
+            "symbol": symbol,
+            "symbol_name": str(symbol_name_map.get(symbol, "") or symbol_name_map.get(symbol.upper(), "") or ""),
+            "threshold_atr": float(threshold_atr),
+            "rule_max_box_atr": float(rule_max_box_atr),
+            "drop_reasons": [],
+            "period_checks": [],
+            "branch_flags": {},
+            "selected": False,
+        }
+
         rt_data = realtime_map.get(symbol)
         if not rt_data:
+            debug_row["drop_reasons"].append("no_realtime")
+            if debug_rows is not None:
+                debug_rows.append(debug_row)
             continue
-        if df.empty or len(df) < max(SCAN_PERIODS):
+        if df is None or df.empty:
+            debug_row["drop_reasons"].append("no_history")
+            if debug_rows is not None:
+                debug_rows.append(debug_row)
+            continue
+        if len(df) < min_history_need:
+            debug_row["drop_reasons"].append(f"insufficient_history:{len(df)}<{min_history_need}")
+            if debug_rows is not None:
+                debug_rows.append(debug_row)
             continue
 
         atr_series = _calc_atr14(df)
         latest_trade_date = trade_date or _normalize_trade_date(df.iloc[-1]["trade_date"])
         has_current_bar = _normalize_trade_date(df.iloc[-1]["trade_date"]) == latest_trade_date
         if atr_series.empty:
+            debug_row["drop_reasons"].append("atr_series_empty")
+            if debug_rows is not None:
+                debug_rows.append(debug_row)
             continue
         atr_ref_idx = -2 if has_current_bar and len(atr_series) >= 2 else -1
         atr_latest = float(atr_series.iloc[atr_ref_idx]) if pd.notna(atr_series.iloc[atr_ref_idx]) else 0.0
         if atr_latest <= 0:
+            debug_row["drop_reasons"].append(f"atr_invalid:{atr_latest:.6f}")
+            if debug_rows is not None:
+                debug_rows.append(debug_row)
             continue
 
         realtime_price = float(rt_data["price"])
         latest_close = float(df.iloc[-1]["close_price"])
+        debug_row["realtime_price"] = realtime_price
+        debug_row["contract_code"] = str(rt_data.get("contract_code", ""))
+        debug_row["contract_name"] = str(rt_data.get("name", ""))
+        debug_row["latest_close"] = latest_close
+        debug_row["atr14"] = atr_latest
 
         # 1) 先复用既有K线形态识别（融合实时价后的临时K）
         intraday_df = _build_intraday_kline_df(df, realtime_price=realtime_price, trade_date=latest_trade_date)
         kline_result = _calc_kline_signals(intraday_df)
         patterns = [str(x) for x in kline_result.get("patterns", []) if str(x).strip()]
         pattern_sig = _extract_pattern_signal(patterns)
+        debug_row["patterns"] = patterns[:8]
+        up_platform_periods = set(pattern_sig.get("up_platform_periods", []))
+        down_platform_periods = set(pattern_sig.get("down_platform_periods", []))
+        intraday_ma5 = float(intraday_df["close_price"].rolling(window=5).mean().iloc[-1]) if len(intraday_df) >= 5 else latest_close
+        intraday_ma10 = float(intraday_df["close_price"].rolling(window=10).mean().iloc[-1]) if len(intraday_df) >= 10 else latest_close
 
         # 2) 再做“压缩箱体 + 实时越界”判定，避免把普通波动当突破
         consolidation = _calc_consolidation_gate(df, atr_latest=atr_latest, bars=MIN_CONSOLIDATION_BARS)
         best_up: Optional[Dict[str, Any]] = None
         best_down: Optional[Dict[str, Any]] = None
+        best_up_rule: Optional[Dict[str, Any]] = None
+        best_down_rule: Optional[Dict[str, Any]] = None
         best_up_platform: Optional[Dict[str, Any]] = None
         best_down_platform: Optional[Dict[str, Any]] = None
         for period in SCAN_PERIODS:
             required = period + 1 if has_current_bar else period
             if len(df) < required:
+                debug_row["period_checks"].append(
+                    {
+                        "period": int(period),
+                        "required_rows": int(required),
+                        "available_rows": int(len(df)),
+                        "skip": "insufficient_rows",
+                    }
+                )
                 continue
             window = df.iloc[-(period + 1) : -1] if has_current_bar else df.iloc[-period:]
             box_high = float(window["high_price"].max())
             box_low = float(window["low_price"].min())
             box_height = box_high - box_low
             atr_ratio = box_height / atr_latest if atr_latest > 0 else 999.0
-
-            # 与 kline_tools 的动态箱体定义一致
-            if atr_ratio > _max_atr_multiple(period):
-                continue
-
+            max_mul = _max_atr_multiple(period)
             up_strength = (realtime_price - box_high) / atr_latest
             down_strength = (box_low - realtime_price) / atr_latest
 
+            # 与 kline_tools 的动态箱体定义一致
+            if atr_ratio > max_mul:
+                debug_row["period_checks"].append(
+                    {
+                        "period": int(period),
+                        "box_high": box_high,
+                        "box_low": box_low,
+                        "atr_ratio": float(atr_ratio),
+                        "max_atr_multiple": float(max_mul),
+                        "up_strength_raw": float(up_strength),
+                        "down_strength_raw": float(down_strength),
+                        "dynamic_box_ok": False,
+                    }
+                )
+                continue
+
+            debug_row["period_checks"].append(
+                {
+                    "period": int(period),
+                    "box_high": box_high,
+                    "box_low": box_low,
+                    "atr_ratio": float(atr_ratio),
+                    "max_atr_multiple": float(max_mul),
+                    "up_strength_raw": float(up_strength),
+                    "down_strength_raw": float(down_strength),
+                    "dynamic_box_ok": True,
+                }
+            )
+
             up_item = {
                 "symbol": symbol,
+                "symbol_name": str(symbol_name_map.get(symbol, "") or symbol_name_map.get(symbol.upper(), "") or ""),
                 "direction": "up",
                 "period": period,
                 "strength_raw": float(up_strength),
@@ -597,6 +1020,8 @@ def build_prefilter_candidates(
                 "consolidation_bars": int(consolidation["bars"]),
                 "consolidation_range_atr": float(consolidation["range_atr"]),
                 "consolidation_drift_atr": float(consolidation["drift_atr"]),
+                "intraday_ma5": intraday_ma5,
+                "intraday_ma10": intraday_ma10,
             }
             down_item = dict(up_item)
             down_item["direction"] = "down"
@@ -607,18 +1032,37 @@ def build_prefilter_candidates(
             if best_down is None or down_item["strength_raw"] > float(best_down["strength_raw"]):
                 best_down = down_item
             if period >= MIN_CONSOLIDATION_BARS:
-                if best_up_platform is None or up_item["strength_raw"] > float(best_up_platform["strength_raw"]):
-                    best_up_platform = up_item
-                if best_down_platform is None or down_item["strength_raw"] > float(best_down_platform["strength_raw"]):
-                    best_down_platform = down_item
+                if best_up_rule is None or up_item["strength_raw"] > float(best_up_rule["strength_raw"]):
+                    best_up_rule = up_item
+                if best_down_rule is None or down_item["strength_raw"] > float(best_down_rule["strength_raw"]):
+                    best_down_rule = down_item
+                if period in up_platform_periods:
+                    if best_up_platform is None or up_item["strength_raw"] > float(best_up_platform["strength_raw"]):
+                        best_up_platform = up_item
+                if period in down_platform_periods:
+                    if best_down_platform is None or down_item["strength_raw"] > float(best_down_platform["strength_raw"]):
+                        best_down_platform = down_item
 
         options: List[Dict[str, Any]] = []
+        up_rule_diag = _rule_breakout_diag(best_up_rule, rule_max_box_atr=rule_max_box_atr, threshold_atr=threshold_atr)
+        down_rule_diag = _rule_breakout_diag(best_down_rule, rule_max_box_atr=rule_max_box_atr, threshold_atr=threshold_atr)
+        debug_row["branch_flags"] = {
+            "up_three_hit": bool(pattern_sig["up_three_hits"]),
+            "down_three_hit": bool(pattern_sig["down_three_hits"]),
+            "up_platform_hit": bool(pattern_sig["up_platform_hits"]),
+            "down_platform_hit": bool(pattern_sig["down_platform_hits"]),
+            "veto_up": bool(pattern_sig["veto_up"]),
+            "veto_down": bool(pattern_sig["veto_down"]),
+            "best_up_strength_raw": float(best_up["strength_raw"]) if best_up else None,
+            "best_down_strength_raw": float(best_down["strength_raw"]) if best_down else None,
+            "up_rule_gate": up_rule_diag,
+            "down_rule_gate": down_rule_diag,
+        }
         if (
             best_up is not None
             and float(best_up["strength_raw"]) >= threshold_atr
             and bool(pattern_sig["up_three_hits"])
             and not bool(pattern_sig["veto_up"])
-            and str(pattern_sig["direction"]) != "down"
         ):
             up_hits = list(pattern_sig["up_hits"])
             bonus = PATTERN_BONUS_PER_HIT * min(3, len(up_hits))
@@ -634,8 +1078,9 @@ def build_prefilter_candidates(
             best_up_platform is not None
             and float(best_up_platform["strength_raw"]) >= threshold_atr
             and bool(pattern_sig["up_platform_hits"])
+            and bool(best_up_platform.get("consolidation_ok", False))
+            and float(best_up_platform.get("atr_ratio", 999.0)) <= rule_max_box_atr
             and not bool(pattern_sig["veto_up"])
-            and str(pattern_sig["direction"]) != "down"
         ):
             up_hits = list(pattern_sig["up_hits"])
             bonus = PATTERN_BONUS_PER_HIT * min(3, len(up_hits))
@@ -656,7 +1101,6 @@ def build_prefilter_candidates(
             and float(best_down["strength_raw"]) >= threshold_atr
             and bool(pattern_sig["down_three_hits"])
             and not bool(pattern_sig["veto_down"])
-            and str(pattern_sig["direction"]) != "up"
         ):
             down_hits = list(pattern_sig["down_hits"])
             bonus = PATTERN_BONUS_PER_HIT * min(3, len(down_hits))
@@ -672,8 +1116,9 @@ def build_prefilter_candidates(
             best_down_platform is not None
             and float(best_down_platform["strength_raw"]) >= threshold_atr
             and bool(pattern_sig["down_platform_hits"])
+            and bool(best_down_platform.get("consolidation_ok", False))
+            and float(best_down_platform.get("atr_ratio", 999.0)) <= rule_max_box_atr
             and not bool(pattern_sig["veto_down"])
-            and str(pattern_sig["direction"]) != "up"
         ):
             down_hits = list(pattern_sig["down_hits"])
             bonus = PATTERN_BONUS_PER_HIT * min(3, len(down_hits))
@@ -689,9 +1134,69 @@ def build_prefilter_candidates(
             )
             options.append(item)
 
+        # 实时横盘区间突破分支：不依赖平台形态字符串，专门用于盘中破位识别
+        if (
+            best_up_rule is not None
+            and float(best_up_rule["strength_raw"]) >= threshold_atr
+            and bool(up_rule_diag["pass"])
+            and float(best_up_rule.get("atr_ratio", 999.0)) <= rule_max_box_atr
+            and not bool(pattern_sig["veto_up"])
+        ):
+            up_hits = list(pattern_sig["up_hits"])
+            bonus = PATTERN_BONUS_PER_HIT * min(3, len(up_hits))
+            item = dict(best_up_rule)
+            item["strength"] = float(item["strength_raw"]) + bonus
+            item["pattern_hits"] = up_hits[:3]
+            item["reason_prefilter"] = (
+                f"{item['period']}日横盘区间上破(压缩比{float(item['atr_ratio']):.1f}ATR, "
+                f"{int(item['consolidation_bars'])}bar横盘)"
+            )
+            options.append(item)
+
+        if (
+            best_down_rule is not None
+            and float(best_down_rule["strength_raw"]) >= threshold_atr
+            and bool(down_rule_diag["pass"])
+            and float(best_down_rule.get("atr_ratio", 999.0)) <= rule_max_box_atr
+            and not bool(pattern_sig["veto_down"])
+        ):
+            down_hits = list(pattern_sig["down_hits"])
+            bonus = PATTERN_BONUS_PER_HIT * min(3, len(down_hits))
+            item = dict(best_down_rule)
+            item["strength"] = float(item["strength_raw"]) + bonus
+            item["pattern_hits"] = down_hits[:3]
+            item["reason_prefilter"] = (
+                f"{item['period']}日横盘区间下破(压缩比{float(item['atr_ratio']):.1f}ATR, "
+                f"{int(item['consolidation_bars'])}bar横盘)"
+            )
+            options.append(item)
+
         if options:
             options.sort(key=lambda x: float(x.get("strength", 0.0)), reverse=True)
-            candidates.append(options[0])
+            pick = options[0]
+            candidates.append(pick)
+            debug_row["selected"] = True
+            debug_row["selected_direction"] = str(pick.get("direction", ""))
+            debug_row["selected_period"] = int(pick.get("period", 0) or 0)
+            debug_row["selected_strength"] = float(pick.get("strength", 0.0) or 0.0)
+            debug_row["selected_reason"] = str(pick.get("reason_prefilter", ""))
+        else:
+            dynamic_ok_count = sum(1 for x in debug_row["period_checks"] if bool(x.get("dynamic_box_ok")))
+            if dynamic_ok_count == 0:
+                debug_row["drop_reasons"].append("all_periods_dynamic_box_reject")
+            up_raw = float(best_up["strength_raw"]) if best_up else None
+            down_raw = float(best_down["strength_raw"]) if best_down else None
+            if (up_raw is None or up_raw < threshold_atr) and (down_raw is None or down_raw < threshold_atr):
+                debug_row["drop_reasons"].append("both_directions_strength_below_threshold")
+            if not bool(pattern_sig["up_three_hits"] or pattern_sig["down_three_hits"] or pattern_sig["up_platform_hits"] or pattern_sig["down_platform_hits"]):
+                debug_row["drop_reasons"].append("no_kline_trigger_pattern")
+            if bool(pattern_sig["veto_up"]) and bool(pattern_sig["veto_down"]):
+                debug_row["drop_reasons"].append("both_directions_vetoed")
+            if not bool(up_rule_diag["pass"]) and not bool(down_rule_diag["pass"]):
+                debug_row["drop_reasons"].append("rule_gate_reject")
+
+        if debug_rows is not None:
+            debug_rows.append(debug_row)
 
     candidates.sort(key=lambda x: float(x.get("strength", 0.0)), reverse=True)
     return candidates[: max(0, int(max_candidates))]
@@ -773,6 +1278,159 @@ def _to_bool(value: Any) -> bool:
     return False
 
 
+def parse_llm_explain_json(raw_text: str) -> List[Dict[str, Any]]:
+    blob = _extract_json_blob(raw_text)
+    if not blob:
+        return []
+    try:
+        data = json.loads(blob)
+    except Exception:
+        return []
+    if isinstance(data, dict):
+        data = [data]
+    if not isinstance(data, list):
+        return []
+
+    parsed: List[Dict[str, Any]] = []
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        symbol = str(item.get("symbol", "")).upper().strip()
+        direction = str(item.get("direction", "")).lower().strip()
+        reason_simple = str(item.get("reason_simple", "")).strip()
+        summary_line = str(item.get("summary_line", "")).strip()
+        period = int(item.get("period", 0) or 0)
+        if not symbol or direction not in {"up", "down"}:
+            continue
+        parsed.append(
+            {
+                "symbol": symbol,
+                "direction": direction,
+                "period": period,
+                "reason_simple": reason_simple,
+                "summary_line": summary_line,
+            }
+        )
+    return parsed
+
+
+def engine_v2_select_candidates(
+    history_map: Dict[str, pd.DataFrame],
+    realtime_map: Dict[str, Optional[Dict[str, Any]]],
+    symbol_name_map: Dict[str, str],
+    trade_date: str,
+    top_k: int,
+    scan_symbols: Optional[List[str]] = None,
+    debug: bool = False,
+) -> Dict[str, Any]:
+    engine = BreakoutEngineV2(top_k=top_k)
+    return engine.select_candidates(
+        history_map=history_map,
+        realtime_map=realtime_map,
+        symbol_name_map=symbol_name_map,
+        trade_date=trade_date,
+        scan_symbols=scan_symbols,
+        debug=debug,
+    )
+
+
+def llm_explain_signals(
+    signals: List[Dict[str, Any]],
+    model_name: str,
+) -> Tuple[List[Dict[str, Any]], str]:
+    if not signals:
+        return [], ""
+
+    api_key = os.getenv("DASHSCOPE_API_KEY", "").strip()
+    if not api_key:
+        # 无 key 时仍返回规则信号，理由使用模板，保证稳定可复现。
+        for item in signals:
+            item["reason_simple"] = str(item.get("reason_simple", "") or item.get("reason_prefilter", "") or "规则触发")
+            item["summary_line"] = str(item.get("summary_line", "") or item.get("reason_simple", ""))
+        return signals, "missing DASHSCOPE_API_KEY"
+
+    from llm_compat import ChatTongyiCompat
+
+    llm = ChatTongyiCompat(model=model_name, api_key=api_key)
+    compact = [
+        {
+            "symbol": str(x.get("symbol", "")),
+            "symbol_name": str(x.get("symbol_name", "")),
+            "direction": str(x.get("direction", "")),
+            "period": int(x.get("period", 0) or 0),
+            "trigger_type": str(x.get("trigger_type", "")),
+            "realtime_price": round(float(x.get("realtime_price", 0.0)), 4),
+            "box_high": round(float(x.get("box_high", 0.0)), 4),
+            "box_low": round(float(x.get("box_low", 0.0)), 4),
+            "distance_atr": round(float(x.get("distance_atr", 0.0)), 4),
+            "width_atr": round(float(x.get("width_atr", 0.0)), 4),
+            "score": round(float(x.get("score", 0.0)), 4),
+            "reason_prefilter": str(x.get("reason_prefilter", "")),
+        }
+        for x in signals
+    ]
+
+    prompt = f"""
+你是交易信号解释器。规则引擎已经确定以下都是有效突破信号，你只能解释，不可否决。
+
+输入信号(JSON)：
+{json.dumps(compact, ensure_ascii=False)}
+
+请输出 JSON 数组，每个元素字段：
+- symbol
+- direction (up/down)
+- period
+- reason_simple（<=30字）
+- summary_line（<=50字）
+
+只输出JSON，不要其他文字。
+""".strip()
+
+    try:
+        resp = llm.invoke(prompt)
+        content = getattr(resp, "content", str(resp))
+        parsed = parse_llm_explain_json(str(content))
+    except Exception as exc:
+        parsed = []
+        llm_error = f"llm explain invoke failed: {exc}"
+    else:
+        llm_error = ""
+
+    if not parsed:
+        for item in signals:
+            item["reason_simple"] = str(item.get("reason_simple", "") or item.get("reason_prefilter", "") or "规则触发")
+            item["summary_line"] = str(item.get("summary_line", "") or item.get("reason_simple", ""))
+        return signals, (llm_error or "llm explain parse failed")
+
+    by_key = {
+        (str(x.get("symbol", "")).upper(), str(x.get("direction", "")).lower(), int(x.get("period", 0) or 0)): x
+        for x in parsed
+    }
+    by_symbol_direction = {
+        (str(x.get("symbol", "")).upper(), str(x.get("direction", "")).lower()): x for x in parsed
+    }
+
+    merged: List[Dict[str, Any]] = []
+    for item in signals:
+        key = (
+            str(item.get("symbol", "")).upper(),
+            str(item.get("direction", "")).lower(),
+            int(item.get("period", 0) or 0),
+        )
+        p = by_key.get(key)
+        if p is None:
+            p = by_symbol_direction.get((key[0], key[1]))
+        out = dict(item)
+        if p:
+            out["reason_simple"] = str(p.get("reason_simple", "")).strip() or str(item.get("reason_prefilter", ""))
+            out["summary_line"] = str(p.get("summary_line", "")).strip() or out["reason_simple"]
+        else:
+            out["reason_simple"] = str(item.get("reason_simple", "") or item.get("reason_prefilter", "") or "规则触发")
+            out["summary_line"] = str(item.get("summary_line", "") or out["reason_simple"])
+        merged.append(out)
+    return merged, llm_error
+
+
 def llm_review_candidates(
     candidates: List[Dict[str, Any]],
     model_name: str,
@@ -791,6 +1449,7 @@ def llm_review_candidates(
     compact_input = [
         {
             "symbol": c["symbol"],
+            "symbol_name": c.get("symbol_name", ""),
             "direction_rule": c["direction"],
             "period": int(c["period"]),
             "strength": round(float(c["strength"]), 4),
@@ -873,6 +1532,19 @@ def group_signals(signals: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any
     return grouped
 
 
+def _format_signal_label(item: Dict[str, Any]) -> str:
+    symbol = str(item.get("symbol", "")).upper()
+    symbol_name = str(item.get("symbol_name", "") or "").strip()
+    contract = str(item.get("contract_code", "") or "").strip()
+    if symbol_name and contract:
+        return f"{symbol_name} {symbol}({contract})"
+    if symbol_name:
+        return f"{symbol_name}({symbol})"
+    if contract:
+        return f"{symbol}({contract})"
+    return symbol
+
+
 def compose_grouped_summary(
     trade_date: str,
     scan_count: int,
@@ -882,18 +1554,20 @@ def compose_grouped_summary(
     grouped = group_signals(signals)
     header = (
         f"【14:25 技术突破提醒】{trade_date}\n"
-        f"扫描品种: {scan_count} | 预筛候选: {candidate_count} | LLM确认: {len(signals)}"
+        f"扫描品种: {scan_count} | 规则候选: {candidate_count} | 最终信号: {len(signals)}"
     )
 
     if not signals:
-        return header + "\n\n未发现有效突破信号。"
+        return header + "\n\n未发现有效突破信号（已完成14:25扫描）。"
 
     lines = [header, "", "【上破组】"]
     if grouped["up"]:
         for x in grouped["up"]:
+            trigger = str(x.get("trigger_type", "box_breakout"))
+            action = f"上破{x['period']}日箱体" if trigger != "three_method" else "上升三法触发"
             lines.append(
-                f"- {x['symbol']}({x.get('contract_code','')}) 现价{float(x['realtime_price']):.2f} "
-                f"上破{x['period']}日箱体 | {x.get('reason_simple','')}"
+                f"- {_format_signal_label(x)} 现价{float(x['realtime_price']):.2f} "
+                f"{action} | {x.get('reason_simple','')}"
             )
     else:
         lines.append("- 无")
@@ -902,9 +1576,11 @@ def compose_grouped_summary(
     lines.append("【下破组】")
     if grouped["down"]:
         for x in grouped["down"]:
+            trigger = str(x.get("trigger_type", "box_breakout"))
+            action = f"下破{x['period']}日箱体" if trigger != "three_method" else "下降三法触发"
             lines.append(
-                f"- {x['symbol']}({x.get('contract_code','')}) 现价{float(x['realtime_price']):.2f} "
-                f"下破{x['period']}日箱体 | {x.get('reason_simple','')}"
+                f"- {_format_signal_label(x)} 现价{float(x['realtime_price']):.2f} "
+                f"{action} | {x.get('reason_simple','')}"
             )
     else:
         lines.append("- 无")
@@ -920,8 +1596,8 @@ def compose_grouped_brief(
 ) -> str:
     grouped = group_signals(signals)
     return (
-        f"{trade_date} 14:25 扫描{scan_count} | 预筛{candidate_count} | "
-        f"确认{len(signals)} | 上破{len(grouped['up'])} | 下破{len(grouped['down'])}"
+        f"{trade_date} 14:25 扫描{scan_count} | 候选{candidate_count} | "
+        f"信号{len(signals)} | 上破{len(grouped['up'])} | 下破{len(grouped['down'])}"
     )
 
 
@@ -943,20 +1619,22 @@ def compose_grouped_html(
 
         rows: List[str] = []
         for x in items:
-            symbol = html.escape(str(x.get("symbol", "")))
-            contract = html.escape(str(x.get("contract_code", "")))
+            display_label = html.escape(_format_signal_label(x))
             reason = html.escape(str(x.get("reason_simple", "")))
             period = int(x.get("period", 0))
             price = float(x.get("realtime_price", 0.0))
             strength = float(x.get("strength_raw", x.get("strength", 0.0)))
             atr_ratio = float(x.get("atr_ratio", 0.0))
+            score = float(x.get("score", x.get("strength", 0.0)))
+            trigger_type = str(x.get("trigger_type", "box_breakout"))
+            trigger_text = f"{period}日箱体" if trigger_type != "three_method" else "三法形态"
             rows.append(
                 (
                     "<div style='margin:10px 0;padding:12px 14px;border:1px solid rgba(255,255,255,0.12);"
                     "border-radius:10px;background:rgba(255,255,255,0.03);'>"
-                    f"<div style='font-size:16px;font-weight:700;color:#eef6ff;'>{symbol}({contract})</div>"
+                    f"<div style='font-size:16px;font-weight:700;color:#eef6ff;'>{display_label}</div>"
                     f"<div style='margin-top:6px;color:#cde0ff;font-size:14px;line-height:1.7;'>"
-                    f"现价：<b>{price:.2f}</b> ｜ 箱体：{period}日 ｜ 越界强度：{strength:.2f} ATR ｜ 压缩比：{atr_ratio:.1f} ATR"
+                    f"现价：<b>{price:.2f}</b> ｜ 触发：{trigger_text} ｜ 越界强度：{strength:.2f} ATR ｜ 结构压缩：{atr_ratio:.1f} ATR ｜ 总分：{score:.3f}"
                     "</div>"
                     f"<div style='margin-top:6px;color:#f7fbff;font-size:15px;line-height:1.7;word-break:break-word;'>"
                     f"说明：{reason}"
@@ -974,7 +1652,7 @@ def compose_grouped_html(
         f"<div style='font-size:22px;font-weight:800;color:#ffe082;'>⚡ 14:25 技术突破提醒</div>"
         f"<div style='margin-top:4px;font-size:15px;color:#b8cced;'>交易日：{html.escape(trade_date)}</div>"
         f"<div style='margin-top:10px;font-size:15px;color:#d6e6ff;'>"
-        f"扫描品种：<b>{scan_count}</b> ｜ 预筛候选：<b>{candidate_count}</b> ｜ LLM确认：<b>{len(signals)}</b>"
+        f"扫描品种：<b>{scan_count}</b> ｜ 规则候选：<b>{candidate_count}</b> ｜ 最终信号：<b>{len(signals)}</b>"
         "</div>"
     )
 
@@ -982,7 +1660,7 @@ def compose_grouped_html(
         body_html = (
             "<div style='margin-top:16px;padding:14px;border-radius:10px;"
             "background:rgba(255,255,255,0.04);font-size:15px;color:#d8e7ff;'>"
-            "今日未发现有效突破信号。"
+            "今日未发现有效突破信号（已完成14:25扫描）。"
             "</div>"
         )
         return header_html + body_html + "</div>"
@@ -1108,6 +1786,9 @@ def run_job(
     limit: int,
     symbols_arg: str,
     dry_run: bool,
+    debug: bool = False,
+    top_k_arg: int = 0,
+    engine_mode_arg: str = "",
 ) -> Dict[str, Any]:
     load_dotenv(override=True)
 
@@ -1117,6 +1798,7 @@ def run_job(
     today = now.strftime("%Y%m%d")
     latest = _normalize_trade_date(get_latest_data_date())
     target_trade_date = _normalize_trade_date(trade_date_arg) if trade_date_arg else latest
+    replay_mode = bool(target_trade_date and latest and target_trade_date != latest)
 
     if not latest:
         return {"status": "error", "error": "latest trading date unavailable"}
@@ -1128,19 +1810,21 @@ def run_job(
             "trade_date": latest,
         }
 
-    if trade_date_arg and target_trade_date != latest:
+    # 历史日期仅允许 dry-run 回放，避免误发历史信号。
+    if replay_mode and (not dry_run):
         return {
             "status": "skipped",
-            "reason": f"trade_date_mismatch target={target_trade_date} latest={latest}",
+            "reason": f"trade_date_mismatch_non_dry target={target_trade_date} latest={latest}",
             "trade_date": latest,
         }
 
-    product_codes = sorted([str(k).upper() for k in PRODUCT_MAP.keys()])
+    product_name_map = {str(k).upper(): str(v) for k, v in PRODUCT_MAP.items()}
+    product_codes = sorted(product_name_map.keys())
     symbols_filter = _parse_symbols_arg(symbols_arg)
 
     universe = _load_scan_symbols(
         engine=engine,
-        latest_trade_date=latest,
+        latest_trade_date=target_trade_date,
         product_codes=product_codes,
         symbols_filter=symbols_filter,
         limit=limit,
@@ -1150,79 +1834,147 @@ def run_job(
         return {
             "status": "skipped",
             "reason": "no symbols to scan",
-            "trade_date": latest,
+            "trade_date": target_trade_date,
         }
 
-    main_contract_map = _load_main_contract_map(engine=engine, latest_trade_date=latest, symbols=universe)
-    realtime_map = fetch_realtime_prices(
-        universe,
-        preferred_contracts=main_contract_map,
-        target_trade_date=latest,
-    )
+    main_contract_map = _load_main_contract_map(engine=engine, latest_trade_date=target_trade_date, symbols=universe)
+    if replay_mode:
+        realtime_map = _load_replay_prices_from_db(
+            engine=engine,
+            trade_date=target_trade_date,
+            symbols=universe,
+            preferred_contracts=main_contract_map,
+        )
+    else:
+        realtime_map = fetch_realtime_prices(
+            universe,
+            preferred_contracts=main_contract_map,
+            target_trade_date=target_trade_date,
+        )
 
     history_map: Dict[str, pd.DataFrame] = {}
     for symbol in universe:
-        df = _fetch_history_df(engine, symbol, latest, bars=HISTORY_BARS)
+        history_code = str(main_contract_map.get(symbol, symbol)).upper()
+        df = _fetch_history_df(engine, history_code, target_trade_date, bars=HISTORY_BARS)
+        if df.empty and history_code != symbol:
+            df = _fetch_history_df(engine, symbol, target_trade_date, bars=HISTORY_BARS)
         if not df.empty:
             history_map[symbol] = df
 
-    max_candidates = int(os.getenv("BREAKOUT_MAX_CANDIDATES", str(DEFAULT_MAX_CANDIDATES)))
-    min_confidence = float(os.getenv("BREAKOUT_MIN_CONFIDENCE", str(DEFAULT_MIN_CONFIDENCE)))
+    engine_mode = str(engine_mode_arg or os.getenv("BREAKOUT_ENGINE", DEFAULT_ENGINE_MODE)).strip().lower()
+    if engine_mode not in {"v1", "v2"}:
+        engine_mode = DEFAULT_ENGINE_MODE
 
-    threshold_atr = float(os.getenv("BREAKOUT_THRESHOLD_ATR", str(DEFAULT_THRESHOLD_ATR)))
-    candidates = build_prefilter_candidates(
-        history_map=history_map,
-        realtime_map=realtime_map,
-        threshold_atr=threshold_atr,
-        max_candidates=max_candidates,
-        trade_date=latest,
-    )
-
+    top_k = max(1, int(top_k_arg or os.getenv("BREAKOUT_TOP_K", str(DEFAULT_TOP_K))))
     model_name = os.getenv("BREAKOUT_LLM_MODEL", "qwen-plus")
-    approved, llm_error = llm_review_candidates(
-        candidates=candidates,
-        model_name=model_name,
-        min_confidence=min_confidence,
-    )
+
+    llm_error = ""
+    candidates: List[Dict[str, Any]] = []
+    signals: List[Dict[str, Any]] = []
+    debug_payload: Dict[str, Any] = {}
+
+    if engine_mode == "v1":
+        # V1 兼容路径（回滚用）
+        max_candidates = int(os.getenv("BREAKOUT_MAX_CANDIDATES", str(DEFAULT_MAX_CANDIDATES)))
+        min_confidence = float(os.getenv("BREAKOUT_MIN_CONFIDENCE", str(DEFAULT_MIN_CONFIDENCE)))
+        threshold_atr = float(os.getenv("BREAKOUT_THRESHOLD_ATR", str(DEFAULT_THRESHOLD_ATR)))
+        prefilter_debug: Optional[List[Dict[str, Any]]] = [] if debug else None
+        candidates = build_prefilter_candidates(
+            history_map=history_map,
+            realtime_map=realtime_map,
+            threshold_atr=threshold_atr,
+            max_candidates=max_candidates,
+            trade_date=target_trade_date,
+            symbol_name_map=product_name_map,
+            scan_symbols=universe,
+            debug_rows=prefilter_debug,
+        )
+        signals, llm_error = llm_review_candidates(
+            candidates=candidates,
+            model_name=model_name,
+            min_confidence=min_confidence,
+        )
+        if debug:
+            debug_payload = {
+                "engine": "v1",
+                "threshold_atr": threshold_atr,
+                "min_confidence": min_confidence,
+                "rule_max_box_atr": float(os.getenv("BREAKOUT_RULE_MAX_BOX_ATR", str(DEFAULT_RULE_MAX_BOX_ATR))),
+                "prefilter": prefilter_debug or [],
+            }
+    else:
+        # V2 主路径：规则直出 + LLM仅解释
+        v2 = engine_v2_select_candidates(
+            history_map=history_map,
+            realtime_map=realtime_map,
+            symbol_name_map=product_name_map,
+            trade_date=target_trade_date,
+            top_k=top_k,
+            scan_symbols=universe,
+            debug=debug,
+        )
+        candidates = list(v2.get("all_ranked", []))
+        top_candidates = list(v2.get("candidates", []))
+        signals, llm_error = llm_explain_signals(signals=top_candidates, model_name=model_name)
+        if debug:
+            debug_payload = {
+                "engine": "v2",
+                "top_k": top_k,
+                "engine_v2": v2.get("debug_rows", []),
+                "ranking_table": v2.get("ranking_table", []),
+            }
 
     summary_text = compose_grouped_summary(
-        trade_date=latest,
+        trade_date=target_trade_date,
         scan_count=len(universe),
         candidate_count=len(candidates),
-        signals=approved,
+        signals=signals,
     )
     summary_brief = compose_grouped_brief(
-        trade_date=latest,
+        trade_date=target_trade_date,
         scan_count=len(universe),
         candidate_count=len(candidates),
-        signals=approved,
+        signals=signals,
     )
     summary_html = compose_grouped_html(
-        trade_date=latest,
+        trade_date=target_trade_date,
         scan_count=len(universe),
         candidate_count=len(candidates),
-        signals=approved,
+        signals=signals,
     )
 
     state_file = os.getenv("BREAKOUT_STATE_FILE", DEFAULT_STATE_FILE)
     state = _load_state(state_file)
 
-    dedupe_hash = _signal_hash(latest, approved)
-    sent_before = (
-        state.get("last_trade_date") == latest
-        and state.get("last_signal_hash") == dedupe_hash
-    )
+    has_signal = bool(signals)
+    report_hash = _signal_hash(target_trade_date, signals) if has_signal else _empty_report_hash(target_trade_date, len(universe))
+    sent_before = False
+    if has_signal:
+        latest_signal = state.get("last_signal_report", {})
+        sent_before = (
+            str(latest_signal.get("trade_date", "")) == target_trade_date
+            and str(latest_signal.get("hash", "")) == report_hash
+        ) or (
+            state.get("last_trade_date") == target_trade_date
+            and state.get("last_signal_hash") == report_hash
+        )
+    else:
+        latest_empty = state.get("last_empty_report", {})
+        sent_before = (
+            str(latest_empty.get("trade_date", "")) == target_trade_date
+            and str(latest_empty.get("hash", "")) == report_hash
+        )
 
     channel_code = os.getenv("BREAKOUT_CHANNEL_CODE", DEFAULT_CHANNEL_CODE)
     email_recipients = _resolve_email_recipients(channel_code=channel_code)
-    title = f"{latest} 14:25 技术突破提醒"
+    title = f"{target_trade_date} 14:25 技术突破提醒"
 
     publish_ok = False
     publish_msg = ""
     email_ok = False
     email_msg = ""
 
-    if approved and not sent_before:
+    if not sent_before:
         publish_ok, publish_msg = _publish_station(
             channel_code=channel_code,
             title=title,
@@ -1233,24 +1985,31 @@ def run_job(
         email_ok, email_msg = _send_email(email_recipients, title, summary_text, dry_run=dry_run)
 
         if (publish_ok or email_ok) and (not dry_run):
-            state["last_trade_date"] = latest
-            state["last_signal_hash"] = dedupe_hash
+            if has_signal:
+                state["last_trade_date"] = target_trade_date
+                state["last_signal_hash"] = report_hash
+                state["last_signal_report"] = {
+                    "trade_date": target_trade_date,
+                    "hash": report_hash,
+                }
+            else:
+                state["last_empty_report"] = {
+                    "trade_date": target_trade_date,
+                    "hash": report_hash,
+                }
             state["last_sent_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             _save_state(state_file, state)
     elif sent_before:
         publish_msg = "duplicate-signal-skip"
         email_msg = "duplicate-signal-skip"
 
-    status = "success"
-    if llm_error and candidates:
-        status = "partial"
-
-    return {
-        "status": status,
-        "trade_date": latest,
+    result = {
+        "status": "success",
+        "trade_date": target_trade_date,
+        "engine": engine_mode,
         "scan_count": len(universe),
         "candidate_count": len(candidates),
-        "signal_count": len(approved),
+        "signal_count": len(signals),
         "llm_error": llm_error,
         "sent_before": sent_before,
         "publish_ok": publish_ok,
@@ -1259,6 +2018,9 @@ def run_job(
         "email_msg": email_msg,
         "summary": summary_text,
     }
+    if debug:
+        result["debug"] = debug_payload
+    return result
 
 
 def run_test_push(dry_run: bool, test_message: str, email_to_arg: str) -> Dict[str, Any]:
@@ -1302,9 +2064,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--trade-date", default="", help="指定交易日，格式 YYYYMMDD")
     parser.add_argument("--limit", type=int, default=0, help="仅扫描前N个品种（0表示不限制）")
     parser.add_argument("--symbols", default="", help="只扫描指定品种，逗号分隔，如 RB,AU")
+    parser.add_argument("--top-k", type=int, default=0, help="V2最终信号数量上限（0表示使用环境变量或默认6）")
+    parser.add_argument("--engine", default="", help="突破引擎版本：v2|v1（默认v2）")
     parser.add_argument("--send-test-message", action="store_true", help="发送联调测试消息（站内+邮件）")
     parser.add_argument("--test-message", default="", help="自定义联调消息正文")
     parser.add_argument("--email-to", default="", help="联调模式指定收件人，多个用逗号分隔")
+    parser.add_argument("--debug", action="store_true", help="输出预筛调试细节（每个品种的入选/淘汰原因）")
     return parser
 
 
@@ -1322,6 +2087,9 @@ def main() -> int:
             limit=max(0, int(args.limit or 0)),
             symbols_arg=args.symbols,
             dry_run=bool(args.dry_run),
+            debug=bool(args.debug),
+            top_k_arg=max(0, int(args.top_k or 0)),
+            engine_mode_arg=str(args.engine or "").strip(),
         )
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
