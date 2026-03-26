@@ -131,5 +131,131 @@
       ["mid_interconnect", "mid_dc_infra"],
       ["mid_dc_infra", "down_model_service"]
     ]
+  },
+  "新能源": {
+    "display_name": "新能源产业链",
+    "stages": [
+      {
+        "id": "up_resource_material",
+        "name": "上游-资源与电池材料",
+        "ths_index_codes": []
+      },
+      {
+        "id": "up_power_chip_control",
+        "name": "上游-功率半导体与控制",
+        "ths_index_codes": []
+      },
+      {
+        "id": "mid_battery_cell_pack",
+        "name": "中游-电芯与PACK",
+        "ths_index_codes": []
+      },
+      {
+        "id": "mid_electric_drive_thermal",
+        "name": "中游-电驱电控与热管理",
+        "ths_index_codes": []
+      },
+      {
+        "id": "mid_vehicle_oem",
+        "name": "中游-整车制造",
+        "ths_index_codes": []
+      },
+      {
+        "id": "down_charge_operation_recycle",
+        "name": "下游-充换电运营与回收",
+        "ths_index_codes": []
+      }
+    ],
+    "edges": [
+      ["up_resource_material", "mid_battery_cell_pack"],
+      ["up_power_chip_control", "mid_battery_cell_pack"],
+      ["mid_battery_cell_pack", "mid_electric_drive_thermal"],
+      ["mid_electric_drive_thermal", "mid_vehicle_oem"],
+      ["mid_vehicle_oem", "down_charge_operation_recycle"]
+    ]
+  },
+  "光伏": {
+    "display_name": "光伏产业链",
+    "stages": [
+      {
+        "id": "up_silicon_aux",
+        "name": "上游-硅料与辅材",
+        "ths_index_codes": []
+      },
+      {
+        "id": "up_wafer_cell",
+        "name": "上游-硅片与电池片",
+        "ths_index_codes": []
+      },
+      {
+        "id": "mid_module",
+        "name": "中游-组件制造",
+        "ths_index_codes": []
+      },
+      {
+        "id": "mid_inverter_electrical",
+        "name": "中游-逆变器与电气系统",
+        "ths_index_codes": []
+      },
+      {
+        "id": "mid_system_epc",
+        "name": "中游-系统集成与EPC",
+        "ths_index_codes": []
+      },
+      {
+        "id": "down_plant_operation",
+        "name": "下游-电站运营与运维",
+        "ths_index_codes": []
+      }
+    ],
+    "edges": [
+      ["up_silicon_aux", "up_wafer_cell"],
+      ["up_wafer_cell", "mid_module"],
+      ["mid_module", "mid_system_epc"],
+      ["mid_inverter_electrical", "mid_system_epc"],
+      ["mid_system_epc", "down_plant_operation"]
+    ]
+  },
+  "航天卫星": {
+    "display_name": "航天卫星产业链",
+    "stages": [
+      {
+        "id": "up_aero_material_elec",
+        "name": "上游-航天材料与电子元器件",
+        "ths_index_codes": []
+      },
+      {
+        "id": "up_payload_platform_parts",
+        "name": "上游-卫星载荷与平台部件",
+        "ths_index_codes": []
+      },
+      {
+        "id": "mid_satellite_launch",
+        "name": "中游-卫星总装与发射",
+        "ths_index_codes": []
+      },
+      {
+        "id": "mid_ground_tt_c",
+        "name": "中游-地面系统与测运控",
+        "ths_index_codes": []
+      },
+      {
+        "id": "mid_terminal_module",
+        "name": "中游-卫星终端与通信模组",
+        "ths_index_codes": []
+      },
+      {
+        "id": "down_satcom_operation_app",
+        "name": "下游-卫星通信运营与应用",
+        "ths_index_codes": []
+      }
+    ],
+    "edges": [
+      ["up_aero_material_elec", "up_payload_platform_parts"],
+      ["up_payload_platform_parts", "mid_satellite_launch"],
+      ["mid_satellite_launch", "mid_ground_tt_c"],
+      ["mid_ground_tt_c", "mid_terminal_module"],
+      ["mid_terminal_module", "down_satcom_operation_app"]
+    ]
   }
 }
