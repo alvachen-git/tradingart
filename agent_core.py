@@ -9,7 +9,7 @@ import json
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage, AIMessage
 from langgraph.prebuilt import create_react_agent
 from langchain_core.prompts import ChatPromptTemplate
-from macro_tools import get_macro_indicator, get_macro_overview, analyze_yield_curve
+from macro_tools import get_macro_indicator, get_macro_overview, analyze_yield_curve, get_macro_health_snapshot
 from pydantic import BaseModel, Field
 from langgraph.graph import StateGraph, END
 
@@ -1014,6 +1014,7 @@ def macro_analyst_node(state: AgentState, llm):
     # from macro_tools import get_macro_indicator
 
     tools = [
+        get_macro_health_snapshot,  # 先做数据可用性/新鲜度体检
         get_macro_indicator,  # 来自 macro_tools (已升级支持多查)
         get_macro_overview,  # 来自 macro_tools (看全局)
         analyze_yield_curve,  # 来自 macro_tools (看倒挂)
@@ -1031,6 +1032,7 @@ def macro_analyst_node(state: AgentState, llm):
         {news_context}
 
         【分析逻辑与工具调用顺序】
+        0. 先调用 `get_macro_health_snapshot()` 检查关键宏观数据可用性和新鲜度，若存在缺失/陈旧必须在结论里明确说明。
 
         **第一步：全景与衰退诊断 (必须执行)**
         1. 调用 `get_macro_overview(category='all')`：
@@ -1040,7 +1042,7 @@ def macro_analyst_node(state: AgentState, llm):
            - 倒挂 = 衰退预警/降息预期升温；陡峭化 = 复苏或通胀预期。
 
         **第二步：核心锚点验证**
-        1. 调用 `get_macro_indicator(codes='US10Y,DXY,US2Y')`：
+        1. 调用 `get_macro_indicator(indicator_code='US10Y,DXY,US2Y')`：
            - 获取精确的最新报价和趋势。
         2. 结合 `Researcher` 的新闻（CPI/非农/FOMC），解释数据为何波动。
 

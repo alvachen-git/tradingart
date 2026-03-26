@@ -6,6 +6,7 @@ import traceback
 import warnings
 from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime, timedelta
+from typing import Any
 
 import akshare as ak
 import pandas as pd
@@ -37,6 +38,107 @@ DXY_BACKFILL_DAYS = int(os.getenv("DXY_BACKFILL_DAYS", "20"))
 
 # Third-party warning noise should not pollute daily update logs.
 warnings.filterwarnings("ignore", category=FutureWarning, module="akshare")
+
+FRESHNESS_THRESHOLD_BY_FREQ = {
+    "D": 7,
+    "W": 21,
+    "M": 45,
+    "Q": 120,
+}
+
+FRED_BACKFILL_DAYS_BY_FREQ = {
+    "D": 180,
+    "W": 365,
+    "M": 1460,
+    "Q": 3650,
+}
+
+FRED_CORE_SERIES: dict[str, dict[str, str]] = {
+    "FEDFUNDS": {
+        "series_id": "FEDFUNDS",
+        "name": "联邦基金利率",
+        "category": "bond",
+        "frequency": "M",
+        "unit": "%",
+    },
+    "SOFR": {
+        "series_id": "SOFR",
+        "name": "SOFR隔夜融资利率",
+        "category": "bond",
+        "frequency": "D",
+        "unit": "%",
+    },
+    "DGS2": {
+        "series_id": "DGS2",
+        "name": "美国2年期国债收益率(FRED)",
+        "category": "bond",
+        "frequency": "D",
+        "unit": "%",
+    },
+    "DGS10": {
+        "series_id": "DGS10",
+        "name": "美国10年期国债收益率(FRED)",
+        "category": "bond",
+        "frequency": "D",
+        "unit": "%",
+    },
+    "T10Y3M": {
+        "series_id": "T10Y3M",
+        "name": "美国10Y-3M期限利差",
+        "category": "bond",
+        "frequency": "D",
+        "unit": "%",
+    },
+    "CPIAUCSL": {
+        "series_id": "CPIAUCSL",
+        "name": "美国CPI(季调)",
+        "category": "inflation",
+        "frequency": "M",
+        "unit": "index",
+    },
+    "PCEPILFE": {
+        "series_id": "PCEPILFE",
+        "name": "美国核心PCE价格指数",
+        "category": "inflation",
+        "frequency": "M",
+        "unit": "index",
+    },
+    "DFII10": {
+        "series_id": "DFII10",
+        "name": "美国10Y实际利率(TIPS)",
+        "category": "bond",
+        "frequency": "D",
+        "unit": "%",
+    },
+    "UNRATE": {
+        "series_id": "UNRATE",
+        "name": "美国失业率",
+        "category": "growth",
+        "frequency": "M",
+        "unit": "%",
+    },
+    "PAYEMS": {
+        "series_id": "PAYEMS",
+        "name": "美国非农就业总人数",
+        "category": "growth",
+        "frequency": "M",
+        "unit": "thousand_persons",
+    },
+    "BAMLH0A0HYM2": {
+        "series_id": "BAMLH0A0HYM2",
+        "name": "美高收益债OAS利差",
+        "category": "credit",
+        "frequency": "D",
+        "unit": "%",
+    },
+    "WALCL": {
+        "series_id": "WALCL",
+        "name": "美联储总资产",
+        "category": "liquidity",
+        "frequency": "W",
+        "unit": "million_usd",
+    },
+}
 
 
 def get_date_range() -> tuple[str, str]:
@@ -138,6 +240,66 @@ def _fetch_fred_series(
     if not records:
         return pd.DataFrame()
     return pd.DataFrame(records)
+
+
+def _threshold_days_for_freq(freq: str) -> int:
+    return FRESHNESS_THRESHOLD_BY_FREQ.get((freq or "D").upper(), 45)
+
+
+def _backfill_days_for_freq(freq: str) -> int:
+    return FRED_BACKFILL_DAYS_BY_FREQ.get((freq or "D").upper(), 365)
+
+
+def _get_stale_flag(trade_date: datetime | pd.Timestamp | None, freq: str) -> tuple[str, int]:
+    if trade_date is None:
+        return "UNKNOWN", -1
+    as_of = pd.to_datetime(trade_date, errors="coerce")
+    if pd.isna(as_of):
+        return "UNKNOWN", -1
+    stale_days = (datetime.now().date() - as_of.date()).days
+    threshold = _threshold_days_for_freq(freq)
+    return ("Y" if stale_days > threshold else "N"), stale_days
+
+
+def _upsert_indicator_meta(meta_map: dict[str, dict[str, str]]) -> None:
+    if not meta_map:
+        return
+
+    create_sql = text(
+        """
+        CREATE TABLE IF NOT EXISTS macro_indicator_meta (
+            indicator_code VARCHAR(64) PRIMARY KEY,
+            indicator_name VARCHAR(128) NOT NULL,
+            category VARCHAR(32) NOT NULL,
+            source VARCHAR(32) NOT NULL,
+            frequency VARCHAR(8) NOT NULL,
+            unit VARCHAR(64) NOT NULL,
+            update_time DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+        )
+        """
+    )
+    upsert_sql = text(
+        """
+        REPLACE INTO macro_indicator_meta
+        (indicator_code, indicator_name, category, source, frequency, unit)
+        VALUES (:indicator_code, :indicator_name, :category, :source, :frequency, :unit)
+        """
+    )
+
+    with engine.begin() as conn:
+        conn.execute(create_sql)
+        for code, meta in meta_map.items():
+            conn.execute(
+                upsert_sql,
+                {
+                    "indicator_code": code,
+                    "indicator_name": meta["name"],
+                    "category": meta["category"],
+                    "source": "fred",
+                    "frequency": meta["frequency"],
+                    "unit": meta["unit"],
+                },
+            )
 
 
 def save_to_db(result_dict: dict) -> int:
@@ -495,6 +657,75 @@ def fetch_bdi_index() -> dict:
     return results
 
 
+def fetch_fred_core_macro() -> tuple[dict[str, dict[str, Any]], list[str], list[str]]:
+    results: dict[str, dict[str, Any]] = {}
+    ok_codes: list[str] = []
+    fail_codes: list[str] = []
+
+    if not FRED_API_KEY:
+        print("  ⚠️ FRED_CORE_SKIP=missing_api_key")
+        return results, ok_codes, list(FRED_CORE_SERIES.keys())
+
+    now_dt = datetime.now()
+    print("  更新 FRED 核心宏观指标(12条)...")
+    _upsert_indicator_meta(FRED_CORE_SERIES)
+
+    for code, meta in FRED_CORE_SERIES.items():
+        series_id = meta["series_id"]
+        freq = meta["frequency"]
+        start_dt = now_dt - timedelta(days=_backfill_days_for_freq(freq))
+
+        try:
+            df_fred = _retry_call(
+                f"fred:{series_id}",
+                lambda s=series_id, sdt=start_dt: _fetch_fred_series(
+                    s,
+                    observation_start=sdt.strftime("%Y-%m-%d"),
+                    observation_end=now_dt.strftime("%Y-%m-%d"),
+                ),
+                attempts=2,
+                base_sleep=2.0,
+            )
+            if df_fred.empty:
+                fail_codes.append(code)
+                print(
+                    f"FRED_FETCH_FAIL={code}|SERIES={series_id}|LATEST_DATE=NONE|"
+                    f"STALE_FLAG=UNKNOWN|REASON=empty_series"
+                )
+                continue
+
+            series_df = _build_series(df_fred, "trade_date", "close_value", start_date=start_dt)
+            if series_df.empty:
+                fail_codes.append(code)
+                print(
+                    f"FRED_FETCH_FAIL={code}|SERIES={series_id}|LATEST_DATE=NONE|"
+                    f"STALE_FLAG=UNKNOWN|REASON=empty_normalized"
+                )
+                continue
+
+            latest_trade_date = series_df["trade_date"].max()
+            stale_flag, stale_days = _get_stale_flag(latest_trade_date, freq)
+            results[code] = {
+                "df": series_df,
+                "name": meta["name"],
+                "category": meta["category"],
+            }
+            ok_codes.append(code)
+            print(
+                f"FRED_FETCH_OK={code}|SERIES={series_id}|LATEST_DATE={latest_trade_date.date()}|"
+                f"STALE_FLAG={stale_flag}|STALE_DAYS={stale_days}|FREQ={freq}|UNIT={meta['unit']}"
+            )
+        except Exception as e:
+            fail_codes.append(code)
+            print(
+                f"FRED_FETCH_FAIL={code}|SERIES={series_id}|LATEST_DATE=NONE|"
+                f"STALE_FLAG=UNKNOWN|REASON={type(e).__name__}"
+            )
+            _log_error(f"    ❌ FRED 指标抓取失败 {code}", e)
+
+    return results, ok_codes, fail_codes
+
+
 def run_daily_update() -> None:
     print("=" * 50)
     print(f"宏观数据每日更新任务 ({datetime.now().strftime('%Y-%m-%d %H:%M:%S')})")
@@ -509,12 +740,18 @@ def run_daily_update() -> None:
     total += dxy_backfilled
     total += save_to_db(fetch_offshore_cny_yahoo())
     total += save_to_db(fetch_bdi_index())
+
+    fred_core_data, fred_ok_codes, fred_fail_codes = fetch_fred_core_macro()
+    total += save_to_db(fred_core_data)
+
     dxy_latest_date = get_latest_indicator_date("DXY")
 
     print(f"\n任务完成! 共更新 {total} 条数据。")
     print(f"DXY_SOURCE={dxy_source}")
     print(f"DXY_BACKFILLED_DATES={dxy_backfilled}")
     print(f"DXY_LATEST_DATE={dxy_latest_date}")
+    print(f"FRED_FETCH_OK={','.join(sorted(fred_ok_codes)) if fred_ok_codes else 'NONE'}")
+    print(f"FRED_FETCH_FAIL={','.join(sorted(fred_fail_codes)) if fred_fail_codes else 'NONE'}")
 
 
 if __name__ == "__main__":
