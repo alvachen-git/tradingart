@@ -123,7 +123,7 @@ def calc_iv_from_db(symbol="rb", days=365):
 if __name__ == "__main__":
     # 定义要计算的品种列表
     # 注意：必须确保这些品种在 commodity_option_basic 和 commodity_opt_daily 表里有数据
-    target_list = ['rb','i','sm','sf','fg', 'sa', 'bu', 'pg','sc', 'm','c','rm','y','oi','p', 'ag', 'au','cu','al','zn','ru','sn','ni','pb','ao','sh', 'lc', 'si','ps', 'sr','cf','ta','ma','eb', 'eg','v', 'if', 'ih', 'im', 'ap', 'cj']
+    target_list = ['rb','i','jm','sm','sf','fg', 'sa', 'bu', 'pg','sc', 'm','c','rm','y','oi','p', 'ag', 'au','cu','al','zn','ru','sn','ni','pb','ao','sh', 'lc', 'si','ps', 'sr','cf','ta','ma','eb', 'eg','v', 'if', 'ih', 'im', 'ap', 'cj']
 
     print(f"=== 开始批量计算 IV，共 {len(target_list)} 个品种 ===")
 
