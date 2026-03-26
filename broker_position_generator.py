@@ -9,10 +9,14 @@
 """
 
 import html
+import json
 import pandas as pd
 import os
+import random
 import re
+import sys
 import time
+from typing import Any, Callable
 from datetime import datetime, timedelta
 from sqlalchemy import create_engine, text
 from dotenv import load_dotenv
@@ -37,10 +41,52 @@ from news_tools import get_financial_news
 from search_tools import search_web
 import subscription_service as sub_svc
 
-# 初始化环境
-load_dotenv(override=True)
+try:
+    from requests.exceptions import ConnectionError as RequestsConnectionError
+    from requests.exceptions import HTTPError as RequestsHTTPError
+    from requests.exceptions import SSLError as RequestsSSLError
+    from requests.exceptions import Timeout as RequestsTimeout
+    RETRYABLE_REQUEST_EXCEPTIONS = (
+        RequestsConnectionError,
+        RequestsSSLError,
+        RequestsTimeout,
+        RequestsHTTPError,
+    )
+except Exception:
+    RETRYABLE_REQUEST_EXCEPTIONS = tuple()
+
+
+def _read_int_env(name: str, default: int) -> int:
+    raw = str(os.getenv(name, str(default))).strip()
+    try:
+        value = int(raw)
+        return value if value > 0 else default
+    except Exception:
+        return default
+
+
+def _configure_langsmith_tracing() -> None:
+    """Default to disable LangSmith tracing for this batch script."""
+    enabled = str(os.getenv("ENABLE_LANGSMITH_TRACING", "0")).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    if enabled:
+        return
+    os.environ["LANGCHAIN_TRACING_V2"] = "false"
+    os.environ["LANGSMITH_TRACING"] = "false"
+    os.environ["LANGCHAIN_CALLBACKS_BACKGROUND"] = "false"
 
 # 避免本地 shell 代理变量触发 requests 的 SOCKS 依赖异常
+load_dotenv(override=True)
+_configure_langsmith_tracing()
+
+BROKER_REPORT_MAX_RETRY_SECONDS = _read_int_env("BROKER_REPORT_MAX_RETRY_SECONDS", 480)
+BROKER_REPORT_REQ_TIMEOUT_SECONDS = _read_int_env("BROKER_REPORT_REQ_TIMEOUT_SECONDS", 45)
+_MAX_BACKOFF_SECONDS = 30
+
 for _proxy_key in (
     "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
     "http_proxy", "https_proxy", "all_proxy",
@@ -52,7 +98,116 @@ db_url = f"mysql+pymysql://{os.getenv('DB_USER')}:{os.getenv('DB_PASSWORD')}@{os
 engine = create_engine(db_url)
 
 # 初始化 LLM
-llm = ChatTongyi(model="qwen-plus", api_key=os.getenv("DASHSCOPE_API_KEY"))
+llm = ChatTongyi(
+    model="qwen-plus",
+    api_key=os.getenv("DASHSCOPE_API_KEY"),
+    request_timeout=BROKER_REPORT_REQ_TIMEOUT_SECONDS,
+    max_retries=1,
+)
+
+
+def _classify_retry(exc: Exception) -> tuple[str, bool]:
+    message = f"{type(exc).__name__}: {exc}"
+    lower = message.lower()
+
+    status_codes = re.findall(r"\b([1-5]\d{2})\b", lower)
+    for code_str in status_codes:
+        code = int(code_str)
+        if code in (401, 403):
+            return "auth_forbidden", False
+        if code == 429:
+            return "rate_limit", True
+        if 500 <= code <= 599:
+            return f"http_{code}", True
+
+    if RETRYABLE_REQUEST_EXCEPTIONS and isinstance(exc, RETRYABLE_REQUEST_EXCEPTIONS):
+        return "network_transport", True
+
+    if isinstance(exc, (TimeoutError, ConnectionError)):
+        return "network_transport", True
+
+    retryable_hints = (
+        "ssleoferror",
+        "unexpected_eof_while_reading",
+        "max retries exceeded",
+        "connection aborted",
+        "connection reset",
+        "timed out",
+        "timeout",
+        "remote disconnected",
+        "temporarily unavailable",
+        "service unavailable",
+    )
+    if any(hint in lower for hint in retryable_hints):
+        return "network_transport", True
+
+    if isinstance(exc, (ValueError, TypeError, KeyError)):
+        return "request_param_error", False
+
+    return "unknown_non_retryable", False
+
+
+def _compute_backoff_seconds(attempt: int, remaining_budget: float) -> float:
+    base = min(_MAX_BACKOFF_SECONDS, 2 ** max(attempt - 1, 0))
+    jitter = random.uniform(0.0, 1.0)
+    wait_s = min(_MAX_BACKOFF_SECONDS, base + jitter)
+    return max(0.0, min(wait_s, remaining_budget))
+
+
+def _invoke_with_retry(fn: Callable[[], Any], op_name: str) -> dict:
+    started_at = time.time()
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            result = fn()
+            elapsed = time.time() - started_at
+            return {
+                "ok": True,
+                "result": result,
+                "attempts": attempt,
+                "elapsed_seconds": elapsed,
+            }
+        except Exception as exc:
+            elapsed = time.time() - started_at
+            remaining = BROKER_REPORT_MAX_RETRY_SECONDS - elapsed
+            category, retryable = _classify_retry(exc)
+            message = f"{type(exc).__name__}: {exc}"
+
+            if (not retryable) or remaining <= 0:
+                return {
+                    "ok": False,
+                    "result": None,
+                    "attempts": attempt,
+                    "elapsed_seconds": elapsed,
+                    "error_category": category,
+                    "error_message": message,
+                }
+
+            wait_s = _compute_backoff_seconds(attempt, remaining)
+            print(
+                f"⚠️ [{op_name}] attempt {attempt} failed ({category}): {message} | "
+                f"retry in {wait_s:.1f}s, remaining budget {remaining:.1f}s"
+            )
+            if wait_s > 0:
+                time.sleep(wait_s)
+
+
+def _write_material_debug(material: str, meta: dict = None) -> None:
+    payload = {
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "meta": meta or {},
+        "material_length": len(material or ""),
+        "material_preview": (material or "")[:2000],
+    }
+    try:
+        with open("broker_material_debug.txt", "w", encoding="utf-8") as f:
+            f.write("=== broker material debug ===\n")
+            f.write(json.dumps(payload, ensure_ascii=False, indent=2))
+            f.write("\n\n=== material full text ===\n")
+            f.write(material or "")
+    except Exception as write_err:
+        print(f"[debug] failed to write broker_material_debug.txt: {write_err}")
 
 # ==========================================
 # 2. 期货商分类配置
@@ -1107,20 +1262,67 @@ def collect_broker_position_data():
 6. 分歧品种技术面验证
 """
 
-        result = reporter_agent.invoke(
-            {"messages": [HumanMessage(content=trigger_msg)]},
-            {"recursion_limit": 150}  # 增加步骤限制，因为多了资金计算
-        )
+        def _do_collect():
+            return reporter_agent.invoke(
+                {"messages": [HumanMessage(content=trigger_msg)]},
+                {"recursion_limit": 150}
+            )
 
-        collected_content = result["messages"][-1].content
-        print("✅ [持仓记者] 采集完成。")
-        return collected_content
+        invoke_result = _invoke_with_retry(_do_collect, "collect_material")
+        if not invoke_result.get("ok"):
+            print(
+                f"[collect_material] failed after {invoke_result.get('attempts', 0)} attempts, "
+                f"elapsed={invoke_result.get('elapsed_seconds', 0.0):.1f}s, "
+                f"category={invoke_result.get('error_category')}, "
+                f"error={invoke_result.get('error_message')}"
+            )
+            return {
+                "ok": False,
+                "material": "",
+                "error_category": invoke_result.get("error_category", "collect_failed"),
+                "error_message": invoke_result.get("error_message", ""),
+                "attempts": invoke_result.get("attempts", 0),
+                "elapsed_seconds": invoke_result.get("elapsed_seconds", 0.0),
+            }
+
+        result = invoke_result.get("result")
+        messages = result.get("messages") if isinstance(result, dict) else None
+        if not messages:
+            return {
+                "ok": False,
+                "material": "",
+                "error_category": "collect_bad_response",
+                "error_message": "missing messages in reporter_agent response",
+                "attempts": invoke_result.get("attempts", 0),
+                "elapsed_seconds": invoke_result.get("elapsed_seconds", 0.0),
+            }
+
+        collected_content = getattr(messages[-1], "content", "")
+        if not isinstance(collected_content, str):
+            collected_content = str(collected_content or "")
+
+        print("✅[持仓记者] 采集完成。")
+        return {
+            "ok": True,
+            "material": collected_content,
+            "error_category": "",
+            "error_message": "",
+            "attempts": invoke_result.get("attempts", 0),
+            "elapsed_seconds": invoke_result.get("elapsed_seconds", 0.0),
+        }
 
     except Exception as e:
         print(f"❌ [持仓记者] 采集出错: {e}")
         import traceback
         traceback.print_exc()
-        return "AI 采集失败。"
+        return {
+            "ok": False,
+            "material": "",
+            "error_category": "collect_internal_error",
+            "error_message": f"{type(e).__name__}: {e}",
+            "attempts": 0,
+            "elapsed_seconds": 0.0,
+        }
 
 
 # ==========================================
@@ -1326,8 +1528,41 @@ def draft_broker_position_report(raw_material):
 【输出】：只返回HTML代码。
 """
 
-    res = llm.invoke([HumanMessage(content=prompt)])
-    html = res.content.replace("```html", "").replace("```", "").strip()
+    try:
+        def _do_draft():
+            return llm.invoke([HumanMessage(content=prompt)])
+
+        invoke_result = _invoke_with_retry(_do_draft, "draft_report")
+        if not invoke_result.get("ok"):
+            print(
+                f"[draft_report] failed after {invoke_result.get('attempts', 0)} attempts, "
+                f"elapsed={invoke_result.get('elapsed_seconds', 0.0):.1f}s, "
+                f"category={invoke_result.get('error_category')}, "
+                f"error={invoke_result.get('error_message')}"
+            )
+            return {
+                "ok": False,
+                "report_html": "",
+                "error_category": invoke_result.get("error_category", "draft_failed"),
+                "error_message": invoke_result.get("error_message", ""),
+                "attempts": invoke_result.get("attempts", 0),
+                "elapsed_seconds": invoke_result.get("elapsed_seconds", 0.0),
+            }
+
+        res = invoke_result.get("result")
+        html = getattr(res, "content", "")
+        if not isinstance(html, str):
+            html = str(html or "")
+        html = html.replace("```html", "").replace("```", "").strip()
+    except Exception as e:
+        return {
+            "ok": False,
+            "report_html": "",
+            "error_category": "draft_internal_error",
+            "error_message": f"{type(e).__name__}: {e}",
+            "attempts": 0,
+            "elapsed_seconds": 0.0,
+        }
 
     # 核心持仓与分歧信号全部改为代码端确定性计算，避免 LLM 误判方向
     today_date, yesterday, five_days_ago = get_recent_trading_days(5)
@@ -1344,7 +1579,14 @@ def draft_broker_position_report(raw_material):
     html = enforce_contra_signal_section(html, contra_day, institution_5d)
 
     html = sanitize_institution_section(html)
-    return html
+    return {
+        "ok": True,
+        "report_html": html,
+        "error_category": "",
+        "error_message": "",
+        "attempts": invoke_result.get("attempts", 0),
+        "elapsed_seconds": invoke_result.get("elapsed_seconds", 0.0),
+    }
 
 
 # ==========================================
@@ -1387,9 +1629,12 @@ def publish_broker_position_report(html_content: str):
 
 
 # ==========================================
-# 8. 主流程
+# 8. 主流程（旧版本保留）
 # ==========================================
-def main():
+def _legacy_main():
+    # Keep compatibility for any external caller that still imports legacy entrypoint.
+    return main()
+
     start_t = time.time()
     print("=" * 60)
     print("🏛️ 期货商持仓晚报生成器 v6.0")
@@ -1431,6 +1676,137 @@ def main():
     print(f"采集: ✅ | 撰写: ✅ | 发布: {'✅' if pub_success else '❌'}")
     print(f"预览: {preview_path}")
     print(f"耗时: {time.time() - start_t:.1f}s")
+    print("=" * 60)
+
+
+def main():
+    start_t = time.time()
+    print("=" * 60)
+    print("Broker Position Report Generator v6.0")
+    print("=" * 60)
+
+    if should_skip_non_trading_publish():
+        print("Task skipped by non-trading-day gate.")
+        return
+
+    print("\n[Step 1] Collect material...")
+    collect_result = collect_broker_position_data()
+    if not isinstance(collect_result, dict):
+        collect_result = {
+            "ok": False,
+            "material": "",
+            "error_category": "collect_contract_error",
+            "error_message": f"unexpected collect return type: {type(collect_result).__name__}",
+            "attempts": 0,
+            "elapsed_seconds": 0.0,
+        }
+
+    if not collect_result.get("ok"):
+        meta = {
+            "stage": "collect",
+            "error_category": collect_result.get("error_category", "collect_failed"),
+            "error_message": collect_result.get("error_message", ""),
+            "attempts": collect_result.get("attempts", 0),
+            "elapsed_seconds": collect_result.get("elapsed_seconds", 0.0),
+        }
+        _write_material_debug("", meta)
+        print(
+            f"[collect] failed | category={meta['error_category']} | "
+            f"attempts={meta['attempts']} | elapsed={meta['elapsed_seconds']:.1f}s | "
+            f"error={meta['error_message']}"
+        )
+        sys.exit(1)
+
+    material = str(collect_result.get("material") or "").strip()
+    if len(material) < 100:
+        meta = {
+            "stage": "collect_quality",
+            "error_category": "material_too_short",
+            "error_message": f"material length too short: {len(material)}",
+            "attempts": collect_result.get("attempts", 0),
+            "elapsed_seconds": collect_result.get("elapsed_seconds", 0.0),
+        }
+        _write_material_debug(material, meta)
+        print(f"[collect] material too short ({len(material)} chars), abort.")
+        sys.exit(1)
+
+    _write_material_debug(
+        material,
+        {
+            "stage": "collect_success",
+            "attempts": collect_result.get("attempts", 0),
+            "elapsed_seconds": collect_result.get("elapsed_seconds", 0.0),
+        },
+    )
+
+    print("\n[Step 2] Draft report...")
+    draft_result = draft_broker_position_report(material)
+    if not isinstance(draft_result, dict):
+        draft_result = {
+            "ok": False,
+            "report_html": "",
+            "error_category": "draft_contract_error",
+            "error_message": f"unexpected draft return type: {type(draft_result).__name__}",
+            "attempts": 0,
+            "elapsed_seconds": 0.0,
+        }
+
+    if not draft_result.get("ok"):
+        meta = {
+            "stage": "draft",
+            "error_category": draft_result.get("error_category", "draft_failed"),
+            "error_message": draft_result.get("error_message", ""),
+            "attempts": draft_result.get("attempts", 0),
+            "elapsed_seconds": draft_result.get("elapsed_seconds", 0.0),
+        }
+        _write_material_debug(material, meta)
+        print(
+            f"[draft] failed | category={meta['error_category']} | "
+            f"attempts={meta['attempts']} | elapsed={meta['elapsed_seconds']:.1f}s | "
+            f"error={meta['error_message']}"
+        )
+        sys.exit(2)
+
+    report_html = str(draft_result.get("report_html") or "")
+    preview_path = "preview_broker_position_report.html"
+    with open(preview_path, "w", encoding="utf-8") as f:
+        f.write(report_html)
+    print(f"[draft] preview written: {preview_path}")
+
+    if len(report_html) < 300:
+        meta = {
+            "stage": "draft_quality",
+            "error_category": "report_too_short",
+            "error_message": f"report html too short: {len(report_html)}",
+            "attempts": draft_result.get("attempts", 0),
+            "elapsed_seconds": draft_result.get("elapsed_seconds", 0.0),
+        }
+        _write_material_debug(material, meta)
+        print("[draft] report too short, abort.")
+        sys.exit(2)
+
+    print("\n[Step 3] Publish report...")
+    pub_success, pub_result = publish_broker_position_report(report_html)
+    if not pub_success:
+        _write_material_debug(
+            material,
+            {
+                "stage": "publish",
+                "error_category": "publish_failed",
+                "error_message": str(pub_result),
+                "attempts": 1,
+                "elapsed_seconds": 0.0,
+            },
+        )
+        print(f"[publish] failed: {pub_result}")
+        sys.exit(3)
+
+    print(f"\n{'=' * 60}")
+    print("Result Summary")
+    print(f"{'=' * 60}")
+    print("collect: OK | draft: OK | publish: OK")
+    print(f"preview: {preview_path}")
+    print(f"elapsed: {time.time() - start_t:.1f}s")
     print("=" * 60)
 
 
