@@ -23,7 +23,10 @@ SPECIAL_MAPPING = {'IO': 'IF', 'MO': 'IM', 'HO': 'IH'}
 FUT_TO_OPT = {v: k for k, v in SPECIAL_MAPPING.items()}
 
 # 目标品种
-TARGETS = ['jm']
+TARGETS = ['LC', 'SI', 'PS', 'pd', 'pt', 'IH', 'IF', 'IM', 'au', 'ag', 'cu', 'al', 'zn', 'ni', 'sn',
+           'rb', 'i', 'sm', 'sf', 'fg', 'sa', 'm', 'a', 'b', 'rm', 'y', 'oi', 'p', 'ta', 'pr', 'ma', 'v', 'eb', 'eg', 'l', 'pp',
+           'ru','br','lg','lh','px',
+           'c', 'cf', 'ap', 'cj', 'pk', 'jd', 'sr', 'ao', 'sh', 'ur', 'sp', 'fu', 'bu', 'sc']
 
 
 def get_opt_prefix(fut_symbol):
@@ -243,8 +246,8 @@ def process_daily_commodity(symbol, target_date):
 if __name__ == "__main__":
 
     # 🔴 在这里配置你想计算的日期区间 (格式 YYYYMMDD)
-    START_DATE = "20251201"
-    END_DATE = "20260301"
+    START_DATE = "20241231"
+    END_DATE = "20250611"
 
     # 自动生成日期序列
     date_range = pd.date_range(start=START_DATE, end=END_DATE)
