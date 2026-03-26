@@ -391,10 +391,39 @@ def _query_group_product_net_changes(brokers_db: list[str], start_date: str, end
         if df.empty:
             return []
 
-        df_agg = df.groupby(["broker", "product", "t_date"])[["long_vol", "short_vol"]].sum().reset_index()
-        df_start = df_agg[df_agg["t_date"] == d1].set_index(["broker", "product"])
-        df_end = df_agg[df_agg["t_date"] == d2].set_index(["broker", "product"])
-        df_end, df_start = df_end.align(df_start, join="outer", fill_value=0)
+        # Normalize aliases first to avoid cross-day key drift: "xx" vs "xx(代客)".
+        df["broker_norm"] = df["broker"].apply(_normalize_broker_base_name)
+        df_agg = (
+            df.groupby(["broker_norm", "product", "t_date"])[["long_vol", "short_vol"]]
+            .sum()
+            .reset_index()
+        )
+        df_start = df_agg[df_agg["t_date"] == d1].set_index(["broker_norm", "product"])
+        df_end = df_agg[df_agg["t_date"] == d2].set_index(["broker_norm", "product"])
+        if df_start.empty or df_end.empty:
+            print(
+                f"[broker_net] insufficient_rows: start_rows={len(df_start)}, "
+                f"end_rows={len(df_end)}, start={d1}, end={d2}"
+            )
+            return []
+
+        start_keys = set(df_start.index.tolist())
+        end_keys = set(df_end.index.tolist())
+        common_keys = start_keys & end_keys
+        if not common_keys:
+            print(f"[broker_net] no_common_keys: start={d1}, end={d2}")
+            return []
+
+        # Critical rule: missing rows mean "unknown", not zero.
+        if start_keys != end_keys:
+            missing_in_end = len(start_keys - end_keys)
+            missing_in_start = len(end_keys - start_keys)
+            print(
+                f"[broker_net] drop_unpaired_keys: missing_in_end={missing_in_end}, "
+                f"missing_in_start={missing_in_start}, start={d1}, end={d2}"
+            )
+
+        df_end, df_start = df_end.align(df_start, join="inner")
 
         df_diff = pd.DataFrame(index=df_end.index)
         # 净持仓变化 = (end_long - end_short) - (start_long - start_short)
@@ -417,7 +446,7 @@ def _query_group_product_net_changes(brokers_db: list[str], start_date: str, end
             name = str(row["name"])
             detail_df = (
                 df_diff[(df_diff["name"] == name) & (df_diff["net_chg"] != 0)]
-                .groupby("broker", as_index=False)["net_chg"]
+                .groupby("broker_norm", as_index=False)["net_chg"]
                 .sum()
                 .assign(abs_chg=lambda x: x["net_chg"].abs())
                 .sort_values("abs_chg", ascending=False)
@@ -429,7 +458,7 @@ def _query_group_product_net_changes(brokers_db: list[str], start_date: str, end
             )
             details = []
             for _, d in detail_df.iterrows():
-                details.append(f"{_broker_alias(d['broker'])} {int(d['net_chg']):+,}")
+                details.append(f"{_broker_alias(d['broker_norm'])} {int(d['net_chg']):+,}")
             components = {
                 str(d["product"]).upper(): int(d["net_chg"])
                 for _, d in component_df.iterrows()
@@ -450,9 +479,76 @@ def _query_group_product_net_changes(brokers_db: list[str], start_date: str, end
         return []
 
 
+def _collect_missing_end_products(brokers_db: list[str], start_date: str, end_date: str) -> list[dict]:
+    """
+    Collect products that exist on start_date but are missing on end_date.
+    """
+    d1 = _normalize_trade_date(start_date)
+    d2 = _normalize_trade_date(end_date)
+    query_brokers = _expand_broker_list(brokers_db)
+    if not query_brokers or len(d1) != 8 or len(d2) != 8:
+        return []
+
+    try:
+        brokers_sql = ",".join("'" + str(b).replace("'", "''") + "'" for b in query_brokers)
+        sql = f"""
+            SELECT broker, ts_code, REPLACE(trade_date, '-', '') AS t_date
+            FROM futures_holding
+            WHERE broker IN ({brokers_sql})
+              AND REPLACE(trade_date, '-', '') IN ('{d1}', '{d2}')
+              AND ts_code NOT LIKE '%%TAS%%'
+        """
+        df = pd.read_sql(sql, engine)
+        if df.empty:
+            return []
+
+        df["product"] = df["ts_code"].apply(_extract_product_code)
+        df = df[df["product"] != ""].copy()
+        if df.empty:
+            return []
+
+        df["broker_norm"] = df["broker"].apply(_normalize_broker_base_name)
+        pairs = df.groupby(["broker_norm", "product", "t_date"]).size().reset_index(name="cnt")
+
+        start_pairs = set(
+            tuple(x)
+            for x in pairs[pairs["t_date"] == d1][["broker_norm", "product"]].itertuples(index=False, name=None)
+        )
+        end_pairs = set(
+            tuple(x)
+            for x in pairs[pairs["t_date"] == d2][["broker_norm", "product"]].itertuples(index=False, name=None)
+        )
+        missing_pairs = sorted(start_pairs - end_pairs)
+        if not missing_pairs:
+            return []
+
+        grouped: dict[str, dict] = {}
+        for broker_norm, product in missing_pairs:
+            name = PRODUCT_MAP.get(product, product)
+            slot = grouped.setdefault(name, {"name": name, "brokers": set(), "codes": set()})
+            slot["brokers"].add(_broker_alias(broker_norm))
+            slot["codes"].add(str(product).upper())
+
+        notes: list[dict] = []
+        for name in sorted(grouped.keys()):
+            slot = grouped[name]
+            notes.append(
+                {
+                    "name": slot["name"],
+                    "brokers": ", ".join(sorted(slot["brokers"])),
+                    "codes": "/".join(sorted(slot["codes"])),
+                }
+            )
+        return notes
+    except Exception as e:
+        print(f"[broker_net] collect_missing_end_products_failed: {e}")
+        return []
+
+
 def _build_institution_day_snapshot(start_date: str, end_date: str) -> dict:
     institution_brokers_db = [get_db_broker_name(b) for b in BROKER_CONFIG["正指标_机构"]]
     records = _query_group_product_net_changes(institution_brokers_db, start_date, end_date)
+    missing_today = _collect_missing_end_products(institution_brokers_db, start_date, end_date)
     long_top = [r for r in records if r["net_chg"] > 0][:5]
     short_top = sorted([r for r in records if r["net_chg"] < 0], key=lambda x: x["net_chg"])[:5]
     return {
@@ -460,6 +556,7 @@ def _build_institution_day_snapshot(start_date: str, end_date: str) -> dict:
         "end_date": end_date,
         "long_top": long_top,
         "short_top": short_top,
+        "missing_today": missing_today,
     }
 
 
@@ -501,9 +598,25 @@ def enforce_institution_day_section(html_content: str, snapshot: dict) -> str:
     long_rows = _render_institution_rows(snapshot.get("long_top", []), "text-red", "— 无显著净多增仓 —")
     short_rows = _render_institution_rows(snapshot.get("short_top", []), "text-green", "— 无显著净空增仓 —")
 
+    missing_today = snapshot.get("missing_today", []) or []
+    if missing_today:
+        missing_text = "；".join(
+            f"{str(item.get('name', ''))}（{str(item.get('brokers', ''))}）"
+            for item in missing_today
+            if str(item.get("name", "")).strip()
+        )
+        missing_note_html = (
+            f'<p class="sub-text" style="margin:-6px 0 12px 0; color:#f59e0b;">'
+            f'当日无数据（已剔除，不按0计算）：{html.escape(missing_text)}'
+            f'</p>'
+        )
+    else:
+        missing_note_html = ""
+
     section = f"""
 <h2 class="section-title">机构当日动向</h2>
 <p class="sub-text" style="margin:-8px 0 16px 0;">海通 · 东证 · 国泰君安 ｜ 当日净持仓变化</p>
+{missing_note_html}
 
 <p style="font-size:14px; font-weight:600; margin:16px 0 8px 0;"><span class="text-red">●</span> 当日净多头增仓 TOP5</p>
 <table class="data-table">
