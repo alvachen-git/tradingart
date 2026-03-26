@@ -138,6 +138,27 @@ FRED_CORE_SERIES: dict[str, dict[str, str]] = {
         "frequency": "W",
         "unit": "million_usd",
     },
+    "GFDEBTN": {
+        "series_id": "GFDEBTN",
+        "name": "美国联邦政府总债务",
+        "category": "debt",
+        "frequency": "Q",
+        "unit": "million_usd",
+    },
+    "GDP": {
+        "series_id": "GDP",
+        "name": "美国名义GDP",
+        "category": "growth",
+        "frequency": "Q",
+        "unit": "billion_usd",
+    },
+    "GFDEGDQ188S": {
+        "series_id": "GFDEGDQ188S",
+        "name": "美国联邦债务占GDP比",
+        "category": "debt",
+        "frequency": "Q",
+        "unit": "%",
+    },
 }
 
 

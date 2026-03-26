@@ -9,7 +9,13 @@ import json
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage, AIMessage
 from langgraph.prebuilt import create_react_agent
 from langchain_core.prompts import ChatPromptTemplate
-from macro_tools import get_macro_indicator, get_macro_overview, analyze_yield_curve, get_macro_health_snapshot
+from macro_tools import (
+    get_macro_indicator,
+    get_macro_overview,
+    analyze_yield_curve,
+    get_macro_health_snapshot,
+    get_us_debt_gdp_snapshot,
+)
 from pydantic import BaseModel, Field
 from langgraph.graph import StateGraph, END
 
@@ -1015,6 +1021,7 @@ def macro_analyst_node(state: AgentState, llm):
 
     tools = [
         get_macro_health_snapshot,  # 先做数据可用性/新鲜度体检
+        get_us_debt_gdp_snapshot,  # 债务/GDP专用快照
         get_macro_indicator,  # 来自 macro_tools (已升级支持多查)
         get_macro_overview,  # 来自 macro_tools (看全局)
         analyze_yield_curve,  # 来自 macro_tools (看倒挂)
@@ -1033,6 +1040,8 @@ def macro_analyst_node(state: AgentState, llm):
 
         【分析逻辑与工具调用顺序】
         0. 先调用 `get_macro_health_snapshot()` 检查关键宏观数据可用性和新鲜度，若存在缺失/陈旧必须在结论里明确说明。
+        0.1 如果用户问题包含“债务/GDP/联邦债务”关键词，必须调用 `get_us_debt_gdp_snapshot()`；必要时再调用
+            `get_macro_indicator(indicator_code='GFDEBTN,GDP,GFDEGDQ188S')` 补充细节，并可用 `draw_macro_compare_chart` 画 GFDEBTN vs GDP。
 
         **第一步：全景与衰退诊断 (必须执行)**
         1. 调用 `get_macro_overview(category='all')`：

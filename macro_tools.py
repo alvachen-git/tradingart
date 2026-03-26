@@ -48,7 +48,17 @@ FRED_CORE_CODES = [
     "PAYEMS",
     "BAMLH0A0HYM2",
     "WALCL",
+    "GFDEBTN",
+    "GDP",
+    "GFDEGDQ188S",
 ]
+
+CODE_ALIAS_MAP = {
+    "USTOTD": "GFDEBTN",
+    "USAGDP": "GDP",
+    "USDEBTGDP": "GFDEGDQ188S",
+    "DEBTGDP": "GFDEGDQ188S",
+}
 
 CODE_META_FALLBACK = {
     "FEDFUNDS": {"source": "fred", "frequency": "M", "unit": "%"},
@@ -63,6 +73,9 @@ CODE_META_FALLBACK = {
     "PAYEMS": {"source": "fred", "frequency": "M", "unit": "thousand_persons"},
     "BAMLH0A0HYM2": {"source": "fred", "frequency": "D", "unit": "%"},
     "WALCL": {"source": "fred", "frequency": "W", "unit": "million_usd"},
+    "GFDEBTN": {"source": "fred", "frequency": "Q", "unit": "million_usd"},
+    "GDP": {"source": "fred", "frequency": "Q", "unit": "billion_usd"},
+    "GFDEGDQ188S": {"source": "fred", "frequency": "Q", "unit": "%"},
     "US10Y": {"source": "akshare", "frequency": "D", "unit": "%"},
     "US2Y": {"source": "akshare", "frequency": "D", "unit": "%"},
     "US30Y": {"source": "akshare", "frequency": "D", "unit": "%"},
@@ -79,7 +92,13 @@ CODE_META_FALLBACK = {
 
 
 def _parse_codes(indicator_code: str) -> list[str]:
-    return [c.strip().upper() for c in (indicator_code or "").split(",") if c.strip()]
+    out = []
+    for raw_code in (indicator_code or "").split(","):
+        code = raw_code.strip().upper()
+        if not code:
+            continue
+        out.append(CODE_ALIAS_MAP.get(code, code))
+    return out
 
 
 def _infer_frequency_from_category(category: str) -> str:
@@ -87,6 +106,8 @@ def _infer_frequency_from_category(category: str) -> str:
         return "M"
     if category == "liquidity":
         return "W"
+    if category == "debt":
+        return "Q"
     return "D"
 
 
@@ -143,6 +164,8 @@ def _format_value(code: str, value: float, unit: str) -> str:
         return f"{float(value):.2f}%"
     if unit == "million_usd":
         return f"{float(value):,.0f} (million USD)"
+    if unit == "billion_usd":
+        return f"{float(value):,.2f} (billion USD)"
     if unit == "thousand_persons":
         return f"{float(value):,.0f} (thousand persons)"
     if code in {"BDI", "PAYEMS"}:
@@ -309,6 +332,85 @@ def get_macro_health_snapshot(indicator_code: str = "") -> str:
         result.extend(["", "✅ 所有指标状态正常。"])
 
     return "\n".join(result)
+
+
+@tool
+def get_us_debt_gdp_snapshot() -> str:
+    """
+    【美债/GDP快照】
+    返回美国联邦债务、美国GDP、债务占GDP比的最新值、来源与新鲜度。
+    """
+    target_codes = ["GFDEBTN", "GDP", "GFDEGDQ188S"]
+    db_meta = _load_meta_from_db()
+    snapshots = {}
+
+    for code in target_codes:
+        sql = text(
+            """
+            SELECT indicator_name, category, close_value, trade_date
+            FROM macro_daily
+            WHERE indicator_code = :code
+            ORDER BY trade_date DESC
+            LIMIT 1
+            """
+        )
+        with engine.connect() as conn:
+            df = pd.read_sql(sql, conn, params={"code": code})
+        if df.empty:
+            snapshots[code] = None
+            continue
+        snapshots[code] = df.iloc[0]
+
+    if snapshots["GFDEBTN"] is None or snapshots["GDP"] is None:
+        missing_codes = [k for k, v in snapshots.items() if v is None]
+        return (
+            "⚠️ 美债/GDP关键数据不完整。\n"
+            f"- 缺失指标: {', '.join(missing_codes)}\n"
+            "- 建议: 先执行 `update_micro_daily.py`，再检查 FRED_FETCH_FAIL 日志。"
+        )
+
+    debt = snapshots["GFDEBTN"]
+    gdp = snapshots["GDP"]
+    ratio_official = snapshots["GFDEGDQ188S"]
+
+    debt_val_musd = pd.to_numeric(debt["close_value"], errors="coerce")
+    gdp_val_busd = pd.to_numeric(gdp["close_value"], errors="coerce")
+    ratio_calc = None
+    if pd.notna(debt_val_musd) and pd.notna(gdp_val_busd) and gdp_val_busd != 0:
+        ratio_calc = (debt_val_musd / (gdp_val_busd * 1000.0)) * 100.0
+
+    debt_meta = _resolve_meta("GFDEBTN", str(debt.get("category") or "debt"), db_meta)
+    gdp_meta = _resolve_meta("GDP", str(gdp.get("category") or "growth"), db_meta)
+    debt_status, debt_stale_days, _ = _freshness(debt["trade_date"], debt_meta["frequency"])
+    gdp_status, gdp_stale_days, _ = _freshness(gdp["trade_date"], gdp_meta["frequency"])
+
+    ratio_lines = []
+    if ratio_official is not None:
+        ratio_official_val = pd.to_numeric(ratio_official["close_value"], errors="coerce")
+        ratio_meta = _resolve_meta("GFDEGDQ188S", "debt", db_meta)
+        ratio_status, ratio_stale_days, _ = _freshness(ratio_official["trade_date"], ratio_meta["frequency"])
+        ratio_lines.extend(
+            [
+                f"- 官方债务/GDP: {ratio_official_val:.2f}% (code=GFDEGDQ188S)",
+                f"- 官方口径 as_of_date: {pd.to_datetime(ratio_official['trade_date']).strftime('%Y-%m-%d')}",
+                f"- 官方口径 freshness_status: {ratio_status}, stale_days: {ratio_stale_days}",
+            ]
+        )
+
+    calc_line = f"- 计算债务/GDP: {ratio_calc:.2f}%" if ratio_calc is not None else "- 计算债务/GDP: N/A"
+    return "\n".join(
+        [
+            "📌 **美国债务/GDP快照**",
+            f"- 联邦债务: {_format_value('GFDEBTN', debt_val_musd, 'million_usd')}",
+            f"- 联邦债务 as_of_date: {pd.to_datetime(debt['trade_date']).strftime('%Y-%m-%d')}",
+            f"- 联邦债务 source: {debt_meta['source']}, freshness_status: {debt_status}, stale_days: {debt_stale_days}",
+            f"- 美国GDP: {_format_value('GDP', gdp_val_busd, 'billion_usd')}",
+            f"- 美国GDP as_of_date: {pd.to_datetime(gdp['trade_date']).strftime('%Y-%m-%d')}",
+            f"- 美国GDP source: {gdp_meta['source']}, freshness_status: {gdp_status}, stale_days: {gdp_stale_days}",
+            calc_line,
+            *ratio_lines,
+        ]
+    )
 
 
 @tool

@@ -42,6 +42,9 @@ def test_fred_core_series_codes_complete():
         "PAYEMS",
         "BAMLH0A0HYM2",
         "WALCL",
+        "GFDEBTN",
+        "GDP",
+        "GFDEGDQ188S",
     }
     assert set(update_micro_daily.FRED_CORE_SERIES.keys()) == expected
 
@@ -155,6 +158,36 @@ def test_get_macro_indicator_contains_source_and_freshness(monkeypatch):
     assert "missing" in out
 
 
+def test_get_macro_indicator_alias_mapping(monkeypatch):
+    monkeypatch.setattr(macro_tools, "engine", DummyEngine())
+    monkeypatch.setattr(
+        macro_tools,
+        "_load_meta_from_db",
+        lambda: {"GFDEBTN": {"source": "fred", "frequency": "Q", "unit": "million_usd"}},
+    )
+
+    def fake_read_sql(sql, conn, params=None):
+        code = params["code"]
+        if code == "GFDEBTN":
+            return pd.DataFrame(
+                {
+                    "trade_date": [datetime.now() - timedelta(days=40), datetime.now() - timedelta(days=130)],
+                    "indicator_name": ["美国联邦政府总债务", "美国联邦政府总债务"],
+                    "category": ["debt", "debt"],
+                    "close_value": [36500000, 36000000],
+                    "change_value": [500000, 200000],
+                    "change_pct": [1.38, 0.56],
+                }
+            )
+        return pd.DataFrame()
+
+    monkeypatch.setattr(macro_tools.pd, "read_sql", fake_read_sql)
+
+    out = macro_tools.get_macro_indicator.invoke({"indicator_code": "USTOTD", "days": 30})
+    assert "GFDEBTN" in out
+    assert "freshness_status:" in out
+
+
 def test_get_macro_health_snapshot_reports_missing(monkeypatch):
     monkeypatch.setattr(macro_tools, "engine", DummyEngine())
     monkeypatch.setattr(
@@ -184,3 +217,54 @@ def test_get_macro_health_snapshot_reports_missing(monkeypatch):
     assert "FEDFUNDS" in out
     assert "SOFR" in out
     assert "异常与建议" in out
+
+
+def test_get_us_debt_gdp_snapshot(monkeypatch):
+    monkeypatch.setattr(macro_tools, "engine", DummyEngine())
+    monkeypatch.setattr(
+        macro_tools,
+        "_load_meta_from_db",
+        lambda: {
+            "GFDEBTN": {"source": "fred", "frequency": "Q", "unit": "million_usd"},
+            "GDP": {"source": "fred", "frequency": "Q", "unit": "billion_usd"},
+            "GFDEGDQ188S": {"source": "fred", "frequency": "Q", "unit": "%"},
+        },
+    )
+
+    def fake_read_sql(sql, conn, params=None):
+        code = params["code"]
+        if code == "GFDEBTN":
+            return pd.DataFrame(
+                {
+                    "indicator_name": ["美国联邦政府总债务"],
+                    "category": ["debt"],
+                    "close_value": [36500000],
+                    "trade_date": [datetime.now() - timedelta(days=60)],
+                }
+            )
+        if code == "GDP":
+            return pd.DataFrame(
+                {
+                    "indicator_name": ["美国名义GDP"],
+                    "category": ["growth"],
+                    "close_value": [30000],
+                    "trade_date": [datetime.now() - timedelta(days=60)],
+                }
+            )
+        if code == "GFDEGDQ188S":
+            return pd.DataFrame(
+                {
+                    "indicator_name": ["美国联邦债务占GDP比"],
+                    "category": ["debt"],
+                    "close_value": [121.5],
+                    "trade_date": [datetime.now() - timedelta(days=60)],
+                }
+            )
+        return pd.DataFrame()
+
+    monkeypatch.setattr(macro_tools.pd, "read_sql", fake_read_sql)
+    out = macro_tools.get_us_debt_gdp_snapshot.invoke({})
+    assert "美国债务/GDP快照" in out
+    assert "联邦债务" in out
+    assert "美国GDP" in out
+    assert "官方债务/GDP" in out
