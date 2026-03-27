@@ -33,7 +33,9 @@
         "navigationBarTitleText": "爱波塔",
         "navigationBarBackgroundColor": "#0b1121",
         "navigationBarTextStyle": "white",
-        "backgroundColor": "#0b1121"
+        "backgroundColor": "#0b1121",
+        "enableShareAppMessage": true,
+        "enableShareTimeline": true
       }
     },
     {
@@ -60,7 +62,9 @@
         "navigationBarTitleText": "行情",
         "navigationBarBackgroundColor": "#0b1121",
         "navigationBarTextStyle": "white",
-        "backgroundColor": "#0b1121"
+        "backgroundColor": "#0b1121",
+        "enableShareAppMessage": true,
+        "enableShareTimeline": true
       }
     },
     {

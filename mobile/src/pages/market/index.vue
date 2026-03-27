@@ -1,11 +1,13 @@
 <script setup lang="ts">
 import { ref, computed } from 'vue'
-import { onShow, onHide } from '@dcloudio/uni-app'
+import { onShow, onHide, onShareAppMessage, onShareTimeline } from '@dcloudio/uni-app'
 import { marketApi, type OptionItem, type ContractLiveItem } from '../../api/index'
 import { useAuthStore } from '../../store/auth'
 import BottomNav from '../../components/BottomNav.vue'
 
 const auth = useAuthStore()
+const SHARE_TITLE = '爱波塔 - 期货期权行情分析'
+const SHARE_PATH = '/pages/login/index'
 
 // ── Tab ──────────────────────────────────────────────────
 type Tab = 'options' | 'holding'
@@ -64,14 +66,12 @@ function livePct(item: OptionItem): number | null {
 
 /** 显示价格：优先实时，回退到 DB 收盘价 */
 function displayPrice(item: OptionItem): string | null {
-  // 实时（akshare 可用时）
-  if (liveTrading.value) {
-    const contractCode = extractContractCode(item.name)
-    const liveP = liveContracts.value[contractCode]?.price
-                ?? livePriceByProduct.value[item.product_code]
-                ?? 0
-    if (liveP > 0) return liveP >= 1000 ? liveP.toLocaleString() : liveP.toFixed(2)
-  }
+  // 优先实时缓存（含收盘后最后一笔）
+  const contractCode = extractContractCode(item.name)
+  const liveP = liveContracts.value[contractCode]?.price
+              ?? livePriceByProduct.value[item.product_code]
+              ?? 0
+  if (liveP > 0) return liveP >= 1000 ? liveP.toLocaleString() : liveP.toFixed(2)
   // DB 收盘价（始终可用）
   const p = item.cur_price ?? 0
   if (!p) return null
@@ -468,6 +468,16 @@ function posIcon(v: number): string { return v > 0 ? '▲' : v < 0 ? '▼' : '�
 function posColor(v: number): string { return v > 0 ? '#e84040' : v < 0 ? '#22c55e' : '#555555' }
 function scoreColor(v: number): string { return v > 0 ? '#e84040' : v < 0 ? '#22c55e' : '#888888' }
 function dirColor(d: string): string { return d === '多' ? '#e84040' : d === '空' ? '#22c55e' : '#888888' }
+
+onShareAppMessage(() => ({
+  title: SHARE_TITLE,
+  path: SHARE_PATH,
+}))
+
+onShareTimeline(() => ({
+  title: SHARE_TITLE,
+  query: 'from=timeline&page=market',
+}))
 </script>
 
 <template>
