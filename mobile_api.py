@@ -124,6 +124,58 @@ def _safe_float(v, default: float = 0.0) -> float:
         return default
 
 
+def _is_missing_value(v) -> bool:
+    if v is None:
+        return True
+    if isinstance(v, str) and v.strip() in {"", "-", "—", "--", "nan", "NaN", "None"}:
+        return True
+    try:
+        return bool(v != v)  # NaN
+    except Exception:
+        return False
+
+
+def _compute_iv_chg_fallback_map(df):
+    """
+    从最近数日 IV 历史中计算“最近两个交易日”的日变动回退值。
+    入参 df 列: code, td, iv
+    返回: {code_lower: iv_chg_1d}
+    """
+    if df is None or getattr(df, "empty", True):
+        return {}
+
+    import pandas as pd
+
+    req_cols = {"code", "td", "iv"}
+    if not req_cols.issubset(set(df.columns)):
+        return {}
+
+    work = df.copy()
+    work["code"] = work["code"].astype(str).str.lower()
+    work["td"] = work["td"].astype(str)
+    work["iv"] = pd.to_numeric(work["iv"], errors="coerce")
+    work = work.dropna(subset=["iv"])
+    if work.empty:
+        return {}
+
+    work = work.sort_values(["code", "td"], ascending=[True, False])
+    out = {}
+    for code, grp in work.groupby("code"):
+        vals = []
+        seen_td = set()
+        for _, r in grp.iterrows():
+            td = str(r["td"])
+            if td in seen_td:
+                continue
+            seen_td.add(td)
+            vals.append(float(r["iv"]))
+            if len(vals) >= 2:
+                break
+        if len(vals) >= 2 and vals[1] > 0:
+            out[code] = round(vals[0] - vals[1], 2)
+    return out
+
+
 def _to_sina_code(contract: str) -> str:
     """将大写合约代码转换为新浪行情请求码。
     所有交易所（SHFE/DCE/CZCE/CFFEX）统一格式：nf_{CODE}
@@ -305,8 +357,10 @@ def _prices_refresh_loop():
                 continue
 
             is_trading = _is_trading_hours()
-            contracts: dict = {}
-            items: list = []
+            # 收盘后保留最后一笔实时快照，避免前端回退到午盘 DB 价。
+            last_payload = _load_last_prices_payload()
+            contracts: dict = last_payload.get("contracts", {}) or {}
+            items: list = last_payload.get("items", []) or []
 
             if is_trading:
                 # refresh active contracts from DB hourly
@@ -792,8 +846,10 @@ def market_options(username: str = Depends(get_current_user)):
 
             # 当前IV：已经是百分比形式（如 18.53 = 18.53%），直接使用
             raw_iv = float(row.get("当前IV", 0) or 0)
-            # IV变动(日)：同样已是百分点，直接使用
-            raw_iv_chg = float(row.get("IV变动(日)", 0) or 0)
+            # IV变动(日)：优先使用综合数据，缺失时走历史回退计算
+            iv_chg_raw = row.get("IV变动(日)", None)
+            iv_chg_missing = _is_missing_value(iv_chg_raw)
+            raw_iv_chg = 0.0 if iv_chg_missing else float(iv_chg_raw or 0)
 
             records.append({
                 "name":         name_str,
@@ -806,7 +862,41 @@ def market_options(username: str = Depends(get_current_user)):
                 "retail_chg":   int(row.get("散户变动(日)", 0) or 0),
                 "inst_chg":     int(row.get("机构变动(日)", 0) or 0),
                 "cur_price":    0.0,  # 下面批量回填
+                "_iv_chg_missing": iv_chg_missing,
             })
+
+        # ── IV变动缺失回退：按最近两个收盘日计算（合约级）──────────
+        if records:
+            try:
+                code_set = set()
+                for r in records:
+                    c = r["name"].split("(")[0].strip().lower()
+                    if re.match(r"^[a-z]+[0-9]{3,4}$", c):
+                        code_set.add(c)
+                if code_set:
+                    codes_sql = "','".join(sorted(code_set))
+                    iv_recent_df = pd.read_sql(
+                        f"""
+                        SELECT
+                            LOWER(SUBSTRING_INDEX(ts_code, '.', 1)) AS code,
+                            REPLACE(trade_date,'-','')              AS td,
+                            iv
+                        FROM commodity_iv_history
+                        WHERE LOWER(SUBSTRING_INDEX(ts_code, '.', 1)) IN ('{codes_sql}')
+                          AND trade_date >= DATE_SUB(CURDATE(), INTERVAL 14 DAY)
+                          AND iv IS NOT NULL
+                        ORDER BY code ASC, td DESC
+                        """,
+                        de.engine
+                    )
+                    iv_fallback_map = _compute_iv_chg_fallback_map(iv_recent_df)
+                    for r in records:
+                        code = r["name"].split("(")[0].strip().lower()
+                        if code in iv_fallback_map:
+                            # 只要历史两日可算，优先采用回退值（覆盖 0 占位场景）
+                            r["iv_chg_1d"] = iv_fallback_map[code]
+            except Exception:
+                pass
 
         # ── 批量查询最新收盘价 ────────────────────────────────
         if records:
@@ -834,6 +924,9 @@ def market_options(username: str = Depends(get_current_user)):
                         r["cur_price"] = round(float(price_map.get(code, 0) or 0), 2)
             except Exception:
                 pass  # 价格查询失败不影响其他字段
+
+        for r in records:
+            r.pop("_iv_chg_missing", None)
 
         # 按 IV Rank 降序排列，快到期(-1)排最后
         records.sort(key=lambda x: x["iv_rank"] if x["iv_rank"] >= 0 else -999, reverse=True)
