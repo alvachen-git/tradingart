@@ -11,7 +11,7 @@ const loading = ref(false)
 
 const FREE_CHANNELS = [
   { code: 'fund_flow_report',       name: '复盘晚报' },
-  { code: 'expiry_option_report',   name: '末日期权晚报' },
+  { code: 'expiry_option_radar',    name: '末日期权晚报' },
   { code: 'broker_position_report', name: '期货商持仓分析晚报' },
 ]
 

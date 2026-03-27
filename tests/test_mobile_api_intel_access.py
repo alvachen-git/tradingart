@@ -13,6 +13,37 @@ except Exception as exc:  # pragma: no cover
 
 @unittest.skipIf(mobile_api is None, f"mobile_api import failed: {_IMPORT_ERROR}")
 class TestMobileApiIntelAccess(unittest.TestCase):
+    def test_intel_reports_normalizes_channel_alias_and_maps_published_at(self):
+        fake_rows = [
+            {
+                "id": 11,
+                "title": "t",
+                "channel_name": "末日期权晚报",
+                "channel_code": "expiry_option_radar",
+                "content": "<p>hello</p>",
+                "publish_time": "2026-03-27 18:30:00",
+            }
+        ]
+        with patch.object(mobile_api.sub_svc, "get_channel_contents", return_value=fake_rows) as mocked_get:
+            out = mobile_api.intel_reports(channel_code="expiry_option_report", username="u1")
+        self.assertEqual(len(out["items"]), 1)
+        self.assertEqual(out["items"][0]["published_at"], "2026-03-27 18:30:00")
+        self.assertEqual(mocked_get.call_args.kwargs["channel_code"], "expiry_option_radar")
+
+    def test_intel_report_detail_adds_published_at_fallback(self):
+        with patch.object(
+            mobile_api.sub_svc,
+            "get_content_by_id",
+            return_value={
+                "id": 9,
+                "channel_id": 1,
+                "is_premium": False,
+                "publish_time": "2026-03-27 18:30:00",
+            },
+        ):
+            out = mobile_api.intel_report_detail(9, username="u1")
+        self.assertEqual(out["published_at"], "2026-03-27 18:30:00")
+
     def test_premium_report_requires_subscription(self):
         with patch.object(
             mobile_api.sub_svc,
@@ -81,6 +112,33 @@ class TestMobileApiIntelAccess(unittest.TestCase):
         self.assertEqual(out["message"], "ok")
         kwargs = mocked_add.call_args.kwargs
         self.assertEqual(kwargs["source_type"], "self_subscribe_whitelist")
+
+    def test_subscribe_accepts_legacy_channel_alias(self):
+        body = mobile_api.SubscribeRequest(channel_code="expiry_option_report")
+        with patch.object(mobile_api, "_INTEL_SELF_SUBSCRIBE_API_ENABLED", True), patch.object(
+            mobile_api, "_ALLOW_SELF_SUB_IN_PROD", True
+        ), patch.object(
+            mobile_api,
+            "_is_production_env",
+            return_value=False,
+        ), patch.object(
+            mobile_api,
+            "_EFFECTIVE_FREE_CHANNEL_CODES",
+            {"expiry_option_radar"},
+        ), patch.object(
+            mobile_api.sub_svc,
+            "get_channel_by_code",
+            return_value={"id": 2, "code": "expiry_option_radar"},
+        ), patch.object(
+            mobile_api.sub_svc,
+            "add_subscription",
+            return_value=(True, "ok"),
+        ) as mocked_add:
+            out = mobile_api.intel_subscribe(body=body, username="u1")
+
+        self.assertEqual(out["message"], "ok")
+        kwargs = mocked_add.call_args.kwargs
+        self.assertEqual(kwargs["source_ref"], "api:intel_subscribe:expiry_option_radar")
 
     def test_subscribe_reject_for_force_paid_channel_even_if_whitelisted(self):
         body = mobile_api.SubscribeRequest(channel_code="fund_flow_report")

@@ -584,6 +584,25 @@ _ALLOW_SELF_SUB_IN_PROD = (
     str(os.getenv("INTEL_SELF_SUBSCRIBE_ALLOW_IN_PROD", "false")).strip().lower()
     in {"1", "true", "on", "yes"}
 )
+_INTEL_CHANNEL_CODE_ALIASES = {
+    # 历史小程序包曾使用该 code，兼容到后端真实频道码
+    "expiry_option_report": "expiry_option_radar",
+}
+
+
+def _normalize_intel_channel_code(code: Optional[str]) -> Optional[str]:
+    raw = str(code or "").strip().lower()
+    if not raw:
+        return None
+    return _INTEL_CHANNEL_CODE_ALIASES.get(raw, raw)
+
+
+def _extract_published_at(payload: dict) -> str:
+    # 兼容 subscription_service 的 publish_time 与旧字段 published_at
+    ts = payload.get("publish_time")
+    if ts is None:
+        ts = payload.get("published_at", "")
+    return str(ts or "")
 
 
 def _is_production_env() -> bool:
@@ -610,10 +629,12 @@ def intel_reports(
     page = max(1, page)
     page_size = min(50, max(1, page_size))
     offset = (page - 1) * page_size
+    channel_code = _normalize_intel_channel_code(channel_code)
 
     # 多拉一些再切片，避免多次 DB 查询
     raw = sub_svc.get_channel_contents(
         channel_code=channel_code,
+        days=10,
         limit=offset + page_size,
     ) or []
     paged = raw[offset: offset + page_size]
@@ -628,7 +649,7 @@ def intel_reports(
             "channel_name": c.get("channel_name", ""),
             "channel_code": c.get("channel_code", ""),
             "summary": summary,
-            "published_at": str(c.get("published_at", "")),
+            "published_at": _extract_published_at(c),
         })
 
     return {
@@ -652,6 +673,8 @@ def intel_report_detail(
         access = sub_svc.check_subscription_access(username, int(content.get("channel_id") or 0))
         if not access.get("has_access"):
             raise HTTPException(status_code=403, detail="该内容需要订阅后查看")
+    # 统一返回字段，避免客户端被 publish_time/published_at 命名差异影响
+    content["published_at"] = _extract_published_at(content)
     return content
 
 
@@ -666,7 +689,7 @@ def intel_subscribe(
     if _is_production_env() and not _ALLOW_SELF_SUB_IN_PROD:
         raise HTTPException(status_code=403, detail="生产环境默认关闭该接口")
 
-    channel_code = str(body.channel_code or "").strip()
+    channel_code = _normalize_intel_channel_code(body.channel_code)
     if not channel_code:
         raise HTTPException(status_code=400, detail="channel_code 不能为空")
     channel = sub_svc.get_channel_by_code(channel_code)

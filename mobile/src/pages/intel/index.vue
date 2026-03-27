@@ -10,7 +10,7 @@ const auth = useAuthStore()
 const channels = [
   { code: '',                          label: '全部' },
   { code: 'fund_flow_report',          label: '复盘晚报' },
-  { code: 'expiry_option_report',      label: '末日期权晚报' },
+  { code: 'expiry_option_radar',       label: '末日期权晚报' },
   { code: 'broker_position_report',    label: '期货商持仓' },
 ]
 
