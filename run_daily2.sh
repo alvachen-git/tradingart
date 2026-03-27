@@ -73,13 +73,11 @@ echo "========================================" >> "${LOG_FILE}"
 echo "⏰ 任务开始: $(date)" >> "${LOG_FILE}"
 echo "🐍 Python: ${PYTHON_BIN}" >> "${LOG_FILE}"
 
-run_step 1 7 "更新期货席位数据" "update_open_oneday.py"
-run_step 2 7 "更新股票资金流数据" "update_stock_moneyflow_daily.py"
-run_step 3 7 "更新产业链快照数据" "update_industry_chain_snapshot_daily.py"
-run_step 4 7 "更新美股价格数据" "update_stock_tiingo.py"
-run_step 5 7 "更新债券收益数据" "update_bond_data.py"
-run_step 6 7 "更新热搜数据" "trend_monitor.py"
-run_step 7 7 "更新宏观数据" "update_micro_daily.py"
+run_step 1 5 "更新期货席位数据" "update_open_oneday.py"
+run_step 2 5 "更新美股价格数据" "update_stock_tiingo.py"
+run_step 3 5 "更新债券收益数据" "update_bond_data.py"
+run_step 4 5 "更新热搜数据" "trend_monitor.py"
+run_step 5 5 "更新宏观数据" "update_micro_daily.py"
 check_dxy_freshness
 
 if [ ${FAILED_STEPS} -gt 0 ]; then
