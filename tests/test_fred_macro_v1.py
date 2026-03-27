@@ -188,6 +188,50 @@ def test_get_macro_indicator_alias_mapping(monkeypatch):
     assert "freshness_status:" in out
 
 
+def test_get_macro_indicator_legacy_alias_mapping(monkeypatch):
+    monkeypatch.setattr(macro_tools, "engine", DummyEngine())
+    monkeypatch.setattr(
+        macro_tools,
+        "_load_meta_from_db",
+        lambda: {
+            "GFDEBTN": {"source": "fred", "frequency": "Q", "unit": "million_usd"},
+            "GDP": {"source": "fred", "frequency": "Q", "unit": "billion_usd"},
+        },
+    )
+
+    def fake_read_sql(sql, conn, params=None):
+        code = params["code"]
+        if code == "GFDEBTN":
+            return pd.DataFrame(
+                {
+                    "trade_date": [datetime.now() - timedelta(days=40)],
+                    "indicator_name": ["美国联邦政府总债务"],
+                    "category": ["debt"],
+                    "close_value": [36500000],
+                    "change_value": [500000],
+                    "change_pct": [1.38],
+                }
+            )
+        if code == "GDP":
+            return pd.DataFrame(
+                {
+                    "trade_date": [datetime.now() - timedelta(days=40)],
+                    "indicator_name": ["美国GDP"],
+                    "category": ["growth"],
+                    "close_value": [30000],
+                    "change_value": [120],
+                    "change_pct": [0.40],
+                }
+            )
+        return pd.DataFrame()
+
+    monkeypatch.setattr(macro_tools.pd, "read_sql", fake_read_sql)
+
+    out = macro_tools.get_macro_indicator.invoke({"indicator_code": "USTD,USGDP", "days": 30})
+    assert "GFDEBTN" in out
+    assert "GDP" in out
+
+
 def test_get_macro_health_snapshot_reports_missing(monkeypatch):
     monkeypatch.setattr(macro_tools, "engine", DummyEngine())
     monkeypatch.setattr(
