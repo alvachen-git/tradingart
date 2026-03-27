@@ -93,7 +93,7 @@ _PRODUCT_EXCHANGE: dict[str, str] = {
     "zc":"CZCE","fg":"CZCE","sa":"CZCE","ur":"CZCE","ap":"CZCE","cj":"CZCE",
     "lc":"CZCE","bz":"CZCE","pr":"CZCE","si":"CZCE","ps":"CZCE","nr":"CZCE",
     "sf":"CZCE","sm":"CZCE","wt":"CZCE","pm":"CZCE","pf":"CZCE","cy":"CZCE",
-    "pl":"CZCE","op":"CZCE","fb":"CZCE","pk":"CZCE",   # 短纤、棉纱、丙烯、双胶纸、纤维板、花生
+    "pl":"CZCE","op":"CZCE","fb":"CZCE","pk":"CZCE","px":"CZCE",   # 短纤、棉纱、丙烯、双胶纸、纤维板、花生、PX
     # CFFEX 中金所 → nf_{CODE}（字段布局与商品期货不同，见 _fetch_sina_prices）
     "if":"CFFEX","ic":"CFFEX","ih":"CFFEX","im":"CFFEX",
     "ts":"CFFEX","tf":"CFFEX","t":"CFFEX","tl":"CFFEX",   # 补充30年国债
