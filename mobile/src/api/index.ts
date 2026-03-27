@@ -150,7 +150,7 @@ export const marketApi = {
       rows: BrokerDetailRow[]
     }>('GET', `/api/market/broker/${product}?broker=${encodeURIComponent(broker)}`),
 
-  chart: (product: string) =>
+  chart: (product: string, contract?: string) =>
     request<{
       product: string
       cn_name: string
@@ -164,7 +164,7 @@ export const marketApi = {
       dumb: Array<{ dt: string; net: number; chg: number }>
       smart: Array<{ dt: string; net: number; chg: number }>
       total_oi: Array<{ dt: string; v: number }>
-    }>('GET', `/api/market/chart/${product}`),
+    }>('GET', `/api/market/chart/${product}${contract ? `?contract=${encodeURIComponent(contract)}` : ''}`),
 }
 
 // ── Portfolio ─────────────────────────────────────────────

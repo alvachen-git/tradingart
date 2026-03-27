@@ -82,17 +82,18 @@ _PRODUCT_EXCHANGE: dict[str, str] = {
     "cu":"SHFE","al":"SHFE","zn":"SHFE","pb":"SHFE","ni":"SHFE","sn":"SHFE",
     "au":"SHFE","ag":"SHFE","rb":"SHFE","hc":"SHFE","ss":"SHFE","bu":"SHFE",
     "ru":"SHFE","fu":"SHFE","lu":"SHFE","sp":"SHFE","bc":"SHFE","ao":"SHFE",
-    "sc":"SHFE","sh":"SHFE","ad":"SHFE",   # 原油(INE)、烧碱、铝合金
+    "sc":"SHFE","sh":"SHFE","ad":"SHFE","br":"SHFE","ec":"SHFE","pt":"SHFE",
+    # 原油(INE)、烧碱、铝合金、BR橡胶、集运欧线、铂金
     # DCE 大连商品交易所 → nf_{CODE}
     "m":"DCE","y":"DCE","a":"DCE","b":"DCE","c":"DCE","cs":"DCE","jd":"DCE",
     "l":"DCE","pp":"DCE","v":"DCE","eb":"DCE","eg":"DCE","j":"DCE","jm":"DCE",
-    "i":"DCE","rr":"DCE","lh":"DCE","pg":"DCE","p":"DCE",
+    "i":"DCE","rr":"DCE","lh":"DCE","pg":"DCE","p":"DCE","lg":"DCE",
     # CZCE 郑商所 → nf_{CODE}（实测与SHFE/DCE格式相同）
     "sr":"CZCE","cf":"CZCE","ta":"CZCE","ma":"CZCE","rm":"CZCE","oi":"CZCE",
     "zc":"CZCE","fg":"CZCE","sa":"CZCE","ur":"CZCE","ap":"CZCE","cj":"CZCE",
     "lc":"CZCE","bz":"CZCE","pr":"CZCE","si":"CZCE","ps":"CZCE","nr":"CZCE",
     "sf":"CZCE","sm":"CZCE","wt":"CZCE","pm":"CZCE","pf":"CZCE","cy":"CZCE",
-    "pl":"CZCE","op":"CZCE","fb":"CZCE",   # 短纤、棉纱、丙烯、双胶纸、纤维板
+    "pl":"CZCE","op":"CZCE","fb":"CZCE","pk":"CZCE",   # 短纤、棉纱、丙烯、双胶纸、纤维板、花生
     # CFFEX 中金所 → nf_{CODE}（字段布局与商品期货不同，见 _fetch_sina_prices）
     "if":"CFFEX","ic":"CFFEX","ih":"CFFEX","im":"CFFEX",
     "ts":"CFFEX","tf":"CFFEX","t":"CFFEX","tl":"CFFEX",   # 补充30年国债
@@ -179,79 +180,85 @@ def _fetch_sina_prices(contracts: list[str]) -> dict:
     result: dict = {}
     batch_size = 80
     keys = list(sina_map.keys())
+    # 不继承系统代理环境，避免 ALL_PROXY/HTTP_PROXY 指向 socks 时触发依赖错误。
+    session = _req.Session()
+    session.trust_env = False
 
-    for i in range(0, len(keys), batch_size):
-        batch = keys[i:i + batch_size]
-        try:
-            url = "https://hq.sinajs.cn/list=" + ",".join(batch)
-            headers = {
-                "Referer": "https://finance.sina.com.cn",
-                "User-Agent": "Mozilla/5.0",
-            }
-            resp = _req.get(url, headers=headers, timeout=10)
-            text = resp.content.decode("gbk", errors="replace")
-            for line in text.split("\n"):
-                line = line.strip()
-                mat = re.match(r'var hq_str_(.+?)="(.*)";', line)
-                if not mat:
-                    continue
-                sc = mat.group(1)
-                contract = sina_map.get(sc, "")
-                if not contract:
-                    continue
-                fields = mat.group(2).split(",")
-                try:
-                    # 判断交易所，CFFEX 字段布局与商品期货完全不同
-                    m_prod = re.match(r'^([A-Z]+)\d+$', contract)
-                    exchange = _PRODUCT_EXCHANGE.get(m_prod.group(1).lower(), "") if m_prod else ""
+    try:
+        for i in range(0, len(keys), batch_size):
+            batch = keys[i:i + batch_size]
+            try:
+                url = "https://hq.sinajs.cn/list=" + ",".join(batch)
+                headers = {
+                    "Referer": "https://finance.sina.com.cn",
+                    "User-Agent": "Mozilla/5.0",
+                }
+                resp = session.get(url, headers=headers, timeout=10)
+                text = resp.content.decode("gbk", errors="replace")
+                for line in text.split("\n"):
+                    line = line.strip()
+                    mat = re.match(r'var hq_str_(.+?)="(.*)";', line)
+                    if not mat:
+                        continue
+                    sc = mat.group(1)
+                    contract = sina_map.get(sc, "")
+                    if not contract:
+                        continue
+                    fields = mat.group(2).split(",")
+                    try:
+                        # 判断交易所，CFFEX 字段布局与商品期货完全不同
+                        m_prod = re.match(r'^([A-Z]+)\d+$', contract)
+                        exchange = _PRODUCT_EXCHANGE.get(m_prod.group(1).lower(), "") if m_prod else ""
 
-                    if exchange == "CFFEX":
-                        # CFFEX 金融期货字段布局（股指/国债）：
-                        # [0]=开 [1]=高 [2]=低 [3]=最新价 [4]=成交量
-                        # [9]=涨停价(≠昨结算!) [10]=跌停价 [13]=昨结算价
-                        if len(fields) < 14:
-                            continue
-                        cur  = _safe_float(fields[3])
-                        prev = _safe_float(fields[13])  # 昨结算价，非fields[9](涨停价)
-                        if cur <= 0:
-                            continue
-                        result[contract] = {
-                            "open":   _safe_float(fields[0]),
-                            "high":   _safe_float(fields[1]),
-                            "low":    _safe_float(fields[2]),
-                            "price":  cur,
-                            "pct":    round((cur - prev) / prev * 100, 2) if prev > 0 else 0.0,
-                            "volume": int(_safe_float(fields[4])),
-                            "updated_at": "",
-                        }
-                    else:
-                        # 商品期货字段布局（SHFE/DCE/CZCE）：
-                        # [0]=合约名 [1]=昨持仓量 [2]=开 [3]=高 [4]=低
-                        # [5]=最新价(盘后=0) [6]=买价 [8]=成交价 [10]=昨结算 [14]=成交量
-                        if len(fields) < 11:
-                            continue
-                        prev = _safe_float(fields[10])
-                        cur  = _safe_float(fields[5])
-                        if cur <= 0:
-                            cur = _safe_float(fields[8])
-                        if cur <= 0:
-                            cur = _safe_float(fields[6])
-                        if cur <= 0:
-                            continue
-                        result[contract] = {
-                            "open":   _safe_float(fields[2]),
-                            "high":   _safe_float(fields[3]),
-                            "low":    _safe_float(fields[4]),
-                            "price":  cur,
-                            "pct":    round((cur - prev) / prev * 100, 2) if prev > 0 else 0.0,
-                            "volume": int(_safe_float(fields[14])) if len(fields) > 14 else 0,
-                            "updated_at": "",
-                        }
-                except Exception:
-                    continue
-        except Exception as e:
-            print(f"[sina_batch] ERROR: {e}", flush=True)
-            continue
+                        if exchange == "CFFEX":
+                            # CFFEX 金融期货字段布局（股指/国债）：
+                            # [0]=开 [1]=高 [2]=低 [3]=最新价 [4]=成交量
+                            # [9]=涨停价(≠昨结算!) [10]=跌停价 [13]=昨结算价
+                            if len(fields) < 14:
+                                continue
+                            cur  = _safe_float(fields[3])
+                            prev = _safe_float(fields[13])  # 昨结算价，非fields[9](涨停价)
+                            if cur <= 0:
+                                continue
+                            result[contract] = {
+                                "open":   _safe_float(fields[0]),
+                                "high":   _safe_float(fields[1]),
+                                "low":    _safe_float(fields[2]),
+                                "price":  cur,
+                                "pct":    round((cur - prev) / prev * 100, 2) if prev > 0 else 0.0,
+                                "volume": int(_safe_float(fields[4])),
+                                "updated_at": "",
+                            }
+                        else:
+                            # 商品期货字段布局（SHFE/DCE/CZCE）：
+                            # [0]=合约名 [1]=昨持仓量 [2]=开 [3]=高 [4]=低
+                            # [5]=最新价(盘后=0) [6]=买价 [8]=成交价 [10]=昨结算 [14]=成交量
+                            if len(fields) < 11:
+                                continue
+                            prev = _safe_float(fields[10])
+                            cur  = _safe_float(fields[5])
+                            if cur <= 0:
+                                cur = _safe_float(fields[8])
+                            if cur <= 0:
+                                cur = _safe_float(fields[6])
+                            if cur <= 0:
+                                continue
+                            result[contract] = {
+                                "open":   _safe_float(fields[2]),
+                                "high":   _safe_float(fields[3]),
+                                "low":    _safe_float(fields[4]),
+                                "price":  cur,
+                                "pct":    round((cur - prev) / prev * 100, 2) if prev > 0 else 0.0,
+                                "volume": int(_safe_float(fields[14])) if len(fields) > 14 else 0,
+                                "updated_at": "",
+                            }
+                    except Exception:
+                        continue
+            except Exception as e:
+                print(f"[sina_batch] ERROR: {e}", flush=True)
+                continue
+    finally:
+        session.close()
 
     return result
 
@@ -1052,10 +1059,15 @@ def market_broker_detail(
 
 
 @app.get("/api/market/chart/{product}", tags=["行情"])
-def market_chart(product: str, username: str = Depends(get_current_user)):
+def market_chart(
+    product: str,
+    contract: Optional[str] = Query(default=None, description="可选，指定具体合约，如 MA2609"),
+    username: str = Depends(get_current_user),
+):
     """
     指定品种近 60 天的价格 + IV 数据，用于前端绘制折线图。
     product: 如 m / rb / cu
+    contract: 可选，传入时优先按该合约绘制；不传时沿用主力合约逻辑。
     """
     try:
         import datetime as _dt
@@ -1071,42 +1083,50 @@ def market_chart(product: str, username: str = Depends(get_current_user)):
         import pandas as _pd
         since = (_dt.datetime.now() - _dt.timedelta(days=400)).strftime("%Y%m%d")
 
-        # ── 1. 找主力合约 ts_code ──────────────────────────────
-        # 用品种代码前缀 REGEXP 匹配，取最新日期持仓量最大的合约（当前主力）
+        # ── 1. 决定图表目标合约 ts_code ─────────────────────────
+        # 传入 contract 时优先使用指定合约；否则使用主力合约。
         pattern = f"^{product.upper()}[0-9]"
         pattern2 = f"^{product.lower()}[0-9]"
-        main_sql = f"""
-            SELECT ts_code FROM futures_price
-            WHERE ts_code REGEXP '{pattern}'
-              AND ts_code NOT LIKE '%%TAS%%'
-              AND REPLACE(trade_date,'-','') = (
-                  SELECT MAX(REPLACE(trade_date,'-','')) FROM futures_price
-                  WHERE ts_code REGEXP '{pattern}'
-                    AND ts_code NOT LIKE '%%TAS%%'
-              )
-            ORDER BY oi DESC LIMIT 1
-        """
-        main_df = _pd.read_sql(main_sql, eng)
-        if main_df.empty:
-            main_sql2 = f"""
+        selected_contract = str(contract or "").strip().upper()
+        selected_contract = selected_contract if re.match(r"^[A-Z]+[0-9]{3,4}$", selected_contract) else ""
+        if selected_contract and not selected_contract.startswith(prod_upper):
+            selected_contract = ""
+
+        if selected_contract:
+            main_contract = selected_contract
+        else:
+            # 用品种代码前缀 REGEXP 匹配，取最新日期持仓量最大的合约（当前主力）
+            main_sql = f"""
                 SELECT ts_code FROM futures_price
-                WHERE ts_code REGEXP '{pattern2}'
+                WHERE ts_code REGEXP '{pattern}'
                   AND ts_code NOT LIKE '%%TAS%%'
                   AND REPLACE(trade_date,'-','') = (
                       SELECT MAX(REPLACE(trade_date,'-','')) FROM futures_price
-                      WHERE ts_code REGEXP '{pattern2}'
+                      WHERE ts_code REGEXP '{pattern}'
                         AND ts_code NOT LIKE '%%TAS%%'
                   )
                 ORDER BY oi DESC LIMIT 1
             """
-            main_df = _pd.read_sql(main_sql2, eng)
+            main_df = _pd.read_sql(main_sql, eng)
+            if main_df.empty:
+                main_sql2 = f"""
+                    SELECT ts_code FROM futures_price
+                    WHERE ts_code REGEXP '{pattern2}'
+                      AND ts_code NOT LIKE '%%TAS%%'
+                      AND REPLACE(trade_date,'-','') = (
+                          SELECT MAX(REPLACE(trade_date,'-','')) FROM futures_price
+                          WHERE ts_code REGEXP '{pattern2}'
+                            AND ts_code NOT LIKE '%%TAS%%'
+                      )
+                    ORDER BY oi DESC LIMIT 1
+                """
+                main_df = _pd.read_sql(main_sql2, eng)
 
-        if main_df.empty:
-            return {"product": product.lower(), "cn_name": cn_name,
-                    "cur_price": None, "cur_pct": None, "cur_iv": None,
-                    "ohlc": [], "iv": []}
-
-        main_contract = main_df.iloc[0]["ts_code"]
+            if main_df.empty:
+                return {"product": product.lower(), "cn_name": cn_name,
+                        "cur_price": None, "cur_pct": None, "cur_iv": None,
+                        "ohlc": [], "iv": []}
+            main_contract = str(main_df.iloc[0]["ts_code"]).upper()
 
         # ── 2. 拉取 OHLC 数据（近1年K线）────────────────────────
         ohlc_sql = f"""
@@ -1119,7 +1139,7 @@ def market_chart(product: str, username: str = Depends(get_current_user)):
                 pct_chg,
                 oi
             FROM futures_price
-            WHERE ts_code = '{main_contract}'
+            WHERE UPPER(ts_code) = '{main_contract}'
               AND REPLACE(trade_date,'-','') >= '{since}'
             ORDER BY trade_date ASC
             LIMIT 300
@@ -1127,27 +1147,37 @@ def market_chart(product: str, username: str = Depends(get_current_user)):
         ohlc_df = _pd.read_sql(ohlc_sql, eng)
 
         # ── 3. 拉取 IV 历史（与价格数据时间范围对齐）────────────
-        iv_sql = f"""
-            SELECT REPLACE(trade_date,'-','') as dt, iv
-            FROM commodity_iv_history
-            WHERE ts_code REGEXP '{pattern}'
-              AND REPLACE(trade_date,'-','') >= '{since}'
-            ORDER BY trade_date ASC
-        """
-        iv_df = _pd.read_sql(iv_sql, eng)
-        if iv_df.empty:
-            # 尝试小写
-            iv_sql2 = f"""
+        if selected_contract:
+            iv_sql = f"""
                 SELECT REPLACE(trade_date,'-','') as dt, iv
                 FROM commodity_iv_history
-                WHERE ts_code REGEXP '{pattern2}'
+                WHERE UPPER(ts_code) = '{main_contract}'
                   AND REPLACE(trade_date,'-','') >= '{since}'
                 ORDER BY trade_date ASC
             """
-            iv_df = _pd.read_sql(iv_sql2, eng)
+            iv_df = _pd.read_sql(iv_sql, eng)
+        else:
+            iv_sql = f"""
+                SELECT REPLACE(trade_date,'-','') as dt, iv
+                FROM commodity_iv_history
+                WHERE ts_code REGEXP '{pattern}'
+                  AND REPLACE(trade_date,'-','') >= '{since}'
+                ORDER BY trade_date ASC
+            """
+            iv_df = _pd.read_sql(iv_sql, eng)
+            if iv_df.empty:
+                # 尝试小写
+                iv_sql2 = f"""
+                    SELECT REPLACE(trade_date,'-','') as dt, iv
+                    FROM commodity_iv_history
+                    WHERE ts_code REGEXP '{pattern2}'
+                      AND REPLACE(trade_date,'-','') >= '{since}'
+                    ORDER BY trade_date ASC
+                """
+                iv_df = _pd.read_sql(iv_sql2, eng)
 
-        # 每天取均值（多合约）
-        if not iv_df.empty:
+        # 不指定合约时，IV按全品种日均；指定合约时按该合约原值。
+        if not iv_df.empty and not selected_contract:
             iv_df = iv_df.groupby("dt")["iv"].mean().reset_index().sort_values("dt")
 
         # ── 4. 拉取反指标/正指标持仓数据 ─────────────────────────

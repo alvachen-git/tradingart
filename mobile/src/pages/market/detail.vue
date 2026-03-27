@@ -109,12 +109,13 @@ onUnload(() => stopLivePoll())
 
 onLoad(async (options) => {
   const product = options?.product || ''
+  const contract = String(options?.contract || '').toUpperCase().trim()
   initName.value   = decodeURIComponent(options?.name || product)
   initIvRank.value = Number(options?.iv_rank ?? -1)
   initIv.value     = Number(options?.iv ?? 0)
   if (!product) { error.value = '参数错误'; loading.value = false; return }
   try {
-    chartData.value = await marketApi.chart(product)
+    chartData.value = await marketApi.chart(product, contract || undefined)
     startLivePoll()
   } catch (e: any) {
     error.value = e.message || '加载失败'

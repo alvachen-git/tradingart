@@ -431,8 +431,10 @@ function refresh() {
 }
 
 function toDetail(item: OptionItem) {
+  const contract = extractContractCode(item.name)
+  const contractQuery = contract ? `&contract=${encodeURIComponent(contract)}` : ''
   uni.navigateTo({
-    url: `/pages/market/detail?product=${item.product_code}&name=${encodeURIComponent(item.name)}&iv_rank=${item.iv_rank}&iv=${item.iv}`,
+    url: `/pages/market/detail?product=${item.product_code}${contractQuery}&name=${encodeURIComponent(item.name)}&iv_rank=${item.iv_rank}&iv=${item.iv}`,
   })
 }
 
