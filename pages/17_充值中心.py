@@ -934,12 +934,44 @@ with shop_topup_tab:
                 ),
                 unsafe_allow_html=True,
             )
-        st.caption("支付完成后请点击余额旁刷新图标查看到账结果。")
+        st.caption("点数充值是虚拟商品，无法退费换成现金。")
 
 with shop_paid_tab:
-    st.markdown('<div class="section-sub">使用点数直接购买晚报与情报套餐，按月开通</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-sub">使用点数直接购买晚报、突破信号与情报套餐，按月开通</div>', unsafe_allow_html=True)
 
     products = pay_svc.get_paid_products()
+    has_breakout_signal = any(
+        str(item.get("code") or "") == "trade_signal" and str(item.get("product_type") or "") == "channel"
+        for item in products
+    )
+    if not has_breakout_signal:
+        breakout_channel = sub_svc.get_channel_by_code("trade_signal")
+        if breakout_channel and breakout_channel.get("id"):
+            products.append(
+                {
+                    "product_type": "channel",
+                    "code": "trade_signal",
+                    "id": int(breakout_channel["id"]),
+                    "name": "突破信号",
+                    "icon": breakout_channel.get("icon") or "",
+                    "points_monthly": 800,
+                    "months_options": [1, 3, 6, 12],
+                }
+            )
+    channel_order = {
+        "daily_report": 0,
+        "expiry_option_radar": 1,
+        "broker_position_report": 2,
+        "fund_flow_report": 3,
+        "trade_signal": 4,
+    }
+    products.sort(
+        key=lambda item: (
+            0 if str(item.get("product_type") or "") == "channel" else 1,
+            channel_order.get(str(item.get("code") or ""), 999),
+        )
+    )
+
     user_subs = sub_svc.get_user_subscriptions(user_id)
     user_sub_map = {int(x["channel_id"]): x for x in user_subs}
     points_balance = int(pay_svc.get_user_points(user_id).get("balance") or 0)
@@ -948,7 +980,17 @@ with shop_paid_tab:
         "expiry_option_radar": "针对快到期期权，综合技术面和波动率，给出适合的策略。",
         "broker_position_report": "分析正指标机构 + 反指标散户的期货持仓，给出期货操盘建议。",
         "fund_flow_report": "分析每天股票市场的资金流动，跟踪成交量异常的潜力股。",
+        "trade_signal": "每天下午2点半，全市场扫描判断突破品种。",
     }
+    product_name_map = {
+        "trade_signal": "突破信号",
+    }
+
+    def _fmt_rmb_from_points(points: int) -> str:
+        rmb = float(points) / 10.0
+        if abs(rmb - int(rmb)) < 1e-9:
+            return str(int(rmb))
+        return f"{rmb:.1f}".rstrip("0").rstrip(".")
 
     if not products:
         st.info("暂无可点数购买商品。")
@@ -957,7 +999,7 @@ with shop_paid_tab:
         for product in products:
             ptype = product.get("product_type")
             code = str(product.get("code") or "")
-            name = str(product.get("name") or "")
+            name = product_name_map.get(code, str(product.get("name") or ""))
             ppm = int(product.get("points_monthly") or 0)
 
             col_a, col_b, col_c = st.columns([3.8, 1.2, 1.3])
@@ -1011,7 +1053,7 @@ with shop_paid_tab:
                         label_visibility="collapsed",
                     )
                     total_cost = ppm * int(months)
-                    st.caption(f"合计 {total_cost} 点")
+                    st.caption(f"合计 {total_cost} 点（{_fmt_rmb_from_points(total_cost)}元）")
 
                 with col_c:
                     disabled = total_cost <= 0
@@ -1076,7 +1118,7 @@ with shop_paid_tab:
                         label_visibility="collapsed",
                     )
                     total_cost = ppm * int(months)
-                    st.caption(f"合计 {total_cost} 点")
+                    st.caption(f"合计 {total_cost} 点（{_fmt_rmb_from_points(total_cost)}元）")
 
                 with col_c:
                     disabled = total_cost <= 0
