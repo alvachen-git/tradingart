@@ -598,25 +598,9 @@ def enforce_institution_day_section(html_content: str, snapshot: dict) -> str:
     long_rows = _render_institution_rows(snapshot.get("long_top", []), "text-red", "— 无显著净多增仓 —")
     short_rows = _render_institution_rows(snapshot.get("short_top", []), "text-green", "— 无显著净空增仓 —")
 
-    missing_today = snapshot.get("missing_today", []) or []
-    if missing_today:
-        missing_text = "；".join(
-            f"{str(item.get('name', ''))}（{str(item.get('brokers', ''))}）"
-            for item in missing_today
-            if str(item.get("name", "")).strip()
-        )
-        missing_note_html = (
-            f'<p class="sub-text" style="margin:-6px 0 12px 0; color:#f59e0b;">'
-            f'当日无数据（已剔除，不按0计算）：{html.escape(missing_text)}'
-            f'</p>'
-        )
-    else:
-        missing_note_html = ""
-
     section = f"""
 <h2 class="section-title">机构当日动向</h2>
 <p class="sub-text" style="margin:-8px 0 16px 0;">海通 · 东证 · 国泰君安 ｜ 当日净持仓变化</p>
-{missing_note_html}
 
 <p style="font-size:14px; font-weight:600; margin:16px 0 8px 0;"><span class="text-red">●</span> 当日净多头增仓 TOP5</p>
 <table class="data-table">
