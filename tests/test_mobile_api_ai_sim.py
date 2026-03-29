@@ -67,6 +67,7 @@ class TestMobileApiAiSim(unittest.TestCase):
                 "trade_date": "20260327",
                 "initial_capital": 1_000_000,
                 "nav": 1_080_000,
+                "position_value": 200_000,
             },
         ), patch.object(
             mobile_api,
@@ -108,6 +109,47 @@ class TestMobileApiAiSim(unittest.TestCase):
         self.assertEqual(out["positions"][0]["symbol"], "600000")
         self.assertEqual(out["watchlist"][0]["symbol"], "600000")
         self.assertEqual(mocked_nav.call_args.kwargs["days"], 250)
+
+    def test_overview_returns_no_positions_when_snapshot_position_value_zero(self):
+        nav_df = pd.DataFrame(
+            [
+                {"trade_date": "20260327", "nav": 942700, "bench_hs300": 0.961, "bench_zz1000": 0.929}
+            ]
+        )
+        with patch.object(
+            mobile_api,
+            "ai_get_latest_snapshot",
+            return_value={
+                "has_data": True,
+                "trade_date": "20260327",
+                "initial_capital": 1_000_000,
+                "nav": 942700,
+                "position_value": 0,
+            },
+        ), patch.object(
+            mobile_api,
+            "ai_get_review_dates",
+            return_value=["20260327"],
+        ), patch.object(
+            mobile_api,
+            "ai_get_daily_review",
+            return_value={"has_data": True, "trade_date": "20260327", "summary_md": "总结", "next_watchlist": []},
+        ), patch.object(
+            mobile_api,
+            "ai_get_nav_series",
+            return_value=nav_df,
+        ), patch.object(
+            mobile_api,
+            "ai_get_positions",
+        ) as mocked_positions, patch.object(
+            mobile_api,
+            "ai_get_trades",
+            return_value=pd.DataFrame([]),
+        ):
+            out = mobile_api.intel_ai_overview(username="u1")
+
+        self.assertEqual(out["positions"], [])
+        mocked_positions.assert_not_called()
 
     def test_review_normalizes_date(self):
         with patch.object(

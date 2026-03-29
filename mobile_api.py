@@ -979,18 +979,22 @@ def intel_ai_overview(
             row["bench_zz1000"] = _safe_float(row.get("bench_zz1000"), 0.0)
             row["trade_date"] = str(row.get("trade_date") or "")
 
-        pos_df = ai_get_positions(
-            OFFICIAL_PORTFOLIO_ID,
-            as_of_date=snapshot_trade_date or None,
-            strict_as_of=True,
-        )
-        if getattr(pos_df, "empty", True):
+        snapshot_position_value = _safe_float(snapshot.get("position_value"), 0.0)
+        positions = []
+        if snapshot_position_value > 0:
             pos_df = ai_get_positions(
                 OFFICIAL_PORTFOLIO_ID,
                 as_of_date=snapshot_trade_date or None,
-                strict_as_of=False,
+                strict_as_of=True,
             )
-        positions = _df_records_jsonable(pos_df, limit=positions_limit)
+            # 仅在快照显示有持仓时，才允许回退到最近可用持仓，避免口径错位。
+            if getattr(pos_df, "empty", True):
+                pos_df = ai_get_positions(
+                    OFFICIAL_PORTFOLIO_ID,
+                    as_of_date=snapshot_trade_date or None,
+                    strict_as_of=False,
+                )
+            positions = _df_records_jsonable(pos_df, limit=positions_limit)
         for row in positions:
             row["trade_date"] = str(row.get("trade_date") or snapshot_trade_date)
 
