@@ -2159,6 +2159,42 @@ def kline_new(username: str = Depends(get_current_user)):
     return {**data, "game_id": start_res["game_id"]}
 
 
+@app.post("/api/kline/trades/batch", tags=["K线训练"])
+def kline_trades_batch(body: dict):
+    """
+    保存 K 线训练交易明细（结算确认前调用）。
+    body: {game_id, user_id, symbol, symbol_name, symbol_type, trades:[...]}
+    """
+    try:
+        game_id = int(body.get("game_id") or 0)
+        user_id = str(body.get("user_id") or "").strip()
+        trades = body.get("trades") or []
+        symbol = body.get("symbol")
+        symbol_name = body.get("symbol_name")
+        symbol_type = body.get("symbol_type")
+
+        result = kg.save_trade_batch(
+            game_id=game_id,
+            user_id=user_id,
+            trades=trades,
+            symbol=symbol,
+            symbol_name=symbol_name,
+            symbol_type=symbol_type,
+        )
+        if result.get("ok"):
+            print(f"[KLINE_TRADES_BATCH] ok: game_id={game_id}, user_id={user_id}, saved={result.get('saved')}, total_rows={result.get('total_rows')}")
+            return result
+
+        msg = str(result.get("message") or "save trade batch failed")
+        print(f"[KLINE_TRADES_BATCH] fail: game_id={game_id}, user_id={user_id}, msg={msg}")
+        raise HTTPException(status_code=400, detail=msg)
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[KLINE_TRADES_BATCH] exception: {e}")
+        raise HTTPException(status_code=500, detail=f"交易明细保存失败: {e}")
+
+
 @app.post("/api/kline/save", tags=["K线训练"])
 def kline_save(body: dict, username: str = Depends(get_current_user)):
     """
