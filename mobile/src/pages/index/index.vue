@@ -1,9 +1,10 @@
 <script setup lang="ts">
 import { ref, nextTick, computed } from 'vue'
-import { onShow } from '@dcloudio/uni-app'
+import { onShow, onHide, onUnload, onShareAppMessage, onShareTimeline } from '@dcloudio/uni-app'
 import { chatApi, type ChatMessage } from '../../api/index'
 import { useAuthStore } from '../../store/auth'
 import BottomNav from '../../components/BottomNav.vue'
+import { formatAiForMobile, type MobileAiFormatted } from '../../utils/ai_mobile_formatter'
 
 const auth = useAuthStore()
 
@@ -16,16 +17,39 @@ interface UIMessage {
 const messages = ref<UIMessage[]>([])
 const input = ref('')
 const sending = ref(false)
+const expandedMap = ref<Record<number, boolean>>({})
 let msgCounter = 0
 let pollTimer: ReturnType<typeof setInterval> | null = null
 
 const HISTORY_KEY = computed(() => `chat_history_${auth.username}`)
 const PENDING_KEY = computed(() => `chat_pending_${auth.username}`)
+const SHARE_TITLE = '爱波塔 - 期权期货分析工具'
+const SHARE_PATH = '/pages/login/index'
 
 function markAiContent(content: string) {
   const text = String(content || '').trim()
   if (!text) return '【AI生成】'
   return text.startsWith('【AI生成】') ? text : `【AI生成】\n${text}`
+}
+
+const formattedAssistantMap = computed<Record<number, MobileAiFormatted>>(() => {
+  const out: Record<number, MobileAiFormatted> = {}
+  for (const msg of messages.value) {
+    if (msg.role !== 'assistant') continue
+    out[msg.id] = formatAiForMobile(msg.content)
+  }
+  return out
+})
+
+function isAssistantExpanded(msgId: number): boolean {
+  return !!expandedMap.value[msgId]
+}
+
+function toggleAssistantExpand(msgId: number) {
+  expandedMap.value = {
+    ...expandedMap.value,
+    [msgId]: !expandedMap.value[msgId],
+  }
 }
 
 // ── 初始化：onShow 统一处理，避免 onMounted/onShow 时序竞争 ──
@@ -34,6 +58,15 @@ onShow(async () => {
   loadHistory()
   await nextTick()
   resumePendingTask()
+})
+
+// 页面切走/进后台时暂停轮询；保留 pending task，回到页面自动续轮询
+onHide(() => {
+  pausePollingForBackground()
+})
+
+onUnload(() => {
+  pausePollingForBackground()
 })
 
 function loadHistory() {
@@ -53,7 +86,7 @@ function loadHistory() {
     messages.value = [{
       id: ++msgCounter,
       role: 'assistant',
-      content: markAiContent('你好！我是爱波塔 AI，专注 A 股期权期货分析。\n\n你可以问我：\n• 沪铜近期多空格局\n• 300ETF 隐含波动率分析\n• 当前适合做哪个期权策略\n\n内容仅供参考，不构成投资建议。'),
+      content: markAiContent('你好！我是爱波塔 AI，专注 A 股期权期货分析。\n\n你可以问我：\n• 中证1000技术面分析下\n• 300ETF隐含波动率如何\n• 什么是牛市价差策略\n\n内容仅供参考，不构成投资建议。'),
     }]
   }
 }
@@ -96,19 +129,32 @@ async function send() {
 
 // 回到页面时恢复未完成的轮询
 function resumePendingTask() {
-  if (sending.value || pollTimer) return
   try {
     const raw = uni.getStorageSync(PENDING_KEY.value)
     if (!raw) return
     const { task_id } = JSON.parse(raw)
+    if (!task_id) {
+      uni.removeStorageSync(PENDING_KEY.value)
+      sending.value = false
+      return
+    }
+
+    // 兜底：先清掉旧定时器，再恢复
+    stopPoll()
+
     // 重新加一个 loading 气泡（切页后原气泡已丢失）
-    const newLoadingId = ++msgCounter
-    messages.value.push({ id: newLoadingId, role: 'loading', content: '' })
+    const existing = messages.value.find(m => m.role === 'loading')
+    const newLoadingId = existing ? existing.id : ++msgCounter
+    if (!existing) {
+      messages.value.push({ id: newLoadingId, role: 'loading', content: '' })
+    }
+
     sending.value = true
     scrollToBottom()
     pollStatus(task_id, newLoadingId)
   } catch {
     uni.removeStorageSync(PENDING_KEY.value)
+    sending.value = false
   }
 }
 
@@ -143,6 +189,14 @@ function stopPoll() {
   if (pollTimer) { clearInterval(pollTimer); pollTimer = null }
 }
 
+function pausePollingForBackground() {
+  const hasPending = !!uni.getStorageSync(PENDING_KEY.value)
+  if (!hasPending) return
+  stopPoll()
+  // 让 onShow 可以正常触发 resume，不被旧 sending 状态拦住
+  sending.value = false
+}
+
 function replaceLoading(loadingId: number, content: string) {
   const idx = messages.value.findIndex(m => m.id === loadingId)
   if (idx !== -1) {
@@ -164,12 +218,23 @@ function clearChat() {
     success(res) {
       if (res.confirm) {
         messages.value = []
+        expandedMap.value = {}
         uni.removeStorageSync(HISTORY_KEY.value)
         loadHistory()
       }
     },
   })
 }
+
+onShareAppMessage(() => ({
+  title: SHARE_TITLE,
+  path: SHARE_PATH,
+}))
+
+onShareTimeline(() => ({
+  title: SHARE_TITLE,
+  query: 'from=timeline',
+}))
 
 </script>
 
@@ -203,7 +268,20 @@ function clearChat() {
 
         <!-- AI 消息 -->
         <view v-else-if="msg.role === 'assistant'" class="bubble ai-bubble">
-          <text class="msg-text selectable">{{ msg.content }}</text>
+          <text class="msg-text selectable">
+            {{
+              isAssistantExpanded(msg.id)
+                ? (formattedAssistantMap[msg.id]?.fullText || msg.content)
+                : (formattedAssistantMap[msg.id]?.previewText || msg.content)
+            }}
+          </text>
+          <view
+            v-if="formattedAssistantMap[msg.id]?.hasMore"
+            class="expand-toggle"
+            @tap="toggleAssistantExpand(msg.id)"
+          >
+            <text class="expand-toggle-text">{{ isAssistantExpanded(msg.id) ? '收起' : '展开全文' }}</text>
+          </view>
         </view>
 
         <!-- 用户消息 -->
@@ -297,13 +375,17 @@ function clearChat() {
 .msg-row.assistant, .msg-row.loading { justify-content: flex-start; }
 
 .bubble {
-  max-width: 80%;
+  max-width: 86%;
   border-radius: 24rpx;
   padding: 20rpx 24rpx;
-  word-break: break-all;
+  word-break: break-word;
+  overflow-wrap: anywhere;
 }
 
 .ai-bubble {
+  display: flex;
+  flex-direction: column;
+  gap: 8rpx;
   background: #162035;
   border: 1px solid #1e2d45;
   border-bottom-left-radius: 6rpx;
@@ -315,7 +397,21 @@ function clearChat() {
 }
 
 .user-bubble .msg-text { color: #0b1121; font-weight: 600; }
-.ai-bubble .msg-text { color: #f0f0f0; line-height: 1.7; white-space: pre-wrap; }
+.msg-text {
+  white-space: pre-wrap;
+  line-height: 1.82;
+}
+
+.ai-bubble .msg-text { color: #f0f0f0; }
+
+.expand-toggle {
+  align-self: flex-end;
+}
+
+.expand-toggle-text {
+  font-size: 22rpx;
+  color: #8ea4d1;
+}
 .loading-bubble {
   background: #162035;
   border: 1px solid #1e2d45;
