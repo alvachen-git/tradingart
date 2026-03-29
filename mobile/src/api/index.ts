@@ -3,6 +3,17 @@
  */
 import { request, uploadFile } from '../utils/request'
 
+function toQuery(params: Record<string, string | number | null | undefined>): string {
+  const pairs: string[] = []
+  for (const [k, v] of Object.entries(params)) {
+    if (v === null || v === undefined) continue
+    const value = String(v)
+    if (!value) continue
+    pairs.push(`${encodeURIComponent(k)}=${encodeURIComponent(value)}`)
+  }
+  return pairs.length ? `?${pairs.join('&')}` : ''
+}
+
 // ── Auth ──────────────────────────────────────────────────
 
 export const authApi = {
@@ -49,13 +60,13 @@ export interface ReportItem {
 
 export const intelApi = {
   reports: (params?: { channel_code?: string; page?: number; page_size?: number }) => {
-    const query = new URLSearchParams()
-    if (params?.channel_code) query.set('channel_code', params.channel_code)
-    if (params?.page) query.set('page', String(params.page))
-    if (params?.page_size) query.set('page_size', String(params.page_size))
-    const qs = query.toString()
+    const qs = toQuery({
+      channel_code: params?.channel_code,
+      page: params?.page,
+      page_size: params?.page_size,
+    })
     return request<{ items: ReportItem[]; page: number; has_more: boolean }>(
-      'GET', `/api/intel/reports${qs ? '?' + qs : ''}`
+      'GET', `/api/intel/reports${qs}`
     )
   },
 
@@ -205,6 +216,69 @@ export interface UserProfile {
 
 export const userApi = {
   profile: () => request<UserProfile>('GET', '/api/user/profile'),
+}
+
+// ── Payment ──────────────────────────────────────────────
+
+export interface WalletInfo {
+  balance: number
+  total_earned: number
+  total_spent: number
+  updated_at: string
+  payment_enabled: boolean
+}
+
+export interface TopupPackage {
+  name: string
+  rmb: number
+  points: number
+  bonus_points: number
+}
+
+export interface PaidProduct {
+  product_type: 'channel' | 'package'
+  code: string
+  id: number | null
+  name: string
+  icon: string
+  points_monthly: number
+  months_options: number[]
+  includes: string[]
+  includes_names: string[]
+}
+
+export interface PurchaseRequest {
+  product_type: 'channel' | 'package'
+  code: string
+  months: number
+}
+
+export interface PurchaseResponse {
+  ok: boolean
+  message: string
+}
+
+export interface PayConfig {
+  recharge_url: string
+  service_wechat: string
+  service_phone: string
+}
+
+export const payApi = {
+  wallet: () =>
+    request<WalletInfo>('GET', '/api/pay/wallet'),
+
+  packages: () =>
+    request<{ items: TopupPackage[] }>('GET', '/api/pay/packages'),
+
+  products: () =>
+    request<{ items: PaidProduct[] }>('GET', '/api/pay/products'),
+
+  purchase: (body: PurchaseRequest) =>
+    request<PurchaseResponse>('POST', '/api/pay/purchase', body),
+
+  config: () =>
+    request<PayConfig>('GET', '/api/pay/config'),
 }
 
 // ── Kline Training ────────────────────────────────────────

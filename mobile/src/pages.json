@@ -111,6 +111,15 @@
         "navigationBarTextStyle": "white",
         "backgroundColor": "#0b1121"
       }
+    },
+    {
+      "path": "pages/recharge/index",
+      "style": {
+        "navigationBarTitleText": "充值中心",
+        "navigationBarBackgroundColor": "#0b1121",
+        "navigationBarTextStyle": "white",
+        "backgroundColor": "#0b1121"
+      }
     }
   ],
   "globalStyle": {

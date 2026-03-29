@@ -22,6 +22,12 @@ mobile_api.py — 爱波塔手机端专用 FastAPI 后端
   POST   /api/intel/subscribe           订阅白名单频道
   POST   /api/alipay/notify             支付宝异步回调通知（验签+到账）
 
+  GET    /api/pay/wallet                点数钱包信息
+  GET    /api/pay/packages              充值套餐列表
+  GET    /api/pay/products              付费产品列表
+  POST   /api/pay/purchase              使用点数购买权限
+  GET    /api/pay/config                充值中心配置（外部链接）
+
   GET    /api/market/snapshot           综合行情快照
 
   POST   /api/portfolio/upload          上传持仓截图 → 识别 → 提交分析
@@ -41,7 +47,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
-from typing import Optional, List
+from typing import Optional, List, Any
 
 import redis
 from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, Query, Request
@@ -74,6 +80,8 @@ _PRICES_TTL = 30  # seconds
 _PRICES_REFRESH_INTERVAL = 10  # seconds
 _PRICES_REFRESH_LOCK_KEY = "mobile:futures:prices:refresh:lock"
 _PRICES_REFRESH_LOCK_TTL = 9  # seconds, must be < refresh interval
+_MARKET_CHART_CACHE_PREFIX = "mobile:market:chart"
+_MARKET_CHART_CACHE_TTL = int(str(os.getenv("MOBILE_MARKET_CHART_CACHE_TTL", "120")).strip() or 120)
 _INSTANCE_ID = f"{os.getenv('HOSTNAME', 'local')}:{os.getpid()}"
 
 # 品种代码 → 交易所（决定新浪行情代码前缀和月份格式）
@@ -122,6 +130,12 @@ def _safe_float(v, default: float = 0.0) -> float:
         return f if f == f else default
     except (TypeError, ValueError):
         return default
+
+
+def _market_chart_cache_key(product: str, contract: str) -> str:
+    p = str(product or "").strip().lower()
+    c = str(contract or "").strip().upper() or "_"
+    return f"{_MARKET_CHART_CACHE_PREFIX}:{p}:{c}"
 
 
 def _is_missing_value(v) -> bool:
@@ -427,6 +441,13 @@ def _html_to_plain(html: str, max_len: int = 120) -> str:
     return text[:max_len] + ("…" if len(text) > max_len else "")
 
 
+def _fmt_expire_at(expire_at: Any) -> str:
+    if hasattr(expire_at, "strftime"):
+        return expire_at.strftime("%Y-%m-%d")
+    text = str(expire_at or "").strip()
+    return text[:10] if len(text) >= 10 else text
+
+
 # ════════════════════════════════════════════════════════════
 #  App & CORS
 # ════════════════════════════════════════════════════════════
@@ -511,6 +532,30 @@ class ChatSubmitRequest(BaseModel):
 
 class SubscribeRequest(BaseModel):
     channel_code: str
+
+
+class PayPurchaseRequest(BaseModel):
+    product_type: str   # channel | package
+    code: str
+    months: int = 1
+
+
+def _build_mobile_chat_prompt(user_prompt: str) -> str:
+    """为移动端问答补充稳定的输出格式约束，提升手机阅读可读性。"""
+    raw = str(user_prompt or "").strip()
+    if "【移动端输出格式要求】" in raw:
+        return raw
+    style_hint = (
+        "【移动端输出格式要求】\n"
+        "1) 禁止使用 Markdown 表格（不要输出 |---| 等表格语法）。\n"
+        "2) 可使用简短小标题和项目符号，每段不超过2句。\n"
+        "3) 关键结论置顶（先结论，再依据与建议）。\n"
+        "4) 语言尽量简洁，适配手机端阅读。\n"
+        "5) 结尾保留“仅供参考，不构成投资建议”。"
+    )
+    if not raw:
+        return style_hint
+    return f"{style_hint}\n\n【用户问题】\n{raw}"
 
 
 # ════════════════════════════════════════════════════════════
@@ -598,9 +643,11 @@ def chat_submit(
     profile = de.get_user_profile(username) or {}
     risk = profile.get("risk_preference", "稳健型")
 
+    normalized_prompt = _build_mobile_chat_prompt(body.prompt)
+
     task_id = TaskManager.create_task(
         user_id=username,
-        prompt=body.prompt,
+        prompt=normalized_prompt,
         risk_preference=risk,
         history_messages=body.history,
     )
@@ -799,6 +846,172 @@ async def alipay_notify(request: Request):
         return PlainTextResponse("success", status_code=200)
     print(f"[mobile_api][alipay_notify] failed reason={reason}")
     return PlainTextResponse("failure", status_code=200)
+
+
+# ════════════════════════════════════════════════════════════
+#  PAYMENT — 充值与点数购买
+# ════════════════════════════════════════════════════════════
+
+@app.get("/api/pay/wallet", tags=["支付"])
+def pay_wallet(username: str = Depends(get_current_user)):
+    """获取点数钱包信息。"""
+    try:
+        points_info = pay_svc.get_user_points(username) or {}
+        updated_at = points_info.get("updated_at")
+        if hasattr(updated_at, "strftime"):
+            updated_text = updated_at.strftime("%Y-%m-%d %H:%M:%S")
+        else:
+            updated_text = str(updated_at or "")
+        return {
+            "balance": int(points_info.get("balance") or 0),
+            "total_earned": int(points_info.get("total_earned") or 0),
+            "total_spent": int(points_info.get("total_spent") or 0),
+            "updated_at": updated_text,
+            "payment_enabled": bool(pay_svc.is_points_payment_enabled()),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"钱包信息获取失败: {e}")
+
+
+@app.get("/api/pay/packages", tags=["支付"])
+def pay_packages(username: str = Depends(get_current_user)):
+    """获取充值套餐列表。"""
+    _ = username
+    try:
+        items = []
+        for pkg in getattr(pay_svc, "POINTS_PACKAGES", []):
+            rmb = float(pkg.get("rmb") or 0)
+            points = int(pkg.get("points") or 0)
+            bonus = max(points - int(round(rmb * 10)), 0)
+            items.append({
+                "name": str(pkg.get("name") or ""),
+                "rmb": round(rmb, 2),
+                "points": points,
+                "bonus_points": bonus,
+            })
+        return {"items": items}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"充值套餐获取失败: {e}")
+
+
+@app.get("/api/pay/products", tags=["支付"])
+def pay_products(username: str = Depends(get_current_user)):
+    """获取可点数购买产品（频道 + 套餐）。"""
+    _ = username
+    try:
+        products = pay_svc.get_paid_products() or []
+
+        # 与桌面端一致：兜底补齐 trade_signal 产品
+        has_trade_signal = any(
+            str(item.get("code") or "") == "trade_signal"
+            and str(item.get("product_type") or "") == "channel"
+            for item in products
+        )
+        if not has_trade_signal:
+            trade_signal = sub_svc.get_channel_by_code("trade_signal")
+            if trade_signal and trade_signal.get("id"):
+                products.append({
+                    "product_type": "channel",
+                    "code": "trade_signal",
+                    "id": int(trade_signal["id"]),
+                    "name": trade_signal.get("name") or "交易信号",
+                    "icon": trade_signal.get("icon") or "⚡",
+                    "points_monthly": 800,
+                    "months_options": [1, 3, 6, 12],
+                })
+
+        channel_order = {
+            "daily_report": 0,
+            "expiry_option_radar": 1,
+            "broker_position_report": 2,
+            "fund_flow_report": 3,
+            "trade_signal": 4,
+        }
+
+        def _sort_key(item: dict):
+            ptype = str(item.get("product_type") or "")
+            code = str(item.get("code") or "")
+            return (
+                0 if ptype == "channel" else 1,
+                channel_order.get(code, 999),
+                code,
+            )
+
+        norm_items = []
+        for item in sorted(products, key=_sort_key):
+            norm_items.append({
+                "product_type": str(item.get("product_type") or ""),
+                "code": str(item.get("code") or ""),
+                "id": int(item.get("id")) if item.get("id") is not None else None,
+                "name": str(item.get("name") or ""),
+                "icon": str(item.get("icon") or ""),
+                "points_monthly": int(item.get("points_monthly") or 0),
+                "months_options": [int(x) for x in (item.get("months_options") or [1, 3, 6, 12])],
+                "includes": [str(x) for x in (item.get("includes") or [])],
+                "includes_names": [str(x) for x in (item.get("includes_names") or [])],
+            })
+
+        return {"items": norm_items}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"付费产品获取失败: {e}")
+
+
+@app.post("/api/pay/purchase", tags=["支付"])
+def pay_purchase(
+    body: PayPurchaseRequest,
+    username: str = Depends(get_current_user),
+):
+    """使用点数购买频道或套餐权限。"""
+    try:
+        months = int(body.months or 0)
+    except Exception:
+        months = 0
+    if months <= 0 or months > 36:
+        raise HTTPException(status_code=400, detail="months 必须在 1~36 之间")
+
+    product_type = str(body.product_type or "").strip().lower()
+    code = str(body.code or "").strip().lower()
+    if not code:
+        raise HTTPException(status_code=400, detail="code 不能为空")
+
+    if product_type == "channel":
+        channel = sub_svc.get_channel_by_code(code)
+        if not channel or not channel.get("id"):
+            raise HTTPException(status_code=404, detail="频道不存在或已下架")
+        ok, msg = pay_svc.purchase_subscription_with_points(
+            username,
+            int(channel["id"]),
+            months=months,
+        )
+    elif product_type == "package":
+        pkg_code = str(getattr(pay_svc, "INTEL_PACKAGE_PRODUCT", {}).get("code", "intel_package")).strip().lower()
+        if code != pkg_code:
+            raise HTTPException(status_code=404, detail="套餐不存在")
+        ok, msg = pay_svc.purchase_intel_package_with_points(
+            username,
+            months=months,
+        )
+    else:
+        raise HTTPException(status_code=400, detail="product_type 仅支持 channel 或 package")
+
+    if ok:
+        message = "购买成功" if str(msg) == "already_processed" else str(msg or "购买成功")
+        return {"ok": True, "message": message}
+    raise HTTPException(status_code=400, detail=str(msg or "购买失败"))
+
+
+@app.get("/api/pay/config", tags=["支付"])
+def pay_config(username: str = Depends(get_current_user)):
+    """获取充值中心配置。"""
+    _ = username
+    recharge_url = str(os.getenv("MOBILE_RECHARGE_URL", "https://www.aiprota.com")).strip() or "https://www.aiprota.com"
+    service_wechat = str(os.getenv("MOBILE_SERVICE_WECHAT", "trader-sec")).strip() or "trader-sec"
+    service_phone = str(os.getenv("MOBILE_SERVICE_PHONE", "17521591756")).strip() or "17521591756"
+    return {
+        "recharge_url": recharge_url,
+        "service_wechat": service_wechat,
+        "service_phone": service_phone,
+    }
 
 
 # ════════════════════════════════════════════════════════════
@@ -1172,6 +1385,19 @@ def market_chart(
 
         prod_upper = product.upper()
         cn_name = de.PRODUCT_MAP.get(prod_upper, product.upper())
+        selected_contract = str(contract or "").strip().upper()
+        selected_contract = selected_contract if re.match(r"^[A-Z]+[0-9]{3,4}$", selected_contract) else ""
+        if selected_contract and not selected_contract.startswith(prod_upper):
+            selected_contract = ""
+        cache_key = _market_chart_cache_key(product, selected_contract)
+        try:
+            cached_raw = _redis.get(cache_key)
+            if cached_raw:
+                cached_payload = json.loads(cached_raw)
+                if isinstance(cached_payload, dict):
+                    return cached_payload
+        except Exception as cache_err:
+            print(f"[market_chart] cache_read_failed key={cache_key} err={cache_err}", flush=True)
 
         import pandas as _pd
         since = (_dt.datetime.now() - _dt.timedelta(days=400)).strftime("%Y%m%d")
@@ -1180,10 +1406,6 @@ def market_chart(
         # 传入 contract 时优先使用指定合约；否则使用主力合约。
         pattern = f"^{product.upper()}[0-9]"
         pattern2 = f"^{product.lower()}[0-9]"
-        selected_contract = str(contract or "").strip().upper()
-        selected_contract = selected_contract if re.match(r"^[A-Z]+[0-9]{3,4}$", selected_contract) else ""
-        if selected_contract and not selected_contract.startswith(prod_upper):
-            selected_contract = ""
 
         if selected_contract:
             main_contract = selected_contract
@@ -1216,9 +1438,20 @@ def market_chart(
                 main_df = _pd.read_sql(main_sql2, eng)
 
             if main_df.empty:
-                return {"product": product.lower(), "cn_name": cn_name,
-                        "cur_price": None, "cur_pct": None, "cur_iv": None,
-                        "ohlc": [], "iv": []}
+                empty_payload = {
+                    "product": product.lower(),
+                    "cn_name": cn_name,
+                    "cur_price": None,
+                    "cur_pct": None,
+                    "cur_iv": None,
+                    "ohlc": [],
+                    "iv": [],
+                }
+                try:
+                    _redis.setex(cache_key, _MARKET_CHART_CACHE_TTL, json.dumps(empty_payload, ensure_ascii=False))
+                except Exception as cache_err:
+                    print(f"[market_chart] cache_write_failed key={cache_key} err={cache_err}", flush=True)
+                return empty_payload
             main_contract = str(main_df.iloc[0]["ts_code"]).upper()
 
         # ── 2. 拉取 OHLC 数据（近1年K线）────────────────────────
@@ -1356,7 +1589,7 @@ def market_chart(
         cur_pct   = round(float(ohlc_df.iloc[-1]["pct_chg"]), 2) if not ohlc_df.empty else None
         cur_iv    = iv_list[-1]["v"] if iv_list else None
 
-        return {
+        payload = {
             "product":       product.lower(),
             "cn_name":       cn_name,
             "main_contract": main_contract,
@@ -1370,6 +1603,11 @@ def market_chart(
             "smart":         smart_list,
             "total_oi":      total_oi_list,
         }
+        try:
+            _redis.setex(cache_key, _MARKET_CHART_CACHE_TTL, json.dumps(payload, ensure_ascii=False))
+        except Exception as cache_err:
+            print(f"[market_chart] cache_write_failed key={cache_key} err={cache_err}", flush=True)
+        return payload
     except HTTPException:
         raise
     except Exception as e:
@@ -1511,9 +1749,10 @@ def user_profile(username: str = Depends(get_current_user)):
         "focus_assets": profile.get("focus_assets", ""),
         "subscriptions": [
             {
-                "channel_name": s.get("channel_name"),
-                "channel_code": s.get("channel_code"),
-                "expires_at": str(s.get("expires_at", "")),
+                # 兼容 subscription_service 返回结构（code/name/expire_at）
+                "channel_name": s.get("channel_name") or s.get("name") or "",
+                "channel_code": (s.get("channel_code") or s.get("code") or "").strip().lower(),
+                "expires_at": _fmt_expire_at(s.get("expires_at") or s.get("expire_at") or ""),
                 "is_active": s.get("is_active", False),
             }
             for s in subscriptions
