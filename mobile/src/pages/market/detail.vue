@@ -12,10 +12,76 @@ function rebasePoints(pts: string, offsetY: number): string {
 
 const chartData  = ref<any>(null)
 const loading    = ref(true)
+const chartLoading = ref(false)
 const error      = ref('')
 const initName   = ref('')
 const initIvRank = ref(-1)
 const initIv     = ref(0)
+const CHART_CACHE_TTL_MS = 2 * 60 * 1000
+
+function _cacheKey(product: string, contract: string): string {
+  return `market_chart_cache_v1:${product.toLowerCase()}:${contract.toUpperCase() || '_'}`
+}
+
+function _readCache(key: string): any | null {
+  try {
+    const raw = uni.getStorageSync(key)
+    if (!raw) return null
+    const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw
+    if (!parsed || typeof parsed !== 'object') return null
+    const ts = Number(parsed.ts || 0)
+    if (!ts || (Date.now() - ts > CHART_CACHE_TTL_MS)) return null
+    return parsed.data ?? null
+  } catch {
+    return null
+  }
+}
+
+function _writeCache(key: string, data: any) {
+  try {
+    uni.setStorageSync(key, JSON.stringify({ ts: Date.now(), data }))
+  } catch {
+    // ignore storage failure
+  }
+}
+
+function _buildInitData(product: string, contract: string) {
+  const shortName = initName.value.split('(')[0].trim() || product.toUpperCase()
+  return {
+    product: product.toLowerCase(),
+    cn_name: shortName,
+    main_contract: contract || '',
+    cur_price: null,
+    cur_pct: null,
+    cur_iv: initIv.value > 0 ? initIv.value : null,
+    dumb_chg_1d: null,
+    ohlc: [],
+    iv: [],
+    dumb: [],
+    smart: [],
+    total_oi: [],
+  }
+}
+
+async function loadChartData(product: string, contract: string, cacheKey: string) {
+  chartLoading.value = true
+  try {
+    const fresh = await marketApi.chart(product, contract || undefined)
+    chartData.value = fresh
+    error.value = ''
+    _writeCache(cacheKey, fresh)
+    startLivePoll()
+  } catch (e: any) {
+    // 有本地缓存/初始化卡片时不打断页面，只提示请求失败
+    if (chartData.value?.ohlc?.length) {
+      uni.showToast({ title: e.message || '图表刷新失败', icon: 'none' })
+    } else {
+      error.value = e.message || '加载失败'
+    }
+  } finally {
+    chartLoading.value = false
+  }
+}
 
 // ── 今日实时K线 ───────────────────────────────────────────
 const liveCandle = ref<{dt:string;o:number;h:number;l:number;c:number;pct:number} | null>(null)
@@ -114,20 +180,23 @@ onLoad(async (options) => {
   initIvRank.value = Number(options?.iv_rank ?? -1)
   initIv.value     = Number(options?.iv ?? 0)
   if (!product) { error.value = '参数错误'; loading.value = false; return }
-  try {
-    chartData.value = await marketApi.chart(product, contract || undefined)
+  const cacheKey = _cacheKey(product, contract)
+  const cached = _readCache(cacheKey)
+  if (cached) {
+    chartData.value = cached
     startLivePoll()
-  } catch (e: any) {
-    error.value = e.message || '加载失败'
-  } finally {
-    loading.value = false
+  } else {
+    chartData.value = _buildInitData(product, contract)
   }
+  loading.value = false
+  await loadChartData(product, contract, cacheKey)
 })
 
 // ── 视窗控制 ──────────────────────────────────────────────
 const startIdx    = ref(0)
 const barCount    = ref(63)
 const activeRange = ref('3M')
+const rangeInitialized = ref(false)
 
 // Historical OHLC + live daily bar merged by trading day (not natural day).
 const allOhlc = computed(() => {
@@ -148,7 +217,24 @@ const allDumb    = computed(() => chartData.value?.dumb     || [])
 const allSmart   = computed(() => chartData.value?.smart    || [])
 const allTotalOi = computed(() => chartData.value?.total_oi || [])
 
-watch(allOhlc, (arr) => { if (arr.length) applyRange('3M') }, { immediate: true })
+watch(allOhlc, (arr) => {
+  if (!arr.length) return
+  // 仅首次默认 3M；后续保持用户当前选择，不再强制回切。
+  if (!rangeInitialized.value) {
+    applyRange(activeRange.value || '3M')
+    rangeInitialized.value = true
+    return
+  }
+  if (activeRange.value) {
+    applyRange(activeRange.value)
+    return
+  }
+  // 自由拖拽/缩放模式（activeRange=''）下，仅做边界收敛。
+  const n = arr.length
+  if (startIdx.value + barCount.value > n) {
+    startIdx.value = Math.max(0, n - barCount.value)
+  }
+}, { immediate: true })
 
 const RANGE_BARS: Record<string, number> = { '1M': 21, '3M': 63, '6M': 126, '1Y': 252 }
 
@@ -253,49 +339,109 @@ const smartLine = computed(() => buildLine(visSmart.value,   'net', SMART_Y0, SM
 const oiLine    = computed(() => buildLine(visTotalOi.value, 'v',   OI_Y0,    OI_H))
 
 // ── 长按 OHLC 浮框 ────────────────────────────────────────
-const tooltip = ref<{visible:boolean;x:number;leftPct:number;dt:string;o:number;h:number;l:number;c:number;pct:number;iv:number|null}>
-  ({visible:false,x:0,leftPct:0,dt:'',o:0,h:0,l:0,c:0,pct:0,iv:null})
+const tooltip = ref<{visible:boolean;x:number;y:number;leftPct:number;dt:string;o:number;h:number;l:number;c:number;pct:number;iv:number|null}>
+  ({visible:false,x:0,y:0,leftPct:0,dt:'',o:0,h:0,l:0,c:0,pct:0,iv:null})
 
 let lpTimer:any=null, lpStartX=0, lpStartY=0
 let t0X=0, t0Idx=0, t0Dist=0, t0Count=0
+const candleWrapLeft = ref(0)
+const candleWrapW = ref(getW())
 
 function getW() { try { return (uni.getSystemInfoSync().windowWidth||375)-48 } catch { return 327 } }
 function svgH(h: number) {
   return `${(getW() / SVG_W * h).toFixed(1)}px`
 }
 
+function syncCandleWrapRect() {
+  nextTick(() => {
+    const q = uni.createSelectorQuery()
+    q.select('.k-candle-wrap').boundingClientRect((rect: any) => {
+      if (!rect) return
+      const w = Number(rect.width || 0)
+      if (w > 0) {
+        candleWrapLeft.value = Number(rect.left || 0)
+        candleWrapW.value = w
+      }
+    }).exec()
+  })
+}
+
+function _touchPoint(e: any, idx = 0): any {
+  return e?.touches?.[idx] ?? e?.changedTouches?.[idx] ?? null
+}
+
+function _touchX(e: any, idx = 0): number | null {
+  const p = _touchPoint(e, idx)
+  if (!p) return null
+  const x = Number(p.clientX ?? p.pageX ?? p.x ?? p.screenX)
+  return Number.isFinite(x) ? x : null
+}
+
+function _touchY(e: any, idx = 0): number | null {
+  const p = _touchPoint(e, idx)
+  if (!p) return null
+  const y = Number(p.clientY ?? p.pageY ?? p.y ?? p.screenY)
+  return Number.isFinite(y) ? y : null
+}
+
+function _localX(clientX: number): number {
+  const w = Math.max(1, candleWrapW.value || getW())
+  const x = clientX - candleWrapLeft.value
+  return Math.max(0, Math.min(w, x))
+}
+
 function onTouchStart(e:any) {
+  clearTimeout(lpTimer)
+  syncCandleWrapRect()
   if(e.touches.length===1) {
-    lpStartX=e.touches[0].clientX; lpStartY=e.touches[0].clientY
-    t0X=e.touches[0].clientX; t0Idx=startIdx.value
-    lpTimer=setTimeout(()=>doTooltip(e.touches[0].clientX), 450)
+    const cx = _touchX(e, 0), cy = _touchY(e, 0)
+    if (cx == null || cy == null) return
+    const localX = _localX(cx)
+    lpStartX = localX
+    lpStartY = cy
+    t0X = localX
+    t0Idx = startIdx.value
+    lpTimer=setTimeout(()=>doTooltip(localX), 450)
   } else if(e.touches.length===2) {
     clearTimeout(lpTimer)
-    const dx=e.touches[1].clientX-e.touches[0].clientX, dy=e.touches[1].clientY-e.touches[0].clientY
+    const x0 = _touchX(e, 0), y0 = _touchY(e, 0)
+    const x1 = _touchX(e, 1), y1 = _touchY(e, 1)
+    if (x0 == null || y0 == null || x1 == null || y1 == null) return
+    const dx = x1 - x0, dy = y1 - y0
     t0Dist=Math.sqrt(dx*dx+dy*dy); t0Count=barCount.value; t0Idx=startIdx.value
   }
 }
 function doTooltip(cx:number) {
   const ohlc=visOhlc.value; if(!ohlc.length) return
-  let idx=Math.round(cx/getW()*(ohlc.length-1)); idx=Math.max(0,Math.min(ohlc.length-1,idx))
+  const wrapW = Math.max(1, candleWrapW.value || getW())
+  let idx=Math.round(cx/wrapW*(ohlc.length-1)); idx=Math.max(0,Math.min(ohlc.length-1,idx))
   const d=ohlc[idx]
   const svgX=PAD_L+(idx+0.5)*((SVG_W-PAD_L-PAD_R)/ohlc.length)
+  const cdl = candleChart.value?.candles?.[idx]
+  const closeY = cdl ? (cdl.up ? cdl.bodyTop : cdl.bodyTop + cdl.bodyH) : PAD_TOP
   const leftPct=svgX/SVG_W*100
   const ivEntry=visIv.value.find((v:any)=>v.dt===d.dt)
-  tooltip.value={visible:true,x:svgX,leftPct,dt:d.dt.slice(0,4)+'/'+d.dt.slice(4,6)+'/'+d.dt.slice(6,8),o:d.o,h:d.h,l:d.l,c:d.c,pct:d.pct??0,iv:ivEntry?ivEntry.v:null}
+  tooltip.value={visible:true,x:svgX,y:closeY,leftPct,dt:d.dt.slice(0,4)+'/'+d.dt.slice(4,6)+'/'+d.dt.slice(6,8),o:d.o,h:d.h,l:d.l,c:d.c,pct:d.pct??0,iv:ivEntry?ivEntry.v:null}
 }
 function onTouchMove(e:any) {
-  e.preventDefault()
+  if (typeof e?.preventDefault === 'function') e.preventDefault()
   const n=allOhlc.value.length; if(!n) return
   if(e.touches.length===1) {
-    const dx=Math.abs(e.touches[0].clientX-lpStartX), dy=Math.abs(e.touches[0].clientY-lpStartY)
+    const cx = _touchX(e, 0), cy = _touchY(e, 0)
+    if (cx == null || cy == null) return
+    const localX = _localX(cx)
+    const dx=Math.abs(localX-lpStartX), dy=Math.abs(cy-lpStartY)
     if(dx>8||dy>8){clearTimeout(lpTimer);tooltip.value.visible=false}
     if(!tooltip.value.visible) {
-      const shift=Math.round(-(e.touches[0].clientX-t0X)*barCount.value/getW())
+      const wrapW = Math.max(1, candleWrapW.value || getW())
+      const shift=Math.round(-(localX-t0X)*barCount.value/wrapW)
       startIdx.value=Math.max(0,Math.min(n-barCount.value,t0Idx+shift)); activeRange.value=''
     }
   } else if(e.touches.length===2) {
-    const dx=e.touches[1].clientX-e.touches[0].clientX, dy=e.touches[1].clientY-e.touches[0].clientY
+    const x0 = _touchX(e, 0), y0 = _touchY(e, 0)
+    const x1 = _touchX(e, 1), y1 = _touchY(e, 1)
+    if (x0 == null || y0 == null || x1 == null || y1 == null) return
+    const dx = x1 - x0, dy = y1 - y0
     const dist=Math.sqrt(dx*dx+dy*dy)
     let nc=Math.round(t0Count*(t0Dist/(dist||1))); nc=Math.max(10,Math.min(n,nc))
     const center=t0Idx+Math.floor(t0Count/2)
@@ -383,6 +529,21 @@ function drawMpCandlePanel() {
     ctx.fillRect(x - bw / 2, top, bw, bh)
   })
 
+  if (tooltip.value.visible) {
+    const tx = Math.max(xL, Math.min(xR, tooltip.value.x * sx))
+    const ty = Math.max(PAD_TOP * sy, Math.min(h, tooltip.value.y * sy))
+    ctx.setStrokeStyle('rgba(255,255,255,0.45)')
+    ctx.setLineWidth(1)
+    ctx.beginPath()
+    ctx.moveTo(tx, PAD_TOP * sy)
+    ctx.lineTo(tx, h)
+    ctx.stroke()
+    ctx.beginPath()
+    ctx.moveTo(xL, ty)
+    ctx.lineTo(xR, ty)
+    ctx.stroke()
+  }
+
   ctx.draw()
   // #endif
 }
@@ -455,7 +616,7 @@ function drawMpPanels() {
 }
 
 watch(
-  [visOhlc, visIv, visTotalOi, visDumb, visSmart, activeRange, startIdx, barCount, liveCandle],
+  [visOhlc, visIv, visTotalOi, visDumb, visSmart, activeRange, startIdx, barCount, liveCandle, tooltip],
   () => drawMpPanels(),
   { deep: true, immediate: true }
 )
@@ -527,7 +688,7 @@ watch(
           <view class="sub-header">
             <text class="sub-title" style="color:#f5c518">K线</text>
             </view>
-          <view class="svg-wrap" @touchstart="onTouchStart" @touchmove.prevent="onTouchMove" @touchend="onTouchEnd">
+          <view class="svg-wrap k-candle-wrap" @touchstart="onTouchStart" @touchmove.prevent="onTouchMove" @touchend="onTouchEnd">
               <!-- #ifdef MP-WEIXIN -->
               <canvas
                 canvas-id="mpCandleCanvas"
@@ -535,6 +696,10 @@ watch(
                 :style="{ width: mpPanelW + 'px', height: mpCandleH + 'px' }"
                 :width="mpPanelW"
                 :height="mpCandleH"
+                @touchstart="onTouchStart"
+                @touchmove.prevent="onTouchMove"
+                @touchend="onTouchEnd"
+                @touchcancel="onTouchEnd"
               />
               <!-- #endif -->
               <!-- #ifndef MP-WEIXIN -->
@@ -758,7 +923,7 @@ watch(
       </view>
 
       <view v-if="allOhlc.length===0&&!loading" class="center-tip">
-        <text class="muted-text">该品种暂无历史数据</text>
+        <text class="muted-text">{{ chartLoading ? '图表加载中...' : '该品种暂无历史数据' }}</text>
       </view>
     </view>
     <view style="height:60rpx;"/>
