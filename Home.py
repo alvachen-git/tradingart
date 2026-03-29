@@ -55,34 +55,39 @@ for key in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"]:
         del os.environ[key]
 
 # ==================== 公告配置区 ====================
-ENABLE_HOME_ANNOUNCEMENT = False  # 临时关闭首页公告，恢复时改为 True
+ENABLE_HOME_ANNOUNCEMENT = True  # 开启首页公告
 # Fast router is disabled by default to avoid false positives on
 # historical/list queries (for example: "最近两周每天价格").
 FAST_ROUTER_ENABLED = os.getenv("AIBOTA_FAST_ROUTER_ENABLED", "0").strip().lower() in {"1", "true", "yes", "on"}
 
 ANNOUNCEMENT_CONTENT = {
-    "title": "🎉 最新动态",
+    "title": "📡 情报站内容升级",
     "sections": [
         {
-            "title": "🚀 新功能上线",
+            "title": "🧠 你能在情报站看到什么",
             "items": [
-                "**期货商持仓分析晚报** — 多家期货商净持仓汇总，每晚 6:30 自动更新，在左侧「情报站」查看",
-                "**末日期权晚报** — 快到期的期权策略操作建议，每晚 6:30 自动更新，在左侧「情报站」查看",
-                "**持仓体检** — 把你的股票持仓截图上传给爱波塔，AI 一键分析持仓健康度、集中度与风险敞口",
+                "复盘晚报：盘后提炼当日主线、关键异动与次日观察点。",
+                "资金流晚报：跟踪主力流向与板块强弱，辅助判断市场节奏。",
+                "交易信号：结合盘中数据，给出k线突破信号参考。",
+                "持仓密报 / 末日期权晚报：面向实盘决策场景，提供重点风险与机会提示。",
             ]
         },
         {
-            "title": "💎 VIP 交流群",
+            "title": "🎯 如何高效使用",
             "items": [
-                "盘前语音 — 每日开盘前市场解读",
-                "盘中交流 — 实时行情讨论",
-                "盘后复盘 — 每日收盘复盘分析",
-                "每周 VIP 视频 — 深度策略讲解",
+                "盘前看资金流晚报，确定重点方向。",
+                "盘后看复盘晚报，更新交易计划。",
+                "持仓密报揭示机构和散户的期货秘密",
             ],
-            "vip_link": "https://mp.weixin.qq.com/s/hZ4jooECvBg5SV6_NeSFHA"
+        },
+        {
+            "title": "👉 立即查看",
+            "items": [
+                "在左侧导航进入「情报站」，按频道订阅并查看历史内容。",
+            ]
         }
     ],
-    "update_date": "2026-03-07"
+    "update_date": "2026-03-29"
 }
 
 
@@ -151,14 +156,16 @@ def show_announcement():
                 current_hash,
                 expires_at=datetime.now() + timedelta(days=365)
             )
-            st.session_state.announcement_displayed = True
+            # 同步更新会话状态，避免等待下一次 cookie 读取
+            st.session_state.announcement_read_hash = current_hash
+            st.session_state.announcement_acknowledged = True
             st.rerun()
 
 
 def check_and_show_announcement():
     """检查是否需要显示公告 - 使用 session_state 中的 cookie 数据"""
-    # 🔥 关键1：如果本次会话已经显示过，直接跳过
-    if st.session_state.get('announcement_displayed', False):
+    # 仅在用户明确点击“我知道了”后，本会话不再弹出
+    if st.session_state.get('announcement_acknowledged', False):
         return
 
     # 🔥 关键2：如果刚刚手动登录，跳过这次显示，等下次用户刷新或操作时再显示
@@ -173,15 +180,17 @@ def check_and_show_announcement():
         # 🔥 使用之前在初始化时读取的 cookie 状态（避免 rerun 冲突）
         read_hash = st.session_state.get('announcement_read_hash', None)
 
-        # 如果 cookie 中没有记录，或者版本不匹配，则显示
-        if read_hash != current_hash:
-            st.session_state.announcement_displayed = True
-            show_announcement()
+        # cookie 已确认当前版本：本会话不再弹出
+        if read_hash == current_hash:
+            st.session_state.announcement_acknowledged = True
+            return
+
+        # cookie 无记录或版本不匹配：继续显示公告
+        show_announcement()
     except Exception as e:
         print(f"公告检查失败: {e}")
-        # 如果出错，仍然显示公告（确保用户能看到）
-        if not st.session_state.get('announcement_displayed', False):
-            st.session_state.announcement_displayed = True
+        # 出错时仍尝试显示，避免静默丢失公告
+        if not st.session_state.get('announcement_acknowledged', False):
             show_announcement()
 
 # ==========================================
