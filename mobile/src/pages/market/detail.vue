@@ -470,8 +470,16 @@ function fmtCompact(v:number):string {
 }
 
 function ivRankColor(r:number):string {
+  if(r===-2) return '#6b7280'
+  if(r===-3) return '#76839a'
   if(r<0) return '#555'; if(r>=80) return '#e84040'; if(r>=60) return '#f97316'
   if(r>=40) return '#f5c518'; if(r>=20) return '#22c55e'; return '#3b82f6'
+}
+function ivRankLabel(r:number):string {
+  if (r === -2) return '无'
+  if (r === -3) return '缺'
+  if (r < 0) return '到期'
+  return String(Math.round(r))
 }
 function pctColor(v:number|null):string { if(v==null) return '#888'; return v>0?'#e84040':v<0?'#22c55e':'#888' }
 function dumbChgColor(v:number|null):string { if(v==null) return '#888'; return v<0?'#22c55e':v>0?'#e84040':'#888' }
@@ -636,7 +644,7 @@ watch(
             <text class="c-code">{{ chartData?.main_contract || initName }}</text>
           </view>
           <view class="rank-circle" :style="{borderColor:ivRankColor(initIvRank),color:ivRankColor(initIvRank)}">
-            <text class="rank-num">{{ initIvRank>=0 ? Math.round(initIvRank) : '-' }}</text>
+            <text class="rank-num">{{ initIvRank>=0 ? Math.round(initIvRank) : ivRankLabel(initIvRank) }}</text>
             <text class="rank-lbl">Rank</text>
           </view>
         </view>
@@ -651,13 +659,13 @@ watch(
           <view class="kpi-item">
             <text class="kpi-lbl">当前 IV%</text>
             <text class="kpi-val" :style="{color:ivRankColor(initIvRank)}">
-              {{ chartData?.cur_iv!=null ? chartData.cur_iv.toFixed(1)+'%' : (initIv>0?initIv.toFixed(1)+'%':'-') }}
+              {{ chartData?.cur_iv!=null ? chartData.cur_iv.toFixed(1)+'%' : (initIv>0?initIv.toFixed(1)+'%':(initIvRank===-2?'无':'-')) }}
             </text>
           </view>
           <view class="kpi-item">
             <text class="kpi-lbl">IV Rank</text>
             <text class="kpi-val" :style="{color:ivRankColor(initIvRank)}">
-              {{ initIvRank>=0 ? Math.round(initIvRank) : '到期' }}
+              {{ initIvRank>=0 ? Math.round(initIvRank) : ivRankLabel(initIvRank) }}
             </text>
           </view>
           <view class="kpi-item">

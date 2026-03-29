@@ -18,6 +18,8 @@ mobile_api.py — 爱波塔手机端专用 FastAPI 后端
   GET    /api/chat/status/{task_id}     轮询 AI 任务状态
 
   GET    /api/intel/reports             获取情报站晚报列表（支持分页/频道筛选）
+  GET    /api/intel/ai/overview         获取 AI炒股总览（KPI/曲线/持仓/交易/复盘）
+  GET    /api/intel/ai/review           获取 AI炒股单日复盘（支持 trade_date）
   GET    /api/intel/report/{id}         获取单篇晚报完整内容
   POST   /api/intel/subscribe           订阅白名单频道
   POST   /api/alipay/notify             支付宝异步回调通知（验签+到账）
@@ -40,6 +42,7 @@ mobile_api.py — 爱波塔手机端专用 FastAPI 后端
 import hashlib
 import io
 import json
+import math
 import os
 import re
 import sys
@@ -47,7 +50,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
-from typing import Optional, List, Any
+from typing import Optional, List, Any, Dict
 
 import redis
 from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, Query, Request
@@ -64,6 +67,15 @@ from task_manager import TaskManager
 import subscription_service as sub_svc
 import payment_service as pay_svc
 import data_engine as de
+from ai_simulation_service import (
+    OFFICIAL_PORTFOLIO_ID,
+    get_daily_review as ai_get_daily_review,
+    get_latest_snapshot as ai_get_latest_snapshot,
+    get_nav_series as ai_get_nav_series,
+    get_positions as ai_get_positions,
+    get_review_dates as ai_get_review_dates,
+    get_trades as ai_get_trades,
+)
 from vision_tools import analyze_portfolio_image
 from mobile_trading_day import enrich_prices_payload_with_trading_day
 
@@ -188,6 +200,86 @@ def _compute_iv_chg_fallback_map(df):
         if len(vals) >= 2 and vals[1] > 0:
             out[code] = round(vals[0] - vals[1], 2)
     return out
+
+
+IV_RANK_EXPIRING = -1
+IV_RANK_NO_OPTION = -2
+IV_RANK_MISSING = -3
+
+_OPTION_PRODUCT_CODES_CACHE: dict[str, Any] = {
+    "ts": 0.0,
+    "values": set(),
+}
+
+
+def _normalize_product_code(raw: Any) -> str:
+    s = str(raw or "").strip().lower()
+    m = re.match(r"^([a-z]+)", s)
+    return m.group(1) if m else ""
+
+
+def _extract_product_code_from_contract(name: str) -> str:
+    s = str(name or "").strip()
+    m = re.match(r"([a-zA-Z]+)", s)
+    return m.group(1).lower() if m else ""
+
+
+def _get_option_product_codes(cache_ttl_sec: int = 600) -> set[str]:
+    """读取“有期权品种”清单（带短缓存）。"""
+    now_ts = time.time()
+    cache_vals = _OPTION_PRODUCT_CODES_CACHE.get("values", set())
+    cache_ts = float(_OPTION_PRODUCT_CODES_CACHE.get("ts", 0.0) or 0.0)
+    if cache_vals and (now_ts - cache_ts) < cache_ttl_sec:
+        return set(cache_vals)
+
+    import pandas as pd
+
+    values: set[str] = set()
+    try:
+        # 优先用 underlying（最稳定）
+        df = pd.read_sql(
+            """
+            SELECT DISTINCT LOWER(TRIM(underlying)) AS product
+            FROM commodity_option_basic
+            WHERE underlying IS NOT NULL
+              AND TRIM(underlying) <> ''
+            """,
+            de.engine,
+        )
+        if not df.empty:
+            values = {
+                _normalize_product_code(x)
+                for x in df["product"].tolist()
+                if _normalize_product_code(x)
+            }
+    except Exception:
+        values = set()
+
+    if not values:
+        try:
+            # 兜底：从 ts_code 前缀提取（避免 underlying 为空时失效）
+            df2 = pd.read_sql(
+                """
+                SELECT DISTINCT LOWER(REGEXP_SUBSTR(SUBSTRING_INDEX(ts_code,'.',1),'^[a-zA-Z]+')) AS product
+                FROM commodity_option_basic
+                """,
+                de.engine,
+            )
+            if not df2.empty:
+                values = {
+                    _normalize_product_code(x)
+                    for x in df2["product"].tolist()
+                    if _normalize_product_code(x)
+                }
+        except Exception:
+            values = set()
+
+    if values:
+        _OPTION_PRODUCT_CODES_CACHE["values"] = set(values)
+        _OPTION_PRODUCT_CODES_CACHE["ts"] = now_ts
+        return values
+
+    return set(cache_vals) if cache_vals else set()
 
 
 def _to_sina_code(contract: str) -> str:
@@ -722,6 +814,56 @@ def _is_production_env() -> bool:
     return env_val in {"prod", "production", "online"}
 
 
+def _normalize_trade_date_input(raw: Optional[str]) -> Optional[str]:
+    digits = "".join(ch for ch in str(raw or "") if ch.isdigit())
+    if not digits:
+        return None
+    if len(digits) != 8:
+        raise HTTPException(status_code=400, detail="trade_date 格式错误，应为 YYYYMMDD")
+    return digits
+
+
+def _json_safe_value(value: Any):
+    if value is None:
+        return None
+
+    # numpy scalar / pandas scalar
+    if hasattr(value, "item") and callable(getattr(value, "item", None)):
+        try:
+            value = value.item()
+        except Exception:
+            pass
+
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, (str, int, bool)):
+        return value
+    if isinstance(value, datetime):
+        return value.strftime("%Y-%m-%d %H:%M:%S")
+    if isinstance(value, dict):
+        return {str(k): _json_safe_value(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe_value(v) for v in value]
+
+    # 兜底处理 NaN / NaT
+    try:
+        if value != value:
+            return None
+    except Exception:
+        pass
+    return value
+
+
+def _df_records_jsonable(df: Any, limit: Optional[int] = None) -> List[Dict[str, Any]]:
+    if df is None or getattr(df, "empty", True):
+        return []
+    work = df.copy()
+    if limit is not None and limit > 0:
+        work = work.head(limit)
+    rows = work.to_dict(orient="records")
+    return [_json_safe_value(row) for row in rows]
+
+
 @app.get("/api/intel/reports", tags=["情报站"])
 def intel_reports(
     channel_code: Optional[str] = None,
@@ -766,6 +908,135 @@ def intel_reports(
         "page_size": page_size,
         "has_more": len(raw) > offset + page_size,
     }
+
+
+@app.get("/api/intel/ai/overview", tags=["情报站"])
+def intel_ai_overview(
+    nav_days: int = 120,
+    trades_days: int = 20,
+    positions_limit: int = 24,
+    review_limit: int = 260,
+    username: str = Depends(get_current_user),
+):
+    """
+    AI炒股总览数据（官方组合）：
+    - snapshot / nav_series / positions / trades / latest_review / review_dates / watchlist
+    """
+    _ = username  # 仅鉴权，不做用户隔离
+    nav_days = min(250, max(30, int(nav_days)))
+    trades_days = min(40, max(5, int(trades_days)))
+    positions_limit = min(50, max(5, int(positions_limit)))
+    review_limit = min(260, max(20, int(review_limit)))
+
+    try:
+        snapshot = _json_safe_value(ai_get_latest_snapshot(OFFICIAL_PORTFOLIO_ID)) or {}
+        if not snapshot.get("has_data"):
+            return {
+                "has_data": False,
+                "portfolio_id": OFFICIAL_PORTFOLIO_ID,
+                "snapshot": snapshot,
+                "review_dates": [],
+                "latest_review": {
+                    "has_data": False,
+                    "summary_md": "暂无复盘数据。",
+                    "buys_md": "",
+                    "sells_md": "",
+                    "risk_md": "",
+                    "next_watchlist": [],
+                },
+                "nav_series": [],
+                "positions": [],
+                "trades": [],
+                "watchlist": [],
+                "fetched_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            }
+
+        snapshot_trade_date = str(snapshot.get("trade_date") or "")
+        review_dates = ai_get_review_dates(OFFICIAL_PORTFOLIO_ID, limit=review_limit) or []
+        if snapshot_trade_date and snapshot_trade_date not in review_dates:
+            review_dates = [snapshot_trade_date] + list(review_dates)
+
+        latest_review_date = review_dates[0] if review_dates else snapshot_trade_date
+        latest_review = _json_safe_value(
+            ai_get_daily_review(OFFICIAL_PORTFOLIO_ID, trade_date=latest_review_date)
+        ) or {
+            "has_data": False,
+            "summary_md": "暂无复盘数据。",
+            "buys_md": "",
+            "sells_md": "",
+            "risk_md": "",
+            "next_watchlist": [],
+        }
+
+        nav_rows = _df_records_jsonable(ai_get_nav_series(OFFICIAL_PORTFOLIO_ID, days=nav_days), limit=nav_days)
+        initial_capital = _safe_float(snapshot.get("initial_capital"), 1_000_000.0)
+        if initial_capital <= 0:
+            initial_capital = 1_000_000.0
+        for row in nav_rows:
+            nav_val = _safe_float(row.get("nav"), 0.0)
+            row["nav_norm"] = round(nav_val / initial_capital, 6)
+            row["bench_hs300"] = _safe_float(row.get("bench_hs300"), 0.0)
+            row["bench_zz1000"] = _safe_float(row.get("bench_zz1000"), 0.0)
+            row["trade_date"] = str(row.get("trade_date") or "")
+
+        pos_df = ai_get_positions(
+            OFFICIAL_PORTFOLIO_ID,
+            as_of_date=snapshot_trade_date or None,
+            strict_as_of=True,
+        )
+        if getattr(pos_df, "empty", True):
+            pos_df = ai_get_positions(
+                OFFICIAL_PORTFOLIO_ID,
+                as_of_date=snapshot_trade_date or None,
+                strict_as_of=False,
+            )
+        positions = _df_records_jsonable(pos_df, limit=positions_limit)
+        for row in positions:
+            row["trade_date"] = str(row.get("trade_date") or snapshot_trade_date)
+
+        trades = _df_records_jsonable(ai_get_trades(OFFICIAL_PORTFOLIO_ID, days=trades_days), limit=trades_days * 20)
+        for row in trades:
+            row["trade_date"] = str(row.get("trade_date") or "")
+            if row.get("created_at") is not None:
+                row["created_at"] = str(row.get("created_at"))
+
+        watchlist = latest_review.get("next_watchlist") if isinstance(latest_review, dict) else []
+        if not isinstance(watchlist, list):
+            watchlist = []
+
+        return {
+            "has_data": True,
+            "portfolio_id": OFFICIAL_PORTFOLIO_ID,
+            "snapshot": snapshot,
+            "review_dates": [str(d) for d in review_dates],
+            "latest_review": latest_review,
+            "nav_series": nav_rows,
+            "positions": positions,
+            "trades": trades,
+            "watchlist": _json_safe_value(watchlist) or [],
+            "fetched_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"AI炒股总览加载失败: {e}")
+
+
+@app.get("/api/intel/ai/review", tags=["情报站"])
+def intel_ai_review(
+    trade_date: Optional[str] = None,
+    username: str = Depends(get_current_user),
+):
+    """获取 AI炒股复盘（日级）。trade_date 可选，格式 YYYYMMDD。"""
+    _ = username
+    td = _normalize_trade_date_input(trade_date)
+    try:
+        review = ai_get_daily_review(OFFICIAL_PORTFOLIO_ID, trade_date=td)
+        return _json_safe_value(review)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"AI炒股复盘加载失败: {e}")
 
 
 @app.get("/api/intel/report/{report_id}", tags=["情报站"])
@@ -1044,18 +1315,20 @@ def market_options(username: str = Depends(get_current_user)):
             return {"items": [], "updated_at": ""}
 
         import pandas as pd
+        option_product_codes = _get_option_product_codes()
         records = []
         for _, row in df.iterrows():
             iv_rank = row.get("IV Rank", 0)
+            is_expiring = str(iv_rank).strip() == "快到期"
             try:
-                iv_rank_num = float(iv_rank) if iv_rank not in ("快到期", None, "") else -1
+                iv_rank_num = float(iv_rank) if iv_rank not in ("快到期", None, "") else IV_RANK_EXPIRING
             except Exception:
-                iv_rank_num = -1
+                iv_rank_num = IV_RANK_EXPIRING
 
             # 提取品种代码（合约格式如 "m2605 (豆粕)"，取括号前的字母部分）
             name_str = str(row.get("合约", ""))
-            prod_match = re.match(r"([a-zA-Z]+)", name_str)
-            product_code = prod_match.group(1).lower() if prod_match else ""
+            product_code = _extract_product_code_from_contract(name_str)
+            has_option = product_code in option_product_codes
 
             # 当前IV：已经是百分比形式（如 18.53 = 18.53%），直接使用
             raw_iv = float(row.get("当前IV", 0) or 0)
@@ -1063,6 +1336,15 @@ def market_options(username: str = Depends(get_current_user)):
             iv_chg_raw = row.get("IV变动(日)", None)
             iv_chg_missing = _is_missing_value(iv_chg_raw)
             raw_iv_chg = 0.0 if iv_chg_missing else float(iv_chg_raw or 0)
+
+            # IV Rank 状态归一化：
+            # -2: 无期权；-1: 快到期；-3: 有期权但缺IV；>=0: 正常分位
+            if not has_option:
+                iv_rank_num = IV_RANK_NO_OPTION
+            elif is_expiring:
+                iv_rank_num = IV_RANK_EXPIRING
+            elif raw_iv <= 0:
+                iv_rank_num = IV_RANK_MISSING
 
             records.append({
                 "name":         name_str,
@@ -1161,6 +1443,8 @@ def market_contracts(product: str, username: str = Depends(get_current_user)):
         import datetime as dt
 
         prod = product.strip().lower()
+        option_product_codes = _get_option_product_codes()
+        has_option = prod in option_product_codes
         pattern = f'^{prod}[0-9]'  # 匹配 m2605 / m2609 等
 
         # ── 最近两个交易日（按该品种自身日历）──
@@ -1231,13 +1515,24 @@ def market_contracts(product: str, username: str = Depends(get_current_user)):
               AND iv > 0
         """
         df_iv_hist = pd.read_sql(iv_hist_sql, de.engine)
+        if not df_iv_hist.empty:
+            df_iv_hist["product"] = (
+                df_iv_hist["ts_code"]
+                .astype(str)
+                .str.split(".", n=1)
+                .str[0]
+                .str.extract(r"^([A-Za-z]+)", expand=False)
+                .str.lower()
+            )
 
         def iv_rank(ts_code: str, cur_iv: float) -> float:
             if cur_iv <= 0:
-                return -1
+                return IV_RANK_MISSING
             hist = df_iv_hist[df_iv_hist['ts_code'] == ts_code]['iv']
+            if len(hist) < 20 and "product" in df_iv_hist.columns:
+                hist = df_iv_hist[df_iv_hist['product'] == prod]['iv']
             if len(hist) < 20:
-                return -1
+                return IV_RANK_MISSING
             return round((hist < cur_iv).sum() / len(hist) * 100, 1)
 
         records = []
@@ -1250,7 +1545,10 @@ def market_contracts(product: str, username: str = Depends(get_current_user)):
             cur_iv  = float(iv_map.get(ts, 0) or 0)
             prev_iv = float(iv_prev_map.get(ts, 0) or 0)
             iv_chg  = round(cur_iv - prev_iv, 2) if prev_iv > 0 else 0.0
-            rank    = iv_rank(ts, cur_iv)
+            if not has_option:
+                rank = IV_RANK_NO_OPTION
+            else:
+                rank = iv_rank(ts, cur_iv)
 
             records.append({
                 "name":         ts.upper(),

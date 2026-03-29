@@ -440,6 +440,8 @@ function toDetail(item: OptionItem) {
 
 // ── 样式辅助 ──────────────────────────────────────────────
 function ivRankColor(rank: number): string {
+  if (rank === -2) return '#6b7280' // 无期权
+  if (rank === -3) return '#76839a' // 有期权但缺IV数据
   if (rank < 0) return '#555555'
   if (rank >= 80) return '#e84040'
   if (rank >= 60) return '#f97316'
@@ -448,6 +450,8 @@ function ivRankColor(rank: number): string {
   return '#3b82f6'
 }
 function ivRankLabel(rank: number): string {
+  if (rank === -2) return '无'
+  if (rank === -3) return '缺'
   if (rank < 0) return '到期'
   return String(Math.round(rank))
 }
@@ -460,7 +464,9 @@ function fmtPct(v: number): string {
   if (v === 0) return '0%'
   return (v > 0 ? '+' : '') + v.toFixed(2) + '%'
 }
-function fmtIvChg(v: number): string {
+function fmtIvChg(v: number, rank?: number): string {
+  if (rank === -2) return '无'
+  if (rank === -3) return '-'
   if (v === 0) return '─'
   return (v > 0 ? '+' : '') + v.toFixed(1)
 }
@@ -582,12 +588,12 @@ onShareTimeline(() => ({
 
           <!-- IV% -->
           <view class="col-iv">
-            <text class="opt-iv">{{ item.iv > 0 ? item.iv.toFixed(1) : '-' }}</text>
+            <text class="opt-iv">{{ item.iv > 0 ? item.iv.toFixed(1) : (item.iv_rank === -2 ? '无' : '-') }}</text>
           </view>
 
           <!-- IV变动 -->
           <view class="col-ivchg">
-            <text class="ivchg-val" :style="{ color: pctColor(item.iv_chg_1d) }">{{ fmtIvChg(item.iv_chg_1d) }}</text>
+            <text class="ivchg-val" :style="{ color: pctColor(item.iv_chg_1d) }">{{ fmtIvChg(item.iv_chg_1d, item.iv_rank) }}</text>
           </view>
 
           <!-- Rank -->
