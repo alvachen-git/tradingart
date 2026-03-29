@@ -461,6 +461,7 @@ function toneClass(v: any): string {
 
       <view v-else>
         <view class="ai-meta">
+          <text class="meta-text">千问模型搭配交易汇训练</text>
           <text class="meta-text">更新：{{ aiOverview.fetched_at || '-' }}</text>
           <text v-if="aiSyncing" class="meta-text">同步中...</text>
         </view>
