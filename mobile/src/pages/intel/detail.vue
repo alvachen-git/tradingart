@@ -63,9 +63,21 @@ const mpRichNodes = computed(() => {
   return `<div style="color:#cbd5e1;line-height:1.85;word-break:break-word;">${cleaned}</div>`
 })
 
+const useMpRichText = computed(() => {
+  if (!isHtml.value) return false
+  const cleaned = sanitizeHtmlForMp(content.value?.content || '')
+  if (!cleaned) return false
+  if (cleaned.length > 8000) return false
+  if (/<(table|iframe|svg|video|audio|form|canvas)\\b/i.test(cleaned)) return false
+  return true
+})
+
 const mpPlainFallback = computed(() => {
   const text = htmlToPlainText(content.value?.content || '')
-  return text || '正文暂不可显示'
+  if (text) return text
+  const summary = htmlToPlainText(content.value?.summary || '')
+  if (summary) return summary
+  return '正文暂不可显示'
 })
 </script>
 
@@ -99,10 +111,10 @@ const mpPlainFallback = computed(() => {
 
       <!-- 纯文本正文（非 HTML 内容，或小程序环境用 rich-text） -->
       <!-- #ifndef H5 -->
-      <rich-text v-if="isHtml && mpRichNodes" :nodes="mpRichNodes" class="rich-body" />
+      <rich-text v-if="isHtml && useMpRichText && mpRichNodes" :nodes="mpRichNodes" class="rich-body" />
       <text v-else-if="isHtml" class="article-body selectable">{{ mpPlainFallback }}</text>
       <!-- #endif -->
-      <text v-if="!isHtml" class="article-body selectable">{{ content.content }}</text>
+      <text v-if="!isHtml" class="article-body selectable">{{ content.content || content.summary || '正文暂不可显示' }}</text>
     </view>
   </view>
 </template>

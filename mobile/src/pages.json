@@ -44,7 +44,8 @@
         "navigationBarTitleText": "情报站",
         "navigationBarBackgroundColor": "#0b1121",
         "navigationBarTextStyle": "white",
-        "backgroundColor": "#0b1121"
+        "backgroundColor": "#0b1121",
+        "enablePullDownRefresh": true
       }
     },
     {

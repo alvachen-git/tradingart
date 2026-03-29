@@ -58,6 +58,67 @@ export interface ReportItem {
   published_at: string
 }
 
+export interface AiNavPoint {
+  trade_date: string
+  nav: number
+  nav_norm: number
+  bench_hs300: number
+  bench_zz1000: number
+}
+
+export interface AiPositionItem {
+  trade_date: string
+  symbol: string
+  name: string
+  quantity: number
+  avg_cost: number
+  close_price: number
+  market_value: number
+  unrealized_pnl: number
+  weight: number
+}
+
+export interface AiTradeItem {
+  trade_date: string
+  symbol: string
+  side: string
+  quantity: number
+  price: number
+  amount: number
+  created_at?: string
+}
+
+export interface AiWatchItem {
+  symbol: string
+  name?: string
+  score?: number
+  [key: string]: any
+}
+
+export interface AiReviewPayload {
+  has_data: boolean
+  trade_date?: string
+  summary_md: string
+  buys_md: string
+  sells_md: string
+  risk_md: string
+  next_watchlist: AiWatchItem[]
+  [key: string]: any
+}
+
+export interface AiOverviewPayload {
+  has_data: boolean
+  portfolio_id: string
+  snapshot: Record<string, any>
+  review_dates: string[]
+  latest_review: AiReviewPayload
+  nav_series: AiNavPoint[]
+  positions: AiPositionItem[]
+  trades: AiTradeItem[]
+  watchlist: AiWatchItem[]
+  fetched_at: string
+}
+
 export const intelApi = {
   reports: (params?: { channel_code?: string; page?: number; page_size?: number }) => {
     const qs = toQuery({
@@ -71,12 +132,29 @@ export const intelApi = {
   },
 
   detail: (id: number) =>
-    request<{ id: number; title: string; content: string; channel_name: string; published_at: string }>(
+    request<{ id: number; title: string; summary?: string; content: string; channel_name: string; published_at: string }>(
       'GET', `/api/intel/report/${id}`
     ),
 
   subscribe: (channel_code: string) =>
     request<{ message: string }>('POST', '/api/intel/subscribe', { channel_code }),
+}
+
+export const aiSimApi = {
+  overview: (params?: { nav_days?: number; trades_days?: number; positions_limit?: number; review_limit?: number }) => {
+    const qs = toQuery({
+      nav_days: params?.nav_days,
+      trades_days: params?.trades_days,
+      positions_limit: params?.positions_limit,
+      review_limit: params?.review_limit,
+    })
+    return request<AiOverviewPayload>('GET', `/api/intel/ai/overview${qs}`)
+  },
+
+  review: (tradeDate?: string) => {
+    const qs = toQuery({ trade_date: tradeDate })
+    return request<AiReviewPayload>('GET', `/api/intel/ai/review${qs}`)
+  },
 }
 
 // ── Market ───────────────────────────────────────────────
@@ -85,7 +163,7 @@ export interface OptionItem {
   name: string
   product_code: string  // 品种代码，如 m / rb / cu
   iv: number            // 当前IV%
-  iv_rank: number       // IV Rank 0-100，-1 表示快到期
+  iv_rank: number       // IV Rank 0-100；-1=快到期；-2=无期权；-3=有期权但缺IV
   iv_chg_1d: number     // 当日IV变动（百分点）
   pct_1d: number        // 标的当日涨跌%
   pct_5d: number        // 标的5日涨跌%
