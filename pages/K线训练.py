@@ -2340,10 +2340,49 @@ if st.session_state.get('game_started') and 'game_data' in st.session_state:
             }};
         }}
 
-        function resolveTradeApiUrl() {{
+        function resolveTradeApiCandidates() {{
+            const fallback = '/api/kline/trades/batch';
+            const candidates = [];
             const configured = String(CONFIG.tradeApiUrl || '').trim();
-            if (configured) return configured;
-            return '/api/kline/trades/batch';
+
+            if (configured) {{
+                let skipConfigured = false;
+                try {{
+                    const targetUrl = new URL(configured, window.location.href);
+                    const host = String(targetUrl.hostname || '').toLowerCase();
+                    const pageHost = String(window.location.hostname || '').toLowerCase();
+                    const targetIsLoopback = host === '127.0.0.1' || host === 'localhost' || host === '::1';
+                    const pageIsLoopback = pageHost === '127.0.0.1' || pageHost === 'localhost' || pageHost === '::1';
+                    if (targetIsLoopback && !pageIsLoopback) {{
+                        // Avoid using server-local loopback URL on a public page.
+                        skipConfigured = true;
+                    }}
+                }} catch (e) {{}}
+                if (!skipConfigured) {{
+                    candidates.push(configured);
+                }} else {{
+                    console.warn('[TRADE_BATCH] skip loopback api on non-loopback page:', configured);
+                }}
+            }}
+
+            candidates.push(fallback);
+            return Array.from(new Set(candidates.filter(Boolean)));
+        }}
+
+        function extractApiErrorMessage(body, status) {{
+            if (body && typeof body === 'object') {{
+                if (body.message) return String(body.message);
+                if (body.detail) return String(body.detail);
+                if (body.error) return String(body.error);
+            }}
+            if (status) return 'HTTP ' + status;
+            return 'unknown error';
+        }}
+
+        function shouldRetryTradeApi(result) {{
+            const code = Number(result?.status || 0);
+            if (!code) return true; // network-level failure
+            return code === 404 || code === 408 || code === 425 || code === 429 || code >= 500;
         }}
 
         function pushTradeEvent(action, lots, price, positionBefore) {{
@@ -2374,8 +2413,8 @@ if st.session_state.get('game_started') and 'game_data' in st.session_state:
             if (tradePersisted) return {{ ok: true, already: true }};
             if (tradePersistPromise) return tradePersistPromise;
 
-            const apiUrl = resolveTradeApiUrl();
-            if (!apiUrl) return {{ ok: false, message: 'trade api unavailable' }};
+            const apiCandidates = resolveTradeApiCandidates();
+            if (!apiCandidates.length) return {{ ok: false, message: 'trade api unavailable' }};
 
             const payload = {{
                 game_id: Number(CONFIG.gameId || 0),
@@ -2386,25 +2425,57 @@ if st.session_state.get('game_started') and 'game_data' in st.session_state:
                 trades: tradeEvents
             }};
 
-            tradePersistPromise = fetch(apiUrl, {{
-                method: 'POST',
-                headers: {{ 'Content-Type': 'application/json' }},
-                body: JSON.stringify(payload)
-            }}).then(async (res) => {{
-                let body = {{}};
-                try {{
-                    body = await res.json();
-                }} catch (e) {{
-                    body = {{ ok: false, message: 'invalid api response' }};
+            tradePersistPromise = (async () => {{
+                let lastError = null;
+
+                for (const apiUrl of apiCandidates) {{
+                    try {{
+                        const res = await fetch(apiUrl, {{
+                            method: 'POST',
+                            headers: {{ 'Content-Type': 'application/json' }},
+                            body: JSON.stringify(payload)
+                        }});
+
+                        let body = {{}};
+                        let rawText = '';
+                        try {{
+                            rawText = await res.text();
+                        }} catch (e) {{
+                            rawText = '';
+                        }}
+
+                        if (rawText) {{
+                            try {{
+                                body = JSON.parse(rawText);
+                            }} catch (e) {{
+                                body = {{ ok: false, message: rawText.slice(0, 300) }};
+                            }}
+                        }}
+
+                        if (res.ok && body && body.ok) {{
+                            tradePersisted = true;
+                            return {{ ok: true, body, apiUrl }};
+                        }}
+
+                        const failed = {{
+                            ok: false,
+                            status: res.status,
+                            body,
+                            message: extractApiErrorMessage(body, res.status),
+                            apiUrl
+                        }};
+                        lastError = failed;
+
+                        if (!shouldRetryTradeApi(failed)) {{
+                            return failed;
+                        }}
+                    }} catch (err) {{
+                        lastError = {{ ok: false, message: String(err), apiUrl }};
+                    }}
                 }}
-                if (res.ok && body.ok) {{
-                    tradePersisted = true;
-                    return {{ ok: true, body }};
-                }}
-                return {{ ok: false, status: res.status, body }};
-            }}).catch((err) => {{
-                return {{ ok: false, message: String(err) }};
-            }}).finally(() => {{
+
+                return lastError || {{ ok: false, message: 'trade api unavailable' }};
+            }})().finally(() => {{
                 tradePersistPromise = null;
             }});
 
@@ -2945,9 +3016,14 @@ function getLots() {{
 
             const persistResult = await persistTradesOnce();
             if (!persistResult || !persistResult.ok) {{
-                const msg = persistResult?.body?.message || persistResult?.message || '未知错误';
+                const msg = persistResult?.message
+                    || persistResult?.body?.message
+                    || persistResult?.body?.detail
+                    || persistResult?.body?.error
+                    || (persistResult?.status ? ('HTTP ' + persistResult.status) : 'unknown error');
                 if (hint) hint.textContent = '交易明细保存失败，可重试或继续结束';
-                const goOn = confirm('交易明细保存失败（' + msg + '）。\\n是否仍结束本局？');
+                const endpointHint = persistResult?.apiUrl ? ('\\n接口：' + persistResult.apiUrl) : '';
+                const goOn = confirm('交易明细保存失败（' + msg + '）。\\n是否仍结束本局？' + endpointHint);
                 if (!goOn) {{
                     btn.disabled = false;
                     if (reviewBtn) reviewBtn.disabled = false;
