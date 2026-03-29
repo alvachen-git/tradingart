@@ -29,6 +29,44 @@ const isHtml = computed(() => {
   const c = content.value?.content || ''
   return c.trimStart().startsWith('<')
 })
+
+function sanitizeHtmlForMp(html: string): string {
+  if (!html) return ''
+  return html
+    .replace(/<!doctype[^>]*>/gi, '')
+    .replace(/<head[\s\S]*?<\/head>/gi, '')
+    .replace(/<script[\s\S]*?<\/script>/gi, '')
+    .replace(/<style[\s\S]*?<\/style>/gi, '')
+    .replace(/<meta[^>]*>/gi, '')
+    .replace(/<\/?(html|body)[^>]*>/gi, '')
+    .trim()
+}
+
+function htmlToPlainText(html: string): string {
+  if (!html) return ''
+  return html
+    .replace(/<style[\s\S]*?<\/style>/gi, '')
+    .replace(/<script[\s\S]*?<\/script>/gi, '')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&amp;/g, '&')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+const mpRichNodes = computed(() => {
+  if (!isHtml.value) return ''
+  const cleaned = sanitizeHtmlForMp(content.value?.content || '')
+  if (!cleaned) return ''
+  return `<div style="color:#cbd5e1;line-height:1.85;word-break:break-word;">${cleaned}</div>`
+})
+
+const mpPlainFallback = computed(() => {
+  const text = htmlToPlainText(content.value?.content || '')
+  return text || '正文暂不可显示'
+})
 </script>
 
 <template>
@@ -61,7 +99,8 @@ const isHtml = computed(() => {
 
       <!-- 纯文本正文（非 HTML 内容，或小程序环境用 rich-text） -->
       <!-- #ifndef H5 -->
-      <rich-text v-if="isHtml" :nodes="content.content" class="rich-body" />
+      <rich-text v-if="isHtml && mpRichNodes" :nodes="mpRichNodes" class="rich-body" />
+      <text v-else-if="isHtml" class="article-body selectable">{{ mpPlainFallback }}</text>
       <!-- #endif -->
       <text v-if="!isHtml" class="article-body selectable">{{ content.content }}</text>
     </view>
