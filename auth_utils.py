@@ -635,7 +635,7 @@ def logout_user(username: str, token: str = None):
         return False
 
 
-def check_token(username, token):
+def check_token(username, token, strict: bool = False):
     if not username or not token:
         return False
 
@@ -667,6 +667,8 @@ def check_token(username, token):
         return False
     except Exception as e:
         print(f"check_token failed: {e}")
+        if strict:
+            raise
         return False
 
 

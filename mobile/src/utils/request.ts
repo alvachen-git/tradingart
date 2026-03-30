@@ -3,21 +3,40 @@
  */
 
 const ENV_API_BASE = (import.meta as any)?.env?.VITE_API_BASE || ''
+const ENV_MODE = (import.meta as any)?.env?.MODE || ''
 
 function normalizeBase(base: string): string {
   return String(base || '').trim().replace(/\/+$/, '')
 }
 
-export const API_BASE = normalizeBase(ENV_API_BASE) || 'http://localhost:8001'
+const DEV_FALLBACK_API_BASE = 'http://localhost:8001'
+const PROD_FALLBACK_API_BASE = 'https://api.aiprota.com'
+const DEFAULT_API_BASE = ENV_MODE === 'development' ? DEV_FALLBACK_API_BASE : PROD_FALLBACK_API_BASE
+
+export const API_BASE = normalizeBase(ENV_API_BASE) || DEFAULT_API_BASE
 
 function getToken(): string {
-  return uni.getStorageSync('token') || ''
+  return String(uni.getStorageSync('token') || '').trim()
+}
+
+let _unauthorizedRedirecting = false
+
+function shouldForceLogoutFor401(detail: string): boolean {
+  const msg = String(detail || '').trim()
+  if (!getToken()) return true
+  if (!msg) return true
+  return /token\s*(无效|已过期|格式错误)|invalid\s*token|expired\s*token/i.test(msg)
 }
 
 function handleUnauthorized() {
+  if (_unauthorizedRedirecting) return
+  _unauthorizedRedirecting = true
   uni.removeStorageSync('token')
   uni.removeStorageSync('username')
-  uni.reLaunch({ url: '/pages/login/index' })
+  setTimeout(() => {
+    uni.reLaunch({ url: '/pages/login/index' })
+    _unauthorizedRedirecting = false
+  }, 60)
 }
 
 export function request<T = any>(
@@ -39,7 +58,7 @@ export function request<T = any>(
           resolve(res.data as T)
         } else {
           const detail = (res.data as any)?.detail || '请求失败'
-          if (res.statusCode === 401) {
+          if (res.statusCode === 401 && shouldForceLogoutFor401(detail)) {
             handleUnauthorized()
           }
           reject(new Error(detail))
@@ -71,8 +90,14 @@ export function uploadFile<T = any>(url: string, filePath: string): Promise<T> {
         } else {
           try {
             const d = JSON.parse(res.data)
+            if (res.statusCode === 401 && shouldForceLogoutFor401(d?.detail || '')) {
+              handleUnauthorized()
+            }
             reject(new Error(d?.detail || '上传失败'))
           } catch {
+            if (res.statusCode === 401) {
+              handleUnauthorized()
+            }
             reject(new Error('上传失败'))
           }
         }

@@ -593,7 +593,12 @@ def get_current_user(
 ) -> str:
     """验证 Bearer Token，返回 username；失败则抛出 401。"""
     username, raw_token = _unpack_token(credentials.credentials)
-    if not auth.check_token(username, raw_token):
+    try:
+        is_valid = auth.check_token(username, raw_token, strict=True)
+    except Exception as exc:
+        print(f"[auth_guard] check_token error username={username}: {exc}")
+        raise HTTPException(status_code=503, detail="认证服务繁忙，请稍后重试")
+    if not is_valid:
         raise HTTPException(status_code=401, detail="Token 无效或已过期，请重新登录")
     return username
 
