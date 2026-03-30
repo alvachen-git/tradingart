@@ -2,6 +2,7 @@
 import { ref, computed } from 'vue'
 import { onLoad } from '@dcloudio/uni-app'
 import { intelApi } from '../../api/index'
+import { formatAiForMobile } from '../../utils/ai_mobile_formatter'
 
 const content = ref<any>(null)
 const loading = ref(true)
@@ -44,15 +45,22 @@ function sanitizeHtmlForMp(html: string): string {
 
 function htmlToPlainText(html: string): string {
   if (!html) return ''
-  return html
+  const withBreaks = html
     .replace(/<style[\s\S]*?<\/style>/gi, '')
     .replace(/<script[\s\S]*?<\/script>/gi, '')
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/?(p|div|section|article|h[1-6]|li|ul|ol|tr|table|blockquote)[^>]*>/gi, '\n')
     .replace(/<[^>]+>/g, ' ')
     .replace(/&nbsp;/g, ' ')
     .replace(/&lt;/g, '<')
     .replace(/&gt;/g, '>')
     .replace(/&amp;/g, '&')
-    .replace(/\s+/g, ' ')
+
+  return withBreaks
+    .split('\n')
+    .map((line) => line.replace(/[ \t]+/g, ' ').trim())
+    .filter((line, idx, arr) => line || (idx > 0 && arr[idx - 1] !== ''))
+    .join('\n')
     .trim()
 }
 
@@ -67,17 +75,27 @@ const useMpRichText = computed(() => {
   if (!isHtml.value) return false
   const cleaned = sanitizeHtmlForMp(content.value?.content || '')
   if (!cleaned) return false
-  if (cleaned.length > 8000) return false
-  if (/<(table|iframe|svg|video|audio|form|canvas)\\b/i.test(cleaned)) return false
+  // 线上内容较长时也优先使用 rich-text，避免过早降级成一整段纯文本。
+  if (cleaned.length > 120000) return false
   return true
 })
 
+function normalizePlainText(raw: string): string {
+  const { fullText } = formatAiForMobile(raw || '')
+  return fullText.replace(/^【AI生成】\s*/, '').trim()
+}
+
 const mpPlainFallback = computed(() => {
-  const text = htmlToPlainText(content.value?.content || '')
+  const text = normalizePlainText(htmlToPlainText(content.value?.content || ''))
   if (text) return text
-  const summary = htmlToPlainText(content.value?.summary || '')
+  const summary = normalizePlainText(htmlToPlainText(content.value?.summary || ''))
   if (summary) return summary
   return '正文暂不可显示'
+})
+
+const plainBodyText = computed(() => {
+  const raw = String(content.value?.content || content.value?.summary || '')
+  return normalizePlainText(raw) || '正文暂不可显示'
 })
 </script>
 
@@ -114,7 +132,7 @@ const mpPlainFallback = computed(() => {
       <rich-text v-if="isHtml && useMpRichText && mpRichNodes" :nodes="mpRichNodes" class="rich-body" />
       <text v-else-if="isHtml" class="article-body selectable">{{ mpPlainFallback }}</text>
       <!-- #endif -->
-      <text v-if="!isHtml" class="article-body selectable">{{ content.content || content.summary || '正文暂不可显示' }}</text>
+      <text v-if="!isHtml" class="article-body selectable">{{ plainBodyText }}</text>
     </view>
   </view>
 </template>
