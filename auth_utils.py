@@ -619,13 +619,18 @@ def bind_email(username: str, email: str, email_code: str):
         return False, "绑定失败"
 
 
-def logout_user(username: str, token: str = None):
+def logout_user(username: str = None, token: str = None):
     try:
         with engine.begin() as conn:
-            if token:
+            if token and username:
                 conn.execute(
                     text("DELETE FROM user_sessions WHERE username = :u AND session_token = :t"),
                     {"u": username, "t": token},
+                )
+            elif token:
+                conn.execute(
+                    text("DELETE FROM user_sessions WHERE session_token = :t"),
+                    {"t": token},
                 )
             else:
                 conn.execute(text("DELETE FROM user_sessions WHERE username = :u"), {"u": username})
@@ -670,6 +675,43 @@ def check_token(username, token, strict: bool = False):
         if strict:
             raise
         return False
+
+
+def get_username_by_token(token: str, strict: bool = False):
+    if not token:
+        return ""
+
+    try:
+        with engine.connect() as conn:
+            result = conn.execute(
+                text(
+                    """
+                    SELECT s.username, s.token_expire, u.is_active
+                    FROM user_sessions s
+                    JOIN users u ON u.username = s.username
+                    WHERE s.session_token = :t
+                    LIMIT 1
+                    """
+                ),
+                {"t": token},
+            ).fetchone()
+            if not result:
+                return ""
+
+            username, expire_time, is_active = result
+            if not is_active:
+                return ""
+            if expire_time and expire_time > datetime.now():
+                return str(username or "")
+
+        with engine.begin() as conn:
+            conn.execute(text("DELETE FROM user_sessions WHERE session_token = :t"), {"t": token})
+        return ""
+    except Exception as e:
+        print(f"get_username_by_token failed: {e}")
+        if strict:
+            raise
+        return ""
 
 
 def restore_login_from_cookies(cookies: dict) -> bool:

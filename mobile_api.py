@@ -571,32 +571,41 @@ app.add_middleware(
 # ════════════════════════════════════════════════════════════
 #  Bearer Token 认证
 #
-#  客户端存储的 token 格式:  "username:raw_uuid_token"
-#  示例: "alice:550e8400-e29b-41d4-a716-446655440000"
+#  客户端 token 格式（兼容）:
+#  - 新版: "raw_uuid_token"（推荐，纯 ASCII）
+#  - 旧版: "username:raw_uuid_token"
 # ════════════════════════════════════════════════════════════
 
 _bearer = HTTPBearer()
 
 
 def _unpack_token(token_str: str):
-    """拆分 token，返回 (username, raw_token)，格式非法时抛出 401。"""
-    if not token_str or ":" not in token_str:
+    """拆分 token，返回 (username_hint, raw_token)。兼容旧版 username:token 与新版纯 token。"""
+    raw = str(token_str or "").strip()
+    if not raw:
         raise HTTPException(status_code=401, detail="Token 格式错误")
-    username, raw_token = token_str.split(":", 1)
-    if not username or not raw_token:
-        raise HTTPException(status_code=401, detail="Token 格式错误")
-    return username, raw_token
+    if ":" in raw:
+        username, raw_token = raw.split(":", 1)
+        if not username or not raw_token:
+            raise HTTPException(status_code=401, detail="Token 格式错误")
+        return username, raw_token
+    return "", raw
 
 
 def get_current_user(
     credentials: HTTPAuthorizationCredentials = Depends(_bearer),
 ) -> str:
     """验证 Bearer Token，返回 username；失败则抛出 401。"""
-    username, raw_token = _unpack_token(credentials.credentials)
+    username_hint, raw_token = _unpack_token(credentials.credentials)
     try:
-        is_valid = auth.check_token(username, raw_token, strict=True)
+        if username_hint:
+            is_valid = auth.check_token(username_hint, raw_token, strict=True)
+            username = username_hint if is_valid else ""
+        else:
+            username = auth.get_username_by_token(raw_token, strict=True)
+            is_valid = bool(username)
     except Exception as exc:
-        print(f"[auth_guard] check_token error username={username}: {exc}")
+        print(f"[auth_guard] check_token error username_hint={username_hint}: {exc}")
         raise HTTPException(status_code=503, detail="认证服务繁忙，请稍后重试")
     if not is_valid:
         raise HTTPException(status_code=401, detail="Token 无效或已过期，请重新登录")
@@ -604,7 +613,8 @@ def get_current_user(
 
 
 def _pack_token(username: str, raw_token: str) -> str:
-    return f"{username}:{raw_token}"
+    _ = username
+    return str(raw_token or "")
 
 
 # ════════════════════════════════════════════════════════════
@@ -804,8 +814,9 @@ def login_email(body: EmailLoginRequest):
 @app.post("/api/auth/logout", tags=["认证"])
 def logout(credentials: HTTPAuthorizationCredentials = Depends(_bearer)):
     """登出当前设备，其他设备不受影响。"""
-    username, raw_token = _unpack_token(credentials.credentials)
-    auth.logout_user(username, raw_token)
+    username_hint, raw_token = _unpack_token(credentials.credentials)
+    username = username_hint or auth.get_username_by_token(raw_token)
+    auth.logout_user(username=username, token=raw_token)
     return {"message": "已登出"}
 
 
