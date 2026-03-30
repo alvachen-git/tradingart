@@ -233,7 +233,7 @@ const CATEGORIES = [
 const PRODUCT_CAT: Record<string, string> = {
   // 化工
   ta:'petro', ma:'petro', pp:'petro', l:'petro', v:'petro',
-  eb:'petro', bu:'petro', ru:'petro', nr:'petro', sc:'petro',
+  eb:'petro', bu:'petro', ru:'petro', nr:'petro', sc:'petro', sh:'petro',
   lu:'petro', pg:'petro', eg:'petro', fu:'petro',
   // 农产品
   m:'agri', y:'agri', p:'agri', oi:'agri', rm:'agri',
@@ -491,10 +491,10 @@ onShareTimeline(() => ({
     <!-- Tab（含刷新）-->
     <view class="tab-bar">
       <view class="tab-item" :class="{ active: activeTab === 'options' }" @tap="switchTab('options')">
-        <text>价格分析</text>
+        <text>价格</text>
       </view>
       <view class="tab-item" :class="{ active: activeTab === 'holding' }" @tap="switchTab('holding')">
-        <text>持仓分析</text>
+        <text>持仓</text>
       </view>
       <!-- 实时状态指示点 -->
       <view v-if="liveTrading" class="live-dot-wrap">
