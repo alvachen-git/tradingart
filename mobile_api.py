@@ -11,6 +11,9 @@ mobile_api.py — 爱波塔手机端专用 FastAPI 后端
   GET    /api/health                    健康检查
   POST   /api/auth/login                密码登录
   POST   /api/auth/login/email          邮箱验证码登录
+  POST   /api/auth/register/send-phone-code    注册短信验证码
+  POST   /api/auth/register/verify-phone-code  校验注册短信验证码
+  POST   /api/auth/register                    账号注册（手机号验证）
   POST   /api/auth/logout               登出当前设备
   GET    /api/auth/verify               验证 Token
 
@@ -617,6 +620,23 @@ class SendCodeRequest(BaseModel):
     email: str
 
 
+class RegisterSendPhoneCodeRequest(BaseModel):
+    phone: str
+
+
+class RegisterVerifyPhoneCodeRequest(BaseModel):
+    phone: str
+    code: str
+
+
+class RegisterRequest(BaseModel):
+    username: str
+    password: str
+    password_confirm: str
+    phone: str
+    sms_code: str
+
+
 class ChatSubmitRequest(BaseModel):
     prompt: str
     history: List[dict] = []    # [{role: "user"/"assistant", content: "..."}]
@@ -677,6 +697,77 @@ def send_code(body: SendCodeRequest):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"发送失败: {e}")
+
+
+@app.post("/api/auth/register/send-phone-code", tags=["认证"])
+def register_send_phone_code(body: RegisterSendPhoneCodeRequest, request: Request):
+    """注册流程：发送手机号短信验证码。"""
+    client_ip = ""
+    try:
+        client_ip = (request.client.host if request and request.client else "") or ""
+    except Exception:
+        client_ip = ""
+    try:
+        success, msg = auth.send_register_phone_code(body.phone, client_ip=client_ip)
+        if not success:
+            raise HTTPException(status_code=400, detail=msg)
+        return {"message": msg}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"验证码发送失败: {e}")
+
+
+@app.post("/api/auth/register/verify-phone-code", tags=["认证"])
+def register_verify_phone_code(body: RegisterVerifyPhoneCodeRequest):
+    """注册流程：校验手机号验证码。"""
+    try:
+        success, msg, normalized_phone = auth.verify_register_phone_code(body.phone, body.code)
+        if not success:
+            raise HTTPException(status_code=400, detail=msg)
+        return {"message": msg, "phone": normalized_phone}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"验证码校验失败: {e}")
+
+
+@app.post("/api/auth/register", tags=["认证"])
+def register_account(body: RegisterRequest):
+    """
+    账号注册（移动端）：
+    1) 校验账号密码
+    2) 校验手机号短信验证码
+    3) 创建账号并自动签发 token
+    """
+    ok_step1, step1_msg, normalized_username = auth.validate_register_step1(
+        body.username, body.password, body.password_confirm
+    )
+    if not ok_step1:
+        raise HTTPException(status_code=400, detail=step1_msg)
+
+    ok_phone, phone_msg, normalized_phone = auth.verify_register_phone_code(body.phone, body.sms_code)
+    if not ok_phone:
+        raise HTTPException(status_code=400, detail=phone_msg)
+
+    reg_ok, reg_msg = auth.register_with_username_phone(
+        normalized_username,
+        body.password,
+        normalized_phone,
+    )
+    if not reg_ok:
+        raise HTTPException(status_code=400, detail=reg_msg)
+
+    sess_ok, sess_msg, raw_token = auth.create_user_session(normalized_username)
+    if not sess_ok or not raw_token:
+        # 账号已创建但会话创建失败，返回 500 让前端提示用户用登录入口重试
+        raise HTTPException(status_code=500, detail=sess_msg or "注册成功但登录失败，请使用登录功能进入")
+
+    return {
+        "token": _pack_token(normalized_username, raw_token),
+        "username": normalized_username,
+        "message": reg_msg or "注册成功",
+    }
 
 
 @app.post("/api/auth/login", tags=["认证"])
