@@ -312,22 +312,25 @@ def _get_previous_nav_row(portfolio_id: str, trade_date: str) -> Optional[Dict[s
     return dict(row) if row else None
 
 
-def _load_previous_positions(portfolio_id: str, trade_date: str) -> Dict[str, Dict[str, Any]]:
+def _load_previous_positions(
+    portfolio_id: str, trade_date: str, prev_trade_date: Optional[str] = None
+) -> Dict[str, Dict[str, Any]]:
+    target_trade_date = _normalize_trade_date(prev_trade_date) if prev_trade_date else ""
+    if not target_trade_date:
+        prev_nav_row = _get_previous_nav_row(portfolio_id, trade_date)
+        target_trade_date = _normalize_trade_date(prev_nav_row.get("trade_date")) if prev_nav_row else ""
+    if not target_trade_date:
+        return {}
+
     sql = text(
         """
-        SELECT p.*
-        FROM ai_sim_positions p
-        INNER JOIN (
-            SELECT portfolio_id, MAX(trade_date) AS td
-            FROM ai_sim_positions
-            WHERE portfolio_id = :pid AND trade_date < :trade_date
-            GROUP BY portfolio_id
-        ) t ON t.portfolio_id = p.portfolio_id AND t.td = p.trade_date
-        WHERE p.portfolio_id = :pid
+        SELECT *
+        FROM ai_sim_positions
+        WHERE portfolio_id = :pid AND trade_date = :td
         """
     )
     with engine.connect() as conn:
-        df = pd.read_sql(sql, conn, params={"pid": portfolio_id, "trade_date": trade_date})
+        df = pd.read_sql(sql, conn, params={"pid": portfolio_id, "td": target_trade_date})
 
     out: Dict[str, Dict[str, Any]] = {}
     if df.empty:
@@ -1972,7 +1975,7 @@ def run_daily_simulation(
     cash_start = _to_float(prev_nav_row.get("cash"), INITIAL_CAPITAL) if prev_nav_row else INITIAL_CAPITAL
     prev_trade_date = prev_nav_row.get("trade_date") if prev_nav_row else None
 
-    current_positions = _load_previous_positions(portfolio_id, td)
+    current_positions = _load_previous_positions(portfolio_id, td, prev_trade_date)
 
     context = SimulationContext(
         portfolio_id=portfolio_id,

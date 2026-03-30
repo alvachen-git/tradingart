@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import MagicMock, patch
 
 import ai_simulation_service as svc
 import pandas as pd
@@ -263,6 +264,55 @@ class TestAISimulationService(unittest.TestCase):
         self.assertIn("2026-03-06", summary)
         self.assertNotIn("2026-03-05", summary)
         self.assertIn("主要动作", summary)
+
+    @patch("ai_simulation_service._get_previous_nav_row")
+    @patch("ai_simulation_service.pd.read_sql")
+    def test_load_previous_positions_uses_prev_nav_day_without_stale_fallback(self, mock_read_sql, mock_prev_nav):
+        mock_prev_nav.return_value = {"trade_date": "20260327"}
+        mock_read_sql.return_value = pd.DataFrame([])
+
+        mock_conn = MagicMock()
+        conn_cm = MagicMock()
+        conn_cm.__enter__.return_value = mock_conn
+        conn_cm.__exit__.return_value = False
+        fake_engine = MagicMock()
+        fake_engine.connect.return_value = conn_cm
+
+        with patch("ai_simulation_service.engine", fake_engine):
+            out = svc._load_previous_positions("official_cn_a_etf_v1", "20260330")
+
+        self.assertEqual(out, {})
+        self.assertEqual(mock_read_sql.call_args.kwargs["params"]["td"], "20260327")
+        self.assertEqual(mock_read_sql.call_count, 1)
+
+    @patch("ai_simulation_service.pd.read_sql")
+    def test_load_previous_positions_reads_exact_prev_trade_date(self, mock_read_sql):
+        mock_read_sql.return_value = pd.DataFrame(
+            [
+                {
+                    "symbol": "600519.SH",
+                    "name": "贵州茅台",
+                    "quantity": 100.0,
+                    "avg_cost": 1650.0,
+                }
+            ]
+        )
+
+        mock_conn = MagicMock()
+        conn_cm = MagicMock()
+        conn_cm.__enter__.return_value = mock_conn
+        conn_cm.__exit__.return_value = False
+        fake_engine = MagicMock()
+        fake_engine.connect.return_value = conn_cm
+
+        with patch("ai_simulation_service.engine", fake_engine):
+            out = svc._load_previous_positions(
+                "official_cn_a_etf_v1", "20260330", prev_trade_date="20260327"
+            )
+
+        self.assertIn("600519.SH", out)
+        self.assertEqual(out["600519.SH"]["quantity"], 100.0)
+        self.assertEqual(mock_read_sql.call_args.kwargs["params"]["td"], "20260327")
 
 
 if __name__ == "__main__":
