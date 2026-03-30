@@ -197,6 +197,8 @@ const startIdx    = ref(0)
 const barCount    = ref(63)
 const activeRange = ref('3M')
 const rangeInitialized = ref(false)
+const RANGE_OPTIONS = ['1M', '3M', '6M', '1Y', '全部'] as const
+const rangePickerIndex = ref(1)
 
 // Historical OHLC + live daily bar merged by trading day (not natural day).
 const allOhlc = computed(() => {
@@ -240,10 +242,18 @@ const RANGE_BARS: Record<string, number> = { '1M': 21, '3M': 63, '6M': 126, '1Y'
 
 function applyRange(label: string) {
   activeRange.value = label
+  const idx = RANGE_OPTIONS.findIndex((item) => item === label)
+  if (idx >= 0) rangePickerIndex.value = idx
   const n = allOhlc.value.length
   if (!n) return
   if (label === '全部') { barCount.value = n; startIdx.value = 0 }
   else { barCount.value = Math.min(RANGE_BARS[label] || 63, n); startIdx.value = Math.max(0, n - barCount.value) }
+}
+
+function onRangePickerChange(e: any) {
+  const idx = Number(e?.detail?.value ?? 1)
+  const label = RANGE_OPTIONS[idx] || '3M'
+  applyRange(label)
 }
 
 const visOhlc = computed(() => {
@@ -267,12 +277,12 @@ const PAD_R   = 6
 const PAD_TOP = 8
 
 // 各区域在 SVG 中的 Y 起始和高度
-const CANDLE_H = 200
+const CANDLE_H = 280
 const DIV      = 2    // 细分割线
-const IV_H     = 70
-const DUMB_H   = 70
-const SMART_H  = 70
-const OI_H     = 70
+const IV_H     = 56
+const DUMB_H   = 56
+const SMART_H  = 56
+const OI_H     = 56
 
 const IV_Y0    = CANDLE_H + DIV
 const DUMB_Y0  = IV_Y0 + IV_H + DIV
@@ -681,21 +691,22 @@ watch(
       <view v-if="allOhlc.length>0" class="chart-card">
         <view class="chart-top">
           <text class="chart-title">K线 · IV · 持仓</text>
-          <text class="chart-sub">{{ visOhlc.length }}/{{ allOhlc.length }}天</text>
-        </view>
-        <view class="range-bar">
-          <view v-for="r in ['1M','3M','6M','1Y','全部']" :key="r"
-            class="range-btn" :class="{active:activeRange===r}" @tap="applyRange(r)">
-            <text class="range-text">{{ r }}</text>
+          <picker
+            class="range-picker"
+            mode="selector"
+            :range="RANGE_OPTIONS"
+            :value="rangePickerIndex"
+            @change="onRangePickerChange"
+          >
+            <view class="range-picker-inner">
+              <text class="range-picker-text">{{ RANGE_OPTIONS[rangePickerIndex] }}</text>
+              <text class="range-picker-arrow">▼</text>
+            </view>
+          </picker>
           </view>
-        </view>
-        <view class="gesture-hint"><text class="hint-text">拖动平移 | 双指缩放 | 长按查看OHLC</text></view>
 
         <!-- ① K线子图 -->
         <view class="sub-panel">
-          <view class="sub-header">
-            <text class="sub-title" style="color:#f5c518">K线</text>
-            </view>
           <view class="svg-wrap k-candle-wrap" @touchstart="onTouchStart" @touchmove.prevent="onTouchMove" @touchend="onTouchEnd">
               <!-- #ifdef MP-WEIXIN -->
               <canvas
@@ -959,18 +970,23 @@ watch(
 .kpi-delta{ display:block; font-size:18rpx; margin-top:4rpx; }
 
 .chart-card { background:#131c2e; border:1px solid #1e2d45; border-radius:20rpx; padding:20rpx; margin-bottom:20rpx; }
-.chart-top  { display:flex; justify-content:space-between; align-items:baseline; margin-bottom:12rpx; }
+.chart-top  { display:flex; justify-content:space-between; align-items:center; margin-bottom:10rpx; }
 .chart-title{ font-size:26rpx; font-weight:700; color:#f5c518; }
-.chart-sub  { font-size:18rpx; color:#555; }
 
-.range-bar { display:flex; gap:10rpx; margin-bottom:10rpx; }
-.range-btn { flex:1; background:#0d1829; border:1px solid #1e2d45; border-radius:8rpx; padding:8rpx 0; text-align:center; }
-.range-btn.active { background:#f5c518; border-color:#f5c518; }
-.range-text { font-size:22rpx; color:#888; }
-.range-btn.active .range-text { color:#000; font-weight:700; }
-
-.gesture-hint { text-align:center; margin-bottom:10rpx; }
-.hint-text { font-size:18rpx; color:#444; }
+.range-picker { display:block; }
+.range-picker-inner {
+  min-width: 128rpx;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  gap:8rpx;
+  background:#0d1829;
+  border:1px solid #1e2d45;
+  border-radius:12rpx;
+  padding:8rpx 14rpx;
+}
+.range-picker-text { font-size:20rpx; color:#cdd6e5; font-weight:600; line-height:1; }
+.range-picker-arrow { font-size:16rpx; color:#7f8ea8; line-height:1; }
 
 /* 子图面板 */
 .sub-panel { margin-bottom:16rpx; }
