@@ -491,7 +491,7 @@ onShareTimeline(() => ({
     <!-- Tab（含刷新）-->
     <view class="tab-bar">
       <view class="tab-item" :class="{ active: activeTab === 'options' }" @tap="switchTab('options')">
-        <text>价格</text>
+        <text>行情</text>
       </view>
       <view class="tab-item" :class="{ active: activeTab === 'holding' }" @tap="switchTab('holding')">
         <text>持仓</text>

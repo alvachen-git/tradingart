@@ -4,7 +4,7 @@ const props = defineProps<{ active: string }>()
 const tabs = [
   { key: 'index',   label: 'AI问答',  icon: '◈', path: '/pages/index/index' },
   { key: 'intel',   label: '情报站',  icon: '◉', path: '/pages/intel/index' },
-  { key: 'market',  label: '行情',    icon: '◆', path: '/pages/market/index' },
+  { key: 'market',  label: '数据',    icon: '◆', path: '/pages/market/index' },
   { key: 'kline',   label: 'K线训练',  icon: '◑', path: '/pages/kline/index' },
   { key: 'profile', label: '我的',    icon: '◍', path: '/pages/profile/index' },
 ]

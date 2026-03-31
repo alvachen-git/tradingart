@@ -60,7 +60,7 @@
     {
       "path": "pages/market/index",
       "style": {
-        "navigationBarTitleText": "行情",
+        "navigationBarTitleText": "数据",
         "navigationBarBackgroundColor": "#0b1121",
         "navigationBarTextStyle": "white",
         "backgroundColor": "#0b1121",
