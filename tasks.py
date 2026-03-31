@@ -23,6 +23,7 @@ from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
 from agent_core import build_trading_graph
 from knowledge_tools import search_knowledge_structured
 from tools.oss_utils import generate_signed_get_url
+from tools.url_content_tools import build_link_context, extract_first_url
 from portfolio_analysis_service import process_portfolio_snapshot as run_portfolio_snapshot
 import data_engine as de
 import re
@@ -30,6 +31,7 @@ import re
 ATTACHMENT_MIN_SCORE = 0.38
 ATTACHMENT_RELATIVE_RATIO = 0.85
 INLINE_IMAGE_TOKEN_PATTERN = re.compile(r"\[\[KNOWLEDGE_IMAGE_(\d+)\]\]")
+URL_PREPROCESS_ENABLED = str(os.getenv("URL_PREPROCESS_ENABLED", "true")).strip().lower() in ("1", "true", "yes", "on")
 
 BULL_DIRECTION_TERMS = [
     "牛市", "牛市价差", "看涨", "bull", "bull spread", "bull call spread", "bull put spread",
@@ -37,6 +39,21 @@ BULL_DIRECTION_TERMS = [
 BEAR_DIRECTION_TERMS = [
     "熊市", "熊市价差", "看跌", "bear", "bear spread", "bear call spread", "bear put spread",
 ]
+
+
+def _build_link_failure_notice(link_ctx: dict) -> str:
+    reason = str(link_ctx.get("error_message") or "未知原因").strip()
+    url = str(link_ctx.get("url") or "").strip()
+    if url:
+        return (
+            f"⚠️ 链接抓取失败（{reason}）。\n"
+            f"链接：{url}\n"
+            "为避免误判，本轮已停止自动推断。请粘贴正文或关键段落，我再继续精确分析。"
+        )
+    return (
+        f"⚠️ 链接抓取失败（{reason}）。"
+        "为避免误判，本轮已停止自动推断。请粘贴正文或关键段落，我再继续精确分析。"
+    )
 
 
 @celery_app.task(bind=True, name="tasks.process_portfolio_snapshot")
@@ -417,6 +434,54 @@ def process_ai_query(
 ):
     """后台处理 AI 查询"""
     try:
+        prompt_for_graph = prompt
+        link_failure_notice = ""
+        url_fetch_blocked = False
+
+        if URL_PREPROCESS_ENABLED:
+            extracted_url = extract_first_url(prompt)
+            if extracted_url:
+                self.update_state(state='PROCESSING', meta={'progress': '正在读取链接正文...'})
+                try:
+                    link_ctx = build_link_context(prompt)
+                except Exception as e:
+                    link_ctx = {
+                        "ok": False,
+                        "url": extracted_url,
+                        "title": "",
+                        "snippet": "",
+                        "error_code": "preprocess_exception",
+                        "error_message": f"链接预处理异常: {e}",
+                    }
+
+                if link_ctx.get("ok"):
+                    link_ref_block = (
+                        f"【链接参考内容】\n"
+                        f"来源: {link_ctx.get('url', '')}\n"
+                        f"标题: {link_ctx.get('title', '未提取到标题')}\n"
+                        f"摘要:\n{link_ctx.get('snippet', '')}\n"
+                        "请优先基于以上链接内容回答；若信息不足，再补充常识并明确说明不确定项。"
+                    )
+                    prompt_for_graph = f"{prompt}\n\n{link_ref_block}".strip()
+                    print(f"[URL_PREPROCESS] 链接正文注入成功: {link_ctx.get('url', '')}")
+                elif link_ctx.get("error_code") != "no_url":
+                    link_failure_notice = _build_link_failure_notice(link_ctx)
+                    url_fetch_blocked = True
+                    print(
+                        f"[URL_PREPROCESS] 链接正文注入失败: "
+                        f"{link_ctx.get('error_code')} | {link_ctx.get('error_message')}"
+                    )
+
+        if url_fetch_blocked:
+            self.update_state(state='PROCESSING', meta={'progress': '链接抓取失败，等待用户补充正文...'})
+            return {
+                "status": "success",
+                "response": link_failure_notice,
+                "chart": None,
+                "attachments": [],
+                "error": None,
+            }
+
         self.update_state(state='PROCESSING', meta={'progress': '正在初始化 AI 模型...'})
 
         # 初始化 LLM
@@ -428,7 +493,7 @@ def process_ai_query(
 
         app = build_trading_graph(fast_llm, mid_llm, smart_llm)
 
-        final_prompt = image_context + prompt if image_context else prompt
+        final_prompt = image_context + prompt_for_graph if image_context else prompt_for_graph
         input_messages = []
 
         if history_messages:
@@ -640,6 +705,13 @@ def process_ai_query(
             final_response = re.sub(r'`([a-z_]+)`', r'\1', final_response)
 
             final_response = final_response.strip()
+
+        if link_failure_notice:
+            final_response = (
+                f"{link_failure_notice}\n\n{final_response}".strip()
+                if final_response
+                else link_failure_notice
+            )
 
         attachments = _build_image_attachments(
             prompt,
