@@ -37,115 +37,206 @@ with st.sidebar:
 # 2. 样式注入 (已同步 Home.py 的去白和侧边栏样式)
 st.markdown("""
 <style>
-    /* 1. 全局背景 (同步 Home.py 的深空蓝黑渐变) */
-    .stApp { 
-        background-color: #0b1121 !important;
-        background-image: radial-gradient(circle at 50% 0%, #1e293b 0%, #0b1121 70%);
-        color: #e2e8f0;
-        font-family: 'PingFang SC', sans-serif;
+    @import url('https://fonts.googleapis.com/css2?family=Rajdhani:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
+
+    :root {
+        --bg-0: #060d1f;
+        --bg-1: #0b1730;
+        --card: #111f3e;
+        --card-soft: rgba(17, 31, 62, 0.72);
+        --line: rgba(120, 149, 204, 0.32);
+        --text: #ecf3ff;
+        --muted: #9fb0cd;
+        --cyan: #3cc8ff;
+        --green: #2ecb88;
     }
 
-    /* 2. 顶部去白核心代码 (同步 Home.py) */
+    .stApp {
+        background:
+            radial-gradient(1200px 600px at 72% -10%, rgba(51, 108, 201, 0.32), transparent 62%),
+            radial-gradient(900px 500px at 10% 0%, rgba(24, 154, 127, 0.18), transparent 58%),
+            linear-gradient(150deg, var(--bg-0), var(--bg-1));
+        color: var(--text);
+        font-family: "Rajdhani", "Noto Sans SC", sans-serif;
+    }
+
+    [data-testid="stMainBlockContainer"] {
+        max-width: 95rem !important;
+        padding-top: 0.9rem;
+        padding-bottom: 1.5rem;
+    }
+
     header[data-testid="stHeader"] {
         background-color: transparent !important;
     }
-    /* 隐藏顶部的彩虹装饰线条 */
     [data-testid="stDecoration"] {
         display: none;
     }
-    /* 调整顶部空白区域的高度 */
-    .block-container {
-        padding-top: 2rem !important; 
-    }
 
-    /* 3. 侧边栏样式 (同步 Home.py 的深色) */
     [data-testid="stSidebar"] {
         background-color: #0f172a !important;
         border-right: 1px solid #1e293b;
     }
-    [data-testid="stSidebar"] p, [data-testid="stSidebar"] span, [data-testid="stSidebar"] div {
+    [data-testid="stSidebar"] p,
+    [data-testid="stSidebar"] span,
+    [data-testid="stSidebar"] div {
         color: #cbd5e1 !important;
     }
 
-    /* --- 以下是个人资料页特有的样式 (保持不变) --- */
-
-    /* 卡片容器 */
-    .profile-card {
-        background-color: #1e293b;
-        border: 1px solid #334155;
-        border-radius: 12px;
-        padding: 24px;
-        margin-bottom: 20px;
-        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.3);
+    h1, h2, h3, h4, p, label, .stCaption {
+        color: var(--text) !important;
     }
 
-    /* 等级徽章 */
-    .level-badge {
-        background: linear-gradient(135deg, #fbbf24 0%, #d97706 100%);
-        color: #fff;
-        padding: 4px 12px;
-        border-radius: 20px;
-        font-weight: bold;
-        font-size: 14px;
-        margin-left: 10px;
+    .hero-shell {
+        border: 1px solid var(--line);
+        border-radius: 16px;
+        padding: 18px 18px 14px;
+        background: linear-gradient(120deg, rgba(12, 26, 54, 0.92), rgba(10, 22, 46, 0.78));
+        box-shadow: 0 16px 40px rgba(0, 0, 0, 0.32), inset 0 1px 0 rgba(255, 255, 255, 0.04);
+        margin-bottom: 12px;
+        position: relative;
+        overflow: hidden;
+        animation: heroOpen 850ms cubic-bezier(.22,.9,.28,1) both;
     }
-
-    /* 统计数字 */
-    .stat-value {
-        font-size: 28px;
+    .hero-shell::after {
+        content: "";
+        position: absolute;
+        top: 0;
+        left: -38%;
+        width: 32%;
+        height: 100%;
+        background: linear-gradient(90deg, transparent, rgba(108, 171, 255, 0.18), transparent);
+        transform: skewX(-16deg);
+        animation: scanSweep 6.2s ease-in-out infinite;
+    }
+    .hero-title {
+        font-size: clamp(28px, 3.8vw, 42px);
+        line-height: 1.06;
         font-weight: 700;
-        color: #f8fafc;
-        font-family: 'Roboto Mono', monospace;
+        margin: 0;
+        letter-spacing: 0.02em;
     }
-    .stat-label {
+    .hero-sub {
+        margin-top: 6px;
+        color: var(--muted);
         font-size: 14px;
-        color: #94a3b8;
+    }
+    .hero-kpi-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+        gap: 10px;
+        margin-top: 12px;
+    }
+    .hero-kpi-card {
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        background: var(--card-soft);
+        padding: 10px 12px;
+    }
+    .hero-kpi-label {
+        font-size: 12px;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        color: var(--muted);
+        margin-bottom: 4px;
+    }
+    .hero-kpi-value {
+        font-size: clamp(20px, 2.1vw, 30px);
+        line-height: 1.1;
+        color: #eff6ff;
+        font-family: "IBM Plex Mono", monospace;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+    .hero-kpi-value.phone {
+        color: var(--cyan);
+    }
+    .hero-kpi-sub {
+        margin-top: 3px;
+        color: #8fa7ce;
+        font-size: 12px;
+        font-family: "IBM Plex Mono", monospace;
     }
 
-    /* 调整 Expander 样式，让它更有质感 */
+    .section-divider {
+        margin: 12px 0 14px 0;
+        border: 0;
+        height: 1px;
+        background: linear-gradient(90deg, transparent, rgba(124, 157, 212, 0.5), transparent);
+    }
+    .panel-title {
+        margin: 6px 0 6px 0;
+        font-size: clamp(21px, 2.0vw, 30px);
+        letter-spacing: 0.03em;
+        font-weight: 700;
+        color: #ecf3ff;
+    }
+    .panel-sub {
+        color: var(--muted);
+        margin-bottom: 8px;
+        font-size: 14px;
+    }
+
     .streamlit-expanderHeader {
-        background-color: #1e293b !important;
-        border: 1px solid #334155 !important;
-        border-radius: 8px !important;
-        color: #e2e8f0 !important;
-        font-weight: 600 !important;
+        background: rgba(13, 28, 58, 0.86) !important;
+        border: 1px solid var(--line) !important;
+        border-radius: 10px !important;
+        color: #dce8ff !important;
+        font-weight: 700 !important;
     }
     .streamlit-expanderContent {
-        background-color: #0f172a !important;
-        border: 1px solid #334155 !important;
+        background: rgba(9, 21, 43, 0.76) !important;
+        border: 1px solid var(--line) !important;
         border-top: none !important;
-        border-bottom-left-radius: 8px !important;
-        border-bottom-right-radius: 8px !important;
-        padding: 15px !important;
+        border-bottom-left-radius: 10px !important;
+        border-bottom-right-radius: 10px !important;
     }
 
-    /* 消除 Expander 内部的 Markdown 默认边距 */
-    .streamlit-expanderContent p {
-        margin-bottom: 0px !important;
+    div[data-testid="stExpander"] {
+        border-radius: 12px;
+        background: rgba(9, 19, 39, 0.42);
+        box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
     }
-    
-    /* 输入框标签文字颜色 */
+
     .stTextInput label, .stNumberInput label, .stSelectbox label {
-        color: #e2e8f0 !important;
+        color: var(--text) !important;
+    }
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 8px;
+        margin-bottom: 8px;
+    }
+    .stTabs [data-baseweb="tab"] {
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        background: rgba(10, 22, 46, 0.68);
+        color: #c9d9f5;
+        padding: 8px 14px;
+    }
+    .stTabs [aria-selected="true"] {
+        background: linear-gradient(120deg, rgba(30, 64, 124, 0.68), rgba(16, 88, 135, 0.52));
+        border-color: rgba(108, 171, 255, 0.65);
+        color: #f4f8ff;
+    }
+    .stButton > button {
+        border: 1px solid var(--line) !important;
+        border-radius: 10px !important;
+        background: rgba(12, 28, 58, 0.74) !important;
+        color: #e8f1ff !important;
+    }
+    .stButton > button:hover {
+        border-color: rgba(108, 171, 255, 0.7) !important;
+        background: linear-gradient(120deg, rgba(22, 52, 103, 0.9), rgba(17, 73, 110, 0.72)) !important;
+        color: #ffffff !important;
     }
 
-    /* 邮箱显示样式 */
-    .email-bound {
-        background: linear-gradient(135deg, #10b981 0%, #059669 100%);
-        color: white;
-        padding: 8px 16px;
-        border-radius: 8px;
-        display: inline-block;
-        font-size: 14px;
-    }
-
-    /* 成就徽章墙 */
     .achv-wrap {
-        background: linear-gradient(145deg, #111827 0%, #0f172a 100%);
-        border: 1px solid #334155;
+        background: linear-gradient(145deg, rgba(11, 28, 58, 0.88), rgba(9, 22, 47, 0.72));
+        border: 1px solid var(--line);
         border-radius: 14px;
         padding: 16px;
         margin: 10px 0 18px;
+        box-shadow: 0 14px 32px rgba(0, 0, 0, 0.24);
     }
     .achv-head {
         display: flex;
@@ -156,11 +247,11 @@ st.markdown("""
     .achv-title {
         font-size: 18px;
         font-weight: 700;
-        color: #f8fafc;
+        color: #eff6ff;
     }
     .achv-progress {
         font-size: 13px;
-        color: #93c5fd;
+        color: #9ac6ff;
     }
     .achv-grid {
         display: grid;
@@ -168,11 +259,16 @@ st.markdown("""
         gap: 10px;
     }
     .achv-badge {
-        border: 1px solid #334155;
+        border: 1px solid var(--line);
         border-radius: 12px;
         padding: 10px;
         min-height: 100px;
-        background: rgba(30, 41, 59, 0.65);
+        background: rgba(12, 28, 58, 0.62);
+        transition: transform 0.2s ease, border-color 0.2s ease;
+    }
+    .achv-badge:hover {
+        transform: translateY(-2px);
+        border-color: rgba(108, 171, 255, 0.62);
     }
     .achv-badge.locked {
         opacity: 0.45;
@@ -199,6 +295,17 @@ st.markdown("""
         color: #60a5fa;
         font-size: 11px;
     }
+
+    @keyframes heroOpen {
+        from { opacity: 0; transform: translateY(10px); }
+        to { opacity: 1; transform: translateY(0); }
+    }
+    @keyframes scanSweep {
+        0% { left: -40%; }
+        48% { left: 110%; }
+        100% { left: 110%; }
+    }
+
     @media (max-width: 1024px) {
         .achv-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
     }
@@ -361,23 +468,41 @@ def get_db_engine():
 # 5. 获取用户基本信息
 def get_user_stats(user_id):
     engine = get_db_engine()
-    # 默认值
-    default_stats = {"level": 1, "experience": 0, "capital": 0, "join_date": "未知"}
+    default_stats = {
+        "level": 1,
+        "experience": 0,
+        "capital": 0,
+        "created_at": None,
+        "phone": None,
+    }
 
-    if not engine: return default_stats
+    if not engine:
+        return default_stats
 
     try:
-        sql = text("SELECT level, experience, capital, created_at FROM users WHERE username = :user")
+        sql = text("SELECT level, experience, capital, created_at, phone FROM users WHERE username = :user")
         with engine.connect() as conn:
             result = conn.execute(sql, {'user': user_id}).mappings().fetchone()
 
             if result:
                 return dict(result)
-            else:
-                return default_stats
-    except Exception as e:
+            return default_stats
+    except Exception:
         return default_stats
 
+
+def mask_phone_number(phone):
+    digits = "".join(ch for ch in str(phone or "") if ch.isdigit())
+    if not digits:
+        return "未绑定"
+
+    if digits.startswith("86") and len(digits) >= 13:
+        digits = digits[-11:]
+
+    if len(digits) >= 7:
+        return f"{digits[:3]}****{digits[-4:]}"
+
+    return "***"
 
 # 6. 从向量库读取回忆
 def get_memory_fragments(user_id):
@@ -584,56 +709,59 @@ username = st.session_state.get('user_id', 'Unknown')
 user_data = get_user_stats(username)
 memory_df = get_memory_fragments(username)
 
-# 2. 顶部：个人信息卡片
-st.markdown(f"## 👤 交易员档案: {username}")
+# 2. 顶部：个人信息区（高科技风）
+level = int(user_data.get('level', 1) or 1)
+exp = int(user_data.get('experience', 0) or 0)
+exp_pct = min(max(exp / 1000, 0), 1.0)
+phone_display = mask_phone_number(user_data.get('phone'))
 
-col1, col2, col3 = st.columns(3)
+created_at = user_data.get('created_at')
+join_date = str(created_at)[:10] if created_at else "未知"
+capital = float(user_data.get('capital', 0) or 0)
 
-with col1:
-    st.markdown('<div>', unsafe_allow_html=True)
-    st.markdown(f"""
-    <div class="stat-label">等级</div>
-    <div style="display:flex; align-items:center;">
-        <div class="stat-value">LV.{user_data.get('level', 1)}</div>
-        <span class="level-badge">期权暴徒</span>
+hero_html = dedent(
+    f"""
+    <div class="hero-shell">
+        <h1 class="hero-title">👤 交易员档案 · {escape(str(username))}</h1>
+        <div class="hero-kpi-grid">
+            <div class="hero-kpi-card">
+                <div class="hero-kpi-label">等级</div>
+                <div class="hero-kpi-value">LV.{level}</div>
+                <div class="hero-kpi-sub">成长目标: LV.{max(level + 1, 2)}</div>
+            </div>
+            <div class="hero-kpi-card">
+                <div class="hero-kpi-label">绑定手机号</div>
+                <div class="hero-kpi-value phone">{escape(phone_display)}</div>
+                <div class="hero-kpi-sub">仅显示脱敏信息</div>
+            </div>
+            <div class="hero-kpi-card">
+                <div class="hero-kpi-label">爱波币</div>
+                <div class="hero-kpi-value">¥ {capital:,.0f}</div>
+                <div class="hero-kpi-sub">K线游戏资金</div>
+            </div>
+            <div class="hero-kpi-card">
+                <div class="hero-kpi-label">注册时间</div>
+                <div class="hero-kpi-value">{escape(join_date)}</div>
+                <div class="hero-kpi-sub">账号创建日期</div>
+            </div>
+        </div>
     </div>
-    """, unsafe_allow_html=True)
-    exp = user_data.get('experience', 0)
-    exp_pct = min(exp / 1000, 1.0)
-    st.progress(exp_pct, text=f"EXP: {exp}/1000")
-    st.markdown('</div>', unsafe_allow_html=True)
+    """
+).strip()
+st.markdown(hero_html, unsafe_allow_html=True)
 
-with col2:
-    st.markdown('<div>', unsafe_allow_html=True)
-    money = float(user_data.get('capital', 0))
-    st.markdown(f"""
-    <div class="stat-label">爱波币</div>
-    <div class="stat-value" style="color: #fbbf24;">¥ {money:,.0f}</div>
-    <div style="font-size:12px; color:#64748b; margin-top:5px;">钱有什么用？</div>
-    """, unsafe_allow_html=True)
-    st.markdown('</div>', unsafe_allow_html=True)
-
-with col3:
-    st.markdown('<div>', unsafe_allow_html=True)
-    total_memories = len(memory_df)
-    last_active = memory_df['create_time'].iloc[0] if not memory_df.empty else "暂无"
-
-    st.markdown(f"""
-    <div class="stat-label">AI 记忆深度</div>
-    <div class="stat-value" style="color: #38bdf8;">{total_memories} 条</div>
-    <div style="font-size:12px; color:#64748b; margin-top:5px;">最近交互: {last_active}</div>
-    """, unsafe_allow_html=True)
-    st.markdown('</div>', unsafe_allow_html=True)
-
-st.markdown("---")
+st.progress(exp_pct, text=f"EXP: {exp}/1000")
+st.markdown('<hr class="section-divider" />', unsafe_allow_html=True)
 done_count, total_count = get_achievement_progress(username)
 with st.expander(f"🏅 成就徽章（已解锁 {done_count}/{total_count}，点击展开）", expanded=False):
     render_achievement_badges(username)
-st.markdown("---")
+st.markdown('<hr class="section-divider" />', unsafe_allow_html=True)
 
 # ============================================
 # 账号安全设置（紧凑折叠版）
 # ============================================
+st.markdown('<div class="panel-title">账号安全中心</div>', unsafe_allow_html=True)
+st.markdown('<div class="panel-sub">邮箱绑定与密码管理</div>', unsafe_allow_html=True)
 if EMAIL_ENABLED:
     masked_email = get_masked_email(username)
 
@@ -707,8 +835,9 @@ if EMAIL_ENABLED:
                         st.error(msg)
 
 # 3. 底部：记忆碎片展示 (折叠版)
-st.subheader("🧠 大脑记忆")
-st.caption("这里存储了 AI 对您的所有深度记忆，也可以分享。")
+st.markdown('<hr class="section-divider" />', unsafe_allow_html=True)
+st.markdown('<div class="panel-title">大脑记忆</div>', unsafe_allow_html=True)
+st.markdown('<div class="panel-sub">AI 记忆碎片与历史交互回放</div>', unsafe_allow_html=True)
 
 if memory_df.empty:
     st.info("📭 暂无记忆数据。去首页多和 AI 聊聊，它就会记住你了！")
@@ -761,7 +890,7 @@ else:
         with st.expander(expander_title, expanded=False):
             st.markdown(f"**👤 用户提问:**\n\n{q_full}")
 
-            st.markdown("---")
+            st.markdown('<hr class="section-divider" />', unsafe_allow_html=True)
 
             st.markdown("🤖 **AI 回答:**")
             if a_full:
