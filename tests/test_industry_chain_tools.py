@@ -501,6 +501,13 @@ def test_new_sector_dynamic_rules_are_complete():
             assert int(cfg.get("company_keep_max_stages") or 0) == 2
 
 
+def test_relaxed_stage_threshold_for_uav_and_bio_equipment():
+    low_alt_rule = tools.AI_CHAIN_DYNAMIC_RULES.get("低空经济", {}).get("mid_uav_evtol", {})
+    bio_rule = tools.AI_CHAIN_DYNAMIC_RULES.get("创新药", {}).get("up_bio_equipment_consumables", {})
+    assert int(low_alt_rule.get("stage_relevance_threshold", 1)) == 0
+    assert int(bio_rule.get("stage_relevance_threshold", 1)) == 0
+
+
 def _mock_cached_snapshot():
     return {
         "meta": {
