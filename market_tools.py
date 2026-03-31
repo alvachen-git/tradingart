@@ -10,6 +10,7 @@ import traceback
 from datetime import datetime
 import streamlit as st
 from symbol_match import strict_futures_prefix_pattern
+from unified_stock_view import ensure_unified_stock_view, get_stock_price_source
 
 # 1. 初始化環境
 load_dotenv(override=True)
@@ -33,6 +34,8 @@ def get_db_engine():
 
 
 engine = get_db_engine()
+ensure_unified_stock_view(engine)
+STOCK_DAILY_SOURCE = get_stock_price_source(engine)
 
 
 # --- 2. 定義 AI 調用工具時的參數結構 ---
@@ -87,11 +90,11 @@ def get_price_statistics(query_list: str, start_date: str, end_date: str):
 
                 if is_hk:
                     # 🔥【港股】使用精确匹配，避免01810.HK和81810.HK混淆
-                    sql = text("""
+                    sql = text(f"""
                                SELECT trade_date,
                                       close_price as close, high_price as high, 
                                low_price as low, open_price as open, pct_chg
-                               FROM stock_price
+                               FROM {STOCK_DAILY_SOURCE}
                                WHERE ts_code = :code
                                  AND trade_date >= :s_date
                                  AND trade_date <= :e_date
@@ -114,7 +117,7 @@ def get_price_statistics(query_list: str, start_date: str, end_date: str):
                     sql = text(f"""
                         SELECT trade_date, close_price as close, high_price as high, 
                                low_price as low, open_price as open, pct_chg 
-                        FROM stock_price 
+                        FROM {STOCK_DAILY_SOURCE} 
                         WHERE ts_code IN ('{code_str}')
                           AND trade_date >= :s_date 
                           AND trade_date <= :e_date
@@ -209,9 +212,9 @@ def get_market_snapshot(query: str):
         target_code = symbol_code.upper()
         if asset_type == 'stock':
             # 模糊匹配查詢最新一條
-            sql = text("""
+            sql = text(f"""
                        SELECT ts_code, name, trade_date, close_price, pct_chg
-                       FROM stock_price
+                       FROM {STOCK_DAILY_SOURCE}
                        WHERE ts_code = :code
                        ORDER BY trade_date DESC LIMIT 1
                        """)
@@ -256,7 +259,15 @@ def get_market_snapshot(query: str):
         else:
             # 期货/指数：使用用户输入的query（已经是中文名）
             display_name = query
-        return f"📍 **{display_name}({ts_code}) 行情**\n日期: {date}\n价格: {price}\n(如需更多历史数据请询问具体时间段)"
+        is_us = str(ts_code).upper().endswith(".US")
+        currency = "USD" if is_us else "元"
+        us_note = "\n提示: 美股为日线收盘数据，非盘中实时报价。" if is_us else ""
+        return (
+            f"📍 **{display_name}({ts_code}) 行情**\n"
+            f"日期: {date}\n"
+            f"价格: {price} {currency}{us_note}\n"
+            f"(如需更多历史数据请询问具体时间段)"
+        )
 
     except Exception as e:
         return f"查询错误: {e}"
@@ -705,7 +716,7 @@ def get_historical_price(query: str, trade_date: str):
 
             if is_hk:
                 # 港股精确匹配
-                sql = text("""
+                sql = text(f"""
                            SELECT ts_code,
                                   name,
                                   trade_date,
@@ -714,7 +725,7 @@ def get_historical_price(query: str, trade_date: str):
                                   low_price,
                                   close_price,
                                   pct_chg
-                           FROM stock_price
+                           FROM {STOCK_DAILY_SOURCE}
                            WHERE ts_code = :code
                              AND trade_date = :date
                            """)
@@ -731,7 +742,7 @@ def get_historical_price(query: str, trade_date: str):
                 sql = text(f"""
                     SELECT ts_code, name, trade_date, open_price, high_price, 
                            low_price, close_price, pct_chg
-                    FROM stock_price 
+                    FROM {STOCK_DAILY_SOURCE} 
                     WHERE ts_code IN ('{code_str}') AND trade_date = :date
                 """)
                 df = pd.read_sql(sql, engine, params={"date": clean_date})
@@ -778,8 +789,14 @@ def get_historical_price(query: str, trade_date: str):
         close_p = row.get('close_price')
         pct_chg = row.get('pct_chg', 0)
 
-        # 港股显示货币单位
-        currency = "港元" if '.HK' in str(ts_code) else "元"
+        # 货币单位
+        ts_code_upper = str(ts_code).upper()
+        if ".US" in ts_code_upper:
+            currency = "USD"
+        elif ".HK" in ts_code_upper:
+            currency = "港元"
+        else:
+            currency = "元"
 
         # 涨跌幅
         if pct_chg and pct_chg != 0:
@@ -834,7 +851,7 @@ def get_recent_price_series(query: str, days: int = 10):
             if is_hk:
                 sql = text(f"""
                     SELECT ts_code, name, trade_date, open_price, high_price, low_price, close_price, pct_chg
-                    FROM stock_price
+                    FROM {STOCK_DAILY_SOURCE}
                     WHERE ts_code = :code
                     ORDER BY trade_date DESC
                     LIMIT {n_days}
@@ -850,7 +867,7 @@ def get_recent_price_series(query: str, days: int = 10):
 
                 sql = text(f"""
                     SELECT ts_code, name, trade_date, open_price, high_price, low_price, close_price, pct_chg
-                    FROM stock_price
+                    FROM {STOCK_DAILY_SOURCE}
                     WHERE ts_code IN ('{code_str}')
                     ORDER BY trade_date DESC
                     LIMIT {n_days}

@@ -410,6 +410,13 @@ def generalist_node(state: AgentState, llm):
         5. 若处于连续追问模式，第一段必须先承接上一轮关键结论，再回答当前问题。
         """
 
+    prompt += """
+        【标的识别补充】
+        - 支持美股代码：AAPL / TSLA / NVDA / MSFT / AMZN / GOOG / META / AVGO / AMD / INTC / TSM
+        - 支持美股中文别名：苹果 / 特斯拉 / 英伟达 / 微软 / 亚马逊 / 谷歌等
+        - 美股数据默认是日线收盘数据（EOD）
+        """
+
     general_agent = create_react_agent(llm, tools, prompt=prompt)
 
     # 🔥 用于在异常时恢复部分结果
@@ -563,6 +570,13 @@ def analyst_node(state: AgentState, llm):
 
 
     # 简单的方向提取 (给策略员用)
+    persona_prompt += """
+            【标的识别补充】
+            - 支持美股代码：AAPL / TSLA / NVDA / MSFT / AMZN / GOOG / META / AVGO / AMD / INTC / TSM
+            - 支持美股中文别名：苹果 / 特斯拉 / 英伟达 / 微软 / 亚马逊 / 谷歌等
+            - 美股行情默认是日线收盘数据（EOD），不是盘中实时逐笔
+            """
+
     analyst_agent = create_react_agent(llm, tools, prompt=persona_prompt)
 
     partial_response = ""
@@ -736,6 +750,13 @@ def monitor_node(state: AgentState, llm):
 
     # 3. 创建临时 Agent (ReAct 模式)
     # 使用 bind_tools 让 LLM 可以自动选择用哪个工具
+    prompt += """
+    【标的识别补充】
+    - 支持美股代码：AAPL / TSLA / NVDA / MSFT / AMZN / GOOG / META / AVGO / AMD / INTC / TSM
+    - 支持美股中文别名：苹果 / 特斯拉 / 英伟达 / 微软 / 亚马逊 / 谷歌等
+    - 美股数据默认是日线收盘数据（EOD）
+    """
+
     monitor_agent = create_react_agent(llm, tools, prompt=prompt)
 
     partial_response = ""

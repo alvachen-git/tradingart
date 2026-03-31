@@ -1119,6 +1119,17 @@ def fast_router_check(user_query):
     # 3. 状态判断
     has_complex = any(k in user_query for k in complex_keywords)
     has_price = any(k in user_query for k in price_keywords)
+    q_lower = str(user_query or "").lower()
+    en_price_keywords = ["price", "quote", "last", "close", "now", "snapshot"]
+    has_en_price = any(k in q_lower for k in en_price_keywords)
+    us_ticker_pattern = r"\b(AAPL|TSLA|NVDA|MSFT|AMZN|GOOG|META|AVGO|AMD|INTC|TSM)\b"
+    has_us_ticker = re.search(us_ticker_pattern, str(user_query).upper()) is not None
+    us_alias_keywords = [
+        "美股", "纳斯达克", "纽交所", "道琼斯", "标普", "apple", "tesla", "nvidia", "microsoft",
+        "amazon", "google", "meta", "broadcom", "amd", "intel", "aapl", "tsla", "nvda", "msft",
+        "amzn", "goog", "meta", "avgo", "intc", "tsm", "苹果", "特斯拉", "英伟达", "微软", "亚马逊", "谷歌",
+    ]
+    has_us_context = any(k in q_lower for k in [s.lower() for s in us_alias_keywords])
 
     # 4. 特殊补丁：如果用户只输入了 代码+多少 (例如 "茅台多少")
     # 虽然 "多少" 被删了，但我们要允许 "代码+多少" 的模糊匹配，前提是它不包含 complex 词
@@ -1131,7 +1142,9 @@ def fast_router_check(user_query):
 
     # 5. 路由逻辑
     # 只有在 (命中精准价格词 OR 命中模糊多少) AND (没有复杂词) AND (没有禁用词) 时才触发
-    is_fast_query = (has_price or is_fuzzy_price) and (not has_complex) and (not has_forbidden)
+    is_price_like = has_price or is_fuzzy_price or has_en_price
+    is_us_fast_price = (has_us_ticker or has_us_context) and (has_en_price or has_price or is_fuzzy_price)
+    is_fast_query = (is_price_like or is_us_fast_price) and (not has_complex) and (not has_forbidden)
 
     if not is_fast_query:
         return False, None
@@ -1145,10 +1158,11 @@ def fast_router_check(user_query):
                 clean_query = user_query
 
                 # 按长度降序排，优先删长词 (防止删了"价格"剩下"多少")
-                target_kws = sorted(price_keywords + ["多少"], key=len, reverse=True)
+                target_kws = sorted(price_keywords + ["多少"] + en_price_keywords, key=len, reverse=True)
 
                 for kw in target_kws:
                     clean_query = clean_query.replace(kw, "")
+                    clean_query = re.sub(rf"(?i)\b{re.escape(kw)}\b", "", clean_query)
 
                 # 去除标点和空格
                 clean_query = clean_query.replace("?", "").replace("？", "").strip()

@@ -5,6 +5,7 @@ from dotenv import load_dotenv
 from functools import lru_cache
 import re
 from sqlalchemy import create_engine, text
+from unified_stock_view import ensure_unified_stock_view
 
 # 1. 初始化
 load_dotenv(override=True)
@@ -24,7 +25,9 @@ def get_db_engine():
     DB_NAME = os.getenv("DB_NAME")
     if not all([DB_USER, DB_PASSWORD, DB_HOST, DB_NAME]): return None
     db_url = f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
-    return create_engine(db_url)
+    engine = create_engine(db_url)
+    ensure_unified_stock_view(engine)
+    return engine
 
 # 基础映射表：中文名称 -> 主力连续代码 (不带数字)
 COMMON_ALIASES = {
@@ -2218,24 +2221,38 @@ def get_all_market_map():
             except:
                 pass
 
-            # 2. 🔥【关键新增】查 港股 (从 stock_price 表提取)
+            # 2. 美股代码映射 (stock_prices 表)
+            try:
+                sql_us = text("SELECT DISTINCT UPPER(symbol) AS symbol FROM stock_prices")
+                df_us = pd.read_sql(sql_us, engine)
+                for _, row in df_us.iterrows():
+                    symbol = str(row.get("symbol") or "").strip().upper()
+                    if symbol:
+                        market_map[symbol] = f"{symbol}.US"
+            except Exception:
+                pass
+
+            # 3. 港股映射 (stock_price 表)
             # 因为我们把港股数据存到了 stock_price，直接去重查询即可
-            print("🔍 正在加载港股映射...")
-            sql_hk = text("SELECT DISTINCT ts_code, name FROM stock_price WHERE ts_code LIKE :suffix")
-            df_hk = pd.read_sql(sql_hk, engine, params={"suffix": "%.HK"})
+            try:
+                print("正在加载港股映射...")
+                sql_hk = text("SELECT DISTINCT ts_code, name FROM stock_price WHERE ts_code LIKE :suffix")
+                df_hk = pd.read_sql(sql_hk, engine, params={"suffix": "%.HK"})
 
-            for _, row in df_hk.iterrows():
-                if row['name']:
-                    # 映射中文名 -> 代码 (如 '腾讯控股' -> '00700.HK')
-                    market_map[row['name']] = row['ts_code']
-                    # 映射纯数字 -> 代码 (如 '00700' -> '00700.HK')
-                    code_num = row['ts_code'].split('.')[0]
-                    market_map[code_num] = row['ts_code']
+                for _, row in df_hk.iterrows():
+                    if row['name']:
+                        # 映射中文名 -> 代码 (如 '腾讯控股' -> '00700.HK')
+                        market_map[row['name']] = row['ts_code']
+                        # 映射纯数字 -> 代码 (如 '00700' -> '00700.HK')
+                        code_num = row['ts_code'].split('.')[0]
+                        market_map[code_num] = row['ts_code']
+            except Exception:
+                pass
 
-            print(f"✅ 市场映射加载完成，共 {len(market_map)} 个品种")
+            print(f"市场映射加载完成，共 {len(market_map)} 个品种")
 
         except Exception as e:
-            print(f"❌ 加载市场映射失败: {e}")
+            print(f"加载市场映射失败: {e}")
 
     return market_map
 
@@ -2265,6 +2282,42 @@ EXTRA_INDEX_MAP = {
 # 将这些补充别名合并进主字典 (不影响原有的期货映射)
 COMMON_ALIASES.update(EXTRA_INDEX_MAP)
 
+US_STOCK_ALIASES = {
+    "AAPL": "AAPL",
+    "TSLA": "TSLA",
+    "NVDA": "NVDA",
+    "MSFT": "MSFT",
+    "AMZN": "AMZN",
+    "GOOG": "GOOG",
+    "META": "META",
+    "AVGO": "AVGO",
+    "AMD": "AMD",
+    "INTC": "INTC",
+    "TSM": "TSM",
+    "APPLE": "AAPL",
+    "TESLA": "TSLA",
+    "NVIDIA": "NVDA",
+    "MICROSOFT": "MSFT",
+    "AMAZON": "AMZN",
+    "GOOGLE": "GOOG",
+    "ALPHABET": "GOOG",
+    "META PLATFORMS": "META",
+    "BROADCOM": "AVGO",
+    "苹果": "AAPL",
+    "特斯拉": "TSLA",
+    "英伟达": "NVDA",
+    "微软": "MSFT",
+    "亚马逊": "AMZN",
+    "谷歌": "GOOG",
+    "字母表": "GOOG",
+    "脸书": "META",
+    "博通": "AVGO",
+    "超微": "AMD",
+    "英特尔": "INTC",
+    "台积电": "TSM",
+}
+US_TICKER_SET = {"AAPL", "TSLA", "NVDA", "MSFT", "AMZN", "GOOG", "META", "AVGO", "AMD", "INTC", "TSM"}
+
 
 def resolve_symbol(query):
     """
@@ -2280,6 +2333,16 @@ def resolve_symbol(query):
     # --- 0. 优先检查是否直接输入了指数代码 ---
     if query in INDEX_CODES_SET:
         return query, 'index'
+
+    # --- 0.1 直接输入美股代码 ---
+    if re.fullmatch(r"[A-Z][A-Z0-9]{0,9}\.US", query):
+        return query, 'stock'
+
+    # --- 0.2 美股别名与 ticker（高优先级，避免与期货别名冲突） ---
+    if query in US_STOCK_ALIASES:
+        return f"{US_STOCK_ALIASES[query]}.US", 'stock'
+    if query in US_TICKER_SET:
+        return f"{query}.US", 'stock'
 
     # --- 1. 尝试匹配具体期货合约 (如 "豆粕2505", "rb2510") ---
     # 规则：中文/英文前缀 + 3-4位数字
@@ -2318,6 +2381,7 @@ def resolve_symbol(query):
     # 🔥【核心修复】同样使用全小写比对
     if query.lower() in [str(v).lower() for v in COMMON_ALIASES.values()]:
         return query.upper(), 'future'
+
 
     # --- 3. 查全市场字典 (股票/ETF) ---
     market_map = get_all_market_map()
@@ -2361,6 +2425,12 @@ def resolve_symbol(query):
         for code in market_map.values():
             if query == code.split('.')[0]:
                 return code, 'stock'
+
+    # 5 位数字代码优先按港股处理
+    if query.isdigit() and len(query) == 5:
+        if query in market_map:
+            return market_map[query], 'stock'
+        return f"{query}.HK", 'stock'
 
     return None, None
 

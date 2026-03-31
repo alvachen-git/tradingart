@@ -7,6 +7,7 @@ from dotenv import load_dotenv
 from langchain_core.tools import tool
 import symbol_map
 from symbol_match import strict_futures_prefix_pattern
+from unified_stock_view import ensure_unified_stock_view, get_stock_price_source
 
 # --- 1. 独立初始化 ---
 load_dotenv(override=True)
@@ -27,6 +28,8 @@ def get_db_engine():
 
 
 engine = get_db_engine()
+ensure_unified_stock_view(engine)
+STOCK_DAILY_SOURCE = get_stock_price_source(engine)
 
 
 # 🔥 [新增] 插入这个函数，用于把 "SH" 翻译回 "烧碱"
@@ -180,7 +183,7 @@ def analyze_kline_pattern(query: str, trade_date: str = None):
         if asset_type == 'stock':
             sql = f"""
                 SELECT trade_date, open_price, high_price, low_price, close_price 
-                FROM stock_price
+                FROM {STOCK_DAILY_SOURCE}
                 WHERE ts_code='{symbol}' 
                 {date_condition} 
                 ORDER BY trade_date DESC LIMIT 60
