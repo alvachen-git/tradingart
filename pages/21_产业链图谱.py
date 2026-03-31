@@ -276,6 +276,20 @@ def _pick_scale_mode(scale_mode_label: str) -> str:
     return mapping.get(scale_mode_label, "log")
 
 
+def _should_hide_runtime_warning(msg: str) -> bool:
+    s = str(msg or "").strip()
+    if not s:
+        return True
+    hidden_keywords = (
+        "今日快照未生成",
+        "动态筛选",
+        "动态候选",
+        "白名单补足",
+        "未匹配到主题指数",
+    )
+    return any(k in s for k in hidden_keywords)
+
+
 def _build_flow_bubble_chart(snapshot: dict, flow_window: str, scale_mode: str) -> go.Figure:
     stages = snapshot.get("stages", [])
     meta = snapshot.get("meta", {})
@@ -673,8 +687,6 @@ def main():
         )
 
     meta = snapshot.get("meta", {})
-    if str(meta.get("snapshot_source") or "") == "realtime":
-        st.info("今日快照未生成，当前使用实时计算数据。")
     right_meta_col1, right_meta_col2 = st.columns([4, 2])
     with right_meta_col2:
         st.markdown(
@@ -685,6 +697,8 @@ def main():
         )
 
     for w in meta.get("warnings", []):
+        if _should_hide_runtime_warning(str(w)):
+            continue
         st.warning(w)
 
     st.plotly_chart(
