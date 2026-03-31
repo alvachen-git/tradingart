@@ -1,11 +1,27 @@
 import argparse
 import os
 import re
+import textwrap
 from datetime import datetime
 from typing import Any, Optional
 
 import pandas as pd
 from dotenv import load_dotenv
+
+
+def _clean_text(value: Any) -> str:
+    text = str(value or "")
+    text = text.replace("\u3000", " ")
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def _truncate(text: str, max_len: int) -> str:
+    max_len = max(int(max_len or 0), 0)
+    normalized = _clean_text(text)
+    if max_len <= 0 or len(normalized) <= max_len:
+        return normalized
+    return textwrap.shorten(normalized, width=max_len, placeholder="...")
 
 
 def _parse_qa_fields(content: str) -> tuple[str, str]:
@@ -20,11 +36,21 @@ def _parse_qa_fields(content: str) -> tuple[str, str]:
         except Exception:
             q = ""
             a = ""
+    if "【回答片段】" in a:
+        try:
+            a = a.split("【回答片段】", 1)[1].strip()
+        except Exception:
+            pass
+    if "【结构化摘要】" in a and "【回答片段】" not in a:
+        try:
+            a = a.split("【结构化摘要】", 1)[1].strip()
+        except Exception:
+            pass
     if not q:
         q = text[:120].strip()
     if not a:
         a = text[:240].strip()
-    return q, a
+    return _clean_text(q), _clean_text(a)
 
 
 def _parse_ts(value: Any) -> Optional[datetime]:
@@ -133,12 +159,45 @@ def _load_vector_store():
     return get_vector_store()
 
 
+def _render_cards(rows: list[dict], max_question: int, max_answer: int) -> None:
+    for idx, row in enumerate(rows, start=1):
+        user_id = str(row.get("user_id", "Unknown")).strip() or "Unknown"
+        ts = str(row.get("time", "N/A")).strip() or "N/A"
+        question = _truncate(row.get("question", ""), max_question)
+        answer = _truncate(row.get("answer", ""), max_answer)
+        print(f"[{idx}] user={user_id}  time={ts}")
+        print(f"Q: {question}")
+        print(f"A: {answer}")
+        print("-" * 80)
+
+
+def _render_table(rows: list[dict], max_question: int, max_answer: int) -> None:
+    df = pd.DataFrame(
+        [
+            {
+                "User ID": str(r.get("user_id", "")),
+                "Time": str(r.get("time", "")),
+                "Question": _truncate(r.get("question", ""), max_question),
+                "Answer Snippet": _truncate(r.get("answer", ""), max_answer),
+            }
+            for r in rows
+        ]
+    )
+    pd.set_option("display.max_rows", None)
+    pd.set_option("display.max_colwidth", max(max_question, max_answer))
+    pd.set_option("display.width", 200)
+    print(df.to_string(index=False))
+
+
 def view_all_memories(
     user: str = "",
     limit: int = 200,
     contains: str = "",
     since: str = "",
     until: str = "",
+    output_format: str = "card",
+    max_question: int = 80,
+    max_answer: int = 160,
 ) -> int:
     print("=== 📖 正在读取本地向量记忆库... ===")
     vector_store = _load_vector_store()
@@ -161,26 +220,15 @@ def view_all_memories(
         print("📭 未匹配到记录。")
         return 0
 
-    df = pd.DataFrame(
-        [
-            {
-                "User ID": r["user_id"],
-                "Time": r["time"],
-                "Question": re.sub(r"\s+", " ", str(r["question"]))[:120],
-                "Answer Snippet": re.sub(r"\s+", " ", str(r["answer"]))[:180],
-            }
-            for r in rows
-        ]
-    )
-
-    print(f"✅ 共匹配到 {len(df)} 条记忆：")
+    print(f"✅ 共匹配到 {len(rows)} 条记忆：")
     print("-" * 80)
-    pd.set_option("display.max_rows", None)
-    pd.set_option("display.max_colwidth", 180)
-    pd.set_option("display.width", 2400)
-    print(df.to_string(index=False))
+    fmt = str(output_format or "card").strip().lower()
+    if fmt == "table":
+        _render_table(rows, max_question=max_question, max_answer=max_answer)
+    else:
+        _render_cards(rows, max_question=max_question, max_answer=max_answer)
     print("-" * 80)
-    return len(df)
+    return len(rows)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -190,6 +238,9 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--contains", default="", help="按关键词过滤（问题/回答/原文）")
     parser.add_argument("--since", default="", help="起始时间（如 2026-03-01）")
     parser.add_argument("--until", default="", help="结束时间（如 2026-03-31）")
+    parser.add_argument("--format", default="card", choices=["card", "table"], help="输出模式：card(默认) 或 table")
+    parser.add_argument("--max-question", type=int, default=80, help="问题最大展示长度，默认 80")
+    parser.add_argument("--max-answer", type=int, default=160, help="回答最大展示长度，默认 160")
     return parser
 
 
@@ -203,6 +254,9 @@ def main(argv=None) -> int:
             contains=args.contains,
             since=args.since,
             until=args.until,
+            output_format=args.format,
+            max_question=max(int(args.max_question or 0), 20),
+            max_answer=max(int(args.max_answer or 0), 20),
         )
         return 0
     except Exception as e:
