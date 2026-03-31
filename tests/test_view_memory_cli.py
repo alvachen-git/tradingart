@@ -21,6 +21,13 @@ class TestViewMemoryCli(unittest.TestCase):
         self.assertIn("期权怎么做对冲", q)
         self.assertIn("先明确风险预算", a)
 
+    def test_parse_qa_fields_prefers_answer_snippet(self):
+        q, a = view_memory._parse_qa_fields(
+            "用户问: 牛市价差策略是什么\nAI回答: 【结构化摘要】这是摘要【回答片段】这是回答片段"
+        )
+        self.assertEqual(q, "牛市价差策略是什么")
+        self.assertEqual(a, "这是回答片段")
+
     def test_filter_rows_by_user_keyword_time_and_limit(self):
         rows = [
             {
