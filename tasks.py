@@ -41,6 +41,20 @@ BEAR_DIRECTION_TERMS = [
 ]
 
 
+def _build_memory_record(ai_response: str, max_chars: int = 4000) -> str:
+    """将 AI 回复压缩为摘要+片段，保持与站点侧记忆格式一致。"""
+    text = str(ai_response or "").strip()
+    if not text:
+        return ""
+    cleaned = re.sub(r"```[\s\S]*?```", " ", text)
+    cleaned = re.sub(r"[#>*`]+", " ", cleaned)
+    lines = [ln.strip() for ln in cleaned.splitlines() if ln.strip()]
+    summary = "；".join(lines[:3]) if lines else cleaned[:220]
+    summary = summary[:240]
+    snippet = text[:max_chars]
+    return f"【结构化摘要】{summary}\n【回答片段】{snippet}"
+
+
 def _build_link_failure_notice(link_ctx: dict) -> str:
     reason = str(link_ctx.get("error_message") or "未知原因").strip()
     url = str(link_ctx.get("url") or "").strip()
@@ -366,6 +380,58 @@ def _build_image_attachments(query: str, top_k: int = 3, symbol_hint: str = "", 
         print(f"[Attachment] 图片附件构建失败: {e}")
 
     return attachments
+
+
+@celery_app.task(bind=True, name="tasks.persist_mobile_chat_memory")
+def persist_mobile_chat_memory_task(
+    self,
+    user_id: str,
+    user_prompt: str,
+    ai_response: str,
+    source: str = "mobile",
+    task_id: str = "",
+):
+    """异步写入小程序问答到向量资料库，失败不影响主流程。"""
+    try:
+        uid = str(user_id or "").strip()
+        prompt = str(user_prompt or "").strip()
+        response = str(ai_response or "").strip()
+        if not uid or not prompt or not response:
+            return {
+                "status": "skipped",
+                "reason": "missing_required_fields",
+                "source": source,
+                "task_id": task_id,
+            }
+
+        memory_record = _build_memory_record(response)
+        if not memory_record:
+            return {
+                "status": "skipped",
+                "reason": "empty_memory_record",
+                "source": source,
+                "task_id": task_id,
+            }
+
+        import memory_utils as mem
+
+        mem.save_interaction(uid, prompt, memory_record)
+        return {
+            "status": "success",
+            "source": source,
+            "task_id": task_id,
+        }
+    except Exception as e:
+        print(
+            "[mobile-memory] persist failed "
+            f"user={user_id} task_id={task_id} source={source} err={e}"
+        )
+        return {
+            "status": "error",
+            "error": str(e),
+            "source": source,
+            "task_id": task_id,
+        }
 
 
 @celery_app.task(bind=True, name='tasks.update_user_profile')
