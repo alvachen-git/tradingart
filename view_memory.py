@@ -79,6 +79,96 @@ def _parse_ts(value: Any) -> Optional[datetime]:
     return None
 
 
+def _normalize_ts_bound(value: Any, is_end: bool) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    dt = _parse_ts(raw)
+    if dt is None:
+        return ""
+    if (":" not in raw) and ("T" not in raw):
+        if is_end:
+            dt = dt.replace(hour=23, minute=59, second=59)
+        else:
+            dt = dt.replace(hour=0, minute=0, second=0)
+    return dt.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _build_time_where(since: str = "", until: str = "") -> Optional[dict]:
+    since_norm = _normalize_ts_bound(since, is_end=False)
+    until_norm = _normalize_ts_bound(until, is_end=True)
+    if since_norm and until_norm:
+        return {
+            "$and": [
+                {"timestamp": {"$gte": since_norm}},
+                {"timestamp": {"$lte": until_norm}},
+            ]
+        }
+    if since_norm:
+        return {"timestamp": {"$gte": since_norm}}
+    if until_norm:
+        return {"timestamp": {"$lte": until_norm}}
+    return None
+
+
+def _merge_payload(dest: dict, chunk: dict) -> None:
+    dest.setdefault("ids", []).extend(chunk.get("ids") or [])
+    dest.setdefault("documents", []).extend(chunk.get("documents") or [])
+    dest.setdefault("metadatas", []).extend(chunk.get("metadatas") or [])
+
+
+def _get_chunk(getter, limit: int, offset: int, where: Optional[dict]) -> tuple[dict, bool]:
+    kwargs = {"limit": limit, "offset": offset}
+    if where:
+        kwargs["where"] = where
+    try:
+        return getter(**kwargs), True
+    except TypeError:
+        if offset > 0:
+            return {"ids": [], "documents": [], "metadatas": []}, False
+        if where:
+            try:
+                return getter(limit=limit, where=where), False
+            except TypeError:
+                pass
+        return getter(limit=limit), False
+
+
+def _fetch_data_paginated(
+    vector_store,
+    page_size: int = 5000,
+    scan_since: str = "",
+    scan_until: str = "",
+) -> dict:
+    page_size = max(int(page_size or 0), 1)
+    where = _build_time_where(scan_since, scan_until)
+    getter = None
+    collection = getattr(vector_store, "_collection", None)
+    if collection is not None and hasattr(collection, "get"):
+        getter = collection.get
+    elif hasattr(vector_store, "get"):
+        getter = vector_store.get
+    else:
+        raise RuntimeError("向量库对象不支持 get() 拉取")
+
+    merged = {"ids": [], "documents": [], "metadatas": []}
+    offset = 0
+    supports_offset = True
+    while True:
+        chunk, call_supports_offset = _get_chunk(getter, page_size, offset, where)
+        supports_offset = supports_offset and call_supports_offset
+        ids = chunk.get("ids") or []
+        if not ids:
+            break
+        _merge_payload(merged, chunk)
+        if len(ids) < page_size:
+            break
+        if not supports_offset:
+            break
+        offset += len(ids)
+    return merged
+
+
 def _build_rows(data: dict) -> list[dict]:
     ids = data.get("ids") or []
     docs = data.get("documents") or []
@@ -148,7 +238,9 @@ def _filter_rows(
     sort_desc = str(order or "asc").strip().lower() == "desc"
     out.sort(key=lambda x: x.get("ts") or datetime.min, reverse=sort_desc)
     if limit > 0:
-        out = out[:limit]
+        # asc 模式要“最新在最下”，因此应保留排序后的尾部 N 条
+        # desc 模式保持“最新在最上”，保留头部 N 条
+        out = out[:limit] if sort_desc else out[-limit:]
     return out
 
 
@@ -197,6 +289,7 @@ def view_all_memories(
     contains: str = "",
     since: str = "",
     until: str = "",
+    page_size: int = 5000,
     output_format: str = "card",
     max_question: int = 80,
     max_answer: int = 160,
@@ -204,7 +297,12 @@ def view_all_memories(
 ) -> int:
     print("=== 📖 正在读取本地向量记忆库... ===")
     vector_store = _load_vector_store()
-    data = vector_store.get(limit=20000)
+    data = _fetch_data_paginated(
+        vector_store,
+        page_size=page_size,
+        scan_since=since,
+        scan_until=until,
+    )
     ids = data.get("ids") or []
     if not ids:
         print("📭 记忆库是空的。")
@@ -239,6 +337,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="查看向量资料库中的历史问答记录")
     parser.add_argument("--user", default="", help="按用户名过滤")
     parser.add_argument("--limit", type=int, default=200, help="最多输出条数，默认 200")
+    parser.add_argument("--page-size", type=int, default=5000, help="分页拉取批大小，默认 5000")
     parser.add_argument("--contains", default="", help="按关键词过滤（问题/回答/原文）")
     parser.add_argument("--since", default="", help="起始时间（如 2026-03-01）")
     parser.add_argument("--until", default="", help="结束时间（如 2026-03-31）")
@@ -259,6 +358,7 @@ def main(argv=None) -> int:
             contains=args.contains,
             since=args.since,
             until=args.until,
+            page_size=max(int(args.page_size or 0), 1),
             output_format=args.format,
             max_question=max(int(args.max_question or 0), 20),
             max_answer=max(int(args.max_answer or 0), 20),
