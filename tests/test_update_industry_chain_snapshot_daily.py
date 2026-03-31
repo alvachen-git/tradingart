@@ -98,3 +98,8 @@ def test_run_update_force_overwrites_existing(monkeypatch):
     assert count == 1
     assert calls["build"] == 1
     assert calls["save"] == 1
+
+
+def test_default_sectors_include_new_boards():
+    for sector in ["机器人", "储能", "工业母机", "创新药", "低空经济"]:
+        assert sector in job.DEFAULT_SECTORS

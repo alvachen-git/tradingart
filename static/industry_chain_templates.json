@@ -257,5 +257,215 @@
       ["mid_ground_tt_c", "mid_terminal_module"],
       ["mid_terminal_module", "down_satcom_operation_app"]
     ]
+  },
+  "机器人": {
+    "display_name": "机器人产业链",
+    "stages": [
+      {
+        "id": "up_core_parts",
+        "name": "上游-核心零部件（减速器/伺服/控制器）",
+        "ths_index_codes": []
+      },
+      {
+        "id": "up_sensor_control",
+        "name": "上游-传感与控制（视觉/力矩/编码器）",
+        "ths_index_codes": []
+      },
+      {
+        "id": "mid_robot_body",
+        "name": "中游-机器人本体（工业/协作/人形）",
+        "ths_index_codes": []
+      },
+      {
+        "id": "mid_system_integration",
+        "name": "中游-系统集成与产线",
+        "ths_index_codes": []
+      },
+      {
+        "id": "mid_embodied_software",
+        "name": "中游-具身智能与运动控制软件",
+        "ths_index_codes": []
+      },
+      {
+        "id": "down_industry_service",
+        "name": "下游-行业应用与服务",
+        "ths_index_codes": []
+      }
+    ],
+    "edges": [
+      ["up_core_parts", "mid_robot_body"],
+      ["up_sensor_control", "mid_robot_body"],
+      ["mid_robot_body", "mid_system_integration"],
+      ["mid_system_integration", "mid_embodied_software"],
+      ["mid_embodied_software", "down_industry_service"]
+    ]
+  },
+  "储能": {
+    "display_name": "储能产业链",
+    "stages": [
+      {
+        "id": "up_storage_material",
+        "name": "上游-电化学材料与电芯材料",
+        "ths_index_codes": []
+      },
+      {
+        "id": "up_power_semiconductor",
+        "name": "上游-功率器件与控制芯片",
+        "ths_index_codes": []
+      },
+      {
+        "id": "mid_cell_pack",
+        "name": "中游-储能电芯与PACK",
+        "ths_index_codes": []
+      },
+      {
+        "id": "mid_pcs_bms_ems",
+        "name": "中游-PCS/BMS/EMS",
+        "ths_index_codes": []
+      },
+      {
+        "id": "mid_system_integrator",
+        "name": "中游-储能系统集成",
+        "ths_index_codes": []
+      },
+      {
+        "id": "down_station_operation",
+        "name": "下游-电站运营与运维",
+        "ths_index_codes": []
+      }
+    ],
+    "edges": [
+      ["up_storage_material", "mid_cell_pack"],
+      ["up_power_semiconductor", "mid_pcs_bms_ems"],
+      ["mid_cell_pack", "mid_system_integrator"],
+      ["mid_pcs_bms_ems", "mid_system_integrator"],
+      ["mid_system_integrator", "down_station_operation"]
+    ]
+  },
+  "工业母机": {
+    "display_name": "工业母机产业链",
+    "stages": [
+      {
+        "id": "up_material_casting",
+        "name": "上游-材料与铸件",
+        "ths_index_codes": []
+      },
+      {
+        "id": "up_core_components",
+        "name": "上游-数控系统与核心部件（主轴/丝杠/导轨）",
+        "ths_index_codes": []
+      },
+      {
+        "id": "mid_tools_fixture",
+        "name": "中游-刀具夹具与测量",
+        "ths_index_codes": []
+      },
+      {
+        "id": "mid_machine_tool",
+        "name": "中游-机床整机",
+        "ths_index_codes": []
+      },
+      {
+        "id": "mid_line_integration",
+        "name": "中游-产线集成与自动化",
+        "ths_index_codes": []
+      },
+      {
+        "id": "down_industry_application",
+        "name": "下游-行业应用与后市场服务",
+        "ths_index_codes": []
+      }
+    ],
+    "edges": [
+      ["up_material_casting", "mid_machine_tool"],
+      ["up_core_components", "mid_machine_tool"],
+      ["mid_tools_fixture", "mid_machine_tool"],
+      ["mid_machine_tool", "mid_line_integration"],
+      ["mid_line_integration", "down_industry_application"]
+    ]
+  },
+  "创新药": {
+    "display_name": "创新药产业链",
+    "stages": [
+      {
+        "id": "up_reagent_intermediate",
+        "name": "上游-试剂与中间体",
+        "ths_index_codes": []
+      },
+      {
+        "id": "up_bio_equipment_consumables",
+        "name": "上游-生物设备与耗材",
+        "ths_index_codes": []
+      },
+      {
+        "id": "mid_cxo_service",
+        "name": "中游-CXO（CRO/CDMO/CMO）",
+        "ths_index_codes": []
+      },
+      {
+        "id": "mid_innovative_pharma",
+        "name": "中游-创新药研发与生产",
+        "ths_index_codes": []
+      },
+      {
+        "id": "mid_registration_commercial",
+        "name": "中游-注册准入与商业化服务",
+        "ths_index_codes": []
+      },
+      {
+        "id": "down_channel_payment",
+        "name": "下游-渠道与支付体系",
+        "ths_index_codes": []
+      }
+    ],
+    "edges": [
+      ["up_reagent_intermediate", "mid_cxo_service"],
+      ["up_bio_equipment_consumables", "mid_cxo_service"],
+      ["mid_cxo_service", "mid_innovative_pharma"],
+      ["mid_innovative_pharma", "mid_registration_commercial"],
+      ["mid_registration_commercial", "down_channel_payment"]
+    ]
+  },
+  "低空经济": {
+    "display_name": "低空经济产业链",
+    "stages": [
+      {
+        "id": "up_airframe_material",
+        "name": "上游-机体材料与结构件",
+        "ths_index_codes": []
+      },
+      {
+        "id": "up_power_avionics",
+        "name": "上游-动力与航电（飞控/导航/通信）",
+        "ths_index_codes": []
+      },
+      {
+        "id": "mid_uav_evtol",
+        "name": "中游-无人机/eVTOL整机",
+        "ths_index_codes": []
+      },
+      {
+        "id": "mid_ground_infra",
+        "name": "中游-地面设施与空管系统",
+        "ths_index_codes": []
+      },
+      {
+        "id": "mid_operation_service",
+        "name": "中游-运营服务（物流/巡检/应急）",
+        "ths_index_codes": []
+      },
+      {
+        "id": "down_industry_apps",
+        "name": "下游-行业应用与商业场景",
+        "ths_index_codes": []
+      }
+    ],
+    "edges": [
+      ["up_airframe_material", "mid_uav_evtol"],
+      ["up_power_avionics", "mid_uav_evtol"],
+      ["mid_uav_evtol", "mid_ground_infra"],
+      ["mid_ground_infra", "mid_operation_service"],
+      ["mid_operation_service", "down_industry_apps"]
+    ]
   }
 }

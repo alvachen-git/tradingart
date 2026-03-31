@@ -14,6 +14,7 @@ from industry_chain_tools import (
     get_chain_snapshot,
     get_chain_snapshot_cache_marker,
     get_chain_snapshot_with_cache,
+    load_chain_templates,
     load_chain_snapshot_cache,
     save_chain_snapshot_cache,
     scale_flow_width,
@@ -467,6 +468,39 @@ def test_stage_member_second_level_cache_by_sector_and_trade_date(monkeypatch):
     assert m1 == m2 and w1 == w2 and d1 == d2 and s1 == s2
 
 
+def test_new_sector_templates_have_six_stages_and_five_edges():
+    templates = load_chain_templates()
+    for sector in ["新能源", "光伏", "航天卫星", "机器人", "储能", "工业母机", "创新药", "低空经济"]:
+        assert sector in templates
+        cfg = templates[sector]
+        assert len(cfg.get("stages") or []) == 6
+        assert len(cfg.get("edges") or []) == 5
+
+
+def test_new_sectors_are_in_strong_filter_set():
+    for sector in ["新能源", "光伏", "航天卫星", "机器人", "储能", "工业母机", "创新药", "低空经济"]:
+        assert sector in tools._STRONG_STAGE_FILTER_SECTORS
+
+
+def test_new_sector_dynamic_rules_are_complete():
+    required_fields = {
+        "include_keywords",
+        "exclude_keywords",
+        "company_include_keywords",
+        "company_exclude_keywords",
+        "whitelist_codes",
+        "max_index_codes",
+        "min_companies_before_fallback",
+        "company_keep_max_stages",
+    }
+    for sector in ["机器人", "储能", "工业母机", "创新药", "低空经济"]:
+        rules = tools.AI_CHAIN_DYNAMIC_RULES.get(sector) or {}
+        assert len(rules) == 6
+        for stage_id, cfg in rules.items():
+            assert required_fields.issubset(set(cfg.keys())), f"{sector}/{stage_id} 缺少字段"
+            assert int(cfg.get("company_keep_max_stages") or 0) == 2
+
+
 def _mock_cached_snapshot():
     return {
         "meta": {
@@ -634,3 +668,24 @@ def test_snapshot_cache_marker_changes_after_rewrite():
     marker2 = get_chain_snapshot_cache_marker("半导体", "5D", "20260324", engine=engine)
     assert marker2.startswith("20260324|")
     assert marker2 >= marker1
+
+
+def test_new_sector_snapshot_stable_when_dynamic_source_empty():
+    class EmptyPro:
+        def ths_index(self, **kwargs):
+            return pd.DataFrame(columns=["ts_code", "name"])
+
+        def ths_member(self, ts_code):
+            return pd.DataFrame(columns=["con_code", "con_name"])
+
+    for sector in ["新能源", "光伏", "航天卫星", "机器人", "储能", "工业母机", "创新药", "低空经济"]:
+        snap = get_chain_snapshot(
+            sector_name=sector,
+            limit_per_stage=10,
+            engine=None,
+            pro=EmptyPro(),
+        )
+        assert len(snap["stages"]) == 6
+        assert snap["meta"]["member_source_mode"] in {"fixed", "mixed"}
+        assert isinstance(snap["meta"].get("dynamic_match_info"), dict)
+        assert any("动态筛选无命中" in w for w in snap["meta"].get("warnings", []))

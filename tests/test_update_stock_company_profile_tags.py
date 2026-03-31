@@ -210,3 +210,29 @@ def test_load_sector_component_codes_supports_dynamic_resolver(monkeypatch):
 
     codes = load_sector_component_codes(object(), "AI服务器")
     assert codes == ["000001.SZ", "000002.SZ"]
+
+
+def test_load_sector_component_codes_supports_new_sectors(monkeypatch):
+    templates = {
+        "新能源": {"stages": [{"id": "s1", "name": "阶段1", "ths_index_codes": []}]},
+        "光伏": {"stages": [{"id": "s1", "name": "阶段1", "ths_index_codes": []}]},
+        "航天卫星": {"stages": [{"id": "s1", "name": "阶段1", "ths_index_codes": []}]},
+        "机器人": {"stages": [{"id": "s1", "name": "阶段1", "ths_index_codes": []}]},
+        "储能": {"stages": [{"id": "s1", "name": "阶段1", "ths_index_codes": []}]},
+        "工业母机": {"stages": [{"id": "s1", "name": "阶段1", "ths_index_codes": []}]},
+        "创新药": {"stages": [{"id": "s1", "name": "阶段1", "ths_index_codes": []}]},
+        "低空经济": {"stages": [{"id": "s1", "name": "阶段1", "ths_index_codes": []}]},
+    }
+    monkeypatch.setattr(profile_tags_mod, "load_chain_templates", lambda path=None: templates)
+    monkeypatch.setattr(
+        profile_tags_mod,
+        "fetch_stage_members_from_tushare",
+        lambda stages, pro, sector_name, collect_meta=False: (
+            {"s1": [{"ts_code": "000333.SZ", "name": "测试公司"}]},
+            [],
+        ),
+    )
+
+    for sector in ["新能源", "光伏", "航天卫星", "机器人", "储能", "工业母机", "创新药", "低空经济"]:
+        codes = load_sector_component_codes(object(), sector)
+        assert codes == ["000333.SZ"]

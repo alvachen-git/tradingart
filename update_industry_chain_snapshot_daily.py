@@ -16,7 +16,19 @@ from industry_chain_tools import (
     save_chain_snapshot_cache,
 )
 
-DEFAULT_SECTORS = ["半导体", "AI服务器", "AI算力", "新能源", "光伏", "航天卫星"]
+DEFAULT_SECTORS = [
+    "半导体",
+    "AI服务器",
+    "AI算力",
+    "新能源",
+    "光伏",
+    "航天卫星",
+    "机器人",
+    "储能",
+    "工业母机",
+    "创新药",
+    "低空经济",
+]
 SNAPSHOT_BUILD_LIMIT = 20
 
 
@@ -146,8 +158,11 @@ def main() -> None:
     parser.add_argument(
         "--sectors",
         type=str,
-        default="半导体,AI服务器,AI算力,新能源,光伏,航天卫星",
-        help="板块列表，逗号分隔，默认 半导体,AI服务器,AI算力,新能源,光伏,航天卫星",
+        default="半导体,AI服务器,AI算力,新能源,光伏,航天卫星,机器人,储能,工业母机,创新药,低空经济",
+        help=(
+            "板块列表，逗号分隔，默认 "
+            "半导体,AI服务器,AI算力,新能源,光伏,航天卫星,机器人,储能,工业母机,创新药,低空经济"
+        ),
     )
     parser.add_argument("--dry-run", action="store_true", help="仅构建验证，不写库")
     parser.add_argument("--force", action="store_true", help="覆盖已存在快照")
