@@ -68,6 +68,31 @@ class TestViewMemoryCli(unittest.TestCase):
         self.assertEqual(out[0]["user_id"], "u1")
         self.assertIn("期权", out[0]["question"])
 
+    def test_filter_rows_default_order_is_asc(self):
+        rows = [
+            {
+                "user_id": "u1",
+                "time": "2026-03-31 10:00",
+                "ts": datetime(2026, 3, 31, 10, 0, 0),
+                "question": "new",
+                "answer": "new",
+                "raw": "",
+            },
+            {
+                "user_id": "u1",
+                "time": "2026-03-30 10:00",
+                "ts": datetime(2026, 3, 30, 10, 0, 0),
+                "question": "old",
+                "answer": "old",
+                "raw": "",
+            },
+        ]
+        out = view_memory._filter_rows(rows, user="u1", limit=10)
+        self.assertEqual([x["question"] for x in out], ["old", "new"])
+
+        out_desc = view_memory._filter_rows(rows, user="u1", limit=10, order="desc")
+        self.assertEqual([x["question"] for x in out_desc], ["new", "old"])
+
     def test_view_all_memories_with_filters(self):
         payload = {
             "ids": ["a1", "a2"],

@@ -109,6 +109,7 @@ def _filter_rows(
     since: str = "",
     until: str = "",
     limit: int = 200,
+    order: str = "asc",
 ) -> list[dict]:
     out = list(rows)
     user = str(user or "").strip()
@@ -144,7 +145,8 @@ def _filter_rows(
             or contains in str(r.get("raw", "")).lower()
         ]
 
-    out.sort(key=lambda x: x.get("ts") or datetime.min, reverse=True)
+    sort_desc = str(order or "asc").strip().lower() == "desc"
+    out.sort(key=lambda x: x.get("ts") or datetime.min, reverse=sort_desc)
     if limit > 0:
         out = out[:limit]
     return out
@@ -198,6 +200,7 @@ def view_all_memories(
     output_format: str = "card",
     max_question: int = 80,
     max_answer: int = 160,
+    order: str = "asc",
 ) -> int:
     print("=== 📖 正在读取本地向量记忆库... ===")
     vector_store = _load_vector_store()
@@ -215,6 +218,7 @@ def view_all_memories(
         since=since,
         until=until,
         limit=limit,
+        order=order,
     )
     if not rows:
         print("📭 未匹配到记录。")
@@ -241,6 +245,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--format", default="card", choices=["card", "table"], help="输出模式：card(默认) 或 table")
     parser.add_argument("--max-question", type=int, default=80, help="问题最大展示长度，默认 80")
     parser.add_argument("--max-answer", type=int, default=160, help="回答最大展示长度，默认 160")
+    parser.add_argument("--order", default="asc", choices=["asc", "desc"], help="时间排序：asc=旧到新(最新在最下)，desc=新到旧")
     return parser
 
 
@@ -257,6 +262,7 @@ def main(argv=None) -> int:
             output_format=args.format,
             max_question=max(int(args.max_question or 0), 20),
             max_answer=max(int(args.max_answer or 0), 20),
+            order=args.order,
         )
         return 0
     except Exception as e:
