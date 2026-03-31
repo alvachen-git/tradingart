@@ -3,7 +3,7 @@ import { ref, computed, watch, nextTick, onUnmounted } from 'vue'
 import { onShow, onHide } from '@dcloudio/uni-app'
 import { useAuthStore } from '../../store/auth'
 import BottomNav from '../../components/BottomNav.vue'
-import { klineApi, type KlineBar, type KlineData, type LbRow } from '../../api/index'
+import { klineApi, type KlineBar, type KlineData, type KlineTradeEvent, type LbRow } from '../../api/index'
 
 const auth = useAuthStore()
 
@@ -185,6 +185,7 @@ async function acceptPenalty() {
 
 // ── Game data ──────────────────────────────────────────────
 const gameId      = ref(0)
+const symbol      = ref('')
 const symbolName  = ref('')
 const symbolType  = ref('')
 const capital     = ref(100000)
@@ -242,10 +243,71 @@ function calcPnL() {
   if (dd > maxDrawdown.value) maxDrawdown.value = dd
 }
 
+function clonePos(p: Pos): Pos {
+  return {
+    direction: p.direction,
+    lots: Number(p.lots || 0),
+    avgPrice: Number(p.avgPrice || 0),
+    totalCost: Number(p.totalCost || 0),
+  }
+}
+
+function pushTradeEvent(action: string, lots: number, price: number, positionBefore: Pos) {
+  if (!lots || lots <= 0) return
+  const bar = allBars.value[curIdx.value]
+  tradeEvents.value.push({
+    trade_seq: tradeEvents.value.length + 1,
+    action,
+    trade_time: new Date().toISOString(),
+    bar_index: curIdx.value,
+    bar_date: bar?.dt || null,
+    price: Number(price || 0),
+    lots: Number(lots || 0),
+    amount: Number((lots || 0) * 1000),
+    leverage: Number(selectedLeverage.value || 1),
+    position_before: clonePos(positionBefore),
+    position_after: clonePos(pos.value),
+    realized_pnl_after: Number(realizedPnl.value || 0),
+    floating_pnl_after: Number(floatingPnl.value || 0),
+  })
+}
+
+async function persistTradesOnce(): Promise<boolean> {
+  if (tradePersisted.value) return true
+  if (!gameId.value || !auth.username) return false
+  if (!tradeEvents.value.length) {
+    tradePersisted.value = true
+    return true
+  }
+  if (tradePersistPromise) return tradePersistPromise
+
+  tradePersistPromise = (async () => {
+    try {
+      await klineApi.saveTradeBatch({
+        game_id: gameId.value,
+        user_id: auth.username,
+        symbol: symbol.value,
+        symbol_name: symbolName.value,
+        symbol_type: symbolType.value,
+        trades: tradeEvents.value,
+      })
+      tradePersisted.value = true
+      return true
+    } catch (e) {
+      console.error('[kline] saveTradeBatch failed', e)
+      return false
+    } finally {
+      tradePersistPromise = null
+    }
+  })()
+  return tradePersistPromise
+}
+
 // ── Trading ────────────────────────────────────────────────
 function openPosition(dir: 'long' | 'short') {
   const lots = selectedLots.value
   const price = currentPrice.value
+  const posBefore = clonePos(pos.value)
   const marginCost = lots * 1000
   const lev = selectedLeverage.value
   if (marginCost > cash.value) { showMsg(`资金不足，需 ${marginCost.toLocaleString()} 元`); return }
@@ -265,12 +327,16 @@ function openPosition(dir: 'long' | 'short') {
   cash.value -= marginCost
   tradeCount.value++
   calcPnL()
+  const action = posBefore.direction ? (dir === 'long' ? 'add_long' : 'add_short') : (dir === 'long' ? 'open_long' : 'open_short')
+  pushTradeEvent(action, lots, price, posBefore)
 }
 
 function closePosition(lotsToClose?: number, force = false) {
   const p = pos.value; if (!p.direction) return
   const lots = Math.min(lotsToClose ?? selectedLots.value, p.lots)
   const price = currentPrice.value
+  const posBefore = clonePos(p)
+  const closingDir = p.direction
   const lev = selectedLeverage.value
   const pnl = p.direction === 'long'
     ? (price - p.avgPrice) * lots * 1000 / p.avgPrice * lev
@@ -282,6 +348,11 @@ function closePosition(lotsToClose?: number, force = false) {
   pos.value.totalCost -= lots * 1000
   if (pos.value.lots <= 0) pos.value = { direction: null, lots: 0, avgPrice: 0, totalCost: 0 }
   floatingPnl.value = 0; calcPnL()
+  const fullyClosed = lots >= (posBefore.lots || 0)
+  const action = closingDir === 'long'
+    ? (fullyClosed ? 'close_long_all' : 'close_long_partial')
+    : (fullyClosed ? 'close_short_all' : 'close_short_partial')
+  pushTradeEvent(action, lots, price, posBefore)
 }
 
 function closeAll(force = false) {
@@ -686,6 +757,7 @@ function beginPlaying() {
 
   // Reset game state
   allBars.value      = data.bars
+  symbol.value       = data.symbol
   symbolName.value   = data.symbol_name
   symbolType.value   = data.symbol_type
   capital.value      = data.capital
@@ -697,6 +769,9 @@ function beginPlaying() {
   maxProfit.value    = 0; maxDrawdown.value  = 0; tradeCount.value = 0
   selectedLots.value = 1
   gameId.value       = 0   // will be set after startRecord resolves
+  tradeEvents.value  = []
+  tradePersisted.value = false
+  tradePersistPromise = null
 
   phase.value = 'playing'
   startTimer()
@@ -716,6 +791,9 @@ function beginPlaying() {
 
 const finalProfit = ref(0)
 const finalRate   = ref(0)
+const tradeEvents = ref<KlineTradeEvent[]>([])
+const tradePersisted = ref(false)
+let tradePersistPromise: Promise<boolean> | null = null
 
 async function finishGame() {
   stopTimer()
@@ -726,7 +804,14 @@ async function finishGame() {
   // Ensure the startRecord call completed so we have a valid game_id
   if (_startRecordPromise) { await _startRecordPromise; _startRecordPromise = null }
   try {
+    const tradesOk = await persistTradesOnce()
+    if (!tradesOk) {
+      uni.showToast({ title: '交易明细保存失败，请重试本局结算', icon: 'none' })
+      saving.value = false
+      return
+    }
     await klineApi.saveGame({ game_id: gameId.value, profit: finalProfit.value, profit_rate: finalRate.value, trade_count: tradeCount.value, max_drawdown: maxDrawdown.value, capital: capital.value })
+    await loadEntryData()
   } catch (_) {}
   saving.value = false
 }
@@ -737,7 +822,12 @@ function resetGame() {
   _startRecordPromise = null
   phase.value = 'idle'
   allBars.value = []
+  symbol.value = ''
   pos.value = { direction: null, lots: 0, avgPrice: 0, totalCost: 0 }
+  tradeEvents.value = []
+  tradePersisted.value = false
+  tradePersistPromise = null
+  loadEntryData()
 }
 
 // ── Helpers ────────────────────────────────────────────────

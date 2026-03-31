@@ -20,6 +20,21 @@ export const authApi = {
   login: (account: string, password: string) =>
     request<{ token: string; username: string }>('POST', '/api/auth/login', { account, password }),
 
+  registerSendPhoneCode: (phone: string) =>
+    request<{ message: string }>('POST', '/api/auth/register/send-phone-code', { phone }),
+
+  registerVerifyPhoneCode: (phone: string, code: string) =>
+    request<{ message: string; phone: string }>('POST', '/api/auth/register/verify-phone-code', { phone, code }),
+
+  register: (payload: {
+    username: string
+    password: string
+    password_confirm: string
+    phone: string
+    sms_code: string
+  }) =>
+    request<{ token: string; username: string; message: string }>('POST', '/api/auth/register', payload),
+
   logout: () =>
     request<{ message: string }>('POST', '/api/auth/logout'),
 
@@ -395,6 +410,29 @@ export interface KlineEntryData {
   leaderboard: { capital: LbRow[]; max_profit: LbRow[]; streak: LbRow[] }
 }
 
+export interface KlineTradePosition {
+  direction: 'long' | 'short' | null
+  lots: number
+  avgPrice: number
+  totalCost: number
+}
+
+export interface KlineTradeEvent {
+  trade_seq: number
+  action: string
+  trade_time: string
+  bar_index: number
+  bar_date: string | null
+  price: number
+  lots: number
+  amount: number
+  leverage: number
+  position_before: KlineTradePosition
+  position_after: KlineTradePosition
+  realized_pnl_after: number
+  floating_pnl_after: number
+}
+
 export const klineApi = {
   getEntry: () =>
     request<KlineEntryData>('GET', '/api/kline/entry'),
@@ -406,6 +444,16 @@ export const klineApi = {
   // Step 2: create game record once K-line is actually playing
   startRecord: (body: { symbol: string; symbol_name: string; symbol_type: string; capital: number; leverage: number; speed: number }) =>
     request<{ game_id: number }>('POST', '/api/kline/start', body),
+
+  saveTradeBatch: (body: {
+    game_id: number
+    user_id: string
+    symbol: string
+    symbol_name: string
+    symbol_type: string
+    trades: KlineTradeEvent[]
+  }) =>
+    request<{ ok: boolean; saved?: number; total_rows?: number }>('POST', '/api/kline/trades/batch', body),
 
   checkUnfinished: () =>
     request<{
