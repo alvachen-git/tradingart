@@ -349,8 +349,26 @@ const smartLine = computed(() => buildLine(visSmart.value,   'net', SMART_Y0, SM
 const oiLine    = computed(() => buildLine(visTotalOi.value, 'v',   OI_Y0,    OI_H))
 
 // ── 长按 OHLC 浮框 ────────────────────────────────────────
-const tooltip = ref<{visible:boolean;x:number;y:number;leftPct:number;dt:string;o:number;h:number;l:number;c:number;pct:number;iv:number|null}>
-  ({visible:false,x:0,y:0,leftPct:0,dt:'',o:0,h:0,l:0,c:0,pct:0,iv:null})
+const tooltip = ref<{
+  visible:boolean
+  x:number
+  y:number
+  leftPct:number
+  idx:number
+  dt:string
+  o:number
+  h:number
+  l:number
+  c:number
+  pct:number
+  iv:number|null
+  oi:number|null
+  dumb:number|null
+  smart:number|null
+}>({
+  visible:false,x:0,y:0,leftPct:0,idx:0,dt:'',
+  o:0,h:0,l:0,c:0,pct:0,iv:null,oi:null,dumb:null,smart:null,
+})
 
 let lpTimer:any=null, lpStartX=0, lpStartY=0
 let t0X=0, t0Idx=0, t0Dist=0, t0Count=0
@@ -400,6 +418,37 @@ function _localX(clientX: number): number {
   return Math.max(0, Math.min(w, x))
 }
 
+function _valByDate(rows: any[], dt: string, key: string): number | null {
+  if (!rows?.length || !dt) return null
+  const row = rows.find((r: any) => String(r?.dt || '') === dt)
+  if (!row) return null
+  const v = Number(row[key])
+  return Number.isFinite(v) ? v : null
+}
+
+function panelCrossY(rows: any[], key: string, panelH: number, val: number | null): number | null {
+  if (val == null || !rows?.length) return null
+  const vals = rows.map((d: any) => Number(d?.[key])).filter((v: number) => Number.isFinite(v))
+  if (!vals.length) return null
+  const maxV = Math.max(...vals)
+  const minV = Math.min(...vals)
+  const range = maxV - minV || 1
+  const usableH = panelH - 4
+  return 2 + usableH - ((val - minV) / range) * usableH
+}
+
+const crossY = computed(() => ({
+  iv: panelCrossY(visIv.value, 'v', IV_H, tooltip.value.iv),
+  oi: panelCrossY(visTotalOi.value, 'v', OI_H, tooltip.value.oi),
+  dumb: panelCrossY(visDumb.value, 'net', DUMB_H, tooltip.value.dumb),
+  smart: panelCrossY(visSmart.value, 'net', SMART_H, tooltip.value.smart),
+}))
+const tooltipBoxStyle = computed(() => {
+  // 十字线在图左侧时，把浮框放到右侧，避免遮挡选中K线
+  if (tooltip.value.leftPct <= 50) return { right: '8rpx', left: 'auto' }
+  return { left: '8rpx', right: 'auto' }
+})
+
 function onTouchStart(e:any) {
   clearTimeout(lpTimer)
   syncCandleWrapRect()
@@ -430,8 +479,20 @@ function doTooltip(cx:number) {
   const cdl = candleChart.value?.candles?.[idx]
   const closeY = cdl ? (cdl.up ? cdl.bodyTop : cdl.bodyTop + cdl.bodyH) : PAD_TOP
   const leftPct=svgX/SVG_W*100
-  const ivEntry=visIv.value.find((v:any)=>v.dt===d.dt)
-  tooltip.value={visible:true,x:svgX,y:closeY,leftPct,dt:d.dt.slice(0,4)+'/'+d.dt.slice(4,6)+'/'+d.dt.slice(6,8),o:d.o,h:d.h,l:d.l,c:d.c,pct:d.pct??0,iv:ivEntry?ivEntry.v:null}
+  const ivVal = _valByDate(visIv.value, d.dt, 'v')
+  const oiVal = _valByDate(visTotalOi.value, d.dt, 'v')
+  const dumbVal = _valByDate(visDumb.value, d.dt, 'net')
+  const smartVal = _valByDate(visSmart.value, d.dt, 'net')
+  tooltip.value={
+    visible:true,
+    x:svgX,
+    y:closeY,
+    leftPct,
+    idx,
+    dt:d.dt.slice(0,4)+'/'+d.dt.slice(4,6)+'/'+d.dt.slice(6,8),
+    o:d.o,h:d.h,l:d.l,c:d.c,pct:d.pct??0,
+    iv:ivVal,oi:oiVal,dumb:dumbVal,smart:smartVal,
+  }
 }
 function onTouchMove(e:any) {
   if (typeof e?.preventDefault === 'function') e.preventDefault()
@@ -440,8 +501,12 @@ function onTouchMove(e:any) {
     const cx = _touchX(e, 0), cy = _touchY(e, 0)
     if (cx == null || cy == null) return
     const localX = _localX(cx)
+    if (tooltip.value.visible) {
+      doTooltip(localX)
+      return
+    }
     const dx=Math.abs(localX-lpStartX), dy=Math.abs(cy-lpStartY)
-    if(dx>8||dy>8){clearTimeout(lpTimer);tooltip.value.visible=false}
+    if(dx>8||dy>8){clearTimeout(lpTimer)}
     if(!tooltip.value.visible) {
       const wrapW = Math.max(1, candleWrapW.value || getW())
       const shift=Math.round(-(localX-t0X)*barCount.value/wrapW)
@@ -461,7 +526,7 @@ function onTouchMove(e:any) {
 }
 function onTouchEnd() {
   clearTimeout(lpTimer)
-  if(tooltip.value.visible) setTimeout(()=>{tooltip.value.visible=false},2500)
+  tooltip.value.visible=false
 }
 
 // ── 格式化 ────────────────────────────────────────────────
@@ -566,7 +631,7 @@ function drawMpCandlePanel() {
   // #endif
 }
 
-function drawMpLinePanel(canvasId: string, rows: any[], key: string, color: string) {
+function drawMpLinePanel(canvasId: string, rows: any[], key: string, color: string, selectedVal: number | null) {
   // #ifdef MP-WEIXIN
   const w = mpPanelW.value
   const h = mpSmallH.value
@@ -616,6 +681,24 @@ function drawMpLinePanel(canvasId: string, rows: any[], key: string, color: stri
   ctx.arc(lx, ly, 2.5, 0, Math.PI * 2)
   ctx.fill()
 
+  if (tooltip.value.visible) {
+    const tx = Math.max(pad, Math.min(w - pad, tooltip.value.x * (w / SVG_W)))
+    ctx.setStrokeStyle('rgba(255,255,255,0.42)')
+    ctx.setLineWidth(1)
+    ctx.beginPath()
+    ctx.moveTo(tx, pad)
+    ctx.lineTo(tx, h - pad)
+    ctx.stroke()
+
+    if (selectedVal != null && Number.isFinite(selectedVal)) {
+      const cy = toY(selectedVal)
+      ctx.beginPath()
+      ctx.moveTo(pad, cy)
+      ctx.lineTo(w - pad, cy)
+      ctx.stroke()
+    }
+  }
+
   ctx.draw()
   // #endif
 }
@@ -625,10 +708,10 @@ function drawMpPanels() {
   syncMpPanelSize()
   nextTick(() => {
     drawMpCandlePanel()
-    drawMpLinePanel('mpIvCanvas', visIv.value, 'v', '#3b82f6')
-    drawMpLinePanel('mpOiCanvas', visTotalOi.value, 'v', '#f5c518')
-    drawMpLinePanel('mpDumbCanvas', visDumb.value, 'net', '#e84040')
-    drawMpLinePanel('mpSmartCanvas', visSmart.value, 'net', '#22c55e')
+    drawMpLinePanel('mpIvCanvas', visIv.value, 'v', '#3b82f6', tooltip.value.iv)
+    drawMpLinePanel('mpOiCanvas', visTotalOi.value, 'v', '#f5c518', tooltip.value.oi)
+    drawMpLinePanel('mpDumbCanvas', visDumb.value, 'net', '#e84040', tooltip.value.dumb)
+    drawMpLinePanel('mpSmartCanvas', visSmart.value, 'net', '#22c55e', tooltip.value.smart)
   })
   // #endif
 }
@@ -739,6 +822,8 @@ watch(
                   </template>
                   <line v-if="tooltip.visible" :x1="tooltip.x" :y1="PAD_TOP" :x2="tooltip.x" :y2="CANDLE_H"
                     stroke="#fff" stroke-width="0.8" stroke-dasharray="3,3" opacity="0.4"/>
+                  <line v-if="tooltip.visible" :x1="PAD_L" :y1="tooltip.y" :x2="SVG_W-PAD_R" :y2="tooltip.y"
+                    stroke="#fff" stroke-width="0.8" stroke-dasharray="3,3" opacity="0.35"/>
                 </template>
               </svg>
               <!-- #endif -->
@@ -748,10 +833,7 @@ watch(
                 <text class="y-min">{{ candleChart.minLabel }}</text>
               </template>
               <!-- 长按浮框：在 svg-wrap 内，position:absolute 相对此容器定位 -->
-              <view v-if="tooltip.visible" class="tooltip-box"
-                :style="tooltip.leftPct > 55
-                  ? 'right:8rpx;left:auto;top:4rpx;'
-                  : 'left:8rpx;right:auto;top:4rpx;'">
+              <view v-if="tooltip.visible" class="tooltip-box" :style="tooltipBoxStyle">
                 <text class="tt-date">{{ tooltip.dt }}</text>
                 <view class="tt-row"><text class="tt-lbl">开</text><text class="tt-val">{{ tooltip.o.toLocaleString() }}</text></view>
                 <view class="tt-row"><text class="tt-lbl">高</text><text class="tt-val" style="color:#e84040">{{ tooltip.h.toLocaleString() }}</text></view>
@@ -759,6 +841,9 @@ watch(
                 <view class="tt-row"><text class="tt-lbl">收</text><text class="tt-val" :style="{color:tooltipColor}">{{ tooltip.c.toLocaleString() }}</text></view>
                 <view class="tt-row"><text class="tt-lbl">涨跌</text><text class="tt-val" :style="{color:tooltipColor}">{{ tooltip.pct>0?'+':'' }}{{ tooltip.pct }}%</text></view>
                 <view v-if="tooltip.iv!=null" class="tt-row"><text class="tt-lbl">IV</text><text class="tt-val" style="color:#3b82f6">{{ tooltip.iv.toFixed(1) }}%</text></view>
+                <view class="tt-row"><text class="tt-lbl">总持仓</text><text class="tt-val" style="color:#f5c518">{{ tooltip.oi!=null ? fmtCompact(tooltip.oi) : '-' }}</text></view>
+                <view class="tt-row"><text class="tt-lbl">反持仓</text><text class="tt-val" style="color:#e84040">{{ tooltip.dumb!=null ? fmtCompact(tooltip.dumb) : '-' }}</text></view>
+                <view class="tt-row"><text class="tt-lbl">正持仓</text><text class="tt-val" style="color:#22c55e">{{ tooltip.smart!=null ? fmtCompact(tooltip.smart) : '-' }}</text></view>
               </view>
           </view>
           <!-- X轴日期 -->
@@ -780,7 +865,7 @@ watch(
             <text v-if="ivLine" class="sub-cur" style="color:#3b82f6">当前 {{ ivLine.lastVal.toFixed(1) }}%</text>
             <text v-else class="no-data">暂无数据</text>
           </view>
-          <view class="svg-wrap">
+          <view class="svg-wrap" @touchstart="onTouchStart" @touchmove.prevent="onTouchMove" @touchend="onTouchEnd">
             <!-- #ifdef MP-WEIXIN -->
             <canvas
               canvas-id="mpIvCanvas"
@@ -803,6 +888,10 @@ watch(
                 <polygon :points="rebasePoints(ivLine.fillPts, IV_Y0)" fill="url(#ivgd)"/>
                 <polyline :points="rebasePoints(ivLine.pts, IV_Y0)" fill="none" stroke="#3b82f6" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
                 <circle :cx="ivLine.lastX" :cy="(parseFloat(ivLine.lastY)-IV_Y0).toFixed(1)" r="3" fill="#3b82f6"/>
+                <line v-if="tooltip.visible" :x1="tooltip.x" y1="0" :x2="tooltip.x" :y2="IV_H"
+                  stroke="#fff" stroke-width="0.8" stroke-dasharray="3,3" opacity="0.35"/>
+                <line v-if="tooltip.visible && crossY.iv!=null" :x1="PAD_L" :y1="crossY.iv" :x2="SVG_W-PAD_R" :y2="crossY.iv"
+                  stroke="#fff" stroke-width="0.8" stroke-dasharray="3,3" opacity="0.35"/>
               </template>
             </svg>
             <!-- #endif -->
@@ -820,7 +909,7 @@ watch(
             <text v-if="oiLine" class="sub-cur" style="color:#f5c518">{{ fmtCompact(oiLine.lastVal) }}</text>
             <text v-else class="no-data">暂无数据</text>
           </view>
-          <view class="svg-wrap">
+          <view class="svg-wrap" @touchstart="onTouchStart" @touchmove.prevent="onTouchMove" @touchend="onTouchEnd">
             <!-- #ifdef MP-WEIXIN -->
             <canvas
               canvas-id="mpOiCanvas"
@@ -843,6 +932,10 @@ watch(
                 <polygon :points="rebasePoints(oiLine.fillPts, OI_Y0)" fill="url(#oigd)"/>
                 <polyline :points="rebasePoints(oiLine.pts, OI_Y0)" fill="none" stroke="#f5c518" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
                 <circle :cx="oiLine.lastX" :cy="(parseFloat(oiLine.lastY)-OI_Y0).toFixed(1)" r="3" fill="#f5c518"/>
+                <line v-if="tooltip.visible" :x1="tooltip.x" y1="0" :x2="tooltip.x" :y2="OI_H"
+                  stroke="#fff" stroke-width="0.8" stroke-dasharray="3,3" opacity="0.35"/>
+                <line v-if="tooltip.visible && crossY.oi!=null" :x1="PAD_L" :y1="crossY.oi" :x2="SVG_W-PAD_R" :y2="crossY.oi"
+                  stroke="#fff" stroke-width="0.8" stroke-dasharray="3,3" opacity="0.35"/>
               </template>
             </svg>
             <!-- #endif -->
@@ -860,7 +953,7 @@ watch(
             <text v-if="dumbLine" class="sub-cur" style="color:#e84040">{{ fmtCompact(dumbLine.lastVal) }}</text>
             <text v-else class="no-data">暂无数据</text>
           </view>
-          <view class="svg-wrap">
+          <view class="svg-wrap" @touchstart="onTouchStart" @touchmove.prevent="onTouchMove" @touchend="onTouchEnd">
             <!-- #ifdef MP-WEIXIN -->
             <canvas
               canvas-id="mpDumbCanvas"
@@ -885,6 +978,10 @@ watch(
                   stroke="#e84040" stroke-width="0.8" opacity="0.4" stroke-dasharray="4,4"/>
                 <polyline :points="rebasePoints(dumbLine.pts, DUMB_Y0)" fill="none" stroke="#e84040" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
                 <circle :cx="dumbLine.lastX" :cy="(parseFloat(dumbLine.lastY)-DUMB_Y0).toFixed(1)" r="3" fill="#e84040"/>
+                <line v-if="tooltip.visible" :x1="tooltip.x" y1="0" :x2="tooltip.x" :y2="DUMB_H"
+                  stroke="#fff" stroke-width="0.8" stroke-dasharray="3,3" opacity="0.35"/>
+                <line v-if="tooltip.visible && crossY.dumb!=null" :x1="PAD_L" :y1="crossY.dumb" :x2="SVG_W-PAD_R" :y2="crossY.dumb"
+                  stroke="#fff" stroke-width="0.8" stroke-dasharray="3,3" opacity="0.35"/>
               </template>
             </svg>
             <!-- #endif -->
@@ -902,7 +999,7 @@ watch(
             <text v-if="smartLine" class="sub-cur" style="color:#22c55e">{{ fmtCompact(smartLine.lastVal) }}</text>
             <text v-else class="no-data">暂无数据</text>
           </view>
-          <view class="svg-wrap">
+          <view class="svg-wrap" @touchstart="onTouchStart" @touchmove.prevent="onTouchMove" @touchend="onTouchEnd">
             <!-- #ifdef MP-WEIXIN -->
             <canvas
               canvas-id="mpSmartCanvas"
@@ -927,6 +1024,10 @@ watch(
                   stroke="#22c55e" stroke-width="0.8" opacity="0.4" stroke-dasharray="4,4"/>
                 <polyline :points="rebasePoints(smartLine.pts, SMART_Y0)" fill="none" stroke="#22c55e" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
                 <circle :cx="smartLine.lastX" :cy="(parseFloat(smartLine.lastY)-SMART_Y0).toFixed(1)" r="3" fill="#22c55e"/>
+                <line v-if="tooltip.visible" :x1="tooltip.x" y1="0" :x2="tooltip.x" :y2="SMART_H"
+                  stroke="#fff" stroke-width="0.8" stroke-dasharray="3,3" opacity="0.35"/>
+                <line v-if="tooltip.visible && crossY.smart!=null" :x1="PAD_L" :y1="crossY.smart" :x2="SVG_W-PAD_R" :y2="crossY.smart"
+                  stroke="#fff" stroke-width="0.8" stroke-dasharray="3,3" opacity="0.35"/>
               </template>
             </svg>
             <!-- #endif -->
