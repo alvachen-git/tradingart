@@ -85,6 +85,10 @@ from mobile_trading_day import enrich_prices_payload_with_trading_day
 # ── Redis ─────────────────────────────────────────────────────
 _REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 _redis = redis.from_url(_REDIS_URL, decode_responses=True)
+_MOBILE_CHAT_PROMPT_KEY_PREFIX = "mobile:chat:raw_prompt:"
+_MOBILE_CHAT_PROMPT_TTL = 7200
+_MOBILE_CHAT_MEMORY_QUEUE_KEY_PREFIX = "mobile:chat:memory:queued:"
+_MOBILE_CHAT_MEMORY_QUEUE_TTL = 7200
 
 # ════════════════════════════════════════════════════════════
 #  实时行情后台刷新 — 直连新浪行情接口（绕过 akshare 封装层）
@@ -685,6 +689,70 @@ def _build_mobile_chat_prompt(user_prompt: str) -> str:
     return f"{style_hint}\n\n【用户问题】\n{raw}"
 
 
+def _mobile_chat_prompt_key(task_id: str) -> str:
+    return f"{_MOBILE_CHAT_PROMPT_KEY_PREFIX}{task_id}"
+
+
+def _mobile_chat_memory_queue_key(task_id: str) -> str:
+    return f"{_MOBILE_CHAT_MEMORY_QUEUE_KEY_PREFIX}{task_id}"
+
+
+def _dispatch_mobile_chat_memory_task(
+    task_id: str,
+    username: str,
+    user_prompt: str,
+    ai_response: str,
+) -> None:
+    from tasks import persist_mobile_chat_memory_task
+
+    persist_mobile_chat_memory_task.delay(
+        user_id=username,
+        user_prompt=user_prompt,
+        ai_response=ai_response,
+        source="mobile",
+        task_id=task_id,
+    )
+
+
+def _queue_mobile_chat_memory_persist(
+    task_id: str,
+    username: str,
+    user_prompt: str,
+    ai_response: str,
+) -> str:
+    """返回 queued / already_queued / invalid_payload / failed。"""
+    prompt = str(user_prompt or "").strip()
+    response = str(ai_response or "").strip()
+    if not prompt or not response:
+        return "invalid_payload"
+
+    queue_key = _mobile_chat_memory_queue_key(task_id)
+    try:
+        queued = _redis.set(queue_key, "1", nx=True, ex=_MOBILE_CHAT_MEMORY_QUEUE_TTL)
+    except Exception as e:
+        print(f"[mobile-memory] queue lock failed task_id={task_id} err={e}")
+        return "failed"
+
+    if not queued:
+        return "already_queued"
+
+    try:
+        _dispatch_mobile_chat_memory_task(
+            task_id=task_id,
+            username=username,
+            user_prompt=prompt,
+            ai_response=response,
+        )
+        return "queued"
+    except Exception as e:
+        print(f"[mobile-memory] dispatch failed task_id={task_id} err={e}")
+        try:
+            _redis.delete(queue_key)
+        except Exception:
+            pass
+        return "failed"
+
+
 # ════════════════════════════════════════════════════════════
 #  Health Check
 # ════════════════════════════════════════════════════════════
@@ -850,6 +918,12 @@ def chat_submit(
         risk_preference=risk,
         history_messages=body.history,
     )
+    try:
+        raw_prompt = str(body.prompt or "").strip()
+        if raw_prompt:
+            _redis.setex(_mobile_chat_prompt_key(task_id), _MOBILE_CHAT_PROMPT_TTL, raw_prompt)
+    except Exception as e:
+        print(f"[mobile-memory] prompt cache failed task_id={task_id} err={e}")
     return {"task_id": task_id, "message": "任务已提交，正在分析..."}
 
 
@@ -860,7 +934,33 @@ def chat_status(task_id: str, username: str = Depends(get_current_user)):
     status 值: pending | processing | success | error
     """
     status = TaskManager.get_task_status(task_id)
-    if status.get("status") in ("success", "error"):
+    status_name = status.get("status")
+    if status_name == "success":
+        prompt_key = _mobile_chat_prompt_key(task_id)
+        user_prompt = ""
+        try:
+            user_prompt = str(_redis.get(prompt_key) or "").strip()
+        except Exception as e:
+            print(f"[mobile-memory] prompt load failed task_id={task_id} err={e}")
+
+        ai_response = ""
+        result = status.get("result")
+        if isinstance(result, dict):
+            ai_response = str(result.get("response") or "").strip()
+
+        queue_status = _queue_mobile_chat_memory_persist(
+            task_id=task_id,
+            username=username,
+            user_prompt=user_prompt,
+            ai_response=ai_response,
+        )
+        if queue_status in {"queued", "already_queued", "invalid_payload"}:
+            try:
+                _redis.delete(prompt_key)
+            except Exception as e:
+                print(f"[mobile-memory] prompt cleanup failed task_id={task_id} err={e}")
+        TaskManager.clear_user_pending_task(username)
+    elif status_name == "error":
         TaskManager.clear_user_pending_task(username)
     return status
 
