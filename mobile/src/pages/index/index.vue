@@ -21,15 +21,51 @@ const expandedMap = ref<Record<number, boolean>>({})
 let msgCounter = 0
 let pollTimer: ReturnType<typeof setInterval> | null = null
 
-const HISTORY_KEY = computed(() => `chat_history_${auth.username}`)
+const CHAT_HISTORY_VERSION = 'v2'
+const HISTORY_KEY = computed(() => `chat_history_${CHAT_HISTORY_VERSION}_${auth.username}`)
+const LEGACY_HISTORY_KEYS = computed(() => [`chat_history_${auth.username}`])
 const PENDING_KEY = computed(() => `chat_pending_${auth.username}`)
-const SHARE_TITLE = '爱波塔 - 期权期货分析工具'
+const SHARE_TITLE = '爱波塔-懂期权的AI'
 const SHARE_PATH = '/pages/login/index'
+const DEFAULT_GREETING_BODY =
+  '你好！我是爱波塔 AI。\n\n你可以问我：\n• 中证1000技术面怎么看\n• 300ETF隐含波动率如何\n• 什么是牛市价差策略\n\n内容仅供参考，不构成投资建议。'
+
+function sanitizeComplianceCopy(text: string) {
+  return String(text || '').replace(
+    /你好！我是爱波塔 AI，专注[^。\n]*。/g,
+    '你好！我是爱波塔 AI。',
+  )
+}
 
 function markAiContent(content: string) {
-  const text = String(content || '').trim()
+  const text = sanitizeComplianceCopy(content).trim()
   if (!text) return '【AI生成】'
   return text.startsWith('【AI生成】') ? text : `【AI生成】\n${text}`
+}
+
+function normalizeAssistantHistory(list: UIMessage[]) {
+  let changed = false
+  const normalized = list.map((m) => {
+    if (m.role !== 'assistant') return m
+    const next = markAiContent(m.content)
+    if (next !== m.content) changed = true
+    return { ...m, content: next }
+  })
+  return { normalized, changed }
+}
+
+function isBootstrapAssistantContent(content: string): boolean {
+  const raw = String(content || '').trim()
+  if (!raw) return false
+  const normalized = raw.replace(/^【AI生成】\s*/, '').trim()
+  return normalized === DEFAULT_GREETING_BODY
+}
+
+function normalizeHistoryContent(role: UIMessage['role'], content: string): string {
+  const raw = String(content || '').trim()
+  if (!raw) return ''
+  if (role === 'assistant') return raw.replace(/^【AI生成】\s*/, '').trim()
+  return raw
 }
 
 const formattedAssistantMap = computed<Record<number, MobileAiFormatted>>(() => {
@@ -42,13 +78,15 @@ const formattedAssistantMap = computed<Record<number, MobileAiFormatted>>(() => 
 })
 
 function isAssistantExpanded(msgId: number): boolean {
-  return !!expandedMap.value[msgId]
+  // 默认展开全文，保证与网页端一致的专业回答密度
+  return expandedMap.value[msgId] ?? true
 }
 
 function toggleAssistantExpand(msgId: number) {
+  const current = expandedMap.value[msgId] ?? true
   expandedMap.value = {
     ...expandedMap.value,
-    [msgId]: !expandedMap.value[msgId],
+    [msgId]: !current,
   }
 }
 
@@ -71,22 +109,35 @@ onUnload(() => {
 
 function loadHistory() {
   try {
-    const saved = uni.getStorageSync(HISTORY_KEY.value)
+    let saved = uni.getStorageSync(HISTORY_KEY.value)
+    let loadedFromLegacy = false
+    if (!saved) {
+      for (const key of LEGACY_HISTORY_KEYS.value) {
+        const legacy = uni.getStorageSync(key)
+        if (legacy) {
+          saved = legacy
+          loadedFromLegacy = true
+          break
+        }
+      }
+    }
     if (saved) {
       const loaded: UIMessage[] = JSON.parse(saved)
-      messages.value = loaded.map((m) => {
-        if (m.role !== 'assistant') return m
-        return { ...m, content: markAiContent(m.content) }
-      })
+      const { normalized, changed } = normalizeAssistantHistory(loaded)
+      messages.value = normalized
       // 从已加载消息中初始化 msgCounter，避免新消息 ID 与历史 ID 重复导致 v-for 渲染错乱
       msgCounter = loaded.reduce((max, m) => Math.max(max, m.id || 0), 0)
+      if (loadedFromLegacy || changed) {
+        uni.setStorageSync(HISTORY_KEY.value, JSON.stringify(normalized.slice(-40)))
+        for (const key of LEGACY_HISTORY_KEYS.value) uni.removeStorageSync(key)
+      }
     }
   } catch { /* 忽略 */ }
   if (messages.value.length === 0) {
     messages.value = [{
       id: ++msgCounter,
       role: 'assistant',
-      content: markAiContent('你好！我是爱波塔 AI，专注 A 股期权期货分析。\n\n你可以问我：\n• 中证1000技术面分析下\n• 300ETF隐含波动率如何\n• 什么是牛市价差策略\n\n内容仅供参考，不构成投资建议。'),
+      content: markAiContent(DEFAULT_GREETING_BODY),
     }]
   }
 }
@@ -113,8 +164,13 @@ async function send() {
   // 构建历史（最近 10 轮）
   const history: ChatMessage[] = messages.value
     .filter(m => m.role !== 'loading')
+    .filter(m => !(m.role === 'assistant' && isBootstrapAssistantContent(m.content)))
     .slice(-20)
-    .map(m => ({ role: m.role as 'user' | 'assistant', content: m.content }))
+    .map(m => ({
+      role: m.role as 'user' | 'assistant',
+      content: normalizeHistoryContent(m.role, m.content),
+    }))
+    .filter(m => !!m.content)
 
   try {
     const { task_id } = await chatApi.submit(text, history)
@@ -299,7 +355,7 @@ onShareTimeline(() => ({
       <textarea
         v-model="input"
         class="input-area"
-        placeholder="问我任何期权期货问题..."
+        placeholder="问我任何市场问题..."
         placeholder-class="input-placeholder"
         :disabled="sending"
         :auto-height="true"
