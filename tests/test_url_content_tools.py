@@ -71,6 +71,32 @@ def test_extract_main_text_for_generic_html():
     assert "window.bad" not in content
 
 
+def test_extract_main_text_from_next_data_json():
+    html = """
+    <html>
+      <head><title>壳页面</title></head>
+      <body>
+        <div id="__next"></div>
+        <script id="__NEXT_DATA__" type="application/json">
+        {
+          "props": {
+            "pageProps": {
+              "article": {
+                "title": "华尔街见闻测试标题",
+                "content": "这是一段来自__NEXT_DATA__的正文内容，长度足够触发结构化提取逻辑，避免壳页面误判。"
+              }
+            }
+          }
+        }
+        </script>
+      </body>
+    </html>
+    """
+    title, content = uct.extract_main_text(html, "https://wallstreetcn.com/articles/123")
+    assert "华尔街见闻测试标题" in title
+    assert "__NEXT_DATA__" in content
+
+
 def test_build_link_context_timeout_is_caught(monkeypatch):
     monkeypatch.setattr(uct, "is_safe_public_url", lambda _url: True)
 
@@ -128,3 +154,60 @@ def test_build_link_context_non_wechat_too_large_fails(monkeypatch):
     result = uct.build_link_context("请分析 https://example.com/long")
     assert result["ok"] is False
     assert result["error_code"] == "too_large"
+
+
+def test_build_link_context_dynamic_fallback_for_whitelist_domain(monkeypatch):
+    monkeypatch.setattr(uct, "is_safe_public_url", lambda _url: True)
+    monkeypatch.setattr(uct, "_fetch_wallstreetcn_article_api", lambda _url: ("", "", "api_failed"))
+    monkeypatch.setattr(uct, "fetch_html", lambda *args, **kwargs: "<html><body><div id='root'></div></body></html>")
+    monkeypatch.setattr(
+        uct,
+        "_fetch_dynamic_text",
+        lambda *args, **kwargs: (
+            "动态渲染正文内容，长度足够用于摘要提取与回答。该段用于验证白名单域名在静态正文提取失败后，"
+            "能够进入动态渲染兜底流程并返回可用内容。",
+            "",
+        ),
+    )
+
+    result = uct.build_link_context("解读这个链接 https://wallstreetcn.com/articles/3768907")
+    assert result["ok"] is True
+    assert "动态渲染正文内容" in result["snippet"]
+
+
+def test_build_link_context_wallstreetcn_api_success(monkeypatch):
+    monkeypatch.setattr(uct, "is_safe_public_url", lambda _url: True)
+    monkeypatch.setattr(
+        uct,
+        "_fetch_wallstreetcn_article_api",
+        lambda _url: ("华尔街见闻标题", "通过API拿到的正文内容，长度足够用于提取和回答。", ""),
+    )
+    fetch_called = {"hit": False}
+
+    def _fetch_html(*args, **kwargs):
+        fetch_called["hit"] = True
+        return "<html></html>"
+
+    monkeypatch.setattr(uct, "fetch_html", _fetch_html)
+    result = uct.build_link_context("解读 https://wallstreetcn.com/articles/3768907")
+    assert result["ok"] is True
+    assert "华尔街见闻标题" in result["title"]
+    assert "通过API拿到的正文内容" in result["snippet"]
+    assert fetch_called["hit"] is False
+
+
+def test_build_link_context_wallstreetcn_api_fail_fallback_static(monkeypatch):
+    monkeypatch.setattr(uct, "is_safe_public_url", lambda _url: True)
+    monkeypatch.setattr(uct, "_fetch_wallstreetcn_article_api", lambda _url: ("", "", "api_failed"))
+    monkeypatch.setattr(
+        uct,
+        "fetch_html",
+        lambda *args, **kwargs: (
+            "<html><body><article><h1>回退标题</h1><p>"
+            "回退正文长度足够，说明API失败后静态流程仍可继续工作，并且不会直接中断。"
+            "</p></article></body></html>"
+        ),
+    )
+    result = uct.build_link_context("解读 https://wallstreetcn.com/articles/3768907")
+    assert result["ok"] is True
+    assert "回退标题" in result["title"]
