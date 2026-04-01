@@ -27,6 +27,7 @@ def get_db_engine():
     db_url = f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
     engine = create_engine(db_url)
     ensure_unified_stock_view(engine)
+    ensure_us_stock_alias_table(engine)
     return engine
 
 # 基础映射表：中文名称 -> 主力连续代码 (不带数字)
@@ -2232,6 +2233,17 @@ def get_all_market_map():
             except Exception:
                 pass
 
+            # 2.1 美股别名映射（可维护表 us_stock_alias + fallback）
+            try:
+                us_alias_map = get_us_stock_alias_map()
+                for alias, ticker in us_alias_map.items():
+                    norm_alias = _normalize_us_alias(alias)
+                    norm_ticker = _normalize_us_alias(ticker)
+                    if norm_alias and norm_ticker:
+                        market_map[norm_alias] = f"{norm_ticker}.US"
+            except Exception:
+                pass
+
             # 3. 港股映射 (stock_price 表)
             # 因为我们把港股数据存到了 stock_price，直接去重查询即可
             try:
@@ -2282,13 +2294,16 @@ EXTRA_INDEX_MAP = {
 # 将这些补充别名合并进主字典 (不影响原有的期货映射)
 COMMON_ALIASES.update(EXTRA_INDEX_MAP)
 
-US_STOCK_ALIASES = {
+US_STOCK_ALIAS_TABLE = "us_stock_alias"
+
+US_STOCK_ALIASES_FALLBACK = {
     "AAPL": "AAPL",
     "TSLA": "TSLA",
     "NVDA": "NVDA",
     "MSFT": "MSFT",
     "AMZN": "AMZN",
     "GOOG": "GOOG",
+    "GOOGL": "GOOGL",
     "META": "META",
     "AVGO": "AVGO",
     "AMD": "AMD",
@@ -2300,7 +2315,7 @@ US_STOCK_ALIASES = {
     "MICROSOFT": "MSFT",
     "AMAZON": "AMZN",
     "GOOGLE": "GOOG",
-    "ALPHABET": "GOOG",
+    "ALPHABET": "GOOGL",
     "META PLATFORMS": "META",
     "BROADCOM": "AVGO",
     "苹果": "AAPL",
@@ -2309,14 +2324,135 @@ US_STOCK_ALIASES = {
     "微软": "MSFT",
     "亚马逊": "AMZN",
     "谷歌": "GOOG",
-    "字母表": "GOOG",
+    "字母表": "GOOGL",
     "脸书": "META",
     "博通": "AVGO",
     "超微": "AMD",
     "英特尔": "INTC",
     "台积电": "TSM",
 }
-US_TICKER_SET = {"AAPL", "TSLA", "NVDA", "MSFT", "AMZN", "GOOG", "META", "AVGO", "AMD", "INTC", "TSM"}
+US_TICKER_FALLBACK = {
+    "AAPL", "TSLA", "NVDA", "MSFT", "AMZN", "GOOG", "GOOGL", "META", "AVGO", "AMD", "INTC", "TSM"
+}
+
+
+def _normalize_us_alias(text: str) -> str:
+    return str(text or "").strip().upper()
+
+
+def ensure_us_stock_alias_table(engine) -> bool:
+    """
+    Create and seed a maintainable alias table for US stocks.
+    Fallback aliases still work when DB is unavailable.
+    """
+    if engine is None:
+        return False
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    f"""
+                    CREATE TABLE IF NOT EXISTS {US_STOCK_ALIAS_TABLE} (
+                        id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+                        ticker VARCHAR(16) NOT NULL,
+                        alias VARCHAR(64) NOT NULL,
+                        is_primary TINYINT(1) NOT NULL DEFAULT 0,
+                        enabled TINYINT(1) NOT NULL DEFAULT 1,
+                        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                        UNIQUE KEY uk_us_stock_alias_alias (alias),
+                        KEY idx_us_stock_alias_ticker (ticker),
+                        KEY idx_us_stock_alias_enabled (enabled)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                    """
+                )
+            )
+
+            insert_sql = text(
+                f"""
+                INSERT IGNORE INTO {US_STOCK_ALIAS_TABLE} (ticker, alias, is_primary, enabled)
+                VALUES (:ticker, :alias, :is_primary, 1)
+                """
+            )
+            for alias, ticker in US_STOCK_ALIASES_FALLBACK.items():
+                norm_alias = _normalize_us_alias(alias)
+                norm_ticker = _normalize_us_alias(ticker)
+                if not norm_alias or not norm_ticker:
+                    continue
+                conn.execute(
+                    insert_sql,
+                    {
+                        "ticker": norm_ticker,
+                        "alias": norm_alias,
+                        "is_primary": 1 if norm_alias == norm_ticker else 0,
+                    },
+                )
+        return True
+    except Exception:
+        return False
+
+
+def get_us_stock_alias_map():
+    alias_map = {
+        _normalize_us_alias(alias): _normalize_us_alias(ticker)
+        for alias, ticker in US_STOCK_ALIASES_FALLBACK.items()
+        if _normalize_us_alias(alias) and _normalize_us_alias(ticker)
+    }
+    engine = get_db_engine()
+    if not engine:
+        return alias_map
+
+    try:
+        sql = text(
+            f"""
+            SELECT UPPER(alias) AS alias, UPPER(ticker) AS ticker
+            FROM {US_STOCK_ALIAS_TABLE}
+            WHERE enabled = 1
+            """
+        )
+        df = pd.read_sql(sql, engine)
+        for _, row in df.iterrows():
+            alias = _normalize_us_alias(row.get("alias"))
+            ticker = _normalize_us_alias(row.get("ticker"))
+            if alias and ticker:
+                alias_map[alias] = ticker
+    except Exception:
+        pass
+    return alias_map
+
+
+@lru_cache(maxsize=1)
+def get_us_ticker_set():
+    tickers = set(US_TICKER_FALLBACK)
+    engine = get_db_engine()
+    if not engine:
+        return tickers
+    try:
+        sql = text("SELECT DISTINCT UPPER(symbol) AS symbol FROM stock_prices")
+        df = pd.read_sql(sql, engine)
+        for _, row in df.iterrows():
+            symbol = _normalize_us_alias(row.get("symbol"))
+            if symbol:
+                tickers.add(symbol)
+    except Exception:
+        pass
+
+    try:
+        sql_alias = text(
+            f"""
+            SELECT DISTINCT UPPER(ticker) AS ticker
+            FROM {US_STOCK_ALIAS_TABLE}
+            WHERE enabled = 1
+            """
+        )
+        df_alias = pd.read_sql(sql_alias, engine)
+        for _, row in df_alias.iterrows():
+            ticker = _normalize_us_alias(row.get("ticker"))
+            if ticker:
+                tickers.add(ticker)
+    except Exception:
+        pass
+    return tickers
 
 
 def resolve_symbol(query):
@@ -2339,9 +2475,11 @@ def resolve_symbol(query):
         return query, 'stock'
 
     # --- 0.2 美股别名与 ticker（高优先级，避免与期货别名冲突） ---
-    if query in US_STOCK_ALIASES:
-        return f"{US_STOCK_ALIASES[query]}.US", 'stock'
-    if query in US_TICKER_SET:
+    us_alias_map = get_us_stock_alias_map()
+    us_ticker_set = get_us_ticker_set()
+    if query in us_alias_map:
+        return f"{us_alias_map[query]}.US", 'stock'
+    if query in us_ticker_set:
         return f"{query}.US", 'stock'
 
     # --- 1. 尝试匹配具体期货合约 (如 "豆粕2505", "rb2510") ---
