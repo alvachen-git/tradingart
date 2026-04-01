@@ -152,6 +152,12 @@ async function send() {
   const text = input.value.trim()
   if (!text || sending.value) return
 
+  // 与网页端对齐：history 只包含“当前提问之前”的上下文
+  const historySource = messages.value
+    .filter(m => m.role !== 'loading')
+    .filter(m => !(m.role === 'assistant' && isBootstrapAssistantContent(m.content)))
+    .slice(-12)
+
   input.value = ''
   sending.value = true
 
@@ -161,11 +167,8 @@ async function send() {
   messages.value.push({ id: loadingId, role: 'loading', content: '' })
   scrollToBottom()
 
-  // 构建历史（最近 10 轮）
-  const history: ChatMessage[] = messages.value
-    .filter(m => m.role !== 'loading')
-    .filter(m => !(m.role === 'assistant' && isBootstrapAssistantContent(m.content)))
-    .slice(-20)
+  // 构建历史：不包含当前这一条用户输入（当前输入由 submit 的 prompt 单独传）
+  const history: ChatMessage[] = historySource
     .map(m => ({
       role: m.role as 'user' | 'assistant',
       content: normalizeHistoryContent(m.role, m.content),
