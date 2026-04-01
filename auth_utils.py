@@ -719,15 +719,26 @@ def restore_login_from_cookies(cookies: dict) -> bool:
         return True
 
     cookies = cookies or {}
-    c_user = cookies.get("username")
-    c_token = cookies.get("token")
-    if not c_user or not c_token or not str(c_user).strip():
+    c_user = str(cookies.get("username") or "").strip()
+    c_token = str(cookies.get("token") or "").strip()
+    if not c_token:
         return False
-    if not check_token(str(c_user), c_token):
+
+    # Prefer username+token check when both are present.
+    if c_user and check_token(c_user, c_token):
+        st.session_state["is_logged_in"] = True
+        st.session_state["user_id"] = c_user
+        st.session_state["token"] = c_token
+        return True
+
+    # Fallback: cookie reads can be partial during page transitions.
+    # If token is valid, recover username from DB and restore session safely.
+    token_user = get_username_by_token(c_token)
+    if not token_user:
         return False
 
     st.session_state["is_logged_in"] = True
-    st.session_state["user_id"] = str(c_user)
+    st.session_state["user_id"] = str(token_user)
     st.session_state["token"] = c_token
     return True
 

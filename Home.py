@@ -837,6 +837,8 @@ cookie_manager = stx.CookieManager(key="main_cookie_manager")
 cookies = cookie_manager.get_all() or {}
 if "home_cookie_retry_once" not in st.session_state:
     st.session_state.home_cookie_retry_once = False
+if "home_invalid_retry_count" not in st.session_state:
+    st.session_state.home_invalid_retry_count = 0
 
 
 def _restore_login_with_cookie_state(cookies: dict):
@@ -896,6 +898,7 @@ if should_auto_login:
 
     if restored:
         st.session_state.home_cookie_retry_once = False
+        st.session_state.home_invalid_retry_count = 0
         c_user = st.session_state.get("user_id")
 
         # 🔥 [新增] 自动登录后，尝试从 Redis 恢复待处理任务
@@ -944,15 +947,16 @@ if should_auto_login:
         time.sleep(0.15)
         st.rerun()
     elif restore_state == "invalid":
-        # Token 失效时清除 Cookie，避免反复失败
-        c_user = cookies.get("username")
-        c_token = cookies.get("token")
-        if c_user or c_token:
-            try:
-                cookie_manager.delete("username", key="auto_clean_user")
-                cookie_manager.delete("token", key="auto_clean_token")
-            except:
-                pass
+        # Do not aggressively delete cookies on first invalid read.
+        # During cross-page transitions, cookie/component timing may briefly misclassify state.
+        st.session_state.home_invalid_retry_count = int(st.session_state.get("home_invalid_retry_count", 0)) + 1
+        print(
+            f"[AUTH_RESTORE] invalid cookie state, retry_count={st.session_state.home_invalid_retry_count}, "
+            f"user_cookie={bool(cookies.get('username'))}, token_cookie={bool(cookies.get('token'))}"
+        )
+        if st.session_state.home_invalid_retry_count <= 2:
+            time.sleep(0.15)
+            st.rerun()
 
 # 【关键修复 2】如果已经是登出后的重跑，现在可以重置标记了
 # 这样下次用户刷新页面(F5)时，如果 Cookie 还在(虽然应该删了)，还能尝试登录，或者单纯重置状态
