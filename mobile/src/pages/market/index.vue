@@ -6,7 +6,7 @@ import { useAuthStore } from '../../store/auth'
 import BottomNav from '../../components/BottomNav.vue'
 
 const auth = useAuthStore()
-const SHARE_TITLE = '爱波塔 - 期货期权行情分析'
+const SHARE_TITLE = '爱波塔 - 市场数据学习工具'
 const SHARE_PATH = '/pages/login/index'
 
 // ── Tab ──────────────────────────────────────────────────
@@ -491,10 +491,10 @@ onShareTimeline(() => ({
     <!-- Tab（含刷新）-->
     <view class="tab-bar">
       <view class="tab-item" :class="{ active: activeTab === 'options' }" @tap="switchTab('options')">
-        <text>行情</text>
+        <text>市场数据</text>
       </view>
       <view class="tab-item" :class="{ active: activeTab === 'holding' }" @tap="switchTab('holding')">
-        <text>持仓</text>
+        <text>仓位变化</text>
       </view>
       <!-- 实时状态指示点 -->
       <view v-if="liveTrading" class="live-dot-wrap">
@@ -632,7 +632,7 @@ onShareTimeline(() => ({
         </view>
 
         <view class="holding-header">
-          <text class="hth hth-broker">期货商</text>
+          <text class="hth hth-broker">机构</text>
           <text class="hth hth-dir">方向</text>
           <view class="hth hth-score sort-th" @tap="toggleHoldingSort('score')">
             <text>累计得分</text>
@@ -668,7 +668,7 @@ onShareTimeline(() => ({
         </view>
 
         <view class="holding-note">
-          <text class="muted-text">得分 = 净持仓方向与行情相关性（近150天），正分=做对方向。点击期货商查看明细。</text>
+          <text class="muted-text">得分 = 净仓位方向与市场变化相关性（近150天），正分=方向一致。点击机构查看明细。</text>
         </view>
       </view>
 
@@ -688,6 +688,9 @@ onShareTimeline(() => ({
           <input
             class="picker-search-input"
             v-model="holdingSearch"
+            type="text"
+            confirm-type="search"
+            :cursor-spacing="120"
             placeholder="搜索品种名称或代码..."
             placeholder-style="color:#556070"
           />
@@ -842,10 +845,18 @@ onShareTimeline(() => ({
 .picker-sheet-title { font-size: 30rpx; color: #f0f0f0; font-weight: 700; }
 .picker-sheet-close { font-size: 30rpx; color: #666666; padding: 8rpx; }
 
-.picker-search-bar { padding: 8rpx 24rpx 16rpx; flex-shrink: 0; }
+.picker-search-bar { padding: 12rpx 24rpx 20rpx; flex-shrink: 0; }
 .picker-search-input {
-  width: 100%; background: #131c2e; border: 1px solid #1e2d45;
-  border-radius: 14rpx; padding: 14rpx 20rpx; font-size: 26rpx; color: #f0f0f0;
+  width: 100%;
+  display: block;
+  height: 76rpx;
+  line-height: 76rpx;
+  background: #131c2e;
+  border: 1px solid #1e2d45;
+  border-radius: 14rpx;
+  padding: 0 22rpx;
+  font-size: 30rpx;
+  color: #f0f0f0;
   box-sizing: border-box;
 }
 

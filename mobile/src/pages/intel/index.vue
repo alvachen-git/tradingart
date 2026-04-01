@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, computed } from 'vue'
+import { ref, onMounted, computed, watch, nextTick, getCurrentInstance } from 'vue'
 import { onShow, onReachBottom, onPullDownRefresh } from '@dcloudio/uni-app'
 import {
   intelApi,
@@ -20,10 +20,10 @@ const activeMainTab = ref<MainTab>('intel')
 const channels = [
   { code: '', label: '全部' },
   { code: 'daily_report', label: '复盘晚报' },
-  { code: 'trade_signal', label: '交易信号' },
+  { code: 'trade_signal', label: '盘面观察' },
   { code: 'fund_flow_report', label: '资金流晚报' },
-  { code: 'expiry_option_radar', label: '末日期权晚报' },
-  { code: 'broker_position_report', label: '期货商持仓' },
+  { code: 'expiry_option_radar', label: '末日晚报' },
+  { code: 'broker_position_report', label: '持仓晚报' },
 ]
 
 // ── 情报列表 ───────────────────────────────────────────────
@@ -33,9 +33,10 @@ const page = ref(1)
 const hasMore = ref(true)
 const reportLoading = ref(false)
 
-// ── AI炒股 ─────────────────────────────────────────────────
+// ── AI日记 ─────────────────────────────────────────────────
 const AI_OVERVIEW_CACHE_KEY = 'intel_ai_overview_cache_v1'
 const AI_OVERVIEW_TTL_MS = 20 * 60 * 1000
+const vm = getCurrentInstance()
 
 const aiOverview = ref<AiOverviewPayload | null>(null)
 const aiReview = ref<AiReviewPayload | null>(null)
@@ -129,6 +130,60 @@ const navChart = computed(() => {
     latestZz: values[values.length - 1].zz,
   }
 })
+
+function parseChartPoints(points: string): Array<{ x: number; y: number }> {
+  return String(points || '')
+    .split(' ')
+    .map((pair) => pair.trim())
+    .filter(Boolean)
+    .map((pair) => {
+      const [x, y] = pair.split(',')
+      return { x: Number(x), y: Number(y) }
+    })
+    .filter((p) => Number.isFinite(p.x) && Number.isFinite(p.y))
+}
+
+function drawMpPolyline(ctx: any, points: Array<{ x: number; y: number }>, color: string, width: number) {
+  if (!points.length) return
+  ctx.beginPath()
+  ctx.setStrokeStyle(color)
+  ctx.setLineWidth(width)
+  points.forEach((p, idx) => {
+    if (idx === 0) ctx.moveTo(p.x, p.y)
+    else ctx.lineTo(p.x, p.y)
+  })
+  ctx.stroke()
+}
+
+function drawMpNavChart() {
+  // #ifndef MP-WEIXIN
+  return
+  // #endif
+  // #ifdef MP-WEIXIN
+  const chart = navChart.value
+  if (!chart || activeMainTab.value !== 'ai') return
+  const ctx = uni.createCanvasContext('aiNavCanvas', vm)
+  const w = chart!.width
+  const h = chart!.height
+
+  ctx.clearRect(0, 0, w, h)
+
+  ctx.setStrokeStyle('rgba(74, 106, 159, 0.35)')
+  ctx.setLineWidth(1)
+  for (let i = 0; i <= 3; i += 1) {
+    const y = 16 + ((h - 32) * i) / 3
+    ctx.beginPath()
+    ctx.moveTo(20, y)
+    ctx.lineTo(w - 20, y)
+    ctx.stroke()
+  }
+
+  drawMpPolyline(ctx, parseChartPoints(chart!.navPoints), '#f5c518', 3)
+  drawMpPolyline(ctx, parseChartPoints(chart!.hsPoints), '#3cc8ff', 2)
+  drawMpPolyline(ctx, parseChartPoints(chart!.zzPoints), '#2ecb88', 2)
+  ctx.draw()
+  // #endif
+}
 
 onShow(() => {
   if (!auth.isLoggedIn) uni.reLaunch({ url: '/pages/login/index' })
@@ -350,6 +405,18 @@ function formatDate(s: string) {
   return s.slice(0, 16).replace('T', ' ')
 }
 
+function formatReportTitle(title: string) {
+  return String(title || '')
+    .replace(/期货商持仓晚报/g, '持仓晚报')
+    .replace(/技术突破提醒/g, '技术形态提醒')
+}
+
+function formatChannelName(name: string) {
+  return String(name || '')
+    .replace(/交易信号/g, '盘面观察')
+    .replace(/期货商持仓/g, '持仓晚报')
+}
+
 function formatTradeDate(raw: string) {
   const digits = String(raw || '').replace(/\D/g, '')
   if (digits.length !== 8) return raw || '-'
@@ -401,6 +468,21 @@ function toneClass(v: any): string {
   if (n < 0) return 'neg'
   return 'flat'
 }
+
+watch(
+  [navChart, activeMainTab],
+  async ([chart, tab]) => {
+    // #ifndef MP-WEIXIN
+    return
+    // #endif
+    // #ifdef MP-WEIXIN
+    if (!chart || tab !== 'ai') return
+    await nextTick()
+    drawMpNavChart()
+    // #endif
+  },
+  { immediate: true },
+)
 </script>
 
 <template>
@@ -411,7 +493,7 @@ function toneClass(v: any): string {
         <text class="filter-arrow">▾</text>
       </view>
       <view class="ai-tab" :class="{ active: activeMainTab === 'ai' }" @tap="toggleAiTab">
-        AI炒股
+        AI日记
       </view>
     </view>
 
@@ -424,10 +506,10 @@ function toneClass(v: any): string {
           @tap="toDetail(item.id)"
         >
           <view class="card-top">
-            <view class="channel-badge">{{ item.channel_name }}</view>
+            <view class="channel-badge">{{ formatChannelName(item.channel_name) }}</view>
             <text class="date-text">{{ formatDate(item.published_at) }}</text>
           </view>
-          <text class="card-title">{{ item.title }}</text>
+          <text class="card-title">{{ formatReportTitle(item.title) }}</text>
           <text class="card-summary">{{ stripHtml(item.summary) }}</text>
         </view>
 
@@ -448,7 +530,7 @@ function toneClass(v: any): string {
 
     <view v-else class="ai-wrap">
       <view v-if="aiLoading" class="center-tip">
-        <text class="muted-text">AI炒股加载中...</text>
+        <text class="muted-text">AI日记加载中...</text>
       </view>
 
       <view v-else-if="aiError && !aiOverview" class="center-tip">
@@ -532,11 +614,21 @@ function toneClass(v: any): string {
           </view>
 
           <view v-if="navChart" class="chart-wrap">
+            <!-- #ifdef MP-WEIXIN -->
+            <canvas
+              canvas-id="aiNavCanvas"
+              class="chart-canvas"
+              :width="navChart.width"
+              :height="navChart.height"
+            />
+            <!-- #endif -->
+            <!-- #ifndef MP-WEIXIN -->
             <svg class="chart-svg" :viewBox="`0 0 ${navChart.width} ${navChart.height}`" :width="navChart.width" :height="navChart.height" preserveAspectRatio="none">
               <polyline :points="navChart.navPoints" fill="none" stroke="#f5c518" stroke-width="3" stroke-linejoin="round" stroke-linecap="round" />
               <polyline :points="navChart.hsPoints" fill="none" stroke="#3cc8ff" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" />
               <polyline :points="navChart.zzPoints" fill="none" stroke="#2ecb88" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" />
             </svg>
+            <!-- #endif -->
             <view class="chart-legend">
               <text class="legend-item">组合 {{ navChart.latestNav.toFixed(3) }}</text>
               <text class="legend-item">沪深300 {{ navChart.latestHs.toFixed(3) }}</text>
@@ -858,6 +950,12 @@ function toneClass(v: any): string {
 .chart-svg {
   width: 100%;
   height: 220rpx;
+}
+
+.chart-canvas {
+  width: 100%;
+  height: 220rpx;
+  display: block;
 }
 
 .chart-legend {

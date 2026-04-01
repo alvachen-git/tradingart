@@ -12,10 +12,10 @@ const loading = ref(false)
 
 const SERVICE_CHANNELS = [
   { code: 'daily_report', name: '复盘晚报' },
-  { code: 'expiry_option_radar', name: '末日期权晚报' },
-  { code: 'broker_position_report', name: '期货商持仓晚报' },
+  { code: 'expiry_option_radar', name: '末日晚报' },
+  { code: 'broker_position_report', name: '持仓晚报' },
   { code: 'fund_flow_report', name: '资金流晚报' },
-  { code: 'trade_signal', name: '交易信号' },
+  { code: 'trade_signal', name: '盘面观察' },
 ]
 
 onShow(() => {
@@ -120,7 +120,7 @@ function getRiskColor(risk: string) {
     </view>
 
     <view class="card section-card">
-      <text class="card-title-text">交易画像</text>
+      <text class="card-title-text">个人风格</text>
       <view class="profile-row">
         <text class="profile-label">风险偏好</text>
         <text
@@ -156,7 +156,7 @@ function getRiskColor(risk: string) {
     <view class="card section-card recharge-card" @tap="goRecharge">
       <view class="recharge-main">
         <text class="card-title-text recharge-title">充值中心</text>
-        <text class="recharge-desc">点数可用于开通晚报、交易信号与情报套餐</text>
+        <text class="recharge-desc">点数可用于开通晚报、盘面观察与情报套餐</text>
         <text class="recharge-update" v-if="wallet?.updated_at">
           最近更新：{{ wallet.updated_at }}
         </text>

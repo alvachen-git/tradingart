@@ -35,7 +35,13 @@ async function fetchDetail() {
     syncCanvasSize()
     nextTick(() => drawScoreCanvas())
   } catch (e: any) {
-    errMsg.value = e.message || '加载失败'
+    const raw = String(e?.message || '').trim()
+    const lowered = raw.toLowerCase()
+    if (!raw || lowered === 'not found' || lowered === 'notfound') {
+      errMsg.value = '暂无数据'
+    } else {
+      errMsg.value = '加载失败，请稍后重试'
+    }
   } finally {
     loading.value = false
   }
@@ -291,7 +297,7 @@ function fmtPct(v: number)     { return (v > 0 ? '+' : '') + v.toFixed(2) + '%' 
           <text class="c-vol">净持仓</text>
           <text class="c-pct">价格涨跌</text>
           <text class="c-score">当日得分</text>
-          <text class="c-cum">累计</text>
+          <text class="c-cum">累计得分</text>
         </view>
         <view class="table-body">
           <view
@@ -311,7 +317,7 @@ function fmtPct(v: number)     { return (v > 0 ? '+' : '') + v.toFixed(2) + '%' 
     </template>
 
     <view v-else-if="!loading" class="center-tip">
-      <text class="muted">该期货商暂无持仓数据</text>
+      <text class="muted">该机构暂无仓位数据</text>
     </view>
 
     <view style="height: 60rpx;" />

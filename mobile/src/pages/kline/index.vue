@@ -879,12 +879,12 @@ function pDec(p: number) { return p < 10 ? 3 : p < 1000 ? 2 : 0 }
           <rect x="49" y="18" width="6" height="16" fill="#ef4444" rx="1" filter="url(#glow-r)"/>
           <line x1="52" y1="34" x2="52" y2="42" stroke="#ef4444" stroke-width="1.5" stroke-linecap="round"/>
         </svg>
-        <text class="hero-title">K线训练</text>
+        <text class="hero-title">K线游戏</text>
         <text class="hero-sub">KLINE TRAINING SIMULATOR</text>
 
         <!-- Capital display -->
         <view class="capital-card">
-          <text class="cap-label">当前资金</text>
+          <text class="cap-label">爱波币</text>
           <text :class="['cap-value', capitalColorClass]">
             {{ lbLoading ? '加载中…' : fmtCapital }}
           </text>
@@ -911,7 +911,7 @@ function pDec(p: number) { return p < 10 ? 3 : p < 1000 ? 2 : 0 }
           :value="selectedLeverage === 1 ? 0 : 1"
           @change="(e: any) => selectedLeverage = +e.detail.value === 0 ? 1 : 10">
           <view class="cfg-row">
-            <text class="cfg-key">杠杆倍数</text>
+            <text class="cfg-key">倍数</text>
             <view class="cfg-val-wrap">
               <text class="cfg-val">{{ selectedLeverage === 1 ? '1倍' : '10倍' }}</text>
               <text class="cfg-arrow">›</text>
@@ -939,7 +939,7 @@ function pDec(p: number) { return p < 10 ? 3 : p < 1000 ? 2 : 0 }
             <text class="lb-tab-text">资金榜</text>
           </view>
           <view class="lb-tab" :class="{ 'lb-tab-active': activeLbTab === 'max_profit' }" @click="activeLbTab = 'max_profit'">
-            <text class="lb-tab-text">最大盈利</text>
+            <text class="lb-tab-text">最高得分</text>
           </view>
           <view class="lb-tab" :class="{ 'lb-tab-active': activeLbTab === 'streak' }" @click="activeLbTab = 'streak'">
             <text class="lb-tab-text">连胜榜</text>
@@ -1236,7 +1236,7 @@ function pDec(p: number) { return p < 10 ? 3 : p < 1000 ? 2 : 0 }
           <text class="stat-k">最终资金</text>
           <text :class="['stat-v', (capital+finalProfit)>=capital?'bull':'bear']">{{ ((capital+finalProfit)/10000).toFixed(2) }} 万</text>
         </view>
-        <view class="stat-row"><text class="stat-k">杠杆倍数</text><text class="stat-v">{{ selectedLeverage }}倍</text></view>
+        <view class="stat-row"><text class="stat-k">倍数</text><text class="stat-v">{{ selectedLeverage }}倍</text></view>
         <view class="stat-row"><text class="stat-k">交易次数</text><text class="stat-v">{{ tradeCount }}</text></view>
         <view class="stat-row"><text class="stat-k">最大回撤</text><text class="stat-v bear">{{ fmtN(maxDrawdown, 2) }}%</text></view>
       </view>

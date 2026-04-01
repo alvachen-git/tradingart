@@ -80,7 +80,7 @@
     {
       "path": "pages/market/broker",
       "style": {
-        "navigationBarTitleText": "期货商持仓",
+        "navigationBarTitleText": "每日仓位数据",
         "navigationBarBackgroundColor": "#0b1121",
         "navigationBarTextStyle": "white",
         "backgroundColor": "#0b1121"
@@ -89,16 +89,7 @@
     {
       "path": "pages/kline/index",
       "style": {
-        "navigationBarTitleText": "K线训练",
-        "navigationBarBackgroundColor": "#0b1121",
-        "navigationBarTextStyle": "white",
-        "backgroundColor": "#0b1121"
-      }
-    },
-    {
-      "path": "pages/health/index",
-      "style": {
-        "navigationBarTitleText": "持仓体检",
+        "navigationBarTitleText": "K线游戏",
         "navigationBarBackgroundColor": "#0b1121",
         "navigationBarTextStyle": "white",
         "backgroundColor": "#0b1121"
