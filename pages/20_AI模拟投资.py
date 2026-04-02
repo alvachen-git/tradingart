@@ -134,15 +134,38 @@ def _render_holdings_table(pos_df: pd.DataFrame) -> str:
 
 def _render_trades_table(trades_df: pd.DataFrame) -> str:
     if trades_df.empty:
-        return '<div class="empty-box">近20日暂无交易记录</div>'
+        return '<div class="empty-box">最近2周暂无交易记录</div>'
 
     side_map = {"buy": "买入", "sell": "卖出"}
-    df = trades_df.copy().head(12)
+    df = trades_df.copy()
+    df["trade_date_dt"] = pd.to_datetime(
+        df["trade_date"].astype(str).str.replace(r"[^0-9]", "", regex=True).str[:8],
+        format="%Y%m%d",
+        errors="coerce",
+    )
+    valid_dt = df["trade_date_dt"].dropna()
+    if not valid_dt.empty:
+        latest_dt = valid_dt.max()
+        cutoff_dt = latest_dt - pd.Timedelta(days=13)
+        df = df[df["trade_date_dt"] >= cutoff_dt]
+    if df.empty:
+        return '<div class="empty-box">最近2周暂无交易记录</div>'
+
+    df["created_at_dt"] = pd.to_datetime(df.get("created_at"), errors="coerce")
+    df = df.sort_values(["trade_date_dt", "created_at_dt"], ascending=[False, False], kind="stable")
+
     rows = []
     for _, row in df.iterrows():
         side = str(row.get("side") or "").lower()
         side_text = side_map.get(side, side.upper() or "-")
         side_cls = "pos" if side == "buy" else ("neg" if side == "sell" else "flat")
+        realized_pnl = _safe_float(row.get("realized_pnl"))
+        if side == "sell":
+            pnl_text = f"{realized_pnl:+,.0f}"
+            pnl_cls = "pos" if realized_pnl > 0 else ("neg" if realized_pnl < 0 else "flat")
+        else:
+            pnl_text = "--"
+            pnl_cls = "flat"
         rows.append(
             "<tr>"
             f"<td class='mono'>{_fmt_trade_date(str(row.get('trade_date') or '-'))}</td>"
@@ -151,13 +174,14 @@ def _render_trades_table(trades_df: pd.DataFrame) -> str:
             f"<td class='mono right'>{int(_safe_float(row.get('quantity'))):,}</td>"
             f"<td class='mono right'>{_safe_float(row.get('price')):.2f}</td>"
             f"<td class='mono right'>{_safe_float(row.get('amount')):,.0f}</td>"
+            f"<td class='mono right {pnl_cls}'>{pnl_text}</td>"
             "</tr>"
         )
     body = "".join(rows)
     return (
         '<div class="table-wrap trades">'
         '<table class="desk-table">'
-        "<thead><tr><th>交易日</th><th>代码</th><th>方向</th><th class='right'>数量</th><th class='right'>价格</th><th class='right'>金额</th></tr></thead>"
+        "<thead><tr><th>交易日</th><th>代码</th><th>方向</th><th class='right'>数量</th><th class='right'>价格</th><th class='right'>金额</th><th class='right'>单笔盈亏</th></tr></thead>"
         f"<tbody>{body}</tbody>"
         "</table>"
         "</div>"

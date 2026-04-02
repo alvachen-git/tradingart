@@ -200,6 +200,28 @@ def ensure_ai_sim_tables() -> None:
         for ddl in ddl_list:
             conn.execute(text(ddl))
 
+        realized_pnl_col = conn.execute(
+            text(
+                """
+                SELECT 1
+                FROM information_schema.COLUMNS
+                WHERE TABLE_SCHEMA = DATABASE()
+                  AND TABLE_NAME = 'ai_sim_trades'
+                  AND COLUMN_NAME = 'realized_pnl'
+                LIMIT 1
+                """
+            )
+        ).fetchone()
+        if not realized_pnl_col:
+            conn.execute(
+                text(
+                    """
+                    ALTER TABLE ai_sim_trades
+                    ADD COLUMN realized_pnl DOUBLE NOT NULL DEFAULT 0 AFTER amount
+                    """
+                )
+            )
+
         conn.execute(
             text(
                 """
@@ -1314,11 +1336,13 @@ def _execute_trades(
         pos = positions[symbol]
         cur_qty = _to_float(pos.get("quantity"), 0.0)
         cur_avg = _to_float(pos.get("avg_cost"), 0.0)
+        realized_pnl = 0.0
 
         if side == "sell":
             qty = min(qty, cur_qty)
             if qty <= 0:
                 continue
+            realized_pnl = (price - cur_avg) * qty
             cash += qty * price
             new_qty = cur_qty - qty
             pos["quantity"] = new_qty
@@ -1346,6 +1370,7 @@ def _execute_trades(
                 **t,
                 "quantity": float(qty),
                 "amount": float(qty * price),
+                "realized_pnl": float(realized_pnl),
             }
         )
 
@@ -2148,10 +2173,10 @@ def run_daily_simulation(
                     """
                     INSERT INTO ai_sim_trades (
                         portfolio_id, trade_date, trade_id, order_id, symbol, side,
-                        quantity, price, amount, cost, slippage, exec_mode
+                        quantity, price, amount, realized_pnl, cost, slippage, exec_mode
                     ) VALUES (
                         :portfolio_id, :trade_date, :trade_id, :order_id, :symbol, :side,
-                        :quantity, :price, :amount, :cost, :slippage, :exec_mode
+                        :quantity, :price, :amount, :realized_pnl, :cost, :slippage, :exec_mode
                     )
                     """
                 ),
@@ -2165,6 +2190,7 @@ def run_daily_simulation(
                     "quantity": _to_float(trade.get("quantity"), 0.0),
                     "price": _to_float(trade.get("price"), 0.0),
                     "amount": _to_float(trade.get("amount"), 0.0),
+                    "realized_pnl": _to_float(trade.get("realized_pnl"), 0.0),
                     "cost": 0.0,
                     "slippage": 0.0,
                     "exec_mode": str(config.get("execution_mode") or "close_t0"),
@@ -2405,6 +2431,74 @@ def get_positions(
         return pd.read_sql(sql, conn, params=params)
 
 
+def _recompute_realized_pnl_for_trades(trades_df: pd.DataFrame) -> pd.DataFrame:
+    if trades_df.empty:
+        return trades_df
+
+    df = trades_df.copy()
+    if "realized_pnl" not in df.columns:
+        df["realized_pnl"] = 0.0
+
+    df["_trade_date_norm"] = (
+        df["trade_date"]
+        .astype(str)
+        .str.replace(r"[^0-9]", "", regex=True)
+        .str[:8]
+    )
+    df["_created_at_sort"] = pd.to_datetime(df.get("created_at"), errors="coerce")
+    if "id" in df.columns:
+        df["_id_sort"] = pd.to_numeric(df["id"], errors="coerce")
+    else:
+        df["_id_sort"] = range(len(df))
+    df["_row_idx"] = range(len(df))
+
+    df = df.sort_values(
+        by=["_trade_date_norm", "_created_at_sort", "_id_sort", "_row_idx"],
+        ascending=True,
+        kind="stable",
+    ).reset_index(drop=True)
+
+    state: Dict[str, Dict[str, float]] = {}
+    realized_values: List[float] = []
+
+    for _, row in df.iterrows():
+        symbol = str(row.get("symbol") or "").strip()
+        side = str(row.get("side") or "").strip().lower()
+        qty = max(_to_float(row.get("quantity"), 0.0), 0.0)
+        price = max(_to_float(row.get("price"), 0.0), 0.0)
+
+        if not symbol:
+            realized_values.append(_to_float(row.get("realized_pnl"), 0.0))
+            continue
+
+        pos = state.setdefault(symbol, {"qty": 0.0, "avg_cost": 0.0})
+        cur_qty = _to_float(pos.get("qty"), 0.0)
+        cur_avg = _to_float(pos.get("avg_cost"), 0.0)
+
+        realized = 0.0
+        if side == "sell":
+            exec_qty = min(qty, cur_qty)
+            if exec_qty > 0 and price > 0:
+                realized = (price - cur_avg) * exec_qty
+                left_qty = cur_qty - exec_qty
+                pos["qty"] = left_qty
+                if left_qty <= 0:
+                    pos["qty"] = 0.0
+                    pos["avg_cost"] = 0.0
+        elif side == "buy":
+            if qty > 0 and price > 0:
+                new_qty = cur_qty + qty
+                pos["avg_cost"] = ((cur_qty * cur_avg) + (qty * price)) / max(1e-9, new_qty)
+                pos["qty"] = new_qty
+        else:
+            realized = _to_float(row.get("realized_pnl"), 0.0)
+
+        realized_values.append(float(realized))
+
+    df["realized_pnl"] = realized_values
+    return df.drop(columns=["_trade_date_norm", "_created_at_sort", "_id_sort", "_row_idx"], errors="ignore")
+
+
 def get_trades(portfolio_id: str = OFFICIAL_PORTFOLIO_ID, days: int = 20) -> pd.DataFrame:
     ensure_ai_sim_tables()
 
@@ -2413,13 +2507,32 @@ def get_trades(portfolio_id: str = OFFICIAL_PORTFOLIO_ID, days: int = 20) -> pd.
         SELECT *
         FROM ai_sim_trades
         WHERE portfolio_id = :pid
-        ORDER BY trade_date DESC, created_at DESC
-        LIMIT :lim
+        ORDER BY trade_date ASC, created_at ASC, id ASC
         """
     )
     with engine.connect() as conn:
-        df = pd.read_sql(sql, conn, params={"pid": portfolio_id, "lim": int(days) * 20})
-    return df
+        df = pd.read_sql(sql, conn, params={"pid": portfolio_id})
+    if df.empty:
+        return df
+
+    df = _recompute_realized_pnl_for_trades(df)
+    df["_trade_date_norm"] = (
+        df["trade_date"]
+        .astype(str)
+        .str.replace(r"[^0-9]", "", regex=True)
+        .str[:8]
+    )
+    df["_created_at_sort"] = pd.to_datetime(df.get("created_at"), errors="coerce")
+    if "id" in df.columns:
+        df["_id_sort"] = pd.to_numeric(df["id"], errors="coerce")
+    else:
+        df["_id_sort"] = range(len(df))
+    df = df.sort_values(
+        by=["_trade_date_norm", "_created_at_sort", "_id_sort"],
+        ascending=[False, False, False],
+        kind="stable",
+    ).head(int(days) * 20)
+    return df.drop(columns=["_trade_date_norm", "_created_at_sort", "_id_sort"], errors="ignore").reset_index(drop=True)
 
 
 def get_daily_review(portfolio_id: str = OFFICIAL_PORTFOLIO_ID, trade_date: Optional[str] = None) -> Dict[str, Any]:
