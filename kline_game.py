@@ -14,6 +14,7 @@ import pandas as pd
 import numpy as np
 from sqlalchemy import text
 from datetime import datetime, timedelta
+import math
 import random
 import time
 import re
@@ -87,6 +88,22 @@ def _to_float(v, default=0.0):
         return float(v)
     except Exception:
         return default
+
+
+_INT32_MAX = 2147483647
+
+
+def _is_finite_number(v) -> bool:
+    try:
+        return math.isfinite(float(v))
+    except Exception:
+        return False
+
+
+def _reject_non_finite_number(field_name: str, raw_value, context: str):
+    msg = f"invalid non-finite number: field={field_name}, context={context}"
+    print(f"[NUM_GUARD] {msg}, raw={raw_value!r}")
+    return {"ok": False, "message": msg}
 
 
 def _format_direction_reason_label(reason_code: str) -> str:
@@ -290,26 +307,57 @@ def save_trade_batch(game_id, user_id, trades, symbol=None, symbol_name=None, sy
                 seq = _to_int(t.get("trade_seq"), i)
                 if seq <= 0:
                     seq = i
+                if seq > _INT32_MAX:
+                    msg = f"trade_seq out of int32 range at trade[{i}]: {seq}"
+                    print(f"[TRADE_BATCH] {msg}")
+                    return {"ok": False, "message": msg}
                 lots = max(0, _to_int(t.get("lots"), 0))
                 if lots <= 0:
                     continue
+                if lots > _INT32_MAX:
+                    msg = f"lots out of int32 range at trade[{i}]: {lots}"
+                    print(f"[TRADE_BATCH] {msg}")
+                    return {"ok": False, "message": msg}
+                bar_index = _to_int(t.get("bar_index"), 0)
+                if bar_index < 0 or bar_index > _INT32_MAX:
+                    msg = f"bar_index out of int32 range at trade[{i}]: {bar_index}"
+                    print(f"[TRADE_BATCH] {msg}")
+                    return {"ok": False, "message": msg}
+                leverage = max(1, _to_int(t.get("leverage"), 1))
+                if leverage > _INT32_MAX:
+                    msg = f"leverage out of int32 range at trade[{i}]: {leverage}"
+                    print(f"[TRADE_BATCH] {msg}")
+                    return {"ok": False, "message": msg}
+
+                price = _to_float(t.get("price"), 0.0)
+                if not _is_finite_number(price):
+                    return _reject_non_finite_number("price", t.get("price"), f"save_trade_batch trade[{i}]")
+                amount = _to_float(t.get("amount"), 0.0)
+                if not _is_finite_number(amount):
+                    return _reject_non_finite_number("amount", t.get("amount"), f"save_trade_batch trade[{i}]")
+                realized_after = _to_float(t.get("realized_pnl_after"), 0.0)
+                if not _is_finite_number(realized_after):
+                    return _reject_non_finite_number("realized_pnl_after", t.get("realized_pnl_after"), f"save_trade_batch trade[{i}]")
+                floating_after = _to_float(t.get("floating_pnl_after"), 0.0)
+                if not _is_finite_number(floating_after):
+                    return _reject_non_finite_number("floating_pnl_after", t.get("floating_pnl_after"), f"save_trade_batch trade[{i}]")
 
                 payload = {
                     "gid": game_id,
                     "uid": owner,
                     "seq": seq,
                     "trade_time": _parse_trade_time(t.get("trade_time")),
-                    "bar_index": _to_int(t.get("bar_index"), 0),
+                    "bar_index": bar_index,
                     "bar_date": _parse_trade_date(t.get("bar_date")),
                     "action": str(t.get("action") or "unknown")[:32],
-                    "price": _to_float(t.get("price"), 0.0),
+                    "price": price,
                     "lots": lots,
-                    "amount": _to_float(t.get("amount"), 0.0),
-                    "leverage": max(1, _to_int(t.get("leverage"), 1)),
+                    "amount": amount,
+                    "leverage": leverage,
                     "pos_before": json.dumps(t.get("position_before") or {}, ensure_ascii=False, separators=(",", ":"))[:20000],
                     "pos_after": json.dumps(t.get("position_after") or {}, ensure_ascii=False, separators=(",", ":"))[:20000],
-                    "realized_after": _to_float(t.get("realized_pnl_after"), 0.0),
-                    "floating_after": _to_float(t.get("floating_pnl_after"), 0.0),
+                    "realized_after": realized_after,
+                    "floating_after": floating_after,
                     "symbol": str(t.get("symbol") or symbol or "")[:32],
                     "symbol_name": str(t.get("symbol_name") or symbol_name or "")[:64],
                     "symbol_type": str(t.get("symbol_type") or symbol_type or "")[:16],
@@ -1346,6 +1394,26 @@ def end_game(game_id, user_id, status, end_reason, profit, profit_rate,
             else:
                 print(f"[END_GAME] ⚠ 后端重算失败，回退前端数值: {recalc.get('message')}")
 
+        if not _is_finite_number(profit):
+            return _reject_non_finite_number("profit", profit, "end_game")
+        if not _is_finite_number(profit_rate):
+            return _reject_non_finite_number("profit_rate", profit_rate, "end_game")
+        if not _is_finite_number(capital_after):
+            return _reject_non_finite_number("capital_after", capital_after, "end_game")
+        if not _is_finite_number(max_drawdown):
+            return _reject_non_finite_number("max_drawdown", max_drawdown, "end_game")
+
+        trade_count = _to_int(trade_count, 0)
+        if trade_count < 0 or trade_count > _INT32_MAX:
+            msg = f"trade_count out of int32 range: {trade_count}"
+            print(f"[END_GAME] {msg}")
+            return {"ok": False, "message": msg}
+
+        profit = float(profit)
+        profit_rate = float(profit_rate)
+        capital_after = float(capital_after)
+        max_drawdown = float(max_drawdown)
+
         with engine.begin() as conn:
             # 结束游戏
             end_sql = text("""
@@ -2218,14 +2286,24 @@ def settle_abandoned_game(user_id, game_id, penalty=20000):
                 print(f"[SETTLE_ABANDONED] ❌ 未找到游戏记录: game_id={game_id}, user_id={user_id}")
                 return None
 
-            capital_before = game[0]
+            capital_before = _to_float(game[0], 0.0)
+            if not _is_finite_number(capital_before):
+                print(f"[SETTLE_ABANDONED] invalid capital_before: {game[0]!r}")
+                return None
             print(f"[SETTLE_ABANDONED] 游戏初始资金: {capital_before}")
 
         # 使用事务进行结算
         with engine.begin() as conn:
             # 固定扣除惩罚金额
-            final_profit = -penalty
+            penalty_value = _to_float(penalty, 20000.0)
+            if not _is_finite_number(penalty_value):
+                print(f"[SETTLE_ABANDONED] invalid penalty: {penalty!r}")
+                return None
+            final_profit = -penalty_value
             capital_after = capital_before + final_profit
+            if not _is_finite_number(capital_after):
+                print(f"[SETTLE_ABANDONED] invalid capital_after: {capital_after!r}")
+                return None
             profit_rate = final_profit / capital_before if capital_before > 0 else 0
 
             # 结束游戏
@@ -2246,14 +2324,14 @@ def settle_abandoned_game(user_id, game_id, penalty=20000):
                 "gid": game_id,
                 "uid": user_id,
                 "end_time": datetime.now(),
-                "profit": int(final_profit),
+                "profit": float(final_profit),
                 "profit_rate": profit_rate,
-                "capital_after": int(capital_after)
+                "capital_after": float(capital_after)
             })
 
             # 更新用户资金
             capital_sql = text("UPDATE users SET capital = :cap WHERE username = :uid")
-            conn.execute(capital_sql, {"cap": int(capital_after), "uid": user_id})
+            conn.execute(capital_sql, {"cap": float(capital_after), "uid": user_id})
 
             # 更新用户统计
             update_user_stats(user_id, final_profit, profit_rate, 'abandoned', 0, 0)

@@ -16,6 +16,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 import pandas as pd
 import json
+from decimal import Decimal
 from datetime import datetime, timedelta
 import sys
 import os
@@ -29,6 +30,15 @@ import auth_utils as auth
 import extra_streamlit_components as stx
 
 TRADE_API_URL = kg.get_trade_batch_api_url(prefer_same_domain=True, fallback_port=8765)
+
+
+def _json_default(obj):
+    """JSON 序列化兜底：兼容 Decimal / datetime / pandas.Timestamp 等类型"""
+    if isinstance(obj, Decimal):
+        return float(obj)
+    if hasattr(obj, "isoformat"):
+        return obj.isoformat()
+    raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
 
 # 页面配置
 st.set_page_config(
@@ -1300,8 +1310,8 @@ if st.session_state.get('game_started') and 'game_data' in st.session_state:
     kline_data = game_data['kline_data']
     config = game_data['config']
 
-    config_json = json.dumps(config, ensure_ascii=False)
-    kline_json = json.dumps(kline_data, ensure_ascii=False)
+    config_json = json.dumps(config, ensure_ascii=False, default=_json_default)
+    kline_json = json.dumps(kline_data, ensure_ascii=False, default=_json_default)
 
     # 🔧 【修复3】K线颜色改为中国标准：红涨绿跌
     trading_html = f'''
