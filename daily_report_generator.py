@@ -809,18 +809,7 @@ def blast_emails(html_content):
             df = pd.read_sql(sql, conn)
 
         if df.empty:
-            # 🔥 兼容旧表：如果新表没数据，尝试旧表
-            print("📭 新订阅表无用户，尝试旧表...")
-            try:
-                with engine.connect() as conn:
-                    sql_old = text(
-                        "SELECT username, email FROM users WHERE is_subscribed = 1 AND email IS NOT NULL AND email != ''")
-                    df = pd.read_sql(sql_old, conn)
-            except:
-                pass
-
-        if df.empty:
-            print("📭 无订阅用户。")
+            print("📭 无有效订阅用户（仅发送给未过期且开启邮件通知的订阅用户）。")
             return 0
 
         today_str = datetime.now().strftime("%m月%d日")
