@@ -16,10 +16,14 @@ from industry_chain_tools import (
     scale_flow_width,
 )
 from sidebar_navigation import show_navigation
-from ui_components import inject_quant_ops_header_style, render_quant_ops_header
+from ui_components import (
+    inject_quant_ops_header_style,
+    inject_sidebar_toggle_style,
+    render_quant_ops_header,
+)
 
 st.set_page_config(
-    page_title="产业链图谱",
+    page_title="股票产业链",
     page_icon="favicon.ico",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -637,6 +641,7 @@ def _render_stage(stage: dict):
 def main():
     _inject_chain_page_style()
     inject_quant_ops_header_style()
+    inject_sidebar_toggle_style(mode="high_contrast")
 
     templates = load_chain_templates()
     sectors = sorted(templates.keys())
@@ -644,7 +649,7 @@ def main():
     date_options = ["AUTO"] + screener_dates
 
     render_quant_ops_header(
-        title="产业链图谱",
+        title="股票产业链",
         subtitle="",
         note="展示口径：A股环节聚合主力净流（万元），颜色区分流入流出，气泡大小映射资金绝对值。",
     )
@@ -677,7 +682,7 @@ def main():
         trade_date=force_date,
     )
 
-    with st.spinner("正在构建产业链图谱..."):
+    with st.spinner("正在构建股票产业链..."):
         snapshot = _get_snapshot_cached(
             selected_sector,
             int(limit_per_stage),
