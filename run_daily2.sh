@@ -6,6 +6,7 @@ APP_DIR="/root/finance_app/future-app"
 LOG_FILE="${APP_DIR}/update.log"
 PYTHON_BIN="${APP_DIR}/venv/bin/python"
 FAILED_STEPS=0
+US_CHUNK_STATE_FILE="${APP_DIR}/.us_chunk_state"
 
 cd "${APP_DIR}" || exit 1
 
@@ -34,6 +35,41 @@ run_step() {
   if [ ${rc} -ne 0 ]; then
     FAILED_STEPS=$((FAILED_STEPS + 1))
   fi
+}
+
+prepare_us_chunk_env() {
+  local chunk_total chunk_index_raw chunk_index last_idx
+
+  chunk_total="${US_SYMBOL_CHUNK_TOTAL:-4}"
+  if ! [[ "${chunk_total}" =~ ^[0-9]+$ ]] || [ "${chunk_total}" -lt 1 ]; then
+    chunk_total=4
+  fi
+
+  if [ -n "${US_SYMBOL_CHUNK_INDEX:-}" ]; then
+    chunk_index_raw="${US_SYMBOL_CHUNK_INDEX}"
+    if ! [[ "${chunk_index_raw}" =~ ^-?[0-9]+$ ]]; then
+      chunk_index_raw=0
+    fi
+    chunk_index=$((chunk_index_raw % chunk_total))
+    if [ "${chunk_index}" -lt 0 ]; then
+      chunk_index=$((chunk_index + chunk_total))
+    fi
+    echo "ℹ️ 美股分片: 使用外部指定 index=${chunk_index}, total=${chunk_total}" >> "${LOG_FILE}"
+  else
+    last_idx=-1
+    if [ -f "${US_CHUNK_STATE_FILE}" ]; then
+      last_idx=$(cat "${US_CHUNK_STATE_FILE}" 2>/dev/null || echo "-1")
+      if ! [[ "${last_idx}" =~ ^-?[0-9]+$ ]]; then
+        last_idx=-1
+      fi
+    fi
+    chunk_index=$(( (last_idx + 1 + chunk_total) % chunk_total ))
+    printf "%s\n" "${chunk_index}" > "${US_CHUNK_STATE_FILE}"
+    echo "ℹ️ 美股分片: 自动轮转 index=${chunk_index}, total=${chunk_total}" >> "${LOG_FILE}"
+  fi
+
+  export US_SYMBOL_CHUNK_TOTAL="${chunk_total}"
+  export US_SYMBOL_CHUNK_INDEX="${chunk_index}"
 }
 
 check_dxy_freshness() {
@@ -74,6 +110,7 @@ echo "⏰ 任务开始: $(date)" >> "${LOG_FILE}"
 echo "🐍 Python: ${PYTHON_BIN}" >> "${LOG_FILE}"
 
 run_step 1 5 "更新期货席位数据" "update_open_oneday.py"
+prepare_us_chunk_env
 run_step 2 5 "更新美股价格数据" "update_stock_tiingo.py"
 run_step 3 5 "更新债券收益数据" "update_bond_data.py"
 run_step 4 5 "更新热搜数据" "trend_monitor.py"

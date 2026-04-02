@@ -22,7 +22,8 @@ except Exception:
 from sqlalchemy import create_engine, text
 from tiingo import TiingoClient
 
-load_dotenv(override=True)
+# Keep shell-exported vars (e.g. chunk rotation from run_daily2.sh) higher priority.
+load_dotenv(override=False)
 
 
 def _env_int(name: str, default: int) -> int:
@@ -83,8 +84,13 @@ US_TARGET_HISTORY_DAYS = _env_int("US_TARGET_HISTORY_DAYS", 1095)
 US_INCREMENTAL_LOOKBACK_DAYS = _env_int("US_INCREMENTAL_LOOKBACK_DAYS", 1)
 US_BACKFILL_BATCH_SIZE = _env_int("US_BACKFILL_BATCH_SIZE", 6)
 US_ENABLE_BACKFILL = _env_bool("US_ENABLE_BACKFILL", True)
+US_MAX_SYMBOLS_PER_RUN = _env_int("US_MAX_SYMBOLS_PER_RUN", 0)
+US_SYMBOL_CHUNK_TOTAL = max(1, _env_int("US_SYMBOL_CHUNK_TOTAL", 1))
+US_SYMBOL_CHUNK_INDEX = _env_int("US_SYMBOL_CHUNK_INDEX", 0)
 
 US_PROVIDER_COOLDOWN_SECONDS = _env_int("US_PROVIDER_COOLDOWN_SECONDS", 900)
+US_PROVIDER_ERROR_COOLDOWN_SECONDS = _env_int("US_PROVIDER_ERROR_COOLDOWN_SECONDS", 600)
+US_PROVIDER_ERROR_COOLDOWN_THRESHOLD = _env_int("US_PROVIDER_ERROR_COOLDOWN_THRESHOLD", 3)
 US_REQUEST_SLEEP_AK = _env_float("US_REQUEST_SLEEP_AK", 1.0)
 US_REQUEST_SLEEP_TIINGO = _env_float("US_REQUEST_SLEEP_TIINGO", 1.5)
 US_REQUEST_SLEEP_TD = _env_float("US_REQUEST_SLEEP_TD", 8.0)
@@ -106,7 +112,7 @@ SECTOR_SYMBOLS = {
     # 科技与互联网龙头（半导体/云计算/软件/平台）
     "tech": [
         "AAPL", "MSFT", "NVDA", "GOOG", "META", "AMZN", "TSM", "AVGO", "AMD", "INTC",
-        "ORCL", "ADBE", "CRM", "CSCO", "QCOM", "TXN", "MU", "AMAT", "LRCX", "KLAC",
+        "ORCL", "ADBE", "CRM", "CSCO", "QCOM", "TXN", "MU", "AMAT", "LRCX", "KLAC","TSLA",
         "PANW", "CRWD", "PLTR", "SNOW", "NOW", "ANET", "CDNS", "SNPS", "INTU", "SHOP",
     ],
     # AI 主题补充（与 tech 并行维护，去重逻辑会自动处理重复代码）
@@ -120,7 +126,7 @@ SECTOR_SYMBOLS = {
     ],
     # 消费核心标的（可选消费 + 必选消费）
     "consumer": [
-        "TSLA", "HD", "LOW", "NKE", "SBUX", "MCD", "CMG", "DIS", "NFLX", "BKNG",
+        "HD", "LOW", "NKE", "SBUX", "MCD", "CMG", "DIS", "NFLX", "BKNG",
         "COST", "WMT", "TGT", "KO", "PEP", "PG", "MDLZ", "PM", "MO", "EL",
     ],
     # 太空与军工航天
@@ -212,6 +218,18 @@ def _looks_like_rate_limit(msg: str) -> bool:
     )
 
 
+def _looks_like_network_abort(msg: str) -> bool:
+    txt = str(msg or "").lower()
+    return (
+        "connection aborted" in txt
+        or "remotedisconnected" in txt
+        or "remote end closed connection without response" in txt
+        or "connection reset" in txt
+        or "read timed out" in txt
+        or "connect timeout" in txt
+    )
+
+
 def _to_naive_dates(series: pd.Series) -> pd.Series:
     dt_series = pd.to_datetime(series, errors="coerce")
     try:
@@ -275,12 +293,14 @@ class ProviderState:
         "rate_limited": 0,
         "skipped": 0,
     })
+    consecutive_errors: int = 0
 
     def in_cooldown(self) -> bool:
         return self.blocked_until is not None and datetime.datetime.utcnow() < self.blocked_until
 
-    def set_cooldown(self) -> None:
-        self.blocked_until = datetime.datetime.utcnow() + datetime.timedelta(seconds=self.cooldown_seconds)
+    def set_cooldown(self, seconds: Optional[int] = None) -> None:
+        sec = int(seconds if seconds is not None else self.cooldown_seconds)
+        self.blocked_until = datetime.datetime.utcnow() + datetime.timedelta(seconds=max(1, sec))
 
 
 class BaseProvider:
@@ -662,18 +682,30 @@ def fetch_with_fallback(
         try:
             data = provider.fetch_daily(symbol=symbol, start_date=start_date, end_date=end_date)
             provider.state.stats["success"] += 1
+            provider.state.consecutive_errors = 0
             time.sleep(max(0.0, provider.state.sleep_seconds))
             return data, provider.state.name, switches, attempts
         except RateLimitError as e:
             provider.state.stats["failed"] += 1
             provider.state.stats["rate_limited"] += 1
+            provider.state.consecutive_errors += 1
             provider.state.set_cooldown()
             attempts.append(f"{name}:rate_limit:{e}")
             switches += 1
             continue
         except Exception as e:
             provider.state.stats["failed"] += 1
-            attempts.append(f"{name}:error:{e}")
+            provider.state.consecutive_errors += 1
+            if (
+                provider.state.consecutive_errors >= US_PROVIDER_ERROR_COOLDOWN_THRESHOLD
+                and _looks_like_network_abort(str(e))
+            ):
+                provider.state.set_cooldown(US_PROVIDER_ERROR_COOLDOWN_SECONDS)
+                attempts.append(
+                    f"{name}:error_cooldown:{e}"
+                )
+            else:
+                attempts.append(f"{name}:error:{e}")
             switches += 1
             continue
 
@@ -690,7 +722,21 @@ def _get_incremental_start(last_date: Optional[datetime.datetime], today: dateti
     return suggested
 
 
-def _run_low_priority_backfill(today: datetime.date) -> dict[str, int]:
+def _select_symbols_for_run(all_symbols: list[str]) -> list[str]:
+    symbols = [str(s).strip().upper() for s in all_symbols if str(s).strip()]
+    if not symbols:
+        return []
+
+    if US_SYMBOL_CHUNK_TOTAL > 1:
+        chunk_index = US_SYMBOL_CHUNK_INDEX % US_SYMBOL_CHUNK_TOTAL
+        symbols = [s for i, s in enumerate(symbols) if (i % US_SYMBOL_CHUNK_TOTAL) == chunk_index]
+
+    if US_MAX_SYMBOLS_PER_RUN > 0:
+        symbols = symbols[:US_MAX_SYMBOLS_PER_RUN]
+    return symbols
+
+
+def _run_low_priority_backfill(today: datetime.date, candidate_symbols: Optional[list[str]] = None) -> dict[str, int]:
     stats = {"attempted": 0, "saved": 0, "failed": 0, "skipped": 0}
     if not US_ENABLE_BACKFILL:
         print("🔕 低优先级历史回填已关闭 (US_ENABLE_BACKFILL=false)")
@@ -698,7 +744,8 @@ def _run_low_priority_backfill(today: datetime.date) -> dict[str, int]:
 
     target_start = today - datetime.timedelta(days=max(30, US_TARGET_HISTORY_DAYS))
     candidates: list[tuple[str, datetime.date]] = []
-    for symbol in SYMBOLS:
+    use_symbols = candidate_symbols or SYMBOLS
+    for symbol in use_symbols:
         first_date = get_first_date_from_db(symbol)
         if first_date is None:
             continue
@@ -754,9 +801,16 @@ def _run_low_priority_backfill(today: datetime.date) -> dict[str, int]:
 
 def update_stock_data() -> None:
     today = datetime.date.today()
-    print(f"🚀 开始更新美股日线，标的总数: {len(SYMBOLS)}")
+    run_symbols = _select_symbols_for_run(SYMBOLS)
+    print(f"🚀 开始更新美股日线，标的总数: {len(SYMBOLS)}，本轮处理: {len(run_symbols)}")
     print(f"🔗 源优先级: {US_SOURCE_PRIORITY}")
     print(f"🔁 回填源优先级: {US_BACKFILL_SOURCE_PRIORITY}")
+    if not TWELVEDATA_API_KEY:
+        print("⚠️ 未配置 TWELVEDATA_API_KEY，twelvedata 次源当前不可用")
+    if US_SYMBOL_CHUNK_TOTAL > 1:
+        print(f"🧩 分片模式: chunk {US_SYMBOL_CHUNK_INDEX % US_SYMBOL_CHUNK_TOTAL + 1}/{US_SYMBOL_CHUNK_TOTAL}")
+    if US_MAX_SYMBOLS_PER_RUN > 0:
+        print(f"🎯 本轮上限: {US_MAX_SYMBOLS_PER_RUN} 只")
 
     summary_items = []
     for key, symbols in SECTOR_SYMBOLS.items():
@@ -766,7 +820,7 @@ def update_stock_data() -> None:
 
     symbol_stats = {"success_symbols": 0, "failed_symbols": 0, "empty_symbols": 0, "saved_rows": 0, "skipped": 0}
 
-    for symbol in SYMBOLS:
+    for symbol in run_symbols:
         symbol = symbol.upper()
         print(f"\n处理: {symbol}")
         try:
@@ -814,7 +868,7 @@ def update_stock_data() -> None:
         finally:
             time.sleep(0.2)
 
-    backfill_stats = _run_low_priority_backfill(today)
+    backfill_stats = _run_low_priority_backfill(today, run_symbols)
 
     print("\n📊 源级汇总")
     for key in ["akshare", "tiingo", "twelvedata"]:
