@@ -29,6 +29,7 @@ from ui_components import inject_sidebar_toggle_style
 from sqlalchemy import text
 from dotenv import load_dotenv
 from pathlib import Path
+from zoneinfo import ZoneInfo
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.outputs import LLMResult
 # --- AI 相关导入 ---
@@ -93,10 +94,57 @@ ANNOUNCEMENT_CONTENT = {
 
 # ==================== 公告工具函数 ====================
 
-def get_announcement_hash():
-    """根据公告内容生成唯一hash"""
-    content_str = str(ANNOUNCEMENT_CONTENT)
-    return hashlib.md5(content_str.encode()).hexdigest()[:8]
+ANNOUNCEMENT_LAST_SHOWN_COOKIE_KEY = "announcement_last_shown_date"
+ASIA_SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
+ANNOUNCEMENT_RERUN_HOLDOFF_SECONDS = 6.0
+
+
+def get_shanghai_today_str():
+    """Return today's date string in Asia/Shanghai."""
+    return datetime.now(ASIA_SHANGHAI_TZ).strftime("%Y-%m-%d")
+
+
+def _persist_announcement_shown_date(date_str: str) -> bool:
+    """Persist shown-date cookie; return whether write succeeded."""
+    try:
+        cm = stx.CookieManager(key="announcement_cookie_setter")
+        cm.set(
+            ANNOUNCEMENT_LAST_SHOWN_COOKIE_KEY,
+            date_str,
+            expires_at=datetime.now() + timedelta(days=365),
+        )
+        return True
+    except Exception as e:
+        print(f"公告显示日期写入 cookie 失败: {e}")
+        return False
+
+
+def flush_pending_announcement_cookie():
+    """Write pending shown-date cookie on a later rerun to avoid dialog flashing."""
+    pending_date = st.session_state.get("announcement_cookie_pending_date")
+    if not pending_date:
+        return
+    if _persist_announcement_shown_date(str(pending_date)):
+        st.session_state.announcement_last_shown_date = str(pending_date)
+        st.session_state.announcement_cookie_pending_date = None
+
+
+def mark_announcement_shown_today():
+    """Mark today's announcement as shown and defer cookie write to next rerun."""
+    today = get_shanghai_today_str()
+    st.session_state.announcement_last_shown_date = today
+    st.session_state.announcement_acknowledged_date = today
+    st.session_state.announcement_cookie_pending_date = today
+    # Hold off background auto-reruns briefly so dialog won't flash-disappear.
+    st.session_state.announcement_holdoff_until = time.time() + ANNOUNCEMENT_RERUN_HOLDOFF_SECONDS
+
+
+def is_announcement_holdoff_active():
+    """Return True when we should temporarily avoid auto-rerun loops."""
+    try:
+        return time.time() < float(st.session_state.get("announcement_holdoff_until", 0))
+    except Exception:
+        return False
 
 
 @st.dialog(ANNOUNCEMENT_CONTENT["title"], width="large")
@@ -148,49 +196,40 @@ def show_announcement():
     col1, col2, col3 = st.columns([1, 1, 1])
     with col2:
         if st.button("我知道了", type="primary", use_container_width=True):
-            current_hash = get_announcement_hash()
-            # ✅ 使用独立的 CookieManager（带唯一 key）
-            cm = stx.CookieManager(key="announcement_cookie_setter")
-            cm.set(
-                "announcement_read",
-                current_hash,
-                expires_at=datetime.now() + timedelta(days=365)
-            )
-            # 同步更新会话状态，避免等待下一次 cookie 读取
-            st.session_state.announcement_read_hash = current_hash
-            st.session_state.announcement_acknowledged = True
+            # Button is only for confirm/close interaction.
+            mark_announcement_shown_today()
             st.rerun()
 
 
 def check_and_show_announcement():
-    """检查是否需要显示公告 - 使用 session_state 中的 cookie 数据"""
-    # 仅在用户明确点击“我知道了”后，本会话不再弹出
-    if st.session_state.get('announcement_acknowledged', False):
+    """检查是否需要显示公告：同浏览器/设备每天最多展示一次。"""
+    today = get_shanghai_today_str()
+
+    # session 兜底：即使 cookie 读取/写入偶发失败，也避免当天重复打扰
+    acknowledged_date = st.session_state.get("announcement_acknowledged_date")
+    if acknowledged_date == today:
         return
 
-    # 🔥 关键2：如果刚刚手动登录，跳过这次显示，等下次用户刷新或操作时再显示
-    # 避免登录后立即弹窗打扰用户，也避免闪现问题
+    # 保留原有行为：手动登录后本次先不弹，避免登录瞬间打扰
     if st.session_state.get('just_manual_logged_in', False):
-        st.session_state['just_manual_logged_in'] = False  # 重置标记
+        st.session_state['just_manual_logged_in'] = False
         return
 
     try:
-        current_hash = get_announcement_hash()
-
-        # 🔥 使用之前在初始化时读取的 cookie 状态（避免 rerun 冲突）
-        read_hash = st.session_state.get('announcement_read_hash', None)
-
-        # cookie 已确认当前版本：本会话不再弹出
-        if read_hash == current_hash:
-            st.session_state.announcement_acknowledged = True
+        # 使用初始化阶段读取到 session_state 的 cookie 值
+        last_shown_date = st.session_state.get("announcement_last_shown_date")
+        if last_shown_date == today:
+            st.session_state.announcement_acknowledged_date = today
             return
 
-        # cookie 无记录或版本不匹配：继续显示公告
+        # 先记录再展示：只要弹出就计为“今天已展示”
+        mark_announcement_shown_today()
         show_announcement()
     except Exception as e:
         print(f"公告检查失败: {e}")
-        # 出错时仍尝试显示，避免静默丢失公告
-        if not st.session_state.get('announcement_acknowledged', False):
+        # 异常时仍允许展示，但 session 内当天不重复
+        if st.session_state.get("announcement_acknowledged_date") != today:
+            st.session_state.announcement_acknowledged_date = today
             show_announcement()
 
 # ==========================================
@@ -870,11 +909,18 @@ if ENABLE_HOME_ANNOUNCEMENT and 'announcement_cookie_loaded' not in st.session_s
     try:
         cm = stx.CookieManager(key="early_announcement_reader")
         announcement_cookies = cm.get_all() or {}
-        st.session_state.announcement_read_hash = announcement_cookies.get("announcement_read", None)
+        st.session_state.announcement_last_shown_date = announcement_cookies.get(
+            ANNOUNCEMENT_LAST_SHOWN_COOKIE_KEY,
+            None,
+        )
         st.session_state.announcement_cookie_loaded = True
     except:
-        st.session_state.announcement_read_hash = None
+        st.session_state.announcement_last_shown_date = None
         st.session_state.announcement_cookie_loaded = True
+
+# 延迟落 cookie：避免公告刚弹出就被组件 rerun 冲掉
+if ENABLE_HOME_ANNOUNCEMENT:
+    flush_pending_announcement_cookie()
 
 # 初始化待处理任务状态
 if "pending_task" not in st.session_state:
@@ -1681,10 +1727,10 @@ def show_welcome_screen():
         st.session_state.pending_prompt = text
 
     with col1:
-        st.button("创业板技术面如何？",
+        st.button("比较宁德时代和阳光电源",
                      use_container_width=True,
                      on_click=set_prompt_callback,
-                     args=("创业板技术面分析下",)
+                     args=("比较宁德时代和阳光电源的基本面和技术面",)
          )
 
     with col2:
@@ -1695,10 +1741,10 @@ def show_welcome_screen():
          )
 
     with col3:
-        st.button("K线分析-强势股票",
+        st.button("哪些期货商在农产品加仓？",
                      use_container_width=True,
                      on_click=set_prompt_callback,
-                     args=("最近有哪些K线强势的股票推荐",)
+                     args=("最近哪些期货商在农产品加仓",)
          )
 
 # ==========================================
@@ -2039,10 +2085,12 @@ if st.session_state.get('is_logged_in', False) and ENABLE_HOME_ANNOUNCEMENT:
 
 # B. 处理卡片点击产生的 Pending Prompt [修改点：处理快捷指令]
 if "pending_prompt" in st.session_state:
-    prompt = st.session_state.pending_prompt
-    del st.session_state.pending_prompt  # 消费掉，防止循环
-    process_user_input(prompt)
-    st.rerun()  # 重新加载以显示新消息
+    # 防止公告弹窗刚弹出就被后续自动 rerun 冲掉
+    if not is_announcement_holdoff_active():
+        prompt = st.session_state.pending_prompt
+        del st.session_state.pending_prompt  # 消费掉，防止循环
+        process_user_input(prompt)
+        st.rerun()  # 重新加载以显示新消息
 
 # ==========================================
 #  B. 界面显示逻辑
@@ -2114,11 +2162,12 @@ if "pending_portfolio_task" in st.session_state and st.session_state.pending_por
     ⏳ {progress_text}（已识别 {recognized_count} 只）
   </div>
 </div>
-""",
+                """,
                 unsafe_allow_html=True,
             )
-            time.sleep(1.2)
-            st.rerun()
+            if not is_announcement_holdoff_active():
+                time.sleep(1.2)
+                st.rerun()
         elif current_status == "success":
             result = task_status.get("result") or {}
             payload = result.get("result") if isinstance(result, dict) else {}
@@ -2271,8 +2320,9 @@ if "pending_task" in st.session_state and st.session_state.pending_task:
                     st.caption("正在后台持续处理，完成后会自动返回结果。")
 
                 # 自动轮询任务状态，避免用户手动点击刷新
-                time.sleep(1.5)
-                st.rerun()
+                if not is_announcement_holdoff_active():
+                    time.sleep(1.5)
+                    st.rerun()
 
             elif current_status == "success":
                 # 任务完成，显示结果
