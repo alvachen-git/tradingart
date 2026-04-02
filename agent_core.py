@@ -28,7 +28,7 @@ from news_tools import get_financial_news
 from fund_flow_tools import tool_get_retail_money_flow
 from polymarket_tool import tool_get_polymarket_sentiment
 from plot_tools import draw_chart_tool,draw_macro_compare_chart
-from futures_fund_flow_tools import get_futures_fund_flow, get_futures_fund_ranking
+from futures_fund_flow_tools import get_futures_fund_flow, get_futures_fund_ranking, get_futures_margin_profile
 from volume_oi_tools import get_volume_oi, get_futures_oi_ranking, get_option_oi_ranking, get_option_volume_abnormal, get_option_oi_abnormal, analyze_etf_option_sentiment, get_etf_option_strikes
 from market_tools import get_market_snapshot, get_price_statistics,tool_query_specific_option,get_historical_price,get_recent_price_series,get_trending_hotspots,get_today_hotlist,analyze_keyword_trend,get_finance_related_trends,search_hotlist_history
 from data_engine import get_commodity_iv_info, check_option_expiry_status,search_broker_holdings_on_date,tool_analyze_position_change,tool_compare_stocks,get_stock_valuation,get_latest_data_date,tool_analyze_broker_positions
@@ -169,6 +169,38 @@ def get_option_multiplier(symbol: str) -> str:
     return "、".join(results)
 
 
+MARGIN_QUERY_KEYWORDS = [
+    "保证金", "合约乘数", "乘数", "一手多少钱", "每手多少钱", "资金占用", "开仓占用", "保证金率",
+]
+STRATEGY_QUERY_KEYWORDS = [
+    "策略", "建议", "怎么做", "怎么操作", "开仓", "平仓", "做多", "做空", "对冲", "仓位",
+]
+
+
+def _contains_any(text: str, keywords: list) -> bool:
+    text_value = str(text or "")
+    return any(k in text_value for k in keywords)
+
+
+def _enforce_margin_monitor_routing(query: str, plan: List[str]) -> List[str]:
+    """
+    保证金/合约乘数问题强制优先 monitor。
+    若用户同时要策略，则固定 monitor -> strategist，再接其余节点。
+    """
+    if not _contains_any(query, MARGIN_QUERY_KEYWORDS):
+        return plan
+
+    want_strategy = _contains_any(query, STRATEGY_QUERY_KEYWORDS)
+    tail = [p for p in plan if p not in {"monitor", "strategist"}]
+    enforced = ["monitor", "strategist"] + tail if want_strategy else ["monitor"] + tail
+
+    deduped = []
+    for step in enforced:
+        if step not in deduped:
+            deduped.append(step)
+    return deduped
+
+
 # ==========================================
 # 2. 定义 Supervisor (大管家)
 # ==========================================
@@ -241,6 +273,7 @@ def supervisor_node(state: AgentState, llm):
     8. 如果用户的问题很模糊 (例如"帮我分析一下"，"黄金怎么看")，要先派chatter去问清楚问题 -> plan=['chatter']。
     9. 只问K线或技术面分析时，只要派analyst，不要再派其他人
     10.如果客户要画图，派 `['generalist']` 。
+    11. 用户问保证金/合约乘数/一手资金占用时，优先派 `monitor`；若同时要策略建议，派 `['monitor','strategist']`。
     """
 
     if is_followup:
@@ -295,6 +328,8 @@ def supervisor_node(state: AgentState, llm):
             final_plan = ["generalist"]
         elif final_plan[0] not in ["generalist", "chatter"]:
             final_plan = ["generalist"] + [p for p in final_plan if p != "generalist"]
+
+    final_plan = _enforce_margin_monitor_routing(query, final_plan)
 
     # 去重并保持顺序，避免路由重复
     deduped_plan = []
@@ -361,7 +396,7 @@ def generalist_node(state: AgentState, llm):
         get_price_statistics, check_option_expiry_status, tool_stock_hedging_analysis,
         tool_futures_correlation_check, tool_stock_correlation_check, calculate_hedging_beta,
         tool_get_retail_money_flow, draw_chart_tool, get_stock_valuation, tool_compare_stocks,
-        get_futures_fund_flow, get_futures_fund_ranking, get_available_patterns, analyze_etf_option_sentiment,
+        get_futures_fund_flow, get_futures_fund_ranking, get_futures_margin_profile, get_available_patterns, analyze_etf_option_sentiment,
         get_etf_option_strikes,tool_analyze_broker_positions, run_option_strategy_backtest,
         get_macro_indicator,get_macro_overview,analyze_yield_curve
     ]
@@ -388,6 +423,7 @@ def generalist_node(state: AgentState, llm):
         8. 对冲分析 -> calculate_hedging_beta
         9. 查某期货资金流动 -> get_futures_fund_flow
         10.查全部期货资金沉淀排名 -> get_futures_fund_ranking
+        10.1 查期货保证金/合约乘数/资金占用 -> get_futures_margin_profile
         11.查商品龙虎榜/期货商持仓 -> search_broker_holdings_on_date  
         12.查某期货商最近持仓变化情况 -> tool_analyze_position_change
         13.查成交量和持仓量 -> get_volume_oi
@@ -669,6 +705,7 @@ def monitor_node(state: AgentState, llm):
         tool_get_retail_money_flow,  # 股票行业资金
         get_futures_fund_flow,  # 期货资金流
         get_futures_fund_ranking, # 期货沉淀资金排名
+        get_futures_margin_profile,  # 保证金/合约乘数
         get_commodity_iv_info,  # IV/波动率/Rank
         search_broker_holdings_on_date,  # 期货商持仓排名
         tool_analyze_position_change,  # 持仓变动分析
@@ -720,6 +757,7 @@ def monitor_node(state: AgentState, llm):
     - 查股票行业资金 -> tool_get_retail_money_flow
     - 查某期货资金流动 -> get_futures_fund_flow
     - 查全部期货资金沉淀排名 -> get_futures_fund_ranking
+    - 查期货保证金/合约乘数/资金占用 -> get_futures_margin_profile
     - 查某天某品种的期货商持仓排名（龙虎榜） -> search_broker_holdings_on_date 
     - 查某品种一段时间内各期货商的持仓变化 -> tool_analyze_position_change 
     - 查某期货商在各品种的持仓变化 -> tool_analyze_broker_positions （当前净持仓代表期货商对这品种的趋势判断）
@@ -848,6 +886,7 @@ def strategist_node(state: AgentState, llm):
         【客户问题】：{user_q}
         【客户风险偏好】：{risk_pref}
         【客户历史记忆】：{mem_context}
+        【市场资金面/保证金信息】：{fund}
         【技术面参考】：{trend} 、 {tech_view}{portfolio_context}
 
         【工作流程】
@@ -1166,6 +1205,7 @@ def chatter_node(state: AgentState, llm=None):
 
         # 市场数据工具（如果用户问行情相关）
         get_market_snapshot,  # 快速获取标的价格
+        get_futures_margin_profile,  # 期货保证金/合约乘数
 
     ]
 
@@ -1175,6 +1215,7 @@ def chatter_node(state: AgentState, llm=None):
         2. **第二步可选**：如果知识库信息不足或需要最新数据，再用其他工具补充
            - `get_financial_news`：获取财经新闻
            - `get_market_snapshot`：获取实时行情
+        3. 如果用户问期货保证金/合约乘数/一手资金占用，优先调用 `get_futures_margin_profile`
     """
     if is_followup:
         core_rules = """

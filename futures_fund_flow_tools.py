@@ -5,6 +5,8 @@ from dotenv import load_dotenv
 from langchain_core.tools import tool
 import streamlit as st
 import re
+import time
+import akshare as ak
 
 # 1. 初始化数据库连接
 load_dotenv(override=True)
@@ -269,6 +271,9 @@ MARGIN_RATE = {
 # 默认值
 DEFAULT_MULTIPLIER = 10
 DEFAULT_MARGIN_RATE = 0.10
+BROKER_MARGIN_FACTOR_FIXED = 1.20
+_FEES_INFO_CACHE = {"ts": 0.0, "df": None}
+_RULE_CACHE = {"ts": 0.0, "df": None}
 
 
 def extract_contract_month(ts_code: str) -> str:
@@ -349,6 +354,283 @@ def parse_contract_input(user_input: str) -> tuple:
     else:
         code = resolve_futures_symbol(user_input)
         return (code, None)
+
+
+def _to_float(value):
+    """宽松数字解析，支持百分号与千位分隔符。"""
+    if value is None:
+        return None
+    try:
+        if isinstance(value, (int, float)):
+            return float(value)
+        text_value = str(value).strip().replace(",", "")
+        if not text_value:
+            return None
+        if text_value.endswith("%"):
+            text_value = text_value[:-1]
+        return float(text_value)
+    except Exception:
+        return None
+
+
+def _normalize_margin_ratio(value):
+    """统一保证金率到 [0, 1] 比例。"""
+    ratio = _to_float(value)
+    if ratio is None or ratio <= 0:
+        return None
+    if ratio > 1.5:
+        ratio /= 100.0
+    return ratio
+
+
+def _format_money(value):
+    if value is None:
+        return "N/A"
+    return f"{float(value):,.2f} 元"
+
+
+def _format_pct(value):
+    if value is None:
+        return "N/A"
+    return f"{float(value) * 100:.2f}%"
+
+
+def _sanitize_side(side: str) -> str:
+    side_text = str(side or "").strip().lower()
+    if side_text in {"short", "sell", "空", "空头"}:
+        return "short"
+    return "long"
+
+
+def _extract_contract_hint(query: str):
+    cleaned = re.sub(r"\s+", "", str(query or "").upper())
+    match = re.search(r"([A-Z]{1,3}\d{3,4})", cleaned)
+    return match.group(1) if match else ""
+
+
+def _get_fees_info_cached(ttl_seconds: int = 300) -> pd.DataFrame:
+    now = time.time()
+    if _FEES_INFO_CACHE["df"] is not None and now - _FEES_INFO_CACHE["ts"] < ttl_seconds:
+        return _FEES_INFO_CACHE["df"]
+    df = ak.futures_fees_info()
+    _FEES_INFO_CACHE["df"] = df
+    _FEES_INFO_CACHE["ts"] = now
+    return df
+
+
+def _get_rule_cached(ttl_seconds: int = 300) -> pd.DataFrame:
+    now = time.time()
+    if _RULE_CACHE["df"] is not None and now - _RULE_CACHE["ts"] < ttl_seconds:
+        return _RULE_CACHE["df"]
+    df = ak.futures_rule()
+    _RULE_CACHE["df"] = df
+    _RULE_CACHE["ts"] = now
+    return df
+
+
+def _get_latest_price_for_margin_estimation(code: str, month: str = None):
+    """用于保证金估算的最新价格，返回 (price, ts_code, trade_date)。"""
+    if engine is None:
+        return (None, "", "")
+    try:
+        if month:
+            target_contract = get_contract_by_month(code, month)
+        else:
+            target_contract = get_dominant_contract(code)
+        if not target_contract:
+            return (None, "", "")
+        sql = text(
+            """
+            SELECT trade_date, ts_code, settle_price, close_price
+            FROM futures_price
+            WHERE ts_code = :code
+            ORDER BY trade_date DESC
+            LIMIT 1
+            """
+        )
+        df = pd.read_sql(sql, engine, params={"code": target_contract})
+        if df.empty:
+            return (None, "", "")
+        row = df.iloc[0]
+        price = _to_float(row.get("settle_price"))
+        if price is None or price <= 0:
+            price = _to_float(row.get("close_price"))
+        return (price, str(row.get("ts_code", "") or ""), str(row.get("trade_date", "") or ""))
+    except Exception:
+        return (None, "", "")
+
+
+def _select_fee_row(df: pd.DataFrame, code: str, month: str = None, contract_hint: str = ""):
+    if df is None or df.empty:
+        return None
+    work_df = df.copy()
+    if "合约代码" not in work_df.columns or "品种代码" not in work_df.columns:
+        return None
+
+    work_df["合约代码"] = work_df["合约代码"].astype(str).str.upper().str.strip()
+    work_df["品种代码"] = work_df["品种代码"].astype(str).str.upper().str.strip()
+    work_df = work_df[work_df["品种代码"] == code]
+    if work_df.empty:
+        return None
+
+    if contract_hint:
+        exact_df = work_df[work_df["合约代码"] == contract_hint]
+        if not exact_df.empty:
+            work_df = exact_df
+
+    if month:
+        month_text = str(month)
+        month_df = work_df[work_df["合约代码"].str.endswith(month_text)]
+        if month_df.empty and len(month_text) == 2:
+            month_df = work_df[work_df["合约代码"].str[-2:] == month_text]
+        if not month_df.empty:
+            work_df = month_df
+
+    if "持仓量" in work_df.columns:
+        oi_series = pd.to_numeric(work_df["持仓量"], errors="coerce")
+        if oi_series.notna().any():
+            idx = oi_series.idxmax()
+            return work_df.loc[idx]
+    if "成交量" in work_df.columns:
+        vol_series = pd.to_numeric(work_df["成交量"], errors="coerce")
+        if vol_series.notna().any():
+            idx = vol_series.idxmax()
+            return work_df.loc[idx]
+    return work_df.iloc[0]
+
+
+@tool
+def get_futures_margin_profile(query: str, lots: int = 1, side: str = "long", broker_margin_factor: float = 1.0):
+    """
+    【期货保证金/合约乘数查询工具】
+    输入品种或合约，返回保证金率、合约乘数、每手保证金估算和按手数计算的资金占用。
+    数据优先级: futures_fees_info -> futures_rule -> 本地静态映射。
+    注意: 为统一口径，期货公司上浮系数固定按 1.20x 计算，入参 broker_margin_factor 仅为兼容保留。
+    """
+    clean_query = str(query or "").strip()
+    if not clean_query:
+        return "请输入品种或合约，例如：螺纹钢、RB2610、白银。"
+
+    try:
+        lots_value = int(float(lots))
+    except Exception:
+        lots_value = 1
+    lots_value = max(1, lots_value)
+    factor = BROKER_MARGIN_FACTOR_FIXED
+    side_key = _sanitize_side(side)
+
+    code, month = parse_contract_input(clean_query)
+    contract_hint = _extract_contract_hint(clean_query)
+    if contract_hint:
+        code = re.sub(r"\d", "", contract_hint).upper()
+        month = re.search(r"(\d{3,4})", contract_hint).group(1)
+
+    if not re.fullmatch(r"[A-Z]{1,3}", str(code or "").upper()):
+        return f"未能识别有效期货品种代码: {clean_query}"
+
+    code = code.upper()
+    long_ratio = None
+    short_ratio = None
+    multiplier = None
+    latest_price = None
+    long_margin_lot = None
+    short_margin_lot = None
+    selected_contract = contract_hint
+    source_name = ""
+    update_time = ""
+    trade_date = ""
+
+    # 1) 主源：ak.futures_fees_info
+    try:
+        fees_df = _get_fees_info_cached()
+        selected = _select_fee_row(fees_df, code=code, month=month, contract_hint=contract_hint)
+        if selected is not None:
+            source_name = "ak.futures_fees_info"
+            selected_contract = str(selected.get("合约代码", "") or selected_contract)
+            multiplier = _to_float(selected.get("合约乘数"))
+            long_ratio = _normalize_margin_ratio(selected.get("做多保证金率"))
+            short_ratio = _normalize_margin_ratio(selected.get("做空保证金率"))
+            latest_price = _to_float(selected.get("最新价"))
+            if latest_price is None or latest_price <= 0:
+                latest_price = _to_float(selected.get("上日结算价"))
+            long_margin_lot = _to_float(selected.get("做多保证金/手"))
+            short_margin_lot = _to_float(selected.get("做空保证金/手"))
+            update_time = str(selected.get("更新时间", "") or "")
+    except Exception:
+        pass
+
+    # 2) 回退：ak.futures_rule
+    if not source_name:
+        try:
+            rule_df = _get_rule_cached()
+            if not rule_df.empty and {"代码", "交易保证金比例", "合约乘数"}.issubset(rule_df.columns):
+                work_df = rule_df.copy()
+                work_df["代码"] = work_df["代码"].astype(str).str.upper().str.strip()
+                work_df = work_df[work_df["代码"] == code]
+                if not work_df.empty:
+                    row = work_df.iloc[0]
+                    source_name = "ak.futures_rule"
+                    multiplier = _to_float(row.get("合约乘数"))
+                    rule_ratio = _normalize_margin_ratio(row.get("交易保证金比例"))
+                    long_ratio = rule_ratio
+                    short_ratio = rule_ratio
+        except Exception:
+            pass
+
+    # 3) 兜底：本地静态映射
+    if not source_name:
+        source_name = "static_mapping"
+        multiplier = get_contract_multiplier(code)
+        long_ratio = get_margin_rate(code)
+        short_ratio = long_ratio
+
+    if multiplier is None or multiplier <= 0:
+        multiplier = get_contract_multiplier(code)
+    if long_ratio is None:
+        long_ratio = get_margin_rate(code)
+    if short_ratio is None:
+        short_ratio = long_ratio
+
+    if latest_price is None or latest_price <= 0:
+        db_price, db_contract, db_trade_date = _get_latest_price_for_margin_estimation(code, month)
+        latest_price = db_price if db_price and db_price > 0 else latest_price
+        if not selected_contract and db_contract:
+            selected_contract = db_contract
+        trade_date = str(db_trade_date or "")
+
+    if (long_margin_lot is None or long_margin_lot <= 0) and latest_price and long_ratio:
+        long_margin_lot = latest_price * multiplier * long_ratio
+    if (short_margin_lot is None or short_margin_lot <= 0) and latest_price and short_ratio:
+        short_margin_lot = latest_price * multiplier * short_ratio
+
+    chosen_lot_margin = long_margin_lot if side_key == "long" else short_margin_lot
+    total_margin = chosen_lot_margin * lots_value * factor if chosen_lot_margin is not None else None
+    side_text = "多头" if side_key == "long" else "空头"
+
+    report = f"""
+📌 **期货保证金/合约乘数**
+- 查询输入: {clean_query}
+- 命中品种: {code}
+- 命中合约: {selected_contract or '未指定（按品种）'}
+- 数据来源: {source_name}
+- 合约乘数: {float(multiplier):g}
+- 多头保证金率: {_format_pct(long_ratio)}
+- 空头保证金率: {_format_pct(short_ratio)}
+- 估算价格: {latest_price if latest_price is not None else 'N/A'}
+- 估算每手保证金(多头): {_format_money(long_margin_lot)}
+- 估算每手保证金(空头): {_format_money(short_margin_lot)}
+- 计算方向: {side_text}
+- 手数: {lots_value}
+- 期货公司上浮系数(统一): {factor:.2f}x
+- 估算总保证金({side_text}, 已含上浮): {_format_money(total_margin)}
+- 口径说明: 优先交易所/行情聚合数据，失败回退到规则表与静态映射；实盘以期货公司与交易所当日通知为准。
+""".strip()
+
+    if update_time:
+        report += f"\n- 数据更新时间: {update_time}"
+    if trade_date:
+        report += f"\n- 价格日期: {trade_date}"
+    return report
 
 
 def get_dominant_contract(symbol_code: str, trade_date: str = None) -> str:
