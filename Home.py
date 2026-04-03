@@ -1,7 +1,6 @@
 import streamlit as st
 import hashlib
 from task_manager import TaskManager
-from deep_task_manager import DeepTaskManager
 import time
 import pandas as pd
 import data_engine as de
@@ -40,6 +39,13 @@ from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 # Streamlit 运行时/第三方组件仍可能访问旧别名，提前映射以避免弃用日志噪音。
 if hasattr(st, "user"):
     st.experimental_user = st.user
+
+try:
+    from deep_task_manager import DeepTaskManager
+except Exception:
+    DeepTaskManager = None
+
+ENABLE_DEEP_MODE = False  # deep 模块开发中，首页先回退为普通模式
 
 
 
@@ -955,8 +961,10 @@ if should_auto_login:
 
         task_manager = TaskManager()
         pending_task_data = task_manager.get_user_pending_task(str(c_user))
-        deep_task_manager = DeepTaskManager()
-        pending_deep_task_data = deep_task_manager.get_user_pending_task(str(c_user))
+        pending_deep_task_data = None
+        if ENABLE_DEEP_MODE and DeepTaskManager is not None:
+            deep_task_manager = DeepTaskManager()
+            pending_deep_task_data = deep_task_manager.get_user_pending_task(str(c_user))
         pending_portfolio_data = task_manager.get_user_pending_portfolio_task(str(c_user))
         if not pending_task_data and pending_deep_task_data:
             pending_task_data = pending_deep_task_data
@@ -1426,6 +1434,7 @@ def auto_submit_portfolio_task(uploaded_img):
 # ==========================================
 def process_user_input(prompt_text, deep_mode=False):
     """处理用户输入（无论是来自输入框还是快捷卡片）"""
+    deep_mode = bool(deep_mode and ENABLE_DEEP_MODE and DeepTaskManager is not None)
 
     # --- 1. 图片识别逻辑 (保留) ---
     image_context = ""
@@ -2020,7 +2029,8 @@ with st.sidebar:
                     tm = TaskManager()
                     tm.clear_user_pending_task(user)
                     tm.clear_user_pending_portfolio_task(user)
-                    DeepTaskManager().clear_user_pending_task(user)
+                    if ENABLE_DEEP_MODE and DeepTaskManager is not None:
+                        DeepTaskManager().clear_user_pending_task(user)
                 except Exception as e:
                     print(f"清理待处理任务失败: {e}")
 
@@ -2254,7 +2264,8 @@ if "pending_task" in st.session_state and st.session_state.pending_task:
             content_placeholder = st.empty()
 
             # 查询任务状态
-            task_manager = DeepTaskManager() if task_mode == "deep" else TaskManager()
+            use_deep_manager = (task_mode == "deep" and ENABLE_DEEP_MODE and DeepTaskManager is not None)
+            task_manager = DeepTaskManager() if use_deep_manager else TaskManager()
             task_status = task_manager.get_task_status(task_id)
             current_status = task_status["status"]
 
@@ -2474,7 +2485,8 @@ if "pending_task" in st.session_state and st.session_state.pending_task:
         # 🔥 [新增] 同时清除 Redis 中的待处理任务
         current_user = st.session_state.get('user_id', "访客")
         if current_user != "访客":
-            task_manager = DeepTaskManager() if task_mode == "deep" else TaskManager()
+            use_deep_manager = (task_mode == "deep" and ENABLE_DEEP_MODE and DeepTaskManager is not None)
+            task_manager = DeepTaskManager() if use_deep_manager else TaskManager()
             task_manager.clear_user_pending_task(current_user)
 
         st.rerun()
@@ -2565,11 +2577,14 @@ button[data-testid="stExpandSidebarButton"] *,
 """, unsafe_allow_html=True)
 
 # D. 底部输入框 (Sticky Footer) [修改点：使用 st.chat_input]
-st.session_state.deep_mode_enabled = st.toggle(
-    "Deep 报告模式",
-    value=bool(st.session_state.get("deep_mode_enabled", False)),
-    help="开启后将走独立 Deep 队列并输出结构化交易报告。",
-)
+if ENABLE_DEEP_MODE and DeepTaskManager is not None:
+    st.session_state.deep_mode_enabled = st.toggle(
+        "Deep 报告模式",
+        value=bool(st.session_state.get("deep_mode_enabled", False)),
+        help="开启后将走独立 Deep 队列并输出结构化交易报告。",
+    )
+else:
+    st.session_state.deep_mode_enabled = False
 
 if prompt := st.chat_input("我受过交易汇训练，欢迎问我任何实战交易问题..."):
     if not st.session_state['is_logged_in']:
