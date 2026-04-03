@@ -4,9 +4,11 @@ import { onShow, onReachBottom, onPullDownRefresh } from '@dcloudio/uni-app'
 import {
   intelApi,
   aiSimApi,
+  userApi,
   type ReportItem,
   type AiOverviewPayload,
   type AiReviewPayload,
+  type UserProfile,
 } from '../../api/index'
 import { formatAiForMobile } from '../../utils/ai_mobile_formatter'
 import { useAuthStore } from '../../store/auth'
@@ -32,6 +34,9 @@ const reports = ref<ReportItem[]>([])
 const page = ref(1)
 const hasMore = ref(true)
 const reportLoading = ref(false)
+const intelAccessChecked = ref(false)
+const intelAccessChecking = ref(false)
+const allowedChannelCodes = ref<Set<string>>(new Set())
 
 // ── AI日记 ─────────────────────────────────────────────────
 const AI_OVERVIEW_CACHE_KEY = 'intel_ai_overview_cache_v1'
@@ -51,6 +56,12 @@ const currentChannelLabel = computed(() => {
   const cur = channels.find((c) => c.code === activeChannel.value)
   return cur?.label || '全部'
 })
+
+const INTEL_ACCESS_CODES = new Set(
+  channels
+    .map((c) => String(c.code || '').trim().toLowerCase())
+    .filter(Boolean),
+)
 
 const reviewDates = computed(() => aiOverview.value?.review_dates || [])
 const selectedReviewLabel = computed(() => {
@@ -186,11 +197,16 @@ function drawMpNavChart() {
 }
 
 onShow(() => {
-  if (!auth.isLoggedIn) uni.reLaunch({ url: '/pages/login/index' })
+  if (!auth.isLoggedIn) {
+    uni.reLaunch({ url: '/pages/login/index' })
+    return
+  }
+  void syncAccessAndBootstrap()
 })
 
 onMounted(() => {
-  loadReports(true)
+  if (!auth.isLoggedIn) return
+  if (!intelAccessChecked.value) void syncAccessAndBootstrap()
 })
 
 onReachBottom(async () => {
@@ -400,6 +416,65 @@ function toDetail(id: number) {
   uni.navigateTo({ url: `/pages/intel/detail?id=${id}` })
 }
 
+function normalizeCode(raw: string) {
+  return String(raw || '').trim().toLowerCase()
+}
+
+function calcAllowedChannelCodes(profile: UserProfile | null): Set<string> {
+  const out = new Set<string>()
+  if (!profile?.subscriptions?.length) return out
+  profile.subscriptions.forEach((s) => {
+    const code = normalizeCode(s.channel_code)
+    if (!!s.is_active && INTEL_ACCESS_CODES.has(code)) out.add(code)
+  })
+  return out
+}
+
+function canAccessChannel(channelCode: string): boolean {
+  const code = normalizeCode(channelCode)
+  return code ? allowedChannelCodes.value.has(code) : false
+}
+
+function canAccessReport(item: ReportItem): boolean {
+  return canAccessChannel(item.channel_code)
+}
+
+function handleReportTap(item: ReportItem) {
+  if (!canAccessReport(item)) {
+    goRecharge()
+    return
+  }
+  toDetail(item.id)
+}
+
+async function refreshIntelAccess() {
+  if (intelAccessChecking.value) return
+  intelAccessChecking.value = true
+  try {
+    const profile = await userApi.profile()
+    allowedChannelCodes.value = calcAllowedChannelCodes(profile)
+  } catch {
+    allowedChannelCodes.value = new Set()
+  } finally {
+    intelAccessChecked.value = true
+    intelAccessChecking.value = false
+  }
+}
+
+async function syncAccessAndBootstrap() {
+  await refreshIntelAccess()
+  if (activeMainTab.value === 'intel' && !reports.value.length && !reportLoading.value) {
+    await loadReports(true)
+  }
+  if (activeMainTab.value === 'ai' && !aiOverview.value && !aiLoading.value) {
+    await ensureAiOverview(false)
+  }
+}
+
+function goRecharge() {
+  uni.navigateTo({ url: '/pages/recharge/index' })
+}
+
 function formatDate(s: string) {
   if (!s) return ''
   return s.slice(0, 16).replace('T', ' ')
@@ -499,29 +574,40 @@ watch(
 
     <view v-if="activeMainTab === 'intel'">
       <view class="list">
+        <view v-if="!intelAccessChecked" class="center-tip">
+          <text class="muted-text">权限检查中...</text>
+        </view>
+
         <view
+          v-else
           v-for="item in reports"
           :key="item.id"
           class="report-card"
-          @tap="toDetail(item.id)"
+          @tap="handleReportTap(item)"
         >
-          <view class="card-top">
-            <view class="channel-badge">{{ formatChannelName(item.channel_name) }}</view>
-            <text class="date-text">{{ formatDate(item.published_at) }}</text>
+          <view v-if="canAccessReport(item)">
+            <view class="card-top">
+              <view class="channel-badge">{{ formatChannelName(item.channel_name) }}</view>
+              <text class="date-text">{{ formatDate(item.published_at) }}</text>
+            </view>
+            <text class="card-title">{{ formatReportTitle(item.title) }}</text>
+            <text class="card-summary">{{ stripHtml(item.summary) }}</text>
           </view>
-          <text class="card-title">{{ formatReportTitle(item.title) }}</text>
-          <text class="card-summary">{{ stripHtml(item.summary) }}</text>
+          <view v-else class="locked-wrap">
+            <text class="locked-title">无权限，请到充值中心开通</text>
+            <text class="locked-sub">点击前往充值中心</text>
+          </view>
         </view>
 
-        <view v-if="reportLoading" class="center-tip">
+        <view v-if="intelAccessChecked && reportLoading" class="center-tip">
           <text class="muted-text">加载中...</text>
         </view>
 
-        <view v-else-if="!hasMore && reports.length > 0" class="center-tip">
+        <view v-else-if="intelAccessChecked && !hasMore && reports.length > 0" class="center-tip">
           <text class="muted-text">— 已全部加载 —</text>
         </view>
 
-        <view v-else-if="!reportLoading && reports.length === 0" class="empty-state">
+        <view v-else-if="intelAccessChecked && !reportLoading && reports.length === 0" class="empty-state">
           <text class="empty-icon">◉</text>
           <text class="muted-text">暂无情报，稍后再来</text>
         </view>
@@ -529,7 +615,11 @@ watch(
     </view>
 
     <view v-else class="ai-wrap">
-      <view v-if="aiLoading" class="center-tip">
+      <view v-if="!intelAccessChecked" class="center-tip">
+        <text class="muted-text">权限检查中...</text>
+      </view>
+
+      <view v-else-if="aiLoading" class="center-tip">
         <text class="muted-text">AI日记加载中...</text>
       </view>
 
@@ -1036,6 +1126,26 @@ watch(
 .center-tip {
   text-align: center;
   padding: 38rpx 0;
+}
+
+.locked-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 168rpx;
+  gap: 12rpx;
+}
+
+.locked-title {
+  color: #f0f4ff;
+  font-size: 30rpx;
+  font-weight: 600;
+}
+
+.locked-sub {
+  color: #f5c518;
+  font-size: 24rpx;
 }
 
 .muted-text {
