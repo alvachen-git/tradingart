@@ -1,6 +1,7 @@
 import streamlit as st
 import hashlib
 from task_manager import TaskManager
+from deep_task_manager import DeepTaskManager
 import time
 import pandas as pd
 import data_engine as de
@@ -56,7 +57,7 @@ for key in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"]:
         del os.environ[key]
 
 # ==================== 公告配置区 ====================
-ENABLE_HOME_ANNOUNCEMENT = True  # 开启首页公告
+ENABLE_HOME_ANNOUNCEMENT = False  # 临时关闭首页公告
 # Fast router is disabled by default to avoid false positives on
 # historical/list queries (for example: "最近两周每天价格").
 FAST_ROUTER_ENABLED = os.getenv("AIBOTA_FAST_ROUTER_ENABLED", "0").strip().lower() in {"1", "true", "yes", "on"}
@@ -925,6 +926,8 @@ if ENABLE_HOME_ANNOUNCEMENT:
 # 初始化待处理任务状态
 if "pending_task" not in st.session_state:
     st.session_state.pending_task = None
+if "deep_mode_enabled" not in st.session_state:
+    st.session_state.deep_mode_enabled = False
 if "pending_portfolio_task" not in st.session_state:
     st.session_state.pending_portfolio_task = None
 if "portfolio_last_attempt_hash" not in st.session_state:
@@ -952,7 +955,11 @@ if should_auto_login:
 
         task_manager = TaskManager()
         pending_task_data = task_manager.get_user_pending_task(str(c_user))
+        deep_task_manager = DeepTaskManager()
+        pending_deep_task_data = deep_task_manager.get_user_pending_task(str(c_user))
         pending_portfolio_data = task_manager.get_user_pending_portfolio_task(str(c_user))
+        if not pending_task_data and pending_deep_task_data:
+            pending_task_data = pending_deep_task_data
 
         if pending_task_data:
             # 恢复任务信息到 Session State
@@ -960,6 +967,7 @@ if should_auto_login:
                 "task_id": pending_task_data["task_id"],
                 "prompt": pending_task_data["prompt"],
                 "image_context": pending_task_data.get("image_context", ""),
+                "mode": pending_task_data.get("mode", "normal"),
                 "risk": pending_task_data.get("risk_preference", "稳健型"),
                 "start_time": pending_task_data["start_time"]
             }
@@ -1416,7 +1424,7 @@ def auto_submit_portfolio_task(uploaded_img):
 # ==========================================
 #  5. 核心逻辑处理函数 [修改点：封装成函数以便复用]
 # ==========================================
-def process_user_input(prompt_text):
+def process_user_input(prompt_text, deep_mode=False):
     """处理用户输入（无论是来自输入框还是快捷卡片）"""
 
     # --- 1. 图片识别逻辑 (保留) ---
@@ -1444,7 +1452,7 @@ def process_user_input(prompt_text):
     final_prompt = image_context + prompt_text
 
     # --- 3. 极速伪路由检查（默认关闭，可通过环境变量显式开启） ---
-    if FAST_ROUTER_ENABLED:
+    if FAST_ROUTER_ENABLED and not deep_mode:
         is_hit, fast_response = fast_router_check(final_prompt)
         if is_hit:
             st.session_state.messages.append({"role": "assistant", "content": fast_response})
@@ -1485,7 +1493,7 @@ def process_user_input(prompt_text):
     # 🔥 [修改] process_user_input 函数中的执行部分
     # ==========================================
     # 创建任务管理器
-    task_manager = TaskManager()
+    task_manager = DeepTaskManager() if deep_mode else TaskManager()
 
     # 准备历史消息
     history_msgs = st.session_state.messages[:-1] if len(st.session_state.messages) > 1 else []
@@ -1493,15 +1501,25 @@ def process_user_input(prompt_text):
     history_for_task = [{"role": msg["role"], "content": msg["content"]} for msg in recent_history]
 
     # 提交后台任务
-    task_id = task_manager.create_task(
-        user_id=current_user,
-        prompt=final_prompt,
-        image_context=image_context,
-        risk_preference=risk,
-        history_messages=history_for_task,
-        context_payload=context_payload,
-        has_portfolio=has_portfolio
-    )
+    if deep_mode:
+        deep_risk = "balanced"
+        task_id = task_manager.create_task(
+            user_id=current_user,
+            prompt=final_prompt,
+            risk_preference=deep_risk,
+            history_messages=history_for_task,
+            context_payload=context_payload,
+        )
+    else:
+        task_id = task_manager.create_task(
+            user_id=current_user,
+            prompt=final_prompt,
+            image_context=image_context,
+            risk_preference=risk,
+            history_messages=history_for_task,
+            context_payload=context_payload,
+            has_portfolio=has_portfolio
+        )
 
     # 🔥 [新增] 异步更新用户画像（带防重复机制）
     if current_user != "访客" and len(prompt_text) > 5:
@@ -1569,7 +1587,8 @@ def process_user_input(prompt_text):
         "task_id": task_id,
         "prompt": final_prompt,
         "image_context": image_context,
-        "risk": risk,
+        "mode": "deep" if deep_mode else "normal",
+        "risk": "balanced" if deep_mode else risk,
         "context_payload": context_payload,
         "start_time": time.time()
     }
@@ -2001,6 +2020,7 @@ with st.sidebar:
                     tm = TaskManager()
                     tm.clear_user_pending_task(user)
                     tm.clear_user_pending_portfolio_task(user)
+                    DeepTaskManager().clear_user_pending_task(user)
                 except Exception as e:
                     print(f"清理待处理任务失败: {e}")
 
@@ -2089,7 +2109,7 @@ if "pending_prompt" in st.session_state:
     if not is_announcement_holdoff_active():
         prompt = st.session_state.pending_prompt
         del st.session_state.pending_prompt  # 消费掉，防止循环
-        process_user_input(prompt)
+        process_user_input(prompt, deep_mode=bool(st.session_state.get("deep_mode_enabled", False)))
         st.rerun()  # 重新加载以显示新消息
 
 # ==========================================
@@ -2222,6 +2242,7 @@ if "pending_task" in st.session_state and st.session_state.pending_task:
     task_info = st.session_state.pending_task
     task_id = task_info["task_id"]
     task_start = task_info["start_time"]
+    task_mode = task_info.get("mode", "normal")
 
     # 获取当前用户
     current_user = st.session_state.get('user_id', "访客")
@@ -2233,7 +2254,7 @@ if "pending_task" in st.session_state and st.session_state.pending_task:
             content_placeholder = st.empty()
 
             # 查询任务状态
-            task_manager = TaskManager()
+            task_manager = DeepTaskManager() if task_mode == "deep" else TaskManager()
             task_status = task_manager.get_task_status(task_id)
             current_status = task_status["status"]
 
@@ -2426,9 +2447,25 @@ if "pending_task" in st.session_state and st.session_state.pending_task:
 
                 # 🔥 [新增] 同时清除 Redis 中的待处理任务
                 task_manager.clear_user_pending_task(current_user)
-
-                time.sleep(2)
-                st.rerun()
+                if task_mode == "deep":
+                    st.session_state.deep_mode_enabled = False
+                    fallback_prompt = str(task_info.get("prompt") or "").strip()
+                    if fallback_prompt and st.button("一键转普通分析", key=f"deep_fallback_error_{task_id}"):
+                        process_user_input(fallback_prompt, deep_mode=False)
+                        st.rerun()
+                else:
+                    time.sleep(2)
+                    st.rerun()
+            elif current_status == "timeout":
+                status_placeholder.warning("⏱️ Deep 报告超时")
+                content_placeholder.warning("Deep 报告在预算与时限内未完成，建议缩小问题范围或切换普通分析。")
+                del st.session_state.pending_task
+                task_manager.clear_user_pending_task(current_user)
+                st.session_state.deep_mode_enabled = False
+                fallback_prompt = str(task_info.get("prompt") or "").strip()
+                if fallback_prompt and st.button("一键转普通分析", key=f"deep_fallback_timeout_{task_id}"):
+                    process_user_input(fallback_prompt, deep_mode=False)
+                    st.rerun()
     else:
         # 超时，清除任务
         st.warning("⏱️ 任务超时，请重新提问")
@@ -2437,7 +2474,7 @@ if "pending_task" in st.session_state and st.session_state.pending_task:
         # 🔥 [新增] 同时清除 Redis 中的待处理任务
         current_user = st.session_state.get('user_id', "访客")
         if current_user != "访客":
-            task_manager = TaskManager()
+            task_manager = DeepTaskManager() if task_mode == "deep" else TaskManager()
             task_manager.clear_user_pending_task(current_user)
 
         st.rerun()
@@ -2528,9 +2565,23 @@ button[data-testid="stExpandSidebarButton"] *,
 """, unsafe_allow_html=True)
 
 # D. 底部输入框 (Sticky Footer) [修改点：使用 st.chat_input]
+st.session_state.deep_mode_enabled = st.toggle(
+    "Deep 报告模式",
+    value=bool(st.session_state.get("deep_mode_enabled", False)),
+    help="开启后将走独立 Deep 队列并输出结构化交易报告。",
+)
+
 if prompt := st.chat_input("我受过交易汇训练，欢迎问我任何实战交易问题..."):
     if not st.session_state['is_logged_in']:
         st.warning("🔒 请先在左侧侧边栏登录")
     else:
-        process_user_input(prompt)
+        normalized_prompt = str(prompt).strip()
+        use_deep = bool(st.session_state.get("deep_mode_enabled", False))
+        if normalized_prompt.lower().startswith("/deep "):
+            use_deep = True
+            normalized_prompt = normalized_prompt[6:].strip()
+        if not normalized_prompt:
+            st.warning("请输入有效的问题内容。")
+            st.stop()
+        process_user_input(normalized_prompt, deep_mode=use_deep)
         st.rerun()  # 确保界面更新
