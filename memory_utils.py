@@ -1,10 +1,31 @@
 import os
-from langchain_community.vectorstores import Chroma
+import warnings
 from langchain_community.embeddings import DashScopeEmbeddings
 from langchain_core.documents import Document
 from datetime import datetime
 from chromadb.config import Settings
 import chromadb
+
+try:
+    from langchain_chroma import Chroma  # type: ignore
+    _CHROMA_BACKEND = "langchain_chroma"
+except ImportError:
+    try:
+        from langchain_core._api.deprecation import LangChainDeprecationWarning  # type: ignore
+    except Exception:
+        LangChainDeprecationWarning = Warning  # type: ignore
+
+    # Fallback for environments that haven't installed langchain-chroma yet.
+    # Suppress import-time deprecation noise while keeping runtime behavior.
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            category=LangChainDeprecationWarning,
+            message=r".*langchain_community\.vectorstores\.Chroma.*",
+        )
+        from langchain_community.vectorstores import Chroma  # type: ignore
+
+    _CHROMA_BACKEND = "langchain_community"
 
 # 1. 初始化 Embedding 模型
 if not os.getenv("DASHSCOPE_API_KEY"):
@@ -16,6 +37,20 @@ embeddings = DashScopeEmbeddings(
 )
 
 PERSIST_DIRECTORY = "./chroma_memory_db"
+
+
+def _needs_manual_persist() -> bool:
+    """
+    Chroma 0.4+ persists automatically. Older versions may still require persist().
+    """
+    version = getattr(chromadb, "__version__", "")
+    try:
+        parts = str(version).split(".")
+        major = int(parts[0])
+        minor = int(parts[1]) if len(parts) > 1 else 0
+        return (major, minor) < (0, 4)
+    except Exception:
+        return False
 
 
 def get_vector_store():
@@ -58,12 +93,12 @@ def save_interaction(user_id: str, user_input: str, ai_response: str):
         # 1. 添加文档
         vector_store.add_documents([doc])
 
-        # 2. [关键修复] 显式强制持久化 (解决文件夹不生成的问题)
-        # 尝试调用 persist，如果版本太新没有这个方法，则忽略(新版会自动存)
-        try:
-            vector_store.persist()
-        except AttributeError:
-            pass
+        # Chroma 0.4+ 自动持久化；仅对老版本保留手动 persist。
+        if _needs_manual_persist():
+            try:
+                vector_store.persist()
+            except AttributeError:
+                pass
 
         print("✅ [记忆系统] 写入成功！")
 

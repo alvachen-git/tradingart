@@ -6,6 +6,11 @@ from dotenv import load_dotenv
 
 load_dotenv(override=True)
 
+# 保证 worker 在非项目目录启动时仍能加载同目录模块（如 memory_utils.py）
+_PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
+
 # 清理代理
 for key in [
     "HTTP_PROXY",
@@ -413,7 +418,21 @@ def persist_mobile_chat_memory_task(
                 "task_id": task_id,
             }
 
-        import memory_utils as mem
+        try:
+            import memory_utils as mem
+        except ModuleNotFoundError as e:
+            if "memory_utils" not in str(e):
+                raise
+            # 兜底：从 tasks.py 同目录显式加载，避免 worker cwd/PYTHONPATH 差异导致导入失败
+            import importlib.util
+
+            module_path = os.path.join(_PROJECT_ROOT, "memory_utils.py")
+            spec = importlib.util.spec_from_file_location("memory_utils", module_path)
+            if spec is None or spec.loader is None:
+                raise RuntimeError(f"cannot load memory_utils from {module_path}")
+            mem = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mem)
+            print(f"[mobile-memory] fallback import loaded: {module_path}")
 
         mem.save_interaction(uid, prompt, memory_record)
         return {
@@ -806,4 +825,37 @@ def process_ai_query(
             "chart": None,
             "attachments": [],
             "error": error_msg
+        }
+
+
+@celery_app.task(bind=True, name="tasks.process_ai_simulation_daily")
+def process_ai_simulation_daily(self, trade_date: str = ""):
+    """后台执行 AI 官方模拟投资的日结任务。"""
+    try:
+        self.update_state(state="PROCESSING", meta={"progress": "正在初始化模拟投资服务..."})
+        from ai_simulation_service import run_daily_simulation
+
+        self.update_state(state="PROCESSING", meta={"progress": "正在执行当日选股与调仓..."})
+        result = run_daily_simulation(trade_date=trade_date or None)
+
+        status = str(result.get("status") or "")
+        if status in {"success", "skipped"}:
+            return {
+                "status": status,
+                "response": result,
+                "error": None,
+            }
+
+        return {
+            "status": "error",
+            "response": result,
+            "error": str(result.get("error") or "模拟投资任务失败"),
+        }
+    except Exception as e:
+        import traceback
+
+        return {
+            "status": "error",
+            "response": None,
+            "error": f"{e}\n{traceback.format_exc()}",
         }
