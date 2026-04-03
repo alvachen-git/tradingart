@@ -884,7 +884,7 @@ function pDec(p: number) { return p < 10 ? 3 : p < 1000 ? 2 : 0 }
 
         <!-- Capital display -->
         <view class="capital-card">
-          <text class="cap-label">爱波币</text>
+          <text class="cap-label">当前积分</text>
           <text :class="['cap-value', capitalColorClass]">
             {{ lbLoading ? '加载中…' : fmtCapital }}
           </text>
@@ -936,7 +936,7 @@ function pDec(p: number) { return p < 10 ? 3 : p < 1000 ? 2 : 0 }
         <text class="lb-heading">排行榜</text>
         <view class="lb-tab-bar">
           <view class="lb-tab" :class="{ 'lb-tab-active': activeLbTab === 'capital' }" @click="activeLbTab = 'capital'">
-            <text class="lb-tab-text">资金榜</text>
+            <text class="lb-tab-text">积分榜</text>
           </view>
           <view class="lb-tab" :class="{ 'lb-tab-active': activeLbTab === 'max_profit' }" @click="activeLbTab = 'max_profit'">
             <text class="lb-tab-text">最高得分</text>
@@ -958,6 +958,10 @@ function pDec(p: number) { return p < 10 ? 3 : p < 1000 ? 2 : 0 }
             </text>
           </view>
         </view>
+      </view>
+
+      <view class="compliance-note-wrap">
+        <text class="compliance-note-text">本功能仅用于历史数据学习与练习，不构成操作建议。</text>
       </view>
 
     </view>
@@ -1362,6 +1366,19 @@ function pDec(p: number) { return p < 10 ? 3 : p < 1000 ? 2 : 0 }
 .rank-normal { color:#2a3a55; }
 .lb-name { flex:1;font-size:24rpx;color:#64748b;padding:0 12rpx; }
 .lb-val  { font-size:24rpx;font-weight:700;color:#cbd5e1; }
+
+.compliance-note-wrap {
+  margin-top: 6rpx;
+  padding: 0 8rpx 28rpx;
+}
+
+.compliance-note-text {
+  display: block;
+  text-align: center;
+  font-size: 22rpx;
+  line-height: 1.6;
+  color: #556070;
+}
 
 /* ══ LOADING ═════════════════════════════════════════════════ */
 .loading-page { display:flex;flex-direction:column;align-items:center;justify-content:center;padding:160rpx 60rpx;gap:28rpx; }

@@ -80,7 +80,7 @@
     {
       "path": "pages/market/broker",
       "style": {
-        "navigationBarTitleText": "每日仓位数据",
+        "navigationBarTitleText": "每日数据变化",
         "navigationBarBackgroundColor": "#0b1121",
         "navigationBarTextStyle": "white",
         "backgroundColor": "#0b1121"
