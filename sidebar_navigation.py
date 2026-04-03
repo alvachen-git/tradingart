@@ -102,6 +102,7 @@ def show_navigation():
     with st.expander("首页", expanded=False):
         st.page_link("Home.py", label="AI对话")
         st.page_link("pages/20_AI模拟投资.py", label="AI炒股")
+        st.page_link("pages/22_AI炒股2号.py", label="AI炒股2号")
         # st.page_link("pages/09_全球风险地图.py", label="全球风险地图")  # 暂不上线
 
     # 期权数据（去掉icon）

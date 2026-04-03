@@ -1,4 +1,4 @@
-import json
+﻿import json
 import os
 import random
 import re
@@ -24,6 +24,7 @@ from knowledge_tools import search_investment_knowledge
 
 
 OFFICIAL_PORTFOLIO_ID = "official_cn_a_etf_v1"
+OFFICIAL_PORTFOLIO_2_ID = "official_cn_a_etf_v2"
 INITIAL_CAPITAL = 1_000_000.0
 DEFAULT_LOT_SIZE = 100
 
@@ -44,6 +45,11 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "min_cash_ratio_soft": 0.10,
     "review_use_llm": 1,
     "is_active": 1,
+}
+
+DEFAULT_CONFIG_V2: Dict[str, Any] = {
+    **DEFAULT_CONFIG,
+    "portfolio_id": OFFICIAL_PORTFOLIO_2_ID,
 }
 
 
@@ -70,7 +76,7 @@ class SimulationContext:
 
 def ensure_ai_sim_tables() -> None:
     if engine is None:
-        raise ValueError("数据库连接不可用")
+        raise ValueError("鏁版嵁搴撹繛鎺ヤ笉鍙敤")
 
     ddl_list = [
         """
@@ -222,36 +228,35 @@ def ensure_ai_sim_tables() -> None:
                 )
             )
 
-        conn.execute(
-            text(
-                """
-                INSERT INTO ai_sim_config (
-                    portfolio_id, model_name, tool_scope, execution_mode, cost_model, risk_mode,
-                    max_positions, max_daily_trades, max_single_weight_soft, max_single_weight_hard,
-                    max_turnover_soft, max_turnover_hard, min_cash_ratio_soft, is_active
-                ) VALUES (
-                    :portfolio_id, :model_name, :tool_scope, :execution_mode, :cost_model, :risk_mode,
-                    :max_positions, :max_daily_trades, :max_single_weight_soft, :max_single_weight_hard,
-                    :max_turnover_soft, :max_turnover_hard, :min_cash_ratio_soft, :is_active
-                )
-                ON DUPLICATE KEY UPDATE
-                    model_name = VALUES(model_name),
-                    tool_scope = VALUES(tool_scope),
-                    execution_mode = VALUES(execution_mode),
-                    cost_model = VALUES(cost_model),
-                    risk_mode = VALUES(risk_mode),
-                    max_positions = VALUES(max_positions),
-                    max_daily_trades = VALUES(max_daily_trades),
-                    max_single_weight_soft = VALUES(max_single_weight_soft),
-                    max_single_weight_hard = VALUES(max_single_weight_hard),
-                    max_turnover_soft = VALUES(max_turnover_soft),
-                    max_turnover_hard = VALUES(max_turnover_hard),
-                    min_cash_ratio_soft = VALUES(min_cash_ratio_soft),
-                    is_active = VALUES(is_active)
-                """
-            ),
-            DEFAULT_CONFIG,
+        upsert_sql = text(
+            """
+            INSERT INTO ai_sim_config (
+                portfolio_id, model_name, tool_scope, execution_mode, cost_model, risk_mode,
+                max_positions, max_daily_trades, max_single_weight_soft, max_single_weight_hard,
+                max_turnover_soft, max_turnover_hard, min_cash_ratio_soft, is_active
+            ) VALUES (
+                :portfolio_id, :model_name, :tool_scope, :execution_mode, :cost_model, :risk_mode,
+                :max_positions, :max_daily_trades, :max_single_weight_soft, :max_single_weight_hard,
+                :max_turnover_soft, :max_turnover_hard, :min_cash_ratio_soft, :is_active
+            )
+            ON DUPLICATE KEY UPDATE
+                model_name = VALUES(model_name),
+                tool_scope = VALUES(tool_scope),
+                execution_mode = VALUES(execution_mode),
+                cost_model = VALUES(cost_model),
+                risk_mode = VALUES(risk_mode),
+                max_positions = VALUES(max_positions),
+                max_daily_trades = VALUES(max_daily_trades),
+                max_single_weight_soft = VALUES(max_single_weight_soft),
+                max_single_weight_hard = VALUES(max_single_weight_hard),
+                max_turnover_soft = VALUES(max_turnover_soft),
+                max_turnover_hard = VALUES(max_turnover_hard),
+                min_cash_ratio_soft = VALUES(min_cash_ratio_soft),
+                is_active = VALUES(is_active)
+            """
         )
+        conn.execute(upsert_sql, DEFAULT_CONFIG)
+        conn.execute(upsert_sql, DEFAULT_CONFIG_V2)
 
 
 def _normalize_trade_date(trade_date: Optional[str]) -> str:
@@ -259,7 +264,7 @@ def _normalize_trade_date(trade_date: Optional[str]) -> str:
         trade_date = str(get_latest_data_date())
     normalized = re.sub(r"[^0-9]", "", str(trade_date))[:8]
     if len(normalized) != 8:
-        raise ValueError(f"trade_date 非法: {trade_date}")
+        raise ValueError(f"trade_date 闈炴硶: {trade_date}")
     return normalized
 
 
@@ -312,6 +317,8 @@ def _load_config(portfolio_id: str) -> Dict[str, Any]:
     with engine.connect() as conn:
         row = conn.execute(sql, {"pid": portfolio_id}).mappings().fetchone()
     if not row:
+        if str(portfolio_id or "").strip() == OFFICIAL_PORTFOLIO_2_ID:
+            return dict(DEFAULT_CONFIG_V2)
         return dict(DEFAULT_CONFIG)
     config = dict(row)
     for k, v in DEFAULT_CONFIG.items():
@@ -481,7 +488,7 @@ def _build_candidate_pool(trade_date: str, current_positions: Dict[str, Dict[str
             continue
 
         name = str(r.get("name") or price_info.get("name") or "")
-        if "ST" in name.upper() or "*ST" in name.upper() or "退" in name:
+        if "ST" in name.upper() or "*ST" in name.upper() or "閫€" in name:
             continue
         if not _is_valid_universe_symbol(symbol, name):
             continue
@@ -491,7 +498,7 @@ def _build_candidate_pool(trade_date: str, current_positions: Dict[str, Dict[str
         if close <= 0:
             continue
 
-        # 候选池过滤：流动性、极端低价保护
+        # 鍊欓€夋睜杩囨护锛氭祦鍔ㄦ€с€佹瀬绔綆浠蜂繚鎶?
         if amount < 1e8 and symbol not in current_positions:
             continue
         if close < 1.0:
@@ -511,7 +518,7 @@ def _build_candidate_pool(trade_date: str, current_positions: Dict[str, Dict[str
             }
         )
 
-    # 候选池过严时，降级放宽流动性门槛，防止长期空仓
+    # 鍊欓€夋睜杩囦弗鏃讹紝闄嶇骇鏀惧娴佸姩鎬ч棬妲涳紝闃叉闀挎湡绌轰粨
     if not rows:
         for _, r in base_df.sort_values(["score"], ascending=[False]).head(limit * 2).iterrows():
             symbol = r["symbol"]
@@ -519,7 +526,7 @@ def _build_candidate_pool(trade_date: str, current_positions: Dict[str, Dict[str
             if not price_info:
                 continue
             name = str(r.get("name") or price_info.get("name") or "")
-            if "ST" in name.upper() or "*ST" in name.upper() or "退" in name:
+            if "ST" in name.upper() or "*ST" in name.upper() or "閫€" in name:
                 continue
             if not _is_valid_universe_symbol(symbol, name):
                 continue
@@ -540,7 +547,7 @@ def _build_candidate_pool(trade_date: str, current_positions: Dict[str, Dict[str
                 }
             )
 
-    # 确保当前持仓不会被过滤掉（用于减仓/清仓）
+    # 纭繚褰撳墠鎸佷粨涓嶄細琚繃婊ゆ帀锛堢敤浜庡噺浠?娓呬粨锛?
     for symbol, pos in current_positions.items():
         if any(x["symbol"] == symbol for x in rows):
             continue
@@ -650,7 +657,7 @@ def _get_csi500_regime(trade_date: str) -> Dict[str, Any]:
         summary = "中证500偏多，可适度积极配置。"
     elif score <= -2:
         regime = "bear"
-        summary = "中证500偏空，建议防守或显著降仓。"
+        summary = "中证500偏空，建议防守或明显降仓。"
     else:
         regime = "neutral"
         summary = "中证500中性震荡，维持均衡仓位。"
@@ -671,7 +678,7 @@ def _regime_stock_exposure_cap(csi500_regime: Dict[str, Any]) -> float:
     regime = str(csi500_regime.get("regime") or "neutral").lower()
     score = int(csi500_regime.get("score") or 0)
     if regime == "bear":
-        # 极弱环境允许全现金观望。
+        # 鏋佸急鐜鍏佽鍏ㄧ幇閲戣鏈涖€?
         return 0.0 if score <= -3 else 0.35
     if regime == "bull":
         return 0.95
@@ -743,13 +750,12 @@ def _fallback_ai_actions(
                     }
                 )
         return {
-            "summary": "回退策略：当前市场环境不利，优先防守与保留现金。",
-            "risk_notes": f"{csi500_regime.get('summary','中证500偏弱')}（回退模式）",
+            "summary": "回退策略：当前市场环境不利，优先防守并保留现金。",
+            "risk_notes": f"{csi500_regime.get('summary', '中证500偏弱')}（回退模式）",
             "actions": actions,
             "source": "fallback_rule",
         }
 
-    # 尝试保持“积极+稳健”风格共存（可用样本不足时自动退化）。
     picks = picks.copy()
     picks["style_hint"] = picks["symbol"].map(style_map).fillna("balanced")
     steady_pool = picks[picks["style_hint"].isin(["steady", "balanced"])]
@@ -813,14 +819,14 @@ def _fallback_ai_actions(
                     "symbol": symbol,
                     "action": "sell",
                     "target_weight": 0.0,
-                    "reason": "不在当日优选候选池或市场偏弱，执行腾仓。",
+                    "reason": "不在当日优选候选池或市场偏弱，执行减仓。",
                     "confidence": 0.5,
                 }
             )
 
     return {
         "summary": f"使用规则回退策略：参考中证500({regime})并做风格混配。",
-        "risk_notes": f"{csi500_regime.get('summary','当前为回退模式，建议检查模型服务可用性。')}",
+        "risk_notes": f"{csi500_regime.get('summary', '当前为回退模式，建议检查模型服务可用性。')}",
         "actions": actions,
         "source": "fallback_rule",
     }
@@ -828,13 +834,13 @@ def _fallback_ai_actions(
 
 def _format_recent_trade_memory(trades_df: pd.DataFrame, max_days: int = 5, max_items_per_day: int = 4) -> str:
     if trades_df.empty:
-        return "近5个交易日无历史成交记录。"
+        return "近几个交易日无历史成交记录。"
 
     df = trades_df.copy()
     df["trade_date"] = df["trade_date"].astype(str).str.replace(r"[^0-9]", "", regex=True).str[:8]
     df = df[df["trade_date"].str.len() == 8]
     if df.empty:
-        return "近5个交易日无历史成交记录。"
+        return "近几个交易日无历史成交记录。"
 
     unique_days = sorted(df["trade_date"].unique(), reverse=True)[:max_days]
     day_lines: List[str] = []
@@ -864,14 +870,13 @@ def _format_recent_trade_memory(trades_df: pd.DataFrame, max_days: int = 5, max_
         td_view = f"{td[:4]}-{td[4:6]}-{td[6:]}"
         line = (
             f"- {td_view}：{len(ddf)}笔，买{len(buy_df)}笔/{buy_amt/1e4:.1f}万，"
-            f"卖{len(sell_df)}笔/{sell_amt/1e4:.1f}万；主要动作：{'、'.join(move_parts) if move_parts else '无'}"
+            f"卖{len(sell_df)}笔/{sell_amt/1e4:.1f}万；主要动作：{('、'.join(move_parts) if move_parts else '无')}"
         )
         day_lines.append(line)
 
     if not day_lines:
-        return "近5个交易日无历史成交记录。"
+        return "近几个交易日无历史成交记录。"
     return "\n".join(day_lines)
-
 
 def _load_recent_trade_memory(portfolio_id: str, trade_date: str, days: int = 5) -> str:
     ensure_ai_sim_tables()
@@ -915,7 +920,7 @@ def _build_ai_prompt(
     positions_lines: List[str] = []
     for symbol, pos in sorted(positions.items()):
         positions_lines.append(
-            f"- {symbol} {pos.get('name','')} qty={_to_float(pos.get('quantity')):.0f} avg_cost={_to_float(pos.get('avg_cost')):.3f}"
+            f"- {symbol} {pos.get('name', '')} qty={_to_float(pos.get('quantity')):.0f} avg_cost={_to_float(pos.get('avg_cost')):.3f}"
         )
     if not positions_lines:
         positions_lines = ["- 当前空仓"]
@@ -923,14 +928,18 @@ def _build_ai_prompt(
     top_candidates = candidates_df.head(60)
     cand_lines: List[str] = []
     for _, row in top_candidates.iterrows():
-        symbol = str(row["symbol"])
+        symbol = str(row.get("symbol") or "")
         style = str(style_map.get(symbol) or "balanced")
         style_cn = "稳健" if style in {"steady", "balanced"} else "积极"
+        name = str(row.get("name") or "")
+        score = _to_float(row.get("score"), 0.0)
+        amount = _to_float(row.get("amount"), 0.0)
+        close = _to_float(row.get("close"), 0.0)
         cand_lines.append(
-            f"- {symbol} {row['name']} style={style_cn} score={_to_float(row['score']):.2f} amount={_to_float(row['amount'])/1e8:.2f}亿 close={_to_float(row['close']):.3f}"
+            f"- {symbol} {name} style={style_cn} score={score:.2f} amount={amount/1e8:.2f}亿 close={close:.3f}"
         )
 
-    csi_summary = str(csi500_regime.get("summary") or "中证500技术面中性")
+    csi_summary = str(csi500_regime.get("summary") or "中证500技术面中性。")
     csi_close = _to_float(csi500_regime.get("close"), 0.0)
     csi_ma20 = _to_float(csi500_regime.get("ma20"), 0.0)
     csi_ma60 = _to_float(csi500_regime.get("ma60"), 0.0)
@@ -954,14 +963,14 @@ def _build_ai_prompt(
   "summary": "一句总体观点",
   "risk_notes": "一句风险提示",
   "actions": [
-    {{"symbol":"600519.SH","action":"buy|sell|hold","target_weight":0.12,"reason":"简短理由","confidence":0.0-1.0}}
+    {{"symbol":"600519.SH","action":"buy|sell|hold","target_weight":0.12,"reason":"简短理由","confidence":0.0}}
   ]
 }}
 
 要求：
 - symbol必须是6位代码+后缀（.SH/.SZ/.BJ）。
 - target_weight是组合目标权重（0~1）。
-- action=buy/hold 时 target_weight > 0；action=sell 时 target_weight = 0。
+- action=buy/hold 时，target_weight > 0；action=sell 时，target_weight = 0。
 - 优先高流动性和高质量候选，避免过度集中。
 """.strip()
 
@@ -981,7 +990,7 @@ def _build_ai_prompt(
 - close={csi_close:.2f}, MA20={csi_ma20:.2f}, MA60={csi_ma60:.2f}, 当日涨跌={csi_day_ret:+.2%}
 
 近5日交易摘要:
-{recent_trade_memory or "近5个交易日无历史成交记录。"}
+{recent_trade_memory or "近几个交易日无历史成交记录。"}
 """.strip()
 
     return system_prompt, user_prompt
@@ -1068,7 +1077,6 @@ def _generate_ai_actions_with_tools(
         fallback = _fallback_ai_actions(candidates_df, current_weights, config, csi500_regime, style_map)
         return fallback, tool_calls, f"模型决策异常({exc})，使用回退策略。"
 
-
 def _sanitize_actions(raw_actions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     actions: List[Dict[str, Any]] = []
     for item in raw_actions:
@@ -1144,10 +1152,10 @@ def _apply_risk_gates(
             }
         )
 
-    # 清理负权重
+    # 娓呯悊璐熸潈閲?
     target_weights = {k: max(0.0, _to_float(v)) for k, v in target_weights.items()}
 
-    # 持仓数量硬限制
+    # 鎸佷粨鏁伴噺纭檺鍒?
     non_zero = [(k, v) for k, v in target_weights.items() if v > 1e-6]
     non_zero.sort(key=lambda x: x[1], reverse=True)
     keep = dict(non_zero[:max_positions])
@@ -1155,18 +1163,18 @@ def _apply_risk_gates(
     for k in dropped:
         keep[k] = 0.0
     if dropped:
-        risk_notes.append(f"持仓数超限，移除 {len(dropped)} 只低权重标的")
+        risk_notes.append(f"鎸佷粨鏁拌秴闄愶紝绉婚櫎 {len(dropped)} 鍙綆鏉冮噸鏍囩殑")
 
-    # 市场择时仓位门禁（中证500技术面）
+    # 甯傚満鎷╂椂浠撲綅闂ㄧ锛堜腑璇?00鎶€鏈潰锛?
     stock_cap = _regime_stock_exposure_cap(csi500_regime)
     total_weight = sum(v for v in keep.values() if v > 0)
     if total_weight > stock_cap >= 0:
         scale = (stock_cap / total_weight) if total_weight > 0 else 1.0
         for k in list(keep.keys()):
             keep[k] = keep[k] * scale
-        risk_notes.append(f"中证500择时约束触发，目标仓位按 {scale:.3f} 等比缩放")
+        risk_notes.append(f"涓瘉500鎷╂椂绾︽潫瑙﹀彂锛岀洰鏍囦粨浣嶆寜 {scale:.3f} 绛夋瘮缂╂斁")
 
-    # 最终归一化保护
+    # 鏈€缁堝綊涓€鍖栦繚鎶?
     total_weight = sum(v for v in keep.values() if v > 0)
     if total_weight > 1.0:
         scale = 1.0 / total_weight
@@ -1174,7 +1182,7 @@ def _apply_risk_gates(
             keep[k] = keep[k] * scale
         risk_notes.append("目标总权重>1，已归一化缩放")
 
-    # 风格混配约束：非偏空市场尽量兼顾积极与稳健。
+    # 椋庢牸娣烽厤绾︽潫锛氶潪鍋忕┖甯傚満灏介噺鍏奸【绉瀬涓庣ǔ鍋ャ€?
     regime = str(csi500_regime.get("regime") or "neutral")
     active_symbols = [k for k, v in keep.items() if v > 1e-6]
     if regime != "bear" and len(active_symbols) >= 3:
@@ -1215,7 +1223,7 @@ def _apply_risk_gates(
                 if shift >= 0.02:
                     keep[donor] = max(0.0, keep.get(donor, 0.0) - shift)
                     keep[add_sym] = keep.get(add_sym, 0.0) + shift
-                    risk_notes.append(f"风格混配约束：补充稳健标的 {add_sym}，从 {donor} 划转 {shift:.2%} 权重")
+                    risk_notes.append(f"椋庢牸娣烽厤绾︽潫锛氳ˉ鍏呯ǔ鍋ユ爣鐨?{add_sym}锛屼粠 {donor} 鍒掕浆 {shift:.2%} 鏉冮噸")
                     active_symbols = [k for k, v in keep.items() if v > 1e-6]
 
         if not _has_aggr(active_symbols):
@@ -1226,7 +1234,7 @@ def _apply_risk_gates(
                 if shift >= 0.02:
                     keep[donor] = max(0.0, keep.get(donor, 0.0) - shift)
                     keep[add_sym] = keep.get(add_sym, 0.0) + shift
-                    risk_notes.append(f"风格混配约束：补充积极标的 {add_sym}，从 {donor} 划转 {shift:.2%} 权重")
+                    risk_notes.append(f"椋庢牸娣烽厤绾︽潫锛氳ˉ鍏呯Н鏋佹爣鐨?{add_sym}锛屼粠 {donor} 鍒掕浆 {shift:.2%} 鏉冮噸")
                     active_symbols = [k for k, v in keep.items() if v > 1e-6]
 
     final_target = {k: round(v, 6) for k, v in keep.items() if v > 1e-8}
@@ -1281,7 +1289,7 @@ def _plan_trades(
             }
         )
 
-    # 先卖后买，且按金额优先
+    # 鍏堝崠鍚庝拱锛屼笖鎸夐噾棰濅紭鍏?
     sells = sorted([x for x in drafts if x["side"] == "sell"], key=lambda x: x["amount"], reverse=True)
     buys = sorted([x for x in drafts if x["side"] == "buy"], key=lambda x: x["amount"], reverse=True)
     ordered = sells + buys
@@ -1289,7 +1297,7 @@ def _plan_trades(
     if len(ordered) > max_daily_trades:
         ordered = ordered[:max_daily_trades]
 
-    # 换手率口径：非首日才统计，且按成交额/2/总资金，避免首日建仓被误读为高换手。
+    # 鎹㈡墜鐜囧彛寰勶細闈為鏃ユ墠缁熻锛屼笖鎸夋垚浜ら/2/鎬昏祫閲戯紝閬垮厤棣栨棩寤轰粨琚璇讳负楂樻崲鎵嬨€?
     turnover = 0.0
     if has_prev_day and nav_prev > 0:
         turnover = sum(x["amount"] for x in ordered) / max(1e-9, nav_prev * 2.0)
@@ -1453,16 +1461,16 @@ def _should_inject_persona(
     risk_notes: List[str],
 ) -> Tuple[bool, str]:
     if abs(_to_float(pnl_pct, 0.0)) >= 0.012:
-        return True, "当日盈亏波动较大"
+        return True, "褰撴棩鐩堜簭娉㈠姩杈冨ぇ"
 
     note_text = " ".join([str(x) for x in risk_notes if str(x).strip()])
-    stop_keywords = ["止损", "清仓", "割肉", "大幅回撤", "风控告警", "回撤"]
+    stop_keywords = ["姝㈡崯", "娓呬粨", "鍓茶倝", "澶у箙鍥炴挙", "椋庢帶鍛婅", "鍥炴挙"]
     if any(k in note_text for k in stop_keywords):
-        return True, "出现明显情绪事件（止损/回撤）"
+        return True, "出现明显情绪事件（止损或回撤）"
 
     sell_count = sum(1 for x in executed_trades if str(x.get("side") or "").lower() == "sell")
     if sell_count >= 3:
-        return True, "当日卖出动作较多"
+        return True, "褰撴棩鍗栧嚭鍔ㄤ綔杈冨"
 
     digits = re.sub(r"[^0-9]", "", str(trade_date or ""))[:8]
     if len(digits) == 8:
@@ -1471,7 +1479,7 @@ def _should_inject_persona(
             if dt.weekday() == 4:
                 return True, "周五收官日"
             if dt.day == monthrange(dt.year, dt.month)[1]:
-                return True, "月末节点"
+                return True, "鏈堟湯鑺傜偣"
         except Exception:
             pass
     return False, ""
@@ -1505,7 +1513,7 @@ def _load_recent_diary_snippets(portfolio_id: str, trade_date: str, days: int = 
         )
         text_blob = re.sub(r"#{1,6}\s*", "", text_blob)
         text_blob = re.sub(r"[`*_>\-]", "", text_blob)
-        parts = re.split(r"[，。！？；\n]", text_blob)
+        parts = re.split(r"[锛屻€傦紒锛燂紱\n]", text_blob)
         for p in parts:
             pp = str(p or "").strip()
             if 8 <= len(pp) <= 36:
@@ -1519,7 +1527,7 @@ def _load_recent_diary_snippets(portfolio_id: str, trade_date: str, days: int = 
     blocked.sort(key=lambda x: (-freq[x], -len(x), x))
 
     strong_banned = [
-        "我还是那个单身交易员，喜欢运动，早上跑步、晚上复盘，心里一直惦记着那天能开着自己的游艇去环游世界",
+        "鎴戣繕鏄偅涓崟韬氦鏄撳憳锛屽枩娆㈣繍鍔紝鏃╀笂璺戞銆佹櫄涓婂鐩橈紝蹇冮噷涓€鐩存儲璁扮潃閭ｅぉ鑳藉紑鐫€鑷繁鐨勬父鑹囧幓鐜父涓栫晫",
     ]
     out = strong_banned + blocked[:18]
     deduped: List[str] = []
@@ -1542,7 +1550,7 @@ def _dedupe_phrase(text: str, blocked_phrases: List[str]) -> str:
         if phrase in out:
             out = out.replace(phrase, "")
     out = re.sub(r"[ \t]+", " ", out)
-    out = re.sub(r"([，。！？；]){2,}", r"\1", out)
+    out = re.sub(r"([锛屻€傦紒锛燂紱]){2,}", r"\1", out)
     out = re.sub(r"\n{3,}", "\n\n", out).strip()
     return out
 
@@ -1563,21 +1571,12 @@ def _build_review_payload(
 ) -> Dict[str, Any]:
     config = config or {}
     tool_calls = tool_calls or []
+    is_v2 = str(portfolio_id or "").strip() == OFFICIAL_PORTFOLIO_2_ID
 
     pnl = nav_now - nav_prev
     pnl_pct = (pnl / nav_prev) if nav_prev > 0 else 0.0
-    is_profit_day = pnl >= 0
-    persona_trigger, persona_reason = _should_inject_persona(
-        trade_date=trade_date,
-        pnl_pct=pnl_pct,
-        executed_trades=executed_trades,
-        risk_notes=risk_notes,
-    )
     blocked_phrases = _load_recent_diary_snippets(portfolio_id=portfolio_id, trade_date=trade_date, days=7)
-    rng = random.Random(f"{trade_date}|{nav_now:.2f}|{len(executed_trades)}")
-
-    rejected = [o for o in orders_audited if o.get("gate_status") == "rejected"]
-    adjusted = [o for o in orders_audited if o.get("gate_status") == "adjusted"]
+    rng = random.Random(f"{trade_date}|{nav_now:.2f}|{len(executed_trades)}|{portfolio_id}")
 
     held_symbols = set(final_positions.keys())
     traded_symbols = {
@@ -1585,233 +1584,170 @@ def _build_review_payload(
         for t in executed_trades
         if _normalize_symbol(str(t.get("symbol") or ""))
     }
-    watchlist = []
-    for _, row in candidates_df.iterrows():
-        s = _normalize_symbol(row.get("symbol", ""))
-        score = _to_float(row.get("score"), 0.0)
-        from_holdings_fallback = int(_to_float(row.get("from_holdings_fallback"), 0.0)) == 1
-        if (
-            not s
-            or s in held_symbols
-            or s in traded_symbols
-            or from_holdings_fallback
-            or score <= 0
-        ):
-            continue
-        watchlist.append({
-            "symbol": s,
-            "name": str(row.get("name") or ""),
-            "score": round(score, 2),
-        })
-        if len(watchlist) >= 5:
-            break
 
-    # 候选池质量偏弱时，放宽分数阈值，但仍避免把昨日持仓兜底行塞进观察列表。
-    if not watchlist:
-        for _, row in candidates_df.iterrows():
-            s = _normalize_symbol(row.get("symbol", ""))
-            from_holdings_fallback = int(_to_float(row.get("from_holdings_fallback"), 0.0)) == 1
-            if not s or s in held_symbols or s in traded_symbols or from_holdings_fallback:
+    watchlist: List[Dict[str, Any]] = []
+    if not candidates_df.empty:
+        cdf = candidates_df.copy()
+        cdf["score"] = pd.to_numeric(cdf.get("score"), errors="coerce").fillna(0.0)
+        cdf = cdf.sort_values(["score", "amount"], ascending=[False, False], na_position="last")
+        for _, row in cdf.iterrows():
+            symbol = _normalize_symbol(row.get("symbol", ""))
+            if not symbol:
                 continue
-            watchlist.append({
-                "symbol": s,
-                "name": str(row.get("name") or ""),
-                "score": round(_to_float(row.get("score"), 0.0), 2),
-            })
+            if symbol in held_symbols or symbol in traded_symbols:
+                continue
+            if int(_to_float(row.get("from_holdings_fallback"), 0.0)) == 1:
+                continue
+            watchlist.append(
+                {
+                    "symbol": symbol,
+                    "name": str(row.get("name") or ""),
+                    "score": round(_to_float(row.get("score"), 0.0), 2),
+                }
+            )
             if len(watchlist) >= 5:
                 break
+
+    def _fmt_td(td: str) -> str:
+        d = re.sub(r"[^0-9]", "", str(td or ""))[:8]
+        if len(d) == 8:
+            return f"{d[:4]}-{d[4:6]}-{d[6:]}"
+        return str(td or "-")
+
     def _reason_for_trade(symbol: str, side: str) -> str:
         side = str(side or "").lower()
-        primary_side = "buy" if side == "buy" else "sell"
+        primary = "buy" if side == "buy" else "sell"
+        symbol = _normalize_symbol(symbol)
         for o in orders_audited:
-            if o.get("symbol") == symbol and str(o.get("action") or "").lower() == primary_side and str(o.get("reason") or "").strip():
-                return str(o.get("reason") or "").strip()
+            if _normalize_symbol(o.get("symbol", "")) == symbol and str(o.get("action") or "").lower() == primary:
+                txt = str(o.get("reason") or "").strip()
+                if txt:
+                    return txt
         for o in orders_audited:
-            if o.get("symbol") == symbol and str(o.get("reason") or "").strip():
-                return str(o.get("reason") or "").strip()
-        return "仓位与风险平衡调整。"
+            if _normalize_symbol(o.get("symbol", "")) == symbol:
+                txt = str(o.get("reason") or "").strip()
+                if txt:
+                    return txt
+        return "仓位与风险平衡调整"
 
-    def _industry_brief() -> str:
-        if candidates_df.empty:
-            return "板块层面今天没有拿到完整候选池数据，先以仓位稳定为主。"
-        df = candidates_df.copy()
-        df["industry"] = df["industry"].astype(str).replace({"": "未分类"})
-        gp = (
-            df.groupby("industry", dropna=False)
-            .agg(score_mean=("score", "mean"), amount_sum=("amount", "sum"), cnt=("symbol", "count"))
-            .sort_values(["score_mean", "amount_sum"], ascending=[False, False])
-            .head(3)
-            .reset_index()
-        )
-        if gp.empty:
-            return "板块分化比较明显，今天没有形成单一主线。"
-        parts = []
-        for _, row in gp.iterrows():
-            parts.append(
-                f"{row['industry']}（均分{_to_float(row['score_mean']):.1f}，成交额约{_to_float(row['amount_sum'])/1e8:.1f}亿）"
-            )
-        return f"板块潜力上，今天更有交易温度的是：{'、'.join(parts)}。"
+    buys = [x for x in executed_trades if str(x.get("side") or "").lower() == "buy"]
+    sells = [x for x in executed_trades if str(x.get("side") or "").lower() == "sell"]
 
-    def _money_flow_brief() -> str:
-        if candidates_df.empty:
-            return "资金流信息偏少，倾向于先看防守和仓位控制。"
-        top_amt = _to_float(candidates_df.head(20)["amount"].sum(), 0.0)
-        avg_pct = _to_float(candidates_df.head(20)["pct_chg"].mean(), 0.0)
-        flow_tone = "偏进攻" if avg_pct > 0.8 else ("偏谨慎" if avg_pct < -0.8 else "分歧震荡")
-        return f"从资金流看，候选池前20只合计成交额约 {top_amt/1e8:.1f} 亿，短线情绪是 {flow_tone}。"
+    ai_summary = str(ai_payload.get("summary") or "").strip() or "当日以结构性机会为主"
+    ai_risk = str(ai_payload.get("risk_notes") or "").strip() or "风险集中在节奏与仓位控制"
+    ai_source = str(ai_payload.get("source") or "").strip().lower()
 
-    def _macro_policy_brief() -> str:
-        ai_summary = str(ai_payload.get("summary") or "").strip()
-        ai_risk = str(ai_payload.get("risk_notes") or "").strip()
-        merged = f"{ai_summary} {ai_risk}".strip()
-        policy_keywords = ["政策", "财政", "货币", "降息", "加息", "会议", "地产", "消费", "科技"]
-        tool_names = {str(x.get("name") or "") for x in tool_calls}
-        if any(k in merged for k in policy_keywords):
-            return f"宏观和政策面今天给我的体感是：{merged}。"
-        if tool_names:
-            return "宏观和政策面没有看到明确超预期增量，更像是存量资金在熟悉赛道里做轮动。"
-        return "宏观和政策面暂时没有突发变量，组合继续按照既定节奏做筛选与调仓。"
-
-    def _technical_brief() -> str:
-        if not executed_trades:
-            if candidates_df.empty:
-                return "技术面上信号并不集中，所以今天更偏向观望。"
-            avg_pct = _to_float(candidates_df.head(15)["pct_chg"].mean(), 0.0)
-            if avg_pct > 0.8:
-                return "技术面上短线动量还在，但性价比一般，所以今天没有强行动手。"
-            if avg_pct < -0.8:
-                return "技术面上波动偏大，信号不够干净，今天先保留子弹。"
-            return "技术面上结构分化，趋势和估值没有在同一时点共振。"
-        trade_pct: List[float] = []
-        if not candidates_df.empty:
-            pct_map = {str(r["symbol"]): _to_float(r.get("pct_chg"), 0.0) for _, r in candidates_df.iterrows()}
-            for t in executed_trades:
-                trade_pct.append(pct_map.get(str(t["symbol"]), 0.0))
-        avg_trade_pct = sum(trade_pct) / len(trade_pct) if trade_pct else 0.0
-        if avg_trade_pct > 0.8:
-            return "技术面上今天更偏顺势，买点主要落在趋势延续而不是逆势抄底。"
-        if avg_trade_pct < -0.8:
-            return "技术面上我们更偏左侧交易，趁回撤分批建仓。"
-        return "技术面上今天以结构性机会为主，主要做强弱切换。"
-
-    def _hot_topic_reflection() -> str:
-        tool_names = {str(x.get("name") or "") for x in tool_calls}
-        ai_text = f"{str(ai_payload.get('summary') or '')} {str(ai_payload.get('risk_notes') or '')}"
-        hot_keywords = [
-            "政策", "关税", "降息", "加息", "监管", "并购", "地缘", "冲突", "战争",
-            "科技", "AI", "消费", "地产", "就业", "通胀", "财政", "货币",
+    if is_v2:
+        opener_pool = [
+            f"{_fmt_td(trade_date)} 收盘后我先把成交回放了一遍，账户定格在 {nav_now:,.2f}，日内变化 {'+' if pnl >= 0 else ''}{pnl:,.2f}（{'+' if pnl_pct >= 0 else ''}{pnl_pct:.2%}）。",
+            f"今天结算后净值是 {nav_now:,.2f}，和昨天相比 {'+' if pnl >= 0 else ''}{pnl:,.2f}。先把情绪放一边，按规则拆每一笔动作。",
         ]
-        has_hotspot = ("get_financial_news" in tool_names) or any(k in ai_text for k in hot_keywords)
-        if not has_hotspot:
-            return ""
-        reflections = [
-            "热点越热，越要提醒自己尊重规则。我一直讨厌不公平，也更愿意在信息对等、机会平等的框架里做判断。",
-            "新闻里情绪很满，但我还是把交易当作长期游戏：钱只是筹码，真正重要的是一路看到的风景和人与人之间的真诚连接。",
-            "面对热点分歧，我更在意价值是否站得住。市场会给价格，时间会给答案，公平和尊重永远比一时输赢更稀缺。",
+        tone_pool = [
+            "我不追高，今天依旧是等回踩、等确认，再出手。",
+            "交易节奏宁可慢半拍，也不愿意在噪音里硬冲。",
+            "盘面再热，也只做自己看得懂、拿得住的那一段。",
         ]
-        return rng.choice(reflections)
-
-    buys = [x for x in executed_trades if x["side"] == "buy"]
-    sells = [x for x in executed_trades if x["side"] == "sell"]
-
-    openers = [
-        f"今天收盘后先把账本过了一遍，组合净值来到 {nav_now:,.2f}，相比昨天 {'+' if pnl >= 0 else ''}{pnl:,.2f}（{'+' if pnl_pct >= 0 else ''}{pnl_pct:.2%}）。",
-        f"盘后第一件事还是看净值，今天收在 {nav_now:,.2f}，日内变化 {'+' if pnl >= 0 else ''}{pnl:,.2f}（{'+' if pnl_pct >= 0 else ''}{pnl_pct:.2%}）。",
-        f"结算完成后账户定格在 {nav_now:,.2f}，和昨天比 {'+' if pnl >= 0 else ''}{pnl:,.2f}（{'+' if pnl_pct >= 0 else ''}{pnl_pct:.2%}），先把节奏记下来。",
-    ]
-    if is_profit_day:
-        mood_pool = [
-            "今天盘感和执行都在线，信号与动作基本对得上。",
-            "今天是偏顺手的一天，仓位节奏踩得还算稳。",
-            "今天收益是正的，心态上更敢做确认后的动作。",
+        life_pool = [
+            "今天气温一上来就有点烦热，复盘时把空调开得很低，脑子反而更清醒。",
+            "晚饭照旧偏辣，辛辣感会让我更快从盘面噪音里抽离出来。",
+            "耳机里循环着五月天和阿信的歌，节拍刚好把复盘节奏稳住。",
         ]
     else:
-        mood_pool = [
-            "今天又给市场交了点学费，先自嘲一句手还不够稳，但纪律不能丢。",
-            "今天并不顺，脸上笑不出来，但复盘要比情绪更诚实。",
-            "今天吃了点亏，先认，再拆动作，明天才有机会把节奏拿回来。",
+        opener_pool = [
+            f"{_fmt_td(trade_date)} 收盘后净值来到 {nav_now:,.2f}，较前一日 {'+' if pnl >= 0 else ''}{pnl:,.2f}（{'+' if pnl_pct >= 0 else ''}{pnl_pct:.2%}）。",
+            f"盘后先做结算：账户收在 {nav_now:,.2f}，日变动 {'+' if pnl >= 0 else ''}{pnl:,.2f}。",
         ]
+        tone_pool = [
+            "先讲事实，再谈判断，情绪放到最后处理。",
+            "今天以纪律执行为主，节奏上保持克制。",
+        ]
+        life_pool = [""]
 
-    persona_pool = [
-        "收盘后照例去慢跑了几公里，把噪音先甩掉，再回来拆每一笔交易。",
-        "跑步时一直在复盘仓位切换，脑子里那条“总有一天开游艇远航”的线，反而让我更愿意把每一步走稳。",
-        "今天这种盘面最考验心态，运动完再看持仓，很多判断会更干净。",
+    summary_blocks = [
+        rng.choice(opener_pool),
+        rng.choice(tone_pool),
+        f"盘后再回看一遍，今天市场没有给出特别清晰的增量线索，我更愿意把动作放在确定性上。{ai_summary}。",
+        f"风险这一侧，我给自己的备注是：{ai_risk}。",
     ]
+    life_line = rng.choice(life_pool).strip()
+    if life_line:
+        summary_blocks.append(life_line)
 
-    narrative_blocks = [
-        rng.choice(openers),
-        rng.choice(mood_pool),
-        _macro_policy_brief(),
-        _money_flow_brief(),
-        _industry_brief(),
-        _technical_brief(),
-        f"AI 今天给出的核心判断是：{str(ai_payload.get('summary') or '暂无明确主线判断')}。",
-    ]
-    hot_reflection = _hot_topic_reflection()
-    if hot_reflection:
-        narrative_blocks.append(hot_reflection)
-    if persona_trigger:
-        insert_at = min(len(narrative_blocks), 2 + rng.randint(0, 2))
-        narrative_blocks.insert(insert_at, rng.choice(persona_pool))
-
-    summary_md = "\n\n".join([f"### 复盘日记（{trade_date}）"] + narrative_blocks)
+    summary_md = "\n\n".join([f"### 复盘日记（{_fmt_td(trade_date)}）"] + summary_blocks)
     summary_md = _dedupe_phrase(summary_md, blocked_phrases)
 
     if buys:
-        buy_sentences = []
+        lines = []
         for t in buys:
-            reason = _reason_for_trade(t["symbol"], "buy")
-            buy_sentences.append(
-                f"{t['symbol']} 这笔买入大概 {int(_to_float(t['quantity'])):,} 股，成交在 { _to_float(t['price']):.3f}，主要是因为{reason}"
-            )
-        buys_md = "### 今天为什么买\n\n" + "；".join(buy_sentences) + "。"
+            symbol = _normalize_symbol(t.get("symbol", ""))
+            qty = int(_to_float(t.get("quantity"), 0.0))
+            px = _to_float(t.get("price"), 0.0)
+            reason = _reason_for_trade(symbol, "buy")
+            lines.append(f"{symbol} 买入 {qty:,} 股，成交价 {px:.3f}，原因：{reason}。")
+        buys_md = "### 今天为什么买\n\n" + "\n".join(lines)
     else:
-        buy_idle_pool = [
-            "今天没有新增买入，主要是想把节奏放慢，等更清晰的信号。",
-            "今天没有新开仓，信号还没到“必须出手”的程度，先耐心一点。",
-            "今天选择不加仓，先把仓位和波动压住，等更高确定性的窗口。",
-        ]
-        buys_md = "### 今天为什么买\n\n" + rng.choice(buy_idle_pool)
+        buys_md = "### 今天为什么买\n\n今天没有新开仓，主要是等更干净的回踩与确认信号。"
     buys_md = _dedupe_phrase(buys_md, blocked_phrases)
 
     if sells:
-        sell_sentences = []
+        lines = []
         for t in sells:
-            reason = _reason_for_trade(t["symbol"], "sell")
-            sell_sentences.append(
-                f"{t['symbol']} 这笔卖出大概 {int(_to_float(t['quantity'])):,} 股，成交在 { _to_float(t['price']):.3f}，背后考虑是{reason}"
-            )
-        sells_md = "### 今天为什么卖\n\n" + "；".join(sell_sentences) + "。"
+            symbol = _normalize_symbol(t.get("symbol", ""))
+            qty = int(_to_float(t.get("quantity"), 0.0))
+            px = _to_float(t.get("price"), 0.0)
+            reason = _reason_for_trade(symbol, "sell")
+            lines.append(f"{symbol} 卖出 {qty:,} 股，成交价 {px:.3f}，原因：{reason}。")
+        sells_md = "### 今天为什么卖\n\n" + "\n".join(lines)
     else:
-        sell_idle_pool = [
-            "今天没有主动减仓，主要是现有仓位和风险预算还在可接受区间。",
-            "今天没有卖出动作，持仓结构暂时还能承受当前波动。",
-            "今天先不动减仓按钮，优先观察信号是否延续。",
-        ]
-        sells_md = "### 今天为什么卖\n\n" + rng.choice(sell_idle_pool)
+        sells_md = "### 今天为什么卖\n\n今天没有主动卖出，持仓结构与风险预算仍在可控区间。"
     sells_md = _dedupe_phrase(sells_md, blocked_phrases)
 
-    gate_notes_text = "；".join([str(x) for x in risk_notes if str(x).strip()])
-    gate_tail = []
+    rejected = [o for o in orders_audited if str(o.get("gate_status") or "").lower() == "rejected"]
+    adjusted = [o for o in orders_audited if str(o.get("gate_status") or "").lower() == "adjusted"]
+    watch_symbols = [str(x.get("symbol") or "") for x in watchlist if str(x.get("symbol") or "").strip()]
+
+    def _clean_note_text(raw: Any) -> str:
+        txt = str(raw or "").strip()
+        if not txt:
+            return ""
+        bad_tokens = [
+            "HTTPConnectionPool",
+            "dashscope.aliyuncs.com",
+            "SSLError",
+            "UNEXPECTED_EOF",
+            "Max retries exceeded",
+            "EOF occurred",
+            "_ssl.c",
+            "Traceback",
+            "port=443",
+        ]
+        if any(tok in txt for tok in bad_tokens):
+            return ""
+        if "锛" in txt or "銆" in txt or "€" in txt:
+            return ""
+        txt = re.sub(r"\s+", " ", txt).strip("；;。 ")
+        return txt[:100]
+
+    risk_parts: List[str] = []
+    clean_ai_risk = _clean_note_text(ai_risk)
+    if clean_ai_risk:
+        risk_parts.append(clean_ai_risk)
+    if ai_source == "fallback_rule":
+        risk_parts.append("模型服务短暂波动，今晚采用规则回退执行，风控与仓位纪律照常生效")
+    for n in risk_notes:
+        txt = _clean_note_text(n)
+        if txt and txt not in risk_parts:
+            risk_parts.append(txt)
     if rejected:
-        gate_tail.append(f"门禁拦截了 {len(rejected)} 条指令")
+        risk_parts.append(f"风控拦截 {len(rejected)} 笔指令")
     if adjusted:
-        gate_tail.append(f"风控下调了 {len(adjusted)} 条指令")
-    gate_extra = "；".join(gate_tail)
-    if gate_notes_text and gate_extra:
-        risk_body = f"风控侧今天主要提醒是：{gate_notes_text}。另外，{gate_extra}。"
-    elif gate_notes_text:
-        risk_body = f"风控侧今天主要提醒是：{gate_notes_text}。"
-    elif gate_extra:
-        risk_body = f"风控执行上，{gate_extra}。"
-    else:
-        risk_body = "风控层面今天比较平稳，没有额外告警。"
+        risk_parts.append(f"风控下调 {len(adjusted)} 笔指令")
+    if not risk_parts:
+        risk_parts.append("风控层面平稳，无额外警报")
+    if watch_symbols:
+        risk_parts.append(f"明日优先跟踪：{'、'.join(watch_symbols[:5])}")
 
-    watch_sentence = "、".join([str(x.get("symbol") or "") for x in watchlist if x.get("symbol")])
-    if watch_sentence:
-        risk_body += f" 明天优先盯住 {watch_sentence}。"
-
-    risk_md = "### 明天继续盯什么\n\n" + risk_body
+    risk_md = "### 明天继续盯什么\n\n" + "。".join(risk_parts) + "。"
     risk_md = _dedupe_phrase(risk_md, blocked_phrases)
 
     def _build_llm_diary() -> Optional[Dict[str, str]]:
@@ -1830,77 +1766,57 @@ def _build_review_payload(
             "nav_now": round(nav_now, 4),
             "pnl": round(pnl, 4),
             "pnl_pct": round(pnl_pct, 6),
-            "ai_summary": str(ai_payload.get("summary") or ""),
-            "ai_risk_notes": str(ai_payload.get("risk_notes") or ""),
+            "ai_summary": ai_summary,
+            "ai_risk_notes": ai_risk,
             "risk_notes": risk_notes,
-            "tool_calls": [str(x.get("name") or "") for x in tool_calls][:12],
-            "persona_trigger": persona_trigger,
-            "persona_reason": persona_reason,
-            "recent_diary_snippets": blocked_phrases,
-            "value_principles": [
-                "讨厌不公平，追求平等",
-                "金钱只是世界游戏里的筹码",
-                "体验与人类情感比短期输赢更重要",
-            ],
             "executed_trades": [
                 {
-                    "symbol": str(t.get("symbol") or ""),
+                    "symbol": _normalize_symbol(t.get("symbol", "")),
                     "side": str(t.get("side") or ""),
                     "quantity": int(_to_float(t.get("quantity"), 0.0)),
                     "price": round(_to_float(t.get("price"), 0.0), 4),
-                    "amount": round(_to_float(t.get("amount"), 0.0), 2),
                     "reason": _reason_for_trade(str(t.get("symbol") or ""), str(t.get("side") or "")),
                 }
                 for t in executed_trades
             ],
-            "candidate_top": [
-                {
-                    "symbol": str(r.get("symbol") or ""),
-                    "industry": str(r.get("industry") or ""),
-                    "score": round(_to_float(r.get("score"), 0.0), 2),
-                    "pct_chg": round(_to_float(r.get("pct_chg"), 0.0), 2),
-                    "amount_e8": round(_to_float(r.get("amount"), 0.0) / 1e8, 2),
-                }
-                for _, r in candidates_df.head(15).iterrows()
-            ],
             "watchlist": watchlist,
+            "recent_diary_snippets": blocked_phrases,
         }
+
+        persona_clause = (
+            "人设要求：女性操盘手，高冷、克制、专业；怕热、爱吃辣；喜欢五月天乐团，喜欢阿信和他们的歌。"
+            "文风要像真实交易员的盘后手记，不要撒娇，不要口号，不要鸡汤。"
+            if is_v2
+            else "文风要求：克制、专业、自然，像真实交易员盘后记录。"
+        )
+
         prompt = (
-            "你是交易员本人，要写一篇当天收盘后的复盘日记，语气平实、自然、有温度，像公众号散文，不要写成报告。"
-            "请你严格只输出 JSON，格式如下："
+            "你要根据事实数据写当天复盘日记，并严格只输出JSON："
             '{"summary_md":"...","buys_md":"...","sells_md":"...","risk_md":"..."}。'
             "要求："
-            "1) summary_md 采用自由日记体，不要求固定段落模板，但要自然覆盖宏观、政策、资金流、板块潜力、技术面这五个维度；"
-            "1.1) 若 persona_trigger=true，才允许轻描淡写提一次“单身/运动/游艇梦想”；若 persona_trigger=false，严禁出现这些词；"
-            "1.2) 避免复用 recent_diary_snippets 里的高频句式；"
-            "1.3) 若当日存在新闻热点，可加入一小段感想，价值观立场保持：讨厌不公平、追求平等、金钱只是筹码、体验与情感更重要；但不要说教，不要每段都讲价值观；"
-            f"1.4) 当天盈亏={pnl:+.2f}，若盈利请更自信；若亏损请带一点自嘲但保持专业克制；"
-            "2) buys_md/sells_md 要写清楚为什么买这只、为什么卖那只，并出现股票代码；"
-            "3) 不要使用列表符号开头，不要公文腔；"
-            "4) 事实不足时明确写“未看到明确增量”，不要编造。"
-            f"\n\n当日事实数据：{json.dumps(facts, ensure_ascii=False)}"
+            "1) summary_md 必须像公众号文章一样的盘后手记，段落连贯、有情绪和节奏，不要写成报告腔；"
+            "2) buys_md/sells_md 要点名股票代码并解释买卖理由；"
+            "3) risk_md 写明次日重点观察与风控动作；"
+            "4) 禁止复用 recent_diary_snippets 中高频句式；"
+            "5) 禁止编造事实，只能依据给定 facts。"
+            f"\n\n{persona_clause}"
+            f"\n\nfacts={json.dumps(facts, ensure_ascii=False)}"
         )
+
         try:
             rsp = llm.invoke([HumanMessage(content=prompt)])
             raw_text = str(getattr(rsp, "content", "") or "")
             parsed = _extract_json_from_text(raw_text)
             if not parsed:
                 return None
-            summary = str(parsed.get("summary_md") or "").strip()
-            buys_text = str(parsed.get("buys_md") or "").strip()
-            sells_text = str(parsed.get("sells_md") or "").strip()
-            risk_text = str(parsed.get("risk_md") or "").strip()
-            summary = _dedupe_phrase(summary, blocked_phrases)
-            buys_text = _dedupe_phrase(buys_text, blocked_phrases)
-            sells_text = _dedupe_phrase(sells_text, blocked_phrases)
-            risk_text = _dedupe_phrase(risk_text, blocked_phrases)
-            if summary and buys_text and sells_text and risk_text:
-                return {
-                    "summary_md": summary,
-                    "buys_md": buys_text,
-                    "sells_md": sells_text,
-                    "risk_md": risk_text,
-                }
+            out = {
+                "summary_md": _dedupe_phrase(str(parsed.get("summary_md") or "").strip(), blocked_phrases),
+                "buys_md": _dedupe_phrase(str(parsed.get("buys_md") or "").strip(), blocked_phrases),
+                "sells_md": _dedupe_phrase(str(parsed.get("sells_md") or "").strip(), blocked_phrases),
+                "risk_md": _dedupe_phrase(str(parsed.get("risk_md") or "").strip(), blocked_phrases),
+            }
+            if all(out.values()):
+                return out
         except Exception:
             return None
         return None
@@ -1919,7 +1835,6 @@ def _build_review_payload(
         "risk_md": risk_md,
         "next_watchlist": watchlist,
     }
-
 
 def _delete_existing_day(portfolio_id: str, trade_date: str) -> None:
     with engine.begin() as conn:
@@ -1957,7 +1872,7 @@ def run_daily_simulation(
     force: bool = False,
 ) -> Dict[str, Any]:
     if engine is None:
-        return {"status": "error", "error": "数据库连接不可用"}
+        return {"status": "error", "error": "鏁版嵁搴撹繛鎺ヤ笉鍙敤"}
 
     ensure_ai_sim_tables()
     td = _normalize_trade_date(trade_date)
@@ -1980,10 +1895,10 @@ def run_daily_simulation(
                 "latest_trade_date": latest_td,
                 "portfolio_id": portfolio_id,
             }
-        # 回头重算老日期时，必须清理该日及之后快照，避免时间线断裂。
+        # 鍥炲ご閲嶇畻鑰佹棩鏈熸椂锛屽繀椤绘竻鐞嗚鏃ュ強涔嬪悗蹇収锛岄伩鍏嶆椂闂寸嚎鏂銆?
         _delete_from_day(portfolio_id, td)
 
-    # 幂等：已存在净值则不重复执行
+    # 骞傜瓑锛氬凡瀛樺湪鍑€鍊煎垯涓嶉噸澶嶆墽琛?
     exists_sql = text(
         "SELECT 1 FROM ai_sim_nav_daily WHERE portfolio_id = :pid AND trade_date = :td LIMIT 1"
     )
@@ -1992,7 +1907,7 @@ def run_daily_simulation(
     if existed and not force:
         return {"status": "skipped", "reason": "already settled", "trade_date": td, "portfolio_id": portfolio_id}
     if existed and force:
-        # 强制重算当日：先清理旧快照，避免 max_drawdown/报表读取被旧值污染。
+        # 寮哄埗閲嶇畻褰撴棩锛氬厛娓呯悊鏃у揩鐓э紝閬垮厤 max_drawdown/鎶ヨ〃璇诲彇琚棫鍊兼薄鏌撱€?
         _delete_existing_day(portfolio_id, td)
 
     prev_nav_row = _get_previous_nav_row(portfolio_id, td)
@@ -2037,7 +1952,7 @@ def run_daily_simulation(
 
     raw_actions = _sanitize_actions(ai_payload.get("actions", []))
 
-    # 允许交易标的 = 候选池 + 当前持仓
+    # 鍏佽浜ゆ槗鏍囩殑 = 鍊欓€夋睜 + 褰撳墠鎸佷粨
     candidate_symbols = set(candidates_df["symbol"].tolist())
     candidate_symbols.update(current_positions.keys())
 
@@ -2077,7 +1992,7 @@ def run_daily_simulation(
         cash_start=context.cash,
     )
 
-    # 计算净值
+    # 璁＄畻鍑€鍊?
     position_value = 0.0
     positions_snapshot: List[Dict[str, Any]] = []
     for symbol, pos in final_positions.items():
@@ -2600,6 +2515,72 @@ def get_daily_review(portfolio_id: str = OFFICIAL_PORTFOLIO_ID, trade_date: Opti
     }
 
 
+def get_watchlist(
+    portfolio_id: str = OFFICIAL_PORTFOLIO_2_ID,
+    as_of_date: Optional[str] = None,
+    limit: int = 40,
+    statuses: Optional[List[str]] = None,
+) -> pd.DataFrame:
+    statuses = statuses or ["watching", "bought", "exited"]
+    clean_statuses = [str(x).strip() for x in statuses if str(x).strip()]
+    if not clean_statuses:
+        clean_statuses = ["watching", "bought", "exited"]
+
+    placeholders = ",".join([f":s{i}" for i in range(len(clean_statuses))])
+    params: Dict[str, Any] = {"pid": portfolio_id, "lim": int(max(1, limit))}
+    for i, stx in enumerate(clean_statuses):
+        params[f"s{i}"] = stx
+
+    date_cond = ""
+    if as_of_date:
+        date_cond = " AND (last_signal_date <= :td OR last_signal_date = '' OR last_signal_date IS NULL) "
+        params["td"] = re.sub(r"[^0-9]", "", str(as_of_date))[:8]
+
+    sql = text(
+        f"""
+        SELECT *
+        FROM ai_sim_watchlist
+        WHERE portfolio_id = :pid
+          AND status IN ({placeholders})
+          {date_cond}
+        ORDER BY updated_at DESC
+        LIMIT :lim
+        """
+    )
+    try:
+        with engine.connect() as conn:
+            return pd.read_sql(sql, conn, params=params)
+    except Exception:
+        return pd.DataFrame(
+            columns=[
+                "symbol",
+                "name",
+                "status",
+                "sector_name",
+                "score",
+                "breakout_date",
+                "breakout_price",
+                "stop_price",
+                "ma10",
+                "ma20",
+                "pullback_ready",
+                "chase_ok",
+                "last_signal_date",
+            ]
+        )
+
+
 if __name__ == "__main__":
-    out = run_daily_simulation()
-    print(json.dumps(out, ensure_ascii=False, indent=2))
+    results: List[Dict[str, Any]] = []
+    for pid in [OFFICIAL_PORTFOLIO_ID, OFFICIAL_PORTFOLIO_2_ID]:
+        try:
+            results.append(run_daily_simulation(portfolio_id=pid))
+        except Exception as exc:
+            results.append(
+                {
+                    "status": "error",
+                    "portfolio_id": pid,
+                    "error": str(exc),
+                }
+            )
+    print(json.dumps({"results": results}, ensure_ascii=False, indent=2))
