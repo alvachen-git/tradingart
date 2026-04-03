@@ -25,6 +25,18 @@ function formatDate(s: string) {
   return s.slice(0, 16).replace('T', ' ')
 }
 
+function formatReportTitle(title: string) {
+  return String(title || '')
+    .replace(/期货商持仓晚报/g, '持仓晚报')
+    .replace(/技术突破提醒/g, '技术形态提醒')
+}
+
+function formatChannelName(name: string) {
+  return String(name || '')
+    .replace(/交易信号/g, '突破提示')
+    .replace(/期货商持仓/g, '持仓晚报')
+}
+
 // 判断是否为 HTML 内容
 const isHtml = computed(() => {
   const c = content.value?.content || ''
@@ -115,11 +127,11 @@ const plainBodyText = computed(() => {
     <view v-else-if="content" class="content-wrap">
       <!-- 头部信息 -->
       <view class="meta">
-        <view class="channel-badge">{{ content.channel_name }}</view>
+        <view class="channel-badge">{{ formatChannelName(content.channel_name) }}</view>
         <text class="date-text">{{ formatDate(content.published_at) }}</text>
       </view>
 
-      <text class="article-title">{{ content.title }}</text>
+      <text class="article-title">{{ formatReportTitle(content.title) }}</text>
       <view class="divider" />
 
       <!-- HTML 正文：H5 使用 v-html 渲染 -->

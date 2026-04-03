@@ -15,7 +15,7 @@ const SERVICE_CHANNELS = [
   { code: 'expiry_option_radar', name: '末日晚报' },
   { code: 'broker_position_report', name: '持仓晚报' },
   { code: 'fund_flow_report', name: '资金流晚报' },
-  { code: 'trade_signal', name: '盘面观察' },
+  { code: 'trade_signal', name: '突破提示' },
 ]
 
 onShow(() => {
@@ -156,7 +156,7 @@ function getRiskColor(risk: string) {
     <view class="card section-card recharge-card" @tap="goRecharge">
       <view class="recharge-main">
         <text class="card-title-text recharge-title">充值中心</text>
-        <text class="recharge-desc">点数可用于开通晚报、盘面观察与情报套餐</text>
+        <text class="recharge-desc">点数可用于开通晚报、突破提示与情报套餐</text>
         <text class="recharge-update" v-if="wallet?.updated_at">
           最近更新：{{ wallet.updated_at }}
         </text>
