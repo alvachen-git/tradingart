@@ -52,6 +52,12 @@ DEFAULT_CONFIG_V2: Dict[str, Any] = {
     "portfolio_id": OFFICIAL_PORTFOLIO_2_ID,
 }
 
+V2_MIN_BREAKOUT_SCORE = 70.0
+V2_PULLBACK_NEAR_PCT = 0.02
+V2_CHASE_LIMIT_PCT = 0.03
+V2_MIN_TRADE_WEIGHT = 0.02
+V2_WATCHLIST_LIMIT = 60
+
 
 TOOLS_FOR_SIMULATION = [
     search_top_stocks,
@@ -200,6 +206,33 @@ def ensure_ai_sim_tables() -> None:
             KEY idx_ai_sim_review_portfolio (portfolio_id)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
         """,
+        """
+        CREATE TABLE IF NOT EXISTS ai_sim_watchlist (
+            portfolio_id VARCHAR(64) NOT NULL,
+            symbol VARCHAR(32) NOT NULL,
+            name VARCHAR(128) DEFAULT '',
+            status VARCHAR(16) NOT NULL DEFAULT 'watching',
+            sector_name VARCHAR(128) DEFAULT '',
+            score DOUBLE NOT NULL DEFAULT 0,
+            breakout_date VARCHAR(16) DEFAULT '',
+            breakout_price DOUBLE NOT NULL DEFAULT 0,
+            stop_price DOUBLE NOT NULL DEFAULT 0,
+            ma10 DOUBLE NOT NULL DEFAULT 0,
+            ma20 DOUBLE NOT NULL DEFAULT 0,
+            pullback_ready TINYINT NOT NULL DEFAULT 0,
+            chase_ok TINYINT NOT NULL DEFAULT 1,
+            has_platform TINYINT NOT NULL DEFAULT 0,
+            platform_low DOUBLE NOT NULL DEFAULT 0,
+            breakout_candle_low DOUBLE NOT NULL DEFAULT 0,
+            last_signal_date VARCHAR(16) DEFAULT '',
+            notes VARCHAR(255) DEFAULT '',
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            PRIMARY KEY (portfolio_id, symbol),
+            KEY idx_ai_sim_watchlist_portfolio_status (portfolio_id, status),
+            KEY idx_ai_sim_watchlist_portfolio_signal_date (portfolio_id, last_signal_date)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """,
     ]
 
     with engine.begin() as conn:
@@ -227,6 +260,29 @@ def ensure_ai_sim_tables() -> None:
                     """
                 )
             )
+
+        watchlist_columns = {
+            "has_platform": "ALTER TABLE ai_sim_watchlist ADD COLUMN has_platform TINYINT NOT NULL DEFAULT 0 AFTER chase_ok",
+            "platform_low": "ALTER TABLE ai_sim_watchlist ADD COLUMN platform_low DOUBLE NOT NULL DEFAULT 0 AFTER has_platform",
+            "breakout_candle_low": "ALTER TABLE ai_sim_watchlist ADD COLUMN breakout_candle_low DOUBLE NOT NULL DEFAULT 0 AFTER platform_low",
+            "notes": "ALTER TABLE ai_sim_watchlist ADD COLUMN notes VARCHAR(255) DEFAULT '' AFTER last_signal_date",
+        }
+        for col_name, ddl in watchlist_columns.items():
+            col_row = conn.execute(
+                text(
+                    """
+                    SELECT 1
+                    FROM information_schema.COLUMNS
+                    WHERE TABLE_SCHEMA = DATABASE()
+                      AND TABLE_NAME = 'ai_sim_watchlist'
+                      AND COLUMN_NAME = :col
+                    LIMIT 1
+                    """
+                ),
+                {"col": col_name},
+            ).fetchone()
+            if not col_row:
+                conn.execute(text(ddl))
 
         upsert_sql = text(
             """
@@ -575,6 +631,734 @@ def _build_candidate_pool(trade_date: str, current_positions: Dict[str, Dict[str
     df = df.sort_values(["score", "amount"], ascending=[False, False]).head(limit).reset_index(drop=True)
     return df
 
+
+def _is_v2_portfolio(portfolio_id: str) -> bool:
+    return str(portfolio_id or "").strip() == OFFICIAL_PORTFOLIO_2_ID
+
+
+def _latest_sector_date(trade_date: str) -> Optional[str]:
+    sql = text(
+        """
+        SELECT MAX(trade_date) AS d
+        FROM sector_moneyflow
+        WHERE trade_date <= :td
+        """
+    )
+    with engine.connect() as conn:
+        row = conn.execute(sql, {"td": trade_date}).fetchone()
+    if not row or not row[0]:
+        return None
+    return re.sub(r"[^0-9]", "", str(row[0]))[:8]
+
+
+def _get_v2_top_sectors(trade_date: str, limit: int = 3) -> List[Dict[str, Any]]:
+    sec_date = _latest_sector_date(trade_date)
+    if not sec_date:
+        return []
+    sql = text(
+        """
+        SELECT industry, pct_change, main_net_inflow
+        FROM sector_moneyflow
+        WHERE trade_date = :td
+          AND sector_type IN ('行业', '琛屼笟')
+        ORDER BY pct_change DESC, main_net_inflow DESC, industry ASC
+        LIMIT :lim
+        """
+    )
+    with engine.connect() as conn:
+        df = pd.read_sql(sql, conn, params={"td": sec_date, "lim": int(max(1, limit))})
+    out: List[Dict[str, Any]] = []
+    if df.empty:
+        return out
+    for _, row in df.iterrows():
+        name = str(row.get("industry") or "").strip()
+        if not name:
+            continue
+        out.append(
+            {
+                "industry": name,
+                "pct_change": _to_float(row.get("pct_change"), 0.0),
+                "main_net_inflow": _to_float(row.get("main_net_inflow"), 0.0),
+                "trade_date": sec_date,
+            }
+        )
+    return out
+
+
+def _fetch_recent_price_history(symbols: List[str], trade_date: str, lookback: int = 100) -> pd.DataFrame:
+    cleaned = sorted({_normalize_symbol(s) for s in symbols if _normalize_symbol(s)})
+    if not cleaned:
+        return pd.DataFrame(
+            columns=[
+                "ts_code",
+                "trade_date",
+                "open_price",
+                "high_price",
+                "low_price",
+                "close_price",
+                "amount",
+                "vol",
+            ]
+        )
+
+    placeholders = ",".join([f":s{i}" for i in range(len(cleaned))])
+    params: Dict[str, Any] = {f"s{i}": s for i, s in enumerate(cleaned)}
+    params["td"] = trade_date
+    params["lb"] = int(max(30, lookback))
+
+    sql = text(
+        f"""
+        SELECT ts_code, trade_date, open_price, high_price, low_price, close_price, amount, vol
+        FROM (
+            SELECT
+                ts_code, trade_date, open_price, high_price, low_price, close_price, amount, vol,
+                ROW_NUMBER() OVER(PARTITION BY ts_code ORDER BY trade_date DESC) AS rn
+            FROM stock_price
+            WHERE trade_date <= :td
+              AND ts_code IN ({placeholders})
+        ) q
+        WHERE q.rn <= :lb
+        ORDER BY ts_code, trade_date
+        """
+    )
+    with engine.connect() as conn:
+        return pd.read_sql(sql, conn, params=params)
+
+
+def _is_v2_breakout_candidate(pattern: str, ma_trend: str, score: float) -> bool:
+    p = str(pattern or "")
+    t = str(ma_trend or "")
+    if _to_float(score, 0.0) < V2_MIN_BREAKOUT_SCORE:
+        return False
+
+    bearish_tokens = ["跌破", "空头", "假突破", "假跌破", "诱多"]
+    if any(tok in p for tok in bearish_tokens):
+        return False
+    if "空头" in t:
+        return False
+
+    positive_tokens = ["突破", "破底翻", "反转", "晨星", "锤子", "创新高", "多头吞噬"]
+    return any(tok in p for tok in positive_tokens)
+
+
+def _compute_v2_symbol_features(hist_df: pd.DataFrame) -> Dict[str, Any]:
+    out = {
+        "ma10": 0.0,
+        "ma20": 0.0,
+        "breakout_date": "",
+        "breakout_price": 0.0,
+        "breakout_candle_low": 0.0,
+        "has_platform": 0,
+        "platform_low": 0.0,
+        "stop_price": 0.0,
+        "pullback_ready": 0,
+        "chase_ok": 1,
+    }
+    if hist_df.empty:
+        return out
+
+    d = hist_df.sort_values("trade_date").reset_index(drop=True)
+    for c in ["open_price", "high_price", "low_price", "close_price"]:
+        d[c] = pd.to_numeric(d[c], errors="coerce")
+    d = d.dropna(subset=["close_price", "high_price", "low_price"])
+    if d.empty:
+        return out
+
+    last = d.iloc[-1]
+    close_now = _to_float(last.get("close_price"), 0.0)
+    ma10 = _to_float(d["close_price"].tail(10).mean(), 0.0)
+    ma20 = _to_float(d["close_price"].tail(20).mean(), 0.0)
+    out["ma10"] = ma10
+    out["ma20"] = ma20
+
+    breakout_date = re.sub(r"[^0-9]", "", str(last.get("trade_date") or ""))[:8]
+    breakout_price = close_now
+    breakout_candle_low = _to_float(last.get("low_price"), close_now)
+
+    for i in range(max(1, len(d) - 12), len(d)):
+        cur = d.iloc[i]
+        prev = d.iloc[:i]
+        if len(prev) < 20:
+            continue
+        prev_high = _to_float(prev["high_price"].tail(20).max(), 0.0)
+        prev_close = _to_float(d.iloc[i - 1].get("close_price"), 0.0)
+        cur_close = _to_float(cur.get("close_price"), 0.0)
+        cur_open = _to_float(cur.get("open_price"), cur_close)
+        day_ret = (cur_close / prev_close - 1.0) if prev_close > 0 else 0.0
+        if cur_close > prev_high and cur_close > cur_open and day_ret >= 0.03:
+            breakout_date = re.sub(r"[^0-9]", "", str(cur.get("trade_date") or ""))[:8]
+            breakout_price = cur_close
+            breakout_candle_low = _to_float(cur.get("low_price"), breakout_candle_low)
+
+    box = d.tail(16).iloc[:-1].copy() if len(d) >= 12 else pd.DataFrame()
+    has_platform = 0
+    platform_low = 0.0
+    if not box.empty:
+        box_high = _to_float(box["high_price"].max(), 0.0)
+        platform_low = _to_float(box["low_price"].min(), 0.0)
+        width = (box_high - platform_low) / max(1e-9, close_now)
+        if width <= 0.18:
+            has_platform = 1
+    out["has_platform"] = has_platform
+    out["platform_low"] = platform_low
+    out["breakout_date"] = breakout_date
+    out["breakout_price"] = breakout_price
+    out["breakout_candle_low"] = breakout_candle_low
+    out["stop_price"] = platform_low if has_platform and platform_low > 0 else breakout_candle_low
+
+    near_ma10 = ma10 > 0 and abs(close_now - ma10) / ma10 <= V2_PULLBACK_NEAR_PCT
+    near_ma20 = ma20 > 0 and abs(close_now - ma20) / ma20 <= V2_PULLBACK_NEAR_PCT
+    out["pullback_ready"] = int(near_ma10 or near_ma20)
+    out["chase_ok"] = int(close_now <= max(1e-9, breakout_price) * (1.0 + V2_CHASE_LIMIT_PCT))
+    return out
+
+
+def _ensure_v2_candidate_columns(df: pd.DataFrame, trade_date: str) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame(
+            columns=[
+                "symbol",
+                "name",
+                "industry",
+                "score",
+                "close",
+                "pct_chg",
+                "amount",
+                "vol",
+                "pattern",
+                "ma_trend",
+                "signal_active",
+                "breakout_date",
+                "breakout_price",
+                "stop_price",
+                "ma10",
+                "ma20",
+                "pullback_ready",
+                "chase_ok",
+                "has_platform",
+                "platform_low",
+                "breakout_candle_low",
+                "from_holdings_fallback",
+            ]
+        )
+
+    out = df.copy()
+    defaults: Dict[str, Any] = {
+        "pattern": "",
+        "ma_trend": "",
+        "signal_active": 0,
+        "breakout_date": trade_date,
+        "breakout_price": out.get("close", 0),
+        "stop_price": 0.0,
+        "ma10": 0.0,
+        "ma20": 0.0,
+        "pullback_ready": 0,
+        "chase_ok": 1,
+        "has_platform": 0,
+        "platform_low": 0.0,
+        "breakout_candle_low": 0.0,
+        "from_holdings_fallback": 0,
+    }
+    for col, dv in defaults.items():
+        if col not in out.columns:
+            out[col] = dv
+    return out
+
+
+def _build_candidate_pool_v2(
+    trade_date: str,
+    current_positions: Dict[str, Dict[str, Any]],
+    limit: int = 120,
+) -> Tuple[pd.DataFrame, List[str]]:
+    screener_date = _latest_screener_date(trade_date)
+    top_sectors = _get_v2_top_sectors(trade_date, limit=3)
+    sector_names = [str(x.get("industry") or "").strip() for x in top_sectors if str(x.get("industry") or "").strip()]
+    sector_notes = [
+        f"{x['industry']}({x['pct_change']:+.2f}%)" for x in top_sectors if str(x.get("industry") or "").strip()
+    ]
+
+    base_df = pd.DataFrame()
+    if screener_date:
+        if sector_names:
+            placeholders = ",".join([f":sec{i}" for i in range(len(sector_names))])
+            params: Dict[str, Any] = {"td": screener_date}
+            for i, sec in enumerate(sector_names):
+                params[f"sec{i}"] = sec
+            sql = text(
+                f"""
+                SELECT ts_code, name, industry, score, close, pct_chg, pattern, ma_trend
+                FROM daily_stock_screener
+                WHERE trade_date = :td
+                  AND industry IN ({placeholders})
+                ORDER BY score DESC
+                LIMIT 600
+                """
+            )
+            with engine.connect() as conn:
+                base_df = pd.read_sql(sql, conn, params=params)
+        else:
+            sql = text(
+                """
+                SELECT ts_code, name, industry, score, close, pct_chg, pattern, ma_trend
+                FROM daily_stock_screener
+                WHERE trade_date = :td
+                ORDER BY score DESC
+                LIMIT 400
+                """
+            )
+            with engine.connect() as conn:
+                base_df = pd.read_sql(sql, conn, params={"td": screener_date})
+
+    if base_df.empty:
+        fallback = _build_candidate_pool(trade_date, current_positions, limit=limit)
+        return _ensure_v2_candidate_columns(fallback, trade_date), sector_notes
+
+    base_df["symbol"] = base_df["ts_code"].apply(_normalize_symbol)
+    base_df = base_df[base_df["symbol"].astype(bool)]
+
+    all_symbols = sorted(set(base_df["symbol"].tolist()) | set(current_positions.keys()))
+    price_map = _fetch_price_snapshot(all_symbols, trade_date)
+    hist_df = _fetch_recent_price_history(all_symbols, trade_date, lookback=100)
+    feature_map: Dict[str, Dict[str, Any]] = {}
+    if not hist_df.empty:
+        hist_df["symbol"] = hist_df["ts_code"].apply(_normalize_symbol)
+        for symbol, g in hist_df.groupby("symbol"):
+            feature_map[symbol] = _compute_v2_symbol_features(g)
+
+    rows: List[Dict[str, Any]] = []
+    for _, r in base_df.iterrows():
+        symbol = _normalize_symbol(r.get("symbol", ""))
+        if not symbol:
+            continue
+        p = price_map.get(symbol)
+        if not p:
+            continue
+        name = str(r.get("name") or p.get("name") or "")
+        if "ST" in name.upper() or "*ST" in name.upper() or "退" in name:
+            continue
+        if not _is_valid_universe_symbol(symbol, name):
+            continue
+
+        close = _to_float(p.get("close"), _to_float(r.get("close"), 0.0))
+        amount = _to_float(p.get("amount"), 0.0)
+        if close <= 0:
+            continue
+        if amount < 1e8 and symbol not in current_positions:
+            continue
+        if close < 1.0:
+            continue
+
+        score = _to_float(r.get("score"), 0.0)
+        pattern = str(r.get("pattern") or "")
+        ma_trend = str(r.get("ma_trend") or "")
+        signal_active = int(_is_v2_breakout_candidate(pattern, ma_trend, score))
+        if signal_active != 1 and symbol not in current_positions:
+            continue
+
+        feat = feature_map.get(symbol, {})
+        rows.append(
+            {
+                "symbol": symbol,
+                "name": name,
+                "industry": str(r.get("industry") or ""),
+                "score": score,
+                "close": close,
+                "pct_chg": _to_float(r.get("pct_chg"), 0.0),
+                "amount": amount,
+                "vol": _to_float(p.get("vol"), 0.0),
+                "pattern": pattern,
+                "ma_trend": ma_trend,
+                "signal_active": signal_active,
+                "breakout_date": str(feat.get("breakout_date") or screener_date or trade_date),
+                "breakout_price": _to_float(feat.get("breakout_price"), close),
+                "stop_price": _to_float(feat.get("stop_price"), 0.0),
+                "ma10": _to_float(feat.get("ma10"), 0.0),
+                "ma20": _to_float(feat.get("ma20"), 0.0),
+                "pullback_ready": int(_to_float(feat.get("pullback_ready"), 0.0)),
+                "chase_ok": int(_to_float(feat.get("chase_ok"), 1.0)),
+                "has_platform": int(_to_float(feat.get("has_platform"), 0.0)),
+                "platform_low": _to_float(feat.get("platform_low"), 0.0),
+                "breakout_candle_low": _to_float(feat.get("breakout_candle_low"), 0.0),
+                "from_holdings_fallback": 0,
+            }
+        )
+
+    for symbol, pos in current_positions.items():
+        if any(x["symbol"] == symbol for x in rows):
+            continue
+        p = price_map.get(symbol)
+        if not p:
+            continue
+        feat = feature_map.get(symbol, {})
+        rows.append(
+            {
+                "symbol": symbol,
+                "name": pos.get("name") or p.get("name") or "",
+                "industry": "",
+                "score": -1.0,
+                "close": _to_float(p.get("close")),
+                "pct_chg": 0.0,
+                "amount": _to_float(p.get("amount"), 0.0),
+                "vol": _to_float(p.get("vol"), 0.0),
+                "pattern": "",
+                "ma_trend": "",
+                "signal_active": 0,
+                "breakout_date": str(feat.get("breakout_date") or trade_date),
+                "breakout_price": _to_float(feat.get("breakout_price"), _to_float(p.get("close"), 0.0)),
+                "stop_price": _to_float(feat.get("stop_price"), 0.0),
+                "ma10": _to_float(feat.get("ma10"), 0.0),
+                "ma20": _to_float(feat.get("ma20"), 0.0),
+                "pullback_ready": int(_to_float(feat.get("pullback_ready"), 0.0)),
+                "chase_ok": int(_to_float(feat.get("chase_ok"), 1.0)),
+                "has_platform": int(_to_float(feat.get("has_platform"), 0.0)),
+                "platform_low": _to_float(feat.get("platform_low"), 0.0),
+                "breakout_candle_low": _to_float(feat.get("breakout_candle_low"), 0.0),
+                "from_holdings_fallback": 1,
+            }
+        )
+
+    if not rows:
+        fallback = _build_candidate_pool(trade_date, current_positions, limit=limit)
+        return _ensure_v2_candidate_columns(fallback, trade_date), sector_notes
+
+    df = pd.DataFrame(rows).drop_duplicates(subset=["symbol"], keep="first")
+    df = df.sort_values(["signal_active", "score", "amount"], ascending=[False, False, False]).head(limit).reset_index(drop=True)
+    return _ensure_v2_candidate_columns(df, trade_date), sector_notes
+
+
+def _v2_regime_limits(csi500_regime: Dict[str, Any]) -> Dict[str, Any]:
+    regime = str(csi500_regime.get("regime") or "neutral").lower()
+    if regime == "bull":
+        return {"regime": "bull", "single_cap": 0.10, "total_cap": 0.80, "tiers": [0.10, 0.08, 0.05]}
+    if regime == "bear":
+        return {"regime": "bear", "single_cap": 0.045, "total_cap": 0.20, "tiers": [0.045, 0.04, 0.035]}
+    return {"regime": "neutral", "single_cap": 0.05, "total_cap": 0.50, "tiers": [0.05, 0.045, 0.04]}
+
+
+def _v2_build_rule_targets(
+    current_positions: Dict[str, Dict[str, Any]],
+    current_weights: Dict[str, float],
+    candidates_df: pd.DataFrame,
+    price_map: Dict[str, Dict[str, Any]],
+    csi500_regime: Dict[str, Any],
+    max_positions: int,
+) -> Tuple[Dict[str, float], Dict[str, str], List[str], set[str], set[str]]:
+    limits = _v2_regime_limits(csi500_regime)
+    single_cap = _to_float(limits.get("single_cap"), 0.05)
+    total_cap = _to_float(limits.get("total_cap"), 0.5)
+    tiers = list(limits.get("tiers") or [single_cap])
+
+    candidate_rows: Dict[str, Dict[str, Any]] = {}
+    for _, row in candidates_df.iterrows():
+        symbol = _normalize_symbol(row.get("symbol", ""))
+        if symbol:
+            candidate_rows[symbol] = dict(row)
+
+    notes: List[str] = []
+    reasons: Dict[str, str] = {}
+    forced_stop_sell: set[str] = set()
+    buy_eligible: set[str] = set()
+    targets: Dict[str, float] = {}
+    used = 0.0
+
+    for symbol in sorted(current_positions.keys(), key=lambda x: current_weights.get(x, 0.0), reverse=True):
+        row = candidate_rows.get(symbol, {})
+        stop_price = _to_float(row.get("stop_price"), 0.0)
+        close = _to_float(price_map.get(symbol, {}).get("close"), 0.0)
+        if stop_price > 0 and close > 0 and close < stop_price:
+            forced_stop_sell.add(symbol)
+            reasons[symbol] = f"收盘价 {close:.3f} 跌破止损位 {stop_price:.3f}，执行卖出。"
+            continue
+
+        w = min(current_weights.get(symbol, 0.0), single_cap)
+        if w <= 1e-6:
+            continue
+        remain = total_cap - used
+        if remain < V2_MIN_TRADE_WEIGHT:
+            reasons[symbol] = "总仓位上限受限，先行降仓。"
+            continue
+        w = min(w, remain)
+        targets[symbol] = w
+        used += w
+        reasons[symbol] = "未触发止损，继续持有。"
+
+    buy_df = candidates_df.copy()
+    if not buy_df.empty:
+        buy_df = buy_df[
+            (buy_df["signal_active"] == 1)
+            & (buy_df["pullback_ready"] == 1)
+            & (buy_df["chase_ok"] == 1)
+        ].copy()
+        buy_df = buy_df[~buy_df["symbol"].isin(list(current_positions.keys()))]
+        buy_df = buy_df.sort_values(["score", "amount"], ascending=[False, False])
+
+    tier_idx = 0
+    for _, row in buy_df.iterrows() if not buy_df.empty else []:
+        symbol = _normalize_symbol(row.get("symbol", ""))
+        if not symbol:
+            continue
+        buy_eligible.add(symbol)
+        if len([x for x, w in targets.items() if w > 1e-8]) >= int(max_positions):
+            break
+        remain = total_cap - used
+        if remain < V2_MIN_TRADE_WEIGHT:
+            break
+        tier_w = _to_float(tiers[min(tier_idx, len(tiers) - 1)], single_cap)
+        tier_idx += 1
+        w = min(single_cap, tier_w, remain)
+        if w < V2_MIN_TRADE_WEIGHT:
+            continue
+        targets[symbol] = w
+        used += w
+        reasons[symbol] = "行业前3中的强势底部突破标的，回踩MA10/MA20附近且未追高，执行买入。"
+
+    for symbol in current_positions.keys():
+        if symbol not in targets and symbol not in forced_stop_sell:
+            reasons[symbol] = "仓位预算收缩或优先级不足，执行降仓腾挪。"
+
+    notes.append(f"2号仓位规则: 单票<= {single_cap:.2%}，总仓<= {total_cap:.2%}。")
+    if forced_stop_sell:
+        notes.append(f"收盘止损触发 {len(forced_stop_sell)} 只: {'、'.join(sorted(forced_stop_sell)[:5])}")
+    return targets, reasons, notes, forced_stop_sell, buy_eligible
+
+
+def _v2_merge_llm_targets(
+    rule_targets: Dict[str, float],
+    llm_actions: List[Dict[str, Any]],
+    current_positions: Dict[str, Dict[str, Any]],
+    allowed_symbols: set[str],
+    buy_eligible: set[str],
+    forced_stop_sell: set[str],
+    csi500_regime: Dict[str, Any],
+    max_positions: int,
+) -> Tuple[Dict[str, float], List[str], set[str]]:
+    limits = _v2_regime_limits(csi500_regime)
+    single_cap = _to_float(limits.get("single_cap"), 0.05)
+    total_cap = _to_float(limits.get("total_cap"), 0.5)
+    merged = dict(rule_targets)
+    notes: List[str] = []
+    override_symbols: set[str] = set()
+
+    rejected = 0
+    accepted = 0
+    for item in llm_actions:
+        symbol = _normalize_symbol(item.get("symbol", ""))
+        action = str(item.get("action") or "").lower()
+        tw = _to_float(item.get("target_weight"), 0.0)
+        if not symbol or symbol not in allowed_symbols:
+            rejected += 1
+            continue
+        if symbol in forced_stop_sell and action != "sell":
+            rejected += 1
+            continue
+        if action in {"buy", "hold"} and symbol not in current_positions and symbol not in buy_eligible:
+            rejected += 1
+            continue
+
+        if action == "sell":
+            merged[symbol] = 0.0
+            override_symbols.add(symbol)
+            accepted += 1
+            continue
+        if action in {"buy", "hold"}:
+            merged[symbol] = min(max(0.0, tw), single_cap)
+            override_symbols.add(symbol)
+            accepted += 1
+
+    merged = {k: max(0.0, _to_float(v)) for k, v in merged.items()}
+
+    non_zero = [(k, v) for k, v in merged.items() if v > 1e-8]
+    non_zero.sort(key=lambda x: x[1], reverse=True)
+    keep = dict(non_zero[: int(max_positions)])
+    for k, _ in non_zero[int(max_positions):]:
+        keep[k] = 0.0
+
+    total_w = sum(v for v in keep.values() if v > 0)
+    if total_w > total_cap > 0:
+        scale = total_cap / total_w
+        for k in list(keep.keys()):
+            keep[k] = keep[k] * scale
+        notes.append(f"LLM目标超出总仓上限，按 {scale:.3f} 比例缩放。")
+
+    if accepted > 0:
+        notes.append(f"LLM在策略池内调整 {accepted} 笔指令。")
+    if rejected > 0:
+        notes.append(f"LLM有 {rejected} 笔池外/违规指令被拦截。")
+    return {k: round(v, 6) for k, v in keep.items() if v > 1e-8}, notes, override_symbols
+
+
+def _v2_targets_to_actions(
+    target_weights: Dict[str, float],
+    current_weights: Dict[str, float],
+    reasons_map: Dict[str, str],
+    override_symbols: Optional[set[str]] = None,
+) -> List[Dict[str, Any]]:
+    override_symbols = override_symbols or set()
+    actions: List[Dict[str, Any]] = []
+    all_symbols = sorted(set(target_weights.keys()) | set(current_weights.keys()))
+    for symbol in all_symbols:
+        current_w = _to_float(current_weights.get(symbol), 0.0)
+        target_w = _to_float(target_weights.get(symbol), 0.0)
+        if target_w <= 1e-8 and current_w <= 1e-8:
+            continue
+        if target_w <= 1e-8 and current_w > 1e-8:
+            action = "sell"
+        elif current_w <= 1e-8 and target_w > 1e-8:
+            action = "buy"
+        else:
+            action = "hold"
+        reason = str(reasons_map.get(symbol) or "2号策略规则执行")
+        if symbol in override_symbols:
+            reason = f"{reason}（LLM在策略池内微调）"
+        actions.append(
+            {
+                "symbol": symbol,
+                "action": action,
+                "target_weight": round(target_w, 6),
+                "reason": reason,
+                "confidence": 0.70 if symbol not in override_symbols else 0.66,
+                "gate_status": "passed",
+                "gate_notes": "",
+            }
+        )
+    return actions
+
+
+def _save_v2_watchlist(
+    portfolio_id: str,
+    trade_date: str,
+    candidates_df: pd.DataFrame,
+    current_positions: Dict[str, Dict[str, Any]],
+    final_positions: Dict[str, Dict[str, Any]],
+    executed_trades: List[Dict[str, Any]],
+) -> None:
+    if candidates_df.empty:
+        return
+
+    old_df = get_watchlist(
+        portfolio_id=portfolio_id,
+        as_of_date=trade_date,
+        limit=V2_WATCHLIST_LIMIT,
+        statuses=["watching", "bought", "exited", "invalid"],
+    )
+    old_map = {
+        _normalize_symbol(r.get("symbol", "")): dict(r)
+        for _, r in old_df.iterrows()
+        if _normalize_symbol(r.get("symbol", ""))
+    } if not old_df.empty else {}
+
+    sold_today = {
+        _normalize_symbol(t.get("symbol", ""))
+        for t in executed_trades
+        if str(t.get("side") or "").lower() == "sell" and _normalize_symbol(t.get("symbol", ""))
+    }
+
+    records: Dict[str, Dict[str, Any]] = {}
+    for _, row in candidates_df.iterrows():
+        symbol = _normalize_symbol(row.get("symbol", ""))
+        if not symbol or int(_to_float(row.get("from_holdings_fallback"), 0.0)) == 1:
+            continue
+        prev = old_map.get(symbol, {})
+        status = "bought" if symbol in final_positions else "watching"
+        if symbol not in final_positions and symbol in sold_today and str(prev.get("status") or "") == "bought":
+            status = "exited"
+
+        records[symbol] = {
+            "portfolio_id": portfolio_id,
+            "symbol": symbol,
+            "name": str(row.get("name") or prev.get("name") or ""),
+            "status": status,
+            "sector_name": str(row.get("industry") or prev.get("sector_name") or ""),
+            "score": _to_float(row.get("score"), _to_float(prev.get("score"), 0.0)),
+            "breakout_date": str(row.get("breakout_date") or prev.get("breakout_date") or trade_date),
+            "breakout_price": _to_float(row.get("breakout_price"), _to_float(prev.get("breakout_price"), 0.0)),
+            "stop_price": _to_float(row.get("stop_price"), _to_float(prev.get("stop_price"), 0.0)),
+            "ma10": _to_float(row.get("ma10"), _to_float(prev.get("ma10"), 0.0)),
+            "ma20": _to_float(row.get("ma20"), _to_float(prev.get("ma20"), 0.0)),
+            "pullback_ready": int(_to_float(row.get("pullback_ready"), _to_float(prev.get("pullback_ready"), 0.0))),
+            "chase_ok": int(_to_float(row.get("chase_ok"), _to_float(prev.get("chase_ok"), 1.0))),
+            "has_platform": int(_to_float(row.get("has_platform"), _to_float(prev.get("has_platform"), 0.0))),
+            "platform_low": _to_float(row.get("platform_low"), _to_float(prev.get("platform_low"), 0.0)),
+            "breakout_candle_low": _to_float(
+                row.get("breakout_candle_low"),
+                _to_float(prev.get("breakout_candle_low"), 0.0),
+            ),
+            "last_signal_date": re.sub(r"[^0-9]", "", str(trade_date or ""))[:8],
+            "notes": str(prev.get("notes") or ""),
+        }
+
+    for symbol, prev in old_map.items():
+        if symbol in records:
+            continue
+        if symbol in final_positions:
+            status = "bought"
+        elif symbol in sold_today and str(prev.get("status") or "") == "bought":
+            status = "exited"
+        else:
+            status = str(prev.get("status") or "watching")
+        records[symbol] = {
+            "portfolio_id": portfolio_id,
+            "symbol": symbol,
+            "name": str(prev.get("name") or ""),
+            "status": status,
+            "sector_name": str(prev.get("sector_name") or ""),
+            "score": _to_float(prev.get("score"), 0.0),
+            "breakout_date": str(prev.get("breakout_date") or ""),
+            "breakout_price": _to_float(prev.get("breakout_price"), 0.0),
+            "stop_price": _to_float(prev.get("stop_price"), 0.0),
+            "ma10": _to_float(prev.get("ma10"), 0.0),
+            "ma20": _to_float(prev.get("ma20"), 0.0),
+            "pullback_ready": int(_to_float(prev.get("pullback_ready"), 0.0)),
+            "chase_ok": int(_to_float(prev.get("chase_ok"), 1.0)),
+            "has_platform": int(_to_float(prev.get("has_platform"), 0.0)),
+            "platform_low": _to_float(prev.get("platform_low"), 0.0),
+            "breakout_candle_low": _to_float(prev.get("breakout_candle_low"), 0.0),
+            "last_signal_date": str(prev.get("last_signal_date") or ""),
+            "notes": str(prev.get("notes") or ""),
+        }
+
+    if not records:
+        return
+
+    rows = list(records.values())[:V2_WATCHLIST_LIMIT]
+    with engine.begin() as conn:
+        for row in rows:
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO ai_sim_watchlist (
+                        portfolio_id, symbol, name, status, sector_name, score,
+                        breakout_date, breakout_price, stop_price, ma10, ma20,
+                        pullback_ready, chase_ok, has_platform, platform_low, breakout_candle_low,
+                        last_signal_date, notes
+                    ) VALUES (
+                        :portfolio_id, :symbol, :name, :status, :sector_name, :score,
+                        :breakout_date, :breakout_price, :stop_price, :ma10, :ma20,
+                        :pullback_ready, :chase_ok, :has_platform, :platform_low, :breakout_candle_low,
+                        :last_signal_date, :notes
+                    )
+                    ON DUPLICATE KEY UPDATE
+                        name = VALUES(name),
+                        status = VALUES(status),
+                        sector_name = VALUES(sector_name),
+                        score = VALUES(score),
+                        breakout_date = VALUES(breakout_date),
+                        breakout_price = VALUES(breakout_price),
+                        stop_price = VALUES(stop_price),
+                        ma10 = VALUES(ma10),
+                        ma20 = VALUES(ma20),
+                        pullback_ready = VALUES(pullback_ready),
+                        chase_ok = VALUES(chase_ok),
+                        has_platform = VALUES(has_platform),
+                        platform_low = VALUES(platform_low),
+                        breakout_candle_low = VALUES(breakout_candle_low),
+                        last_signal_date = VALUES(last_signal_date),
+                        notes = VALUES(notes),
+                        updated_at = CURRENT_TIMESTAMP
+                    """
+                ),
+                row,
+            )
 
 def _classify_style_hint(symbol: str, name: str, amount: float, pct_chg: float) -> str:
     s = _normalize_symbol(symbol)
@@ -1555,6 +2339,66 @@ def _dedupe_phrase(text: str, blocked_phrases: List[str]) -> str:
     return out
 
 
+def _is_v2_diary_rule_text(text: str) -> bool:
+    t = str(text or "").strip()
+    if not t:
+        return False
+    tokens = [
+        "策略",
+        "仓位",
+        "单票",
+        "总仓",
+        "行业top3",
+        "行业前3",
+        "回踩",
+        "ma10",
+        "ma20",
+        "止损位",
+        "候选池",
+        "权重",
+        "中证500状态",
+        "风控拦截",
+        "风控下调",
+        "llm",
+        "不追高",
+    ]
+    lower = t.lower()
+    if any(tok in lower for tok in tokens):
+        return True
+    if re.search(r"(\d+(\.\d+)?%)|([<>]=?)|(\bma\d+\b)", lower):
+        return True
+    return False
+
+
+def _soften_v2_diary_text(text: str, fallback: str) -> str:
+    t = str(text or "").strip()
+    if not t:
+        return fallback
+    if _is_v2_diary_rule_text(t):
+        return fallback
+    t = re.sub(r"\s+", " ", t).strip("；;。 ")
+    if not t:
+        return fallback
+    return t[:120]
+
+
+def _strip_v2_diary_rule_lines(text: str, fallback: str) -> str:
+    raw = str(text or "")
+    if not raw:
+        return fallback
+    kept: List[str] = []
+    for ln in raw.splitlines():
+        line = str(ln or "").strip()
+        if not line:
+            kept.append("")
+            continue
+        if _is_v2_diary_rule_text(line):
+            continue
+        kept.append(ln)
+    out = "\n".join(kept).strip()
+    return out or fallback
+
+
 def _build_review_payload(
     trade_date: str,
     nav_prev: float,
@@ -1622,19 +2466,26 @@ def _build_review_payload(
             if _normalize_symbol(o.get("symbol", "")) == symbol and str(o.get("action") or "").lower() == primary:
                 txt = str(o.get("reason") or "").strip()
                 if txt:
+                    if is_v2:
+                        return _soften_v2_diary_text(txt, "看着顺眼就上了一点，先拿小仓位试错。")
                     return txt
         for o in orders_audited:
             if _normalize_symbol(o.get("symbol", "")) == symbol:
                 txt = str(o.get("reason") or "").strip()
                 if txt:
+                    if is_v2:
+                        return _soften_v2_diary_text(txt, "这笔主要是顺势调整，动作不大。")
                     return txt
-        return "仓位与风险平衡调整"
+        return "这笔是顺着盘面的临场处理。"
 
     buys = [x for x in executed_trades if str(x.get("side") or "").lower() == "buy"]
     sells = [x for x in executed_trades if str(x.get("side") or "").lower() == "sell"]
 
     ai_summary = str(ai_payload.get("summary") or "").strip() or "当日以结构性机会为主"
     ai_risk = str(ai_payload.get("risk_notes") or "").strip() or "风险集中在节奏与仓位控制"
+    if is_v2:
+        ai_summary = _soften_v2_diary_text(ai_summary, "今天盘面机会不算多，我更想把节奏放慢一点。")
+        ai_risk = _soften_v2_diary_text(ai_risk, "明天继续看市场给不给更舒服的位置。")
     ai_source = str(ai_payload.get("source") or "").strip().lower()
 
     if is_v2:
@@ -1675,6 +2526,25 @@ def _build_review_payload(
 
     summary_md = "\n\n".join([f"### 复盘日记（{_fmt_td(trade_date)}）"] + summary_blocks)
     summary_md = _dedupe_phrase(summary_md, blocked_phrases)
+    if is_v2:
+        summary_md = _strip_v2_diary_rule_lines(
+            summary_md,
+            f"### 复盘日记（{_fmt_td(trade_date)}）\n\n今天盘面没有让我特别兴奋的点，我更愿意慢一点，先把状态留给明天。",
+        )
+
+    def _v2_no_trade_reason() -> str:
+        if candidates_df.empty:
+            return "今天盯盘下来没看到特别顺手的机会，我宁愿空着等下一拍。"
+        cols = set(candidates_df.columns.tolist())
+        if {"signal_active", "pullback_ready", "chase_ok"}.issubset(cols):
+            cdf = candidates_df.copy()
+            cdf["signal_active"] = pd.to_numeric(cdf["signal_active"], errors="coerce").fillna(0.0)
+            cdf["pullback_ready"] = pd.to_numeric(cdf["pullback_ready"], errors="coerce").fillna(0.0)
+            cdf["chase_ok"] = pd.to_numeric(cdf["chase_ok"], errors="coerce").fillna(0.0)
+            eligible = cdf[(cdf["signal_active"] == 1) & (cdf["pullback_ready"] == 1) & (cdf["chase_ok"] == 1)]
+            if eligible.empty:
+                return "看了几只票，但位置都不够舒服，今天就没有硬下单。"
+        return "盘面有点乱，我今天主要做观察，不急着把手伸出去。"
 
     if buys:
         lines = []
@@ -1686,8 +2556,13 @@ def _build_review_payload(
             lines.append(f"{symbol} 买入 {qty:,} 股，成交价 {px:.3f}，原因：{reason}。")
         buys_md = "### 今天为什么买\n\n" + "\n".join(lines)
     else:
-        buys_md = "### 今天为什么买\n\n今天没有新开仓，主要是等更干净的回踩与确认信号。"
+        if is_v2:
+            buys_md = f"### 今天为什么买\n\n今天没有买入。{_v2_no_trade_reason()}"
+        else:
+            buys_md = "### 今天为什么买\n\n今天没有新开仓，主要是等更干净的回踩与确认信号。"
     buys_md = _dedupe_phrase(buys_md, blocked_phrases)
+    if is_v2:
+        buys_md = _strip_v2_diary_rule_lines(buys_md, "### 今天为什么买\n\n今天没有买入，先把手收回来，等更顺的时机。")
 
     if sells:
         lines = []
@@ -1699,8 +2574,13 @@ def _build_review_payload(
             lines.append(f"{symbol} 卖出 {qty:,} 股，成交价 {px:.3f}，原因：{reason}。")
         sells_md = "### 今天为什么卖\n\n" + "\n".join(lines)
     else:
-        sells_md = "### 今天为什么卖\n\n今天没有主动卖出，持仓结构与风险预算仍在可控区间。"
+        if is_v2:
+            sells_md = "### 今天为什么卖\n\n今天没有卖出。手里的票还在观察节奏里，暂时不急着动。"
+        else:
+            sells_md = "### 今天为什么卖\n\n今天没有主动卖出，持仓结构与风险预算仍在可控区间。"
     sells_md = _dedupe_phrase(sells_md, blocked_phrases)
+    if is_v2:
+        sells_md = _strip_v2_diary_rule_lines(sells_md, "### 今天为什么卖\n\n今天没有卖出，先稳住再说。")
 
     rejected = [o for o in orders_audited if str(o.get("gate_status") or "").lower() == "rejected"]
     adjusted = [o for o in orders_audited if str(o.get("gate_status") or "").lower() == "adjusted"]
@@ -1736,6 +2616,8 @@ def _build_review_payload(
         risk_parts.append("模型服务短暂波动，今晚采用规则回退执行，风控与仓位纪律照常生效")
     for n in risk_notes:
         txt = _clean_note_text(n)
+        if is_v2 and _is_v2_diary_rule_text(txt):
+            continue
         if txt and txt not in risk_parts:
             risk_parts.append(txt)
     if rejected:
@@ -1749,6 +2631,11 @@ def _build_review_payload(
 
     risk_md = "### 明天继续盯什么\n\n" + "。".join(risk_parts) + "。"
     risk_md = _dedupe_phrase(risk_md, blocked_phrases)
+    if is_v2:
+        risk_md = _strip_v2_diary_rule_lines(
+            risk_md,
+            "### 明天继续盯什么\n\n先看开盘情绪有没有回暖，盯住手里和观察名单里的几只票，耐心等信号更清楚一点。",
+        )
 
     def _build_llm_diary() -> Optional[Dict[str, str]]:
         if int(config.get("review_use_llm", 1)) != 1:
@@ -1768,7 +2655,11 @@ def _build_review_payload(
             "pnl_pct": round(pnl_pct, 6),
             "ai_summary": ai_summary,
             "ai_risk_notes": ai_risk,
-            "risk_notes": risk_notes,
+            "risk_notes": [
+                x
+                for x in risk_notes
+                if (not is_v2) or (not _is_v2_diary_rule_text(str(x or "")))
+            ],
             "executed_trades": [
                 {
                     "symbol": _normalize_symbol(t.get("symbol", "")),
@@ -1799,6 +2690,7 @@ def _build_review_payload(
             "3) risk_md 写明次日重点观察与风控动作；"
             "4) 禁止复用 recent_diary_snippets 中高频句式；"
             "5) 禁止编造事实，只能依据给定 facts。"
+            "6) 不要写策略参数、仓位比例、均线名词、规则条款，也不要写选股逻辑口号（如不追高）。"
             f"\n\n{persona_clause}"
             f"\n\nfacts={json.dumps(facts, ensure_ascii=False)}"
         )
@@ -1815,6 +2707,23 @@ def _build_review_payload(
                 "sells_md": _dedupe_phrase(str(parsed.get("sells_md") or "").strip(), blocked_phrases),
                 "risk_md": _dedupe_phrase(str(parsed.get("risk_md") or "").strip(), blocked_phrases),
             }
+            if is_v2:
+                out["summary_md"] = _strip_v2_diary_rule_lines(
+                    out["summary_md"],
+                    f"### 复盘日记（{_fmt_td(trade_date)}）\n\n今天更像是耐心的一天，我没有被盘中噪音带着走。",
+                )
+                out["buys_md"] = _strip_v2_diary_rule_lines(
+                    out["buys_md"],
+                    "### 今天为什么买\n\n今天没有买入，先等市场把位置走顺一点。",
+                )
+                out["sells_md"] = _strip_v2_diary_rule_lines(
+                    out["sells_md"],
+                    "### 今天为什么卖\n\n今天没有卖出，节奏还在观察区间里。",
+                )
+                out["risk_md"] = _strip_v2_diary_rule_lines(
+                    out["risk_md"],
+                    "### 明天继续盯什么\n\n先看开盘强弱，再决定要不要动手。",
+                )
             if all(out.values()):
                 return out
         except Exception:
@@ -1927,52 +2836,109 @@ def run_daily_simulation(
         config=config,
     )
 
-    candidates_df = _build_candidate_pool(td, current_positions)
+    csi500_regime = _get_csi500_regime(td)
+    recent_trade_memory = _load_recent_trade_memory(portfolio_id=portfolio_id, trade_date=td, days=5)
+    is_v2 = _is_v2_portfolio(portfolio_id)
+    if is_v2:
+        candidates_df, sector_notes = _build_candidate_pool_v2(td, current_positions)
+    else:
+        candidates_df = _build_candidate_pool(td, current_positions)
+        sector_notes = []
+
     style_map = _build_style_map(candidates_df)
     candidate_score_map = {
         _normalize_symbol(str(r.get("symbol") or "")): _to_float(r.get("score"), 0.0)
         for _, r in candidates_df.iterrows()
         if _normalize_symbol(str(r.get("symbol") or ""))
     }
-    csi500_regime = _get_csi500_regime(td)
-    recent_trade_memory = _load_recent_trade_memory(portfolio_id=portfolio_id, trade_date=td, days=5)
 
-    ai_payload, tool_calls, ai_warning = _generate_ai_actions_with_tools(
-        portfolio_id=portfolio_id,
-        trade_date=td,
-        nav_prev=context.nav_prev,
-        cash=context.cash,
-        positions=current_positions,
-        candidates_df=candidates_df,
-        config=config,
-        csi500_regime=csi500_regime,
-        style_map=style_map,
-        recent_trade_memory=recent_trade_memory,
-    )
-
-    raw_actions = _sanitize_actions(ai_payload.get("actions", []))
-
-    # 鍏佽浜ゆ槗鏍囩殑 = 鍊欓€夋睜 + 褰撳墠鎸佷粨
     candidate_symbols = set(candidates_df["symbol"].tolist())
     candidate_symbols.update(current_positions.keys())
-
     all_symbols_for_price = sorted(set(candidate_symbols) | set(current_positions.keys()))
     price_map = _fetch_price_snapshot(all_symbols_for_price, td)
-
     current_weights = _current_weight_map(current_positions, price_map, context.nav_prev)
 
-    audited_actions, target_weights, gate_notes = _apply_risk_gates(
-        raw_actions=raw_actions,
-        current_weights=current_weights,
-        candidate_symbols=candidate_symbols,
-        config=config,
-        csi500_regime=csi500_regime,
-        style_map=style_map,
-        candidate_score_map=candidate_score_map,
-    )
+    if not is_v2:
+        ai_payload, tool_calls, ai_warning = _generate_ai_actions_with_tools(
+            portfolio_id=portfolio_id,
+            trade_date=td,
+            nav_prev=context.nav_prev,
+            cash=context.cash,
+            positions=current_positions,
+            candidates_df=candidates_df,
+            config=config,
+            csi500_regime=csi500_regime,
+            style_map=style_map,
+            recent_trade_memory=recent_trade_memory,
+        )
 
-    if ai_warning:
-        gate_notes.append(ai_warning)
+        raw_actions = _sanitize_actions(ai_payload.get("actions", []))
+        audited_actions, target_weights, gate_notes = _apply_risk_gates(
+            raw_actions=raw_actions,
+            current_weights=current_weights,
+            candidate_symbols=candidate_symbols,
+            config=config,
+            csi500_regime=csi500_regime,
+            style_map=style_map,
+            candidate_score_map=candidate_score_map,
+        )
+        if ai_warning:
+            gate_notes.append(ai_warning)
+    else:
+        rule_targets, reason_map, rule_notes, forced_stop_sell, buy_eligible = _v2_build_rule_targets(
+            current_positions=current_positions,
+            current_weights=current_weights,
+            candidates_df=candidates_df,
+            price_map=price_map,
+            csi500_regime=csi500_regime,
+            max_positions=int(config.get("max_positions", 10)),
+        )
+        gate_notes = list(rule_notes)
+        if sector_notes:
+            gate_notes.append(f"行业Top3: {'、'.join(sector_notes)}")
+
+        llm_payload, llm_tool_calls, llm_warning = _generate_ai_actions_with_tools(
+            portfolio_id=portfolio_id,
+            trade_date=td,
+            nav_prev=context.nav_prev,
+            cash=context.cash,
+            positions=current_positions,
+            candidates_df=candidates_df,
+            config=config,
+            csi500_regime=csi500_regime,
+            style_map=style_map,
+            recent_trade_memory=recent_trade_memory,
+        )
+        llm_actions = _sanitize_actions(llm_payload.get("actions", []))
+        target_weights, llm_notes, override_symbols = _v2_merge_llm_targets(
+            rule_targets=rule_targets,
+            llm_actions=llm_actions,
+            current_positions=current_positions,
+            allowed_symbols=set(candidates_df["symbol"].tolist()) | set(current_positions.keys()),
+            buy_eligible=buy_eligible,
+            forced_stop_sell=forced_stop_sell,
+            csi500_regime=csi500_regime,
+            max_positions=int(config.get("max_positions", 10)),
+        )
+        gate_notes.extend(llm_notes)
+        if llm_warning:
+            gate_notes.append(llm_warning)
+
+        audited_actions = _v2_targets_to_actions(
+            target_weights=target_weights,
+            current_weights=current_weights,
+            reasons_map=reason_map,
+            override_symbols=override_symbols,
+        )
+        ai_payload = {
+            "summary": "2号策略：行业前3中选择强势底部突破，回踩MA10/MA20再买入，不追高。",
+            "risk_notes": "收盘跌破止损位卖出；仓位按中证500多空状态动态限制。",
+            "actions": audited_actions,
+            "source": "llm_v2_hybrid" if override_symbols else "rule_v2",
+        }
+        tool_calls = llm_tool_calls
+        ai_warning = llm_warning
+
     gate_notes.append(f"中证500状态: {csi500_regime.get('summary', '中性')}")
 
     planned_trades = _plan_trades(
@@ -1991,6 +2957,19 @@ def run_daily_simulation(
         price_map=price_map,
         cash_start=context.cash,
     )
+
+    if is_v2:
+        try:
+            _save_v2_watchlist(
+                portfolio_id=portfolio_id,
+                trade_date=td,
+                candidates_df=candidates_df,
+                current_positions=current_positions,
+                final_positions=final_positions,
+                executed_trades=executed_trades,
+            )
+        except Exception as exc:
+            gate_notes.append(f"2号自选池更新失败: {exc}")
 
     # 璁＄畻鍑€鍊?
     position_value = 0.0
