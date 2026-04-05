@@ -28,6 +28,8 @@ let msgCounter = 0
 let pollTimer: ReturnType<typeof setInterval> | null = null
 let pollingTaskId = ''
 let pollingStartedAtMs = 0
+let pollingSessionVersion = 0
+let uiSessionVersion = 0
 
 const CHAT_HISTORY_VERSION = 'v2'
 const HISTORY_KEY = computed(() => `chat_history_${CHAT_HISTORY_VERSION}_${auth.username}`)
@@ -128,6 +130,10 @@ function clearPendingTask() {
   pollingStartedAtMs = 0
 }
 
+function isStaleSession(sessionVersion: number) {
+  return sessionVersion !== uiSessionVersion
+}
+
 // ── 初始化：onShow 统一处理，避免 onMounted/onShow 时序竞争 ──
 onShow(async () => {
   if (!auth.isLoggedIn) { uni.reLaunch({ url: '/pages/login/index' }); return }
@@ -189,6 +195,7 @@ function saveHistory() {
 async function send() {
   const text = input.value.trim()
   if (!text || sending.value) return
+  const sessionVersion = uiSessionVersion
 
   // 与网页端对齐：history 只包含“当前提问之前”的上下文
   const historySource = messages.value
@@ -215,13 +222,21 @@ async function send() {
 
   try {
     const { task_id } = await chatApi.submit(text, history)
+    if (isStaleSession(sessionVersion)) {
+      try {
+        await chatApi.cancel(task_id, 'clear')
+      } catch {
+        // ignore
+      }
+      return
+    }
     const pending: PendingTaskRecord = {
       task_id,
       submitted_at_ms: Date.now(),
       question_text: text,
     }
     writePendingTask(pending)
-    pollStatus(task_id, loadingId, pending.submitted_at_ms)
+    pollStatus(task_id, loadingId, pending.submitted_at_ms, sessionVersion)
   } catch (e: any) {
     replaceLoading(loadingId, `请求失败：${e.message}`)
     sending.value = false
@@ -236,7 +251,8 @@ function ensureLoadingBubble(): number {
   return loadingId
 }
 
-function applyTaskSuccess(taskId: string, loadingId: number, result: any) {
+function applyTaskSuccess(taskId: string, loadingId: number, result: any, sessionVersion: number) {
+  if (isStaleSession(sessionVersion)) return
   stopPoll()
   clearPendingTask()
   void taskId
@@ -251,7 +267,8 @@ function appendAssistantMessage(content: string) {
   scrollToBottom()
 }
 
-function applyTaskError(taskId: string, loadingId: number, errorText?: string) {
+function applyTaskError(taskId: string, loadingId: number, errorText: string | undefined, sessionVersion: number) {
+  if (isStaleSession(sessionVersion)) return
   stopPoll()
   clearPendingTask()
   void taskId
@@ -293,20 +310,28 @@ function normalizePendingSnapshot(snapshot: ChatPendingResponse): ChatStatusResp
   }
 }
 
-async function resolveTaskSnapshot(taskId: string, loadingId: number, snapshot: ChatStatusResponse, startedAtMs: number) {
+async function resolveTaskSnapshot(
+  taskId: string,
+  loadingId: number,
+  snapshot: ChatStatusResponse,
+  startedAtMs: number,
+  sessionVersion: number,
+) {
+  if (isStaleSession(sessionVersion)) return
   if (snapshot.status === 'success') {
-    applyTaskSuccess(taskId, loadingId, snapshot.result)
+    applyTaskSuccess(taskId, loadingId, snapshot.result, sessionVersion)
     return
   }
   if (snapshot.status === 'error') {
-    applyTaskError(taskId, loadingId, snapshot.error || 'AI思考太久，请重新提问。')
+    applyTaskError(taskId, loadingId, snapshot.error || 'AI思考太久，请重新提问。', sessionVersion)
     return
   }
-  pollStatus(taskId, loadingId, startedAtMs)
+  pollStatus(taskId, loadingId, startedAtMs, sessionVersion)
 }
 
 // 回到页面时恢复未完成任务（优先以服务端状态为准）
 async function resumePendingTask() {
+  const sessionVersion = uiSessionVersion
   stopPoll()
   const localPending = readPendingTask()
   let remotePending: ChatPendingResponse | null = null
@@ -315,6 +340,7 @@ async function resumePendingTask() {
   } catch {
     remotePending = null
   }
+  if (isStaleSession(sessionVersion)) return
 
   let taskId = ''
   let startedAtMs = Date.now()
@@ -333,7 +359,7 @@ async function resumePendingTask() {
     const loadingId = ensureLoadingBubble()
     sending.value = true
     scrollToBottom()
-    await resolveTaskSnapshot(taskId, loadingId, normalizePendingSnapshot(remotePending), startedAtMs)
+    await resolveTaskSnapshot(taskId, loadingId, normalizePendingSnapshot(remotePending), startedAtMs, sessionVersion)
     return
   }
 
@@ -350,44 +376,58 @@ async function resumePendingTask() {
   scrollToBottom()
   try {
     const status = await chatApi.status(taskId)
-    await resolveTaskSnapshot(taskId, loadingId, status, startedAtMs)
+    if (isStaleSession(sessionVersion)) return
+    await resolveTaskSnapshot(taskId, loadingId, status, startedAtMs, sessionVersion)
   } catch {
-    applyTaskError(taskId, loadingId, '网络异常，请稍后重试')
+    applyTaskError(taskId, loadingId, '网络异常，请稍后重试', sessionVersion)
   }
 }
 
-function pollStatus(taskId: string, loadingId: number, startedAtMs: number) {
+function pollStatus(taskId: string, loadingId: number, startedAtMs: number, sessionVersion: number) {
+  if (isStaleSession(sessionVersion)) return
   stopPoll()
   pollingTaskId = taskId
   pollingStartedAtMs = startedAtMs
+  pollingSessionVersion = sessionVersion
   pollTimer = setInterval(async () => {
+    if (isStaleSession(sessionVersion)) {
+      stopPoll(sessionVersion)
+      return
+    }
     if (Date.now() - pollingStartedAtMs >= POLL_TIMEOUT_MS) {
       try {
         await chatApi.cancel(taskId, 'timeout')
       } catch {
         // ignore
       }
-      applyTaskError(taskId, loadingId, 'AI思考太久，请重新提问。')
+      if (isStaleSession(sessionVersion)) return
+      applyTaskError(taskId, loadingId, 'AI思考太久，请重新提问。', sessionVersion)
       return
     }
 
     try {
       const res = await chatApi.status(taskId)
+      if (isStaleSession(sessionVersion)) return
       if (res.status === 'success') {
-        applyTaskSuccess(taskId, loadingId, res.result)
+        applyTaskSuccess(taskId, loadingId, res.result, sessionVersion)
       } else if (res.status === 'error') {
-        applyTaskError(taskId, loadingId, res.error || 'AI思考太久，请重新提问。')
+        applyTaskError(taskId, loadingId, res.error || 'AI思考太久，请重新提问。', sessionVersion)
       }
     } catch {
-      applyTaskError(taskId, loadingId, '网络异常，请稍后重试')
+      if (isStaleSession(sessionVersion)) return
+      applyTaskError(taskId, loadingId, '网络异常，请稍后重试', sessionVersion)
     }
   }, POLL_INTERVAL_MS)
 }
 
-function stopPoll() {
+function stopPoll(expectedSessionVersion?: number) {
+  if (typeof expectedSessionVersion === 'number' && expectedSessionVersion !== pollingSessionVersion) {
+    return
+  }
   if (pollTimer) { clearInterval(pollTimer); pollTimer = null }
   pollingTaskId = ''
   pollingStartedAtMs = 0
+  pollingSessionVersion = 0
 }
 
 function pausePollingForBackground() {
@@ -421,13 +461,8 @@ function clearChat() {
     success: async (res) => {
       if (res.confirm) {
         const pending = readPendingTask()
-        if (pending?.task_id || pollingTaskId) {
-          try {
-            await chatApi.cancel(pending?.task_id || pollingTaskId, 'clear')
-          } catch {
-            // ignore
-          }
-        }
+        const taskIdToCancel = pending?.task_id || pollingTaskId
+        uiSessionVersion += 1
         stopPoll()
         clearPendingTask()
         sending.value = false
@@ -435,6 +470,13 @@ function clearChat() {
         expandedMap.value = {}
         uni.removeStorageSync(HISTORY_KEY.value)
         loadHistory()
+        if (taskIdToCancel) {
+          try {
+            await chatApi.cancel(taskIdToCancel, 'clear')
+          } catch {
+            // ignore
+          }
+        }
       }
     },
   })
