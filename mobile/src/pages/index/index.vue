@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, nextTick, computed } from 'vue'
 import { onShow, onHide, onUnload, onShareAppMessage, onShareTimeline } from '@dcloudio/uni-app'
-import { chatApi, type ChatMessage } from '../../api/index'
+import { chatApi, type ChatMessage, type ChatPendingResponse, type ChatStatusResponse } from '../../api/index'
 import { useAuthStore } from '../../store/auth'
 import BottomNav from '../../components/BottomNav.vue'
 import { formatAiForMobile, type MobileAiFormatted } from '../../utils/ai_mobile_formatter'
@@ -14,17 +14,27 @@ interface UIMessage {
   content: string
 }
 
+interface PendingTaskRecord {
+  task_id: string
+  submitted_at_ms: number
+  question_text?: string
+}
+
 const messages = ref<UIMessage[]>([])
 const input = ref('')
 const sending = ref(false)
 const expandedMap = ref<Record<number, boolean>>({})
 let msgCounter = 0
 let pollTimer: ReturnType<typeof setInterval> | null = null
+let pollingTaskId = ''
+let pollingStartedAtMs = 0
 
 const CHAT_HISTORY_VERSION = 'v2'
 const HISTORY_KEY = computed(() => `chat_history_${CHAT_HISTORY_VERSION}_${auth.username}`)
 const LEGACY_HISTORY_KEYS = computed(() => [`chat_history_${auth.username}`])
 const PENDING_KEY = computed(() => `chat_pending_${auth.username}`)
+const POLL_INTERVAL_MS = 1000
+const POLL_TIMEOUT_MS = 400 * 1000
 const SHARE_TITLE = '爱波塔-懂期权的AI'
 const SHARE_PATH = '/pages/login/index'
 const DEFAULT_GREETING_BODY =
@@ -90,12 +100,40 @@ function toggleAssistantExpand(msgId: number) {
   }
 }
 
+function readPendingTask(): PendingTaskRecord | null {
+  try {
+    const raw = uni.getStorageSync(PENDING_KEY.value)
+    if (!raw) return null
+    const parsed = JSON.parse(raw)
+    const taskId = String(parsed?.task_id || '').trim()
+    if (!taskId) return null
+    const submittedAt = Number(parsed?.submitted_at_ms || 0)
+    return {
+      task_id: taskId,
+      submitted_at_ms: submittedAt > 0 ? submittedAt : Date.now(),
+      question_text: String(parsed?.question_text || ''),
+    }
+  } catch {
+    return null
+  }
+}
+
+function writePendingTask(task: PendingTaskRecord) {
+  uni.setStorageSync(PENDING_KEY.value, JSON.stringify(task))
+}
+
+function clearPendingTask() {
+  uni.removeStorageSync(PENDING_KEY.value)
+  pollingTaskId = ''
+  pollingStartedAtMs = 0
+}
+
 // ── 初始化：onShow 统一处理，避免 onMounted/onShow 时序竞争 ──
 onShow(async () => {
   if (!auth.isLoggedIn) { uni.reLaunch({ url: '/pages/login/index' }); return }
   loadHistory()
   await nextTick()
-  resumePendingTask()
+  await resumePendingTask()
 })
 
 // 页面切走/进后台时暂停轮询；保留 pending task，回到页面自动续轮询
@@ -177,79 +215,183 @@ async function send() {
 
   try {
     const { task_id } = await chatApi.submit(text, history)
-    // 存储待处理任务，切换页面后可恢复
-    uni.setStorageSync(PENDING_KEY.value, JSON.stringify({ task_id }))
-    pollStatus(task_id, loadingId)
+    const pending: PendingTaskRecord = {
+      task_id,
+      submitted_at_ms: Date.now(),
+      question_text: text,
+    }
+    writePendingTask(pending)
+    pollStatus(task_id, loadingId, pending.submitted_at_ms)
   } catch (e: any) {
     replaceLoading(loadingId, `请求失败：${e.message}`)
     sending.value = false
   }
 }
 
-// 回到页面时恢复未完成的轮询
-function resumePendingTask() {
-  try {
-    const raw = uni.getStorageSync(PENDING_KEY.value)
-    if (!raw) return
-    const { task_id } = JSON.parse(raw)
-    if (!task_id) {
-      uni.removeStorageSync(PENDING_KEY.value)
-      sending.value = false
-      return
+function ensureLoadingBubble(): number {
+  const existing = messages.value.find(m => m.role === 'loading')
+  if (existing) return existing.id
+  const loadingId = ++msgCounter
+  messages.value.push({ id: loadingId, role: 'loading', content: '' })
+  return loadingId
+}
+
+function applyTaskSuccess(taskId: string, loadingId: number, result: any) {
+  stopPoll()
+  clearPendingTask()
+  void taskId
+  const aiText = result?.response || result?.answer || JSON.stringify(result || {})
+  replaceLoading(loadingId, markAiContent(aiText))
+  saveHistory()
+  sending.value = false
+}
+
+function appendAssistantMessage(content: string) {
+  messages.value.push({ id: ++msgCounter, role: 'assistant', content: markAiContent(content) })
+  scrollToBottom()
+}
+
+function applyTaskError(taskId: string, loadingId: number, errorText?: string) {
+  stopPoll()
+  clearPendingTask()
+  void taskId
+  const msg = String(errorText || '').trim() || 'AI思考太久，请重新提问。'
+  const idx = messages.value.findIndex(m => m.id === loadingId && m.role === 'loading')
+  if (idx !== -1) {
+    replaceLoading(loadingId, markAiContent(msg))
+  } else {
+    appendAssistantMessage(msg)
+  }
+  saveHistory()
+  sending.value = false
+}
+
+function normalizePendingSnapshot(snapshot: ChatPendingResponse): ChatStatusResponse {
+  const status = String(snapshot?.status || 'pending').toLowerCase()
+  if (status === 'success') {
+    return {
+      status: 'success',
+      progress: '已完成',
+      result: snapshot?.result || {},
+      error: null,
     }
-
-    // 兜底：先清掉旧定时器，再恢复
-    stopPoll()
-
-    // 重新加一个 loading 气泡（切页后原气泡已丢失）
-    const existing = messages.value.find(m => m.role === 'loading')
-    const newLoadingId = existing ? existing.id : ++msgCounter
-    if (!existing) {
-      messages.value.push({ id: newLoadingId, role: 'loading', content: '' })
+  }
+  if (status === 'error' || status === 'canceled' || status === 'timeout') {
+    return {
+      status: 'error',
+      progress: '任务失败',
+      result: null,
+      error: snapshot?.error || (status === 'timeout' ? 'AI思考太久，请重新提问。' : '任务失败'),
+      code: status === 'timeout' ? 'task_timeout' : status === 'canceled' ? 'task_canceled' : undefined,
     }
-
-    sending.value = true
-    scrollToBottom()
-    pollStatus(task_id, newLoadingId)
-  } catch {
-    uni.removeStorageSync(PENDING_KEY.value)
-    sending.value = false
+  }
+  return {
+    status: status === 'processing' ? 'processing' : 'pending',
+    progress: '处理中',
+    result: null,
+    error: null,
   }
 }
 
-function pollStatus(taskId: string, loadingId: number) {
+async function resolveTaskSnapshot(taskId: string, loadingId: number, snapshot: ChatStatusResponse, startedAtMs: number) {
+  if (snapshot.status === 'success') {
+    applyTaskSuccess(taskId, loadingId, snapshot.result)
+    return
+  }
+  if (snapshot.status === 'error') {
+    applyTaskError(taskId, loadingId, snapshot.error || 'AI思考太久，请重新提问。')
+    return
+  }
+  pollStatus(taskId, loadingId, startedAtMs)
+}
+
+// 回到页面时恢复未完成任务（优先以服务端状态为准）
+async function resumePendingTask() {
   stopPoll()
+  const localPending = readPendingTask()
+  let remotePending: ChatPendingResponse | null = null
+  try {
+    remotePending = await chatApi.pending()
+  } catch {
+    remotePending = null
+  }
+
+  let taskId = ''
+  let startedAtMs = Date.now()
+
+  if (remotePending?.has_task && remotePending.task_id) {
+    taskId = String(remotePending.task_id)
+    startedAtMs = localPending?.task_id === taskId
+      ? Number(localPending?.submitted_at_ms || Date.now())
+      : Date.now()
+    writePendingTask({
+      task_id: taskId,
+      submitted_at_ms: startedAtMs,
+      question_text: localPending?.question_text || '',
+    })
+
+    const loadingId = ensureLoadingBubble()
+    sending.value = true
+    scrollToBottom()
+    await resolveTaskSnapshot(taskId, loadingId, normalizePendingSnapshot(remotePending), startedAtMs)
+    return
+  }
+
+  if (!localPending?.task_id) {
+    sending.value = false
+    clearPendingTask()
+    return
+  }
+
+  taskId = localPending.task_id
+  startedAtMs = Number(localPending.submitted_at_ms || Date.now())
+  const loadingId = ensureLoadingBubble()
+  sending.value = true
+  scrollToBottom()
+  try {
+    const status = await chatApi.status(taskId)
+    await resolveTaskSnapshot(taskId, loadingId, status, startedAtMs)
+  } catch {
+    applyTaskError(taskId, loadingId, '网络异常，请稍后重试')
+  }
+}
+
+function pollStatus(taskId: string, loadingId: number, startedAtMs: number) {
+  stopPoll()
+  pollingTaskId = taskId
+  pollingStartedAtMs = startedAtMs
   pollTimer = setInterval(async () => {
+    if (Date.now() - pollingStartedAtMs >= POLL_TIMEOUT_MS) {
+      try {
+        await chatApi.cancel(taskId, 'timeout')
+      } catch {
+        // ignore
+      }
+      applyTaskError(taskId, loadingId, 'AI思考太久，请重新提问。')
+      return
+    }
+
     try {
       const res = await chatApi.status(taskId)
       if (res.status === 'success') {
-        stopPoll()
-        uni.removeStorageSync(PENDING_KEY.value)
-        const aiText = res.result?.response || res.result?.answer || JSON.stringify(res.result)
-        replaceLoading(loadingId, markAiContent(aiText))
-        saveHistory()
-        sending.value = false
+        applyTaskSuccess(taskId, loadingId, res.result)
       } else if (res.status === 'error') {
-        stopPoll()
-        uni.removeStorageSync(PENDING_KEY.value)
-        replaceLoading(loadingId, markAiContent(`分析失败：${res.error || '请稍后重试'}`))
-        sending.value = false
+        applyTaskError(taskId, loadingId, res.error || 'AI思考太久，请重新提问。')
       }
     } catch {
-      stopPoll()
-      uni.removeStorageSync(PENDING_KEY.value)
-      replaceLoading(loadingId, markAiContent('网络异常，请稍后重试'))
-      sending.value = false
+      applyTaskError(taskId, loadingId, '网络异常，请稍后重试')
     }
-  }, 1000)
+  }, POLL_INTERVAL_MS)
 }
 
 function stopPoll() {
   if (pollTimer) { clearInterval(pollTimer); pollTimer = null }
+  pollingTaskId = ''
+  pollingStartedAtMs = 0
 }
 
 function pausePollingForBackground() {
-  const hasPending = !!uni.getStorageSync(PENDING_KEY.value)
+  const hasPending = !!readPendingTask()
   if (!hasPending) return
   stopPoll()
   // 让 onShow 可以正常触发 resume，不被旧 sending 状态拦住
@@ -260,6 +402,8 @@ function replaceLoading(loadingId: number, content: string) {
   const idx = messages.value.findIndex(m => m.id === loadingId)
   if (idx !== -1) {
     messages.value[idx] = { id: loadingId, role: 'assistant', content }
+  } else {
+    messages.value.push({ id: ++msgCounter, role: 'assistant', content })
   }
   scrollToBottom()
 }
@@ -274,8 +418,19 @@ function clearChat() {
   uni.showModal({
     title: '清空对话',
     content: '确认清空当前对话记录？',
-    success(res) {
+    success: async (res) => {
       if (res.confirm) {
+        const pending = readPendingTask()
+        if (pending?.task_id || pollingTaskId) {
+          try {
+            await chatApi.cancel(pending?.task_id || pollingTaskId, 'clear')
+          } catch {
+            // ignore
+          }
+        }
+        stopPoll()
+        clearPendingTask()
+        sending.value = false
         messages.value = []
         expandedMap.value = {}
         uni.removeStorageSync(HISTORY_KEY.value)

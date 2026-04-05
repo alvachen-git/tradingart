@@ -49,17 +49,35 @@ export interface ChatMessage {
   content: string
 }
 
+export interface ChatStatusResponse {
+  status: 'pending' | 'processing' | 'success' | 'error'
+  progress: string
+  result: any
+  error: string | null
+  code?: 'task_timeout' | 'task_stale' | 'task_canceled' | string
+}
+
+export interface ChatPendingResponse {
+  has_task: boolean
+  task_id?: string
+  status?: 'pending' | 'processing' | 'success' | 'error' | 'canceled' | 'timeout'
+  result?: any
+  error?: string
+  updated_at?: string
+}
+
 export const chatApi = {
   submit: (prompt: string, history: ChatMessage[] = []) =>
     request<{ task_id: string }>('POST', '/api/chat/submit', { prompt, history }),
 
   status: (taskId: string) =>
-    request<{
-      status: 'pending' | 'processing' | 'success' | 'error'
-      progress: string
-      result: any
-      error: string | null
-    }>('GET', `/api/chat/status/${taskId}`),
+    request<ChatStatusResponse>('GET', `/api/chat/status/${taskId}`),
+
+  pending: () =>
+    request<ChatPendingResponse>('GET', '/api/chat/pending'),
+
+  cancel: (task_id?: string, reason: 'clear' | 'timeout' | 'manual' = 'manual') =>
+    request<{ status: string; task_id?: string; message: string }>('POST', '/api/chat/cancel', { task_id, reason }),
 }
 
 // ── Intel ────────────────────────────────────────────────

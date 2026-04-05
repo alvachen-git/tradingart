@@ -1,4 +1,6 @@
 import unittest
+import json
+from datetime import datetime, timedelta
 from unittest.mock import patch
 
 
@@ -35,6 +37,10 @@ class _FakeRedis:
 
 @unittest.skipIf(mobile_api is None, f"mobile_api import failed: {_IMPORT_ERROR}")
 class TestMobileApiChatMemoryAsync(unittest.TestCase):
+    def test_mobile_prompt_keeps_raw_input(self):
+        raw = "请做螺纹钢技术分析并给期权策略"
+        self.assertEqual(mobile_api._build_mobile_chat_prompt(raw), raw)
+
     def test_queue_mobile_chat_memory_is_idempotent(self):
         fake_redis = _FakeRedis()
         with patch.object(mobile_api, "_redis", fake_redis), patch.object(
@@ -63,12 +69,66 @@ class TestMobileApiChatMemoryAsync(unittest.TestCase):
         with patch.object(mobile_api, "_redis", fake_redis), patch.object(
             mobile_api.de, "get_user_profile", return_value={}
         ), patch.object(
+            mobile_api, "_build_mobile_context_payload", return_value={"is_followup": False}
+        ) as mocked_ctx, patch.object(
+            mobile_api, "_detect_mobile_has_portfolio", return_value=False
+        ) as mocked_has_portfolio, patch.object(
             mobile_api.TaskManager, "create_task", return_value="task-2"
-        ):
+        ) as mocked_create:
             out = mobile_api.chat_submit(body=body, username="u1")
 
         self.assertEqual(out["task_id"], "task-2")
         self.assertEqual(fake_redis.get(mobile_api._mobile_chat_prompt_key("task-2")), "原始问题")
+        mocked_ctx.assert_called_once()
+        mocked_has_portfolio.assert_called_once_with("u1")
+        self.assertEqual(mocked_create.call_args.kwargs.get("prompt"), "原始问题")
+        self.assertIn("context_payload", mocked_create.call_args.kwargs)
+        self.assertIn("has_portfolio", mocked_create.call_args.kwargs)
+
+    def test_chat_submit_builds_followup_context_from_history(self):
+        fake_redis = _FakeRedis()
+        history = [
+            {"role": "user", "content": "先看黄金技术面"},
+            {"role": "assistant", "content": "前面偏震荡。"},
+        ]
+        body = mobile_api.ChatSubmitRequest(prompt="继续讲讲入场点", history=history)
+        with patch.object(mobile_api, "_redis", fake_redis), patch.object(
+            mobile_api.de, "get_user_profile", return_value={}
+        ), patch.object(
+            mobile_api, "_detect_mobile_has_portfolio", return_value=False
+        ), patch.object(
+            mobile_api.TaskManager, "create_task", return_value="task-2"
+        ) as mocked_create:
+            out = mobile_api.chat_submit(body=body, username="u1")
+
+        self.assertEqual(out["task_id"], "task-2")
+        ctx = mocked_create.call_args.kwargs.get("context_payload") or {}
+        self.assertTrue(ctx.get("is_followup"))
+        self.assertIn("用户: 先看黄金技术面", ctx.get("recent_context", ""))
+
+    def test_chat_submit_only_keeps_recent_four_history(self):
+        fake_redis = _FakeRedis()
+        history = [
+            {"role": "user", "content": "u1"},
+            {"role": "assistant", "content": "a1"},
+            {"role": "user", "content": "u2"},
+            {"role": "assistant", "content": "a2"},
+            {"role": "user", "content": "u3"},
+            {"role": "assistant", "content": "a3"},
+        ]
+        body = mobile_api.ChatSubmitRequest(prompt="分析一下", history=history)
+        with patch.object(mobile_api, "_redis", fake_redis), patch.object(
+            mobile_api.de, "get_user_profile", return_value={}
+        ), patch.object(
+            mobile_api, "_detect_mobile_has_portfolio", return_value=False
+        ), patch.object(
+            mobile_api.TaskManager, "create_task", return_value="task-5"
+        ) as mocked_create:
+            mobile_api.chat_submit(body=body, username="u1")
+
+        sent_history = mocked_create.call_args.kwargs.get("history_messages") or []
+        self.assertEqual(len(sent_history), 4)
+        self.assertEqual([x["content"] for x in sent_history], ["u2", "a2", "u3", "a3"])
 
     def test_chat_status_success_dispatches_once_and_cleans_prompt(self):
         fake_redis = _FakeRedis()
@@ -107,6 +167,148 @@ class TestMobileApiChatMemoryAsync(unittest.TestCase):
 
         self.assertEqual(out["status"], "success")
         self.assertEqual(fake_redis.get(prompt_key), "原始问题")
+        mocked_clear.assert_called_once_with("u1")
+
+    def test_chat_status_uses_cached_success_even_if_celery_pending(self):
+        fake_redis = _FakeRedis()
+        task_id = "task-cached-success"
+        fake_redis.setex(
+            mobile_api._mobile_chat_state_key(task_id),
+            86400,
+            json.dumps(
+                {
+                    "task_id": task_id,
+                    "user_id": "u1",
+                    "status": "success",
+                    "created_at": datetime.now().isoformat(),
+                    "updated_at": datetime.now().isoformat(),
+                },
+                ensure_ascii=False,
+            ),
+        )
+        fake_redis.setex(
+            mobile_api._mobile_chat_result_key(task_id),
+            86400,
+            json.dumps(
+                {
+                    "task_id": task_id,
+                    "user_id": "u1",
+                    "result": {"response": "缓存回答"},
+                    "updated_at": datetime.now().isoformat(),
+                },
+                ensure_ascii=False,
+            ),
+        )
+
+        with patch.object(mobile_api, "_redis", fake_redis), patch.object(
+            mobile_api.TaskManager, "get_task_status", return_value={"status": "pending"}
+        ), patch.object(
+            mobile_api.TaskManager, "clear_user_pending_task"
+        ) as mocked_clear, patch.object(
+            mobile_api, "_dispatch_mobile_chat_memory_task"
+        ) as mocked_dispatch:
+            out = mobile_api.chat_status(task_id=task_id, username="u1")
+
+        self.assertEqual(out["status"], "success")
+        self.assertEqual(out["result"]["response"], "缓存回答")
+        self.assertEqual(mocked_dispatch.call_count, 0)  # 无 prompt 时不入记忆队列
+        mocked_clear.assert_called_once_with("u1")
+
+    def test_chat_status_turns_timeout_when_pending_too_long(self):
+        fake_redis = _FakeRedis()
+        task_id = "task-timeout"
+        old_created = (datetime.now() - timedelta(seconds=10)).isoformat()
+        fake_redis.setex(
+            mobile_api._mobile_chat_state_key(task_id),
+            86400,
+            json.dumps(
+                {
+                    "task_id": task_id,
+                    "user_id": "u1",
+                    "status": "pending",
+                    "created_at": old_created,
+                    "updated_at": old_created,
+                },
+                ensure_ascii=False,
+            ),
+        )
+
+        with patch.object(mobile_api, "_redis", fake_redis), patch.object(
+            mobile_api, "_MOBILE_CHAT_MAX_PENDING_SECONDS", 1
+        ), patch.object(
+            mobile_api.TaskManager, "clear_user_pending_task"
+        ) as mocked_clear:
+            out = mobile_api.chat_status(task_id=task_id, username="u1")
+
+        self.assertEqual(out["status"], "error")
+        self.assertEqual(out.get("code"), "task_timeout")
+        state = json.loads(fake_redis.get(mobile_api._mobile_chat_state_key(task_id)))
+        self.assertEqual(state.get("status"), "timeout")
+        mocked_clear.assert_called_with("u1")
+
+    def test_chat_pending_returns_terminal_once(self):
+        fake_redis = _FakeRedis()
+        task_id = "task-pending-terminal"
+        fake_redis.setex(
+            mobile_api._mobile_chat_last_task_key("u1"),
+            86400,
+            task_id,
+        )
+        fake_redis.setex(
+            mobile_api._mobile_chat_state_key(task_id),
+            86400,
+            json.dumps(
+                {
+                    "task_id": task_id,
+                    "user_id": "u1",
+                    "status": "success",
+                    "created_at": datetime.now().isoformat(),
+                    "updated_at": datetime.now().isoformat(),
+                },
+                ensure_ascii=False,
+            ),
+        )
+        fake_redis.setex(
+            mobile_api._mobile_chat_result_key(task_id),
+            86400,
+            json.dumps(
+                {
+                    "task_id": task_id,
+                    "user_id": "u1",
+                    "result": {"response": "ok"},
+                    "updated_at": datetime.now().isoformat(),
+                },
+                ensure_ascii=False,
+            ),
+        )
+
+        with patch.object(mobile_api, "_redis", fake_redis):
+            first = mobile_api.chat_pending(username="u1")
+            second = mobile_api.chat_pending(username="u1")
+
+        self.assertTrue(first.get("has_task"))
+        self.assertEqual(first.get("status"), "success")
+        self.assertEqual(first.get("result", {}).get("response"), "ok")
+        self.assertFalse(second.get("has_task"))
+
+    def test_chat_cancel_marks_canceled_and_clears_last_task(self):
+        fake_redis = _FakeRedis()
+        task_id = "task-cancel"
+        fake_redis.setex(mobile_api._mobile_chat_last_task_key("u1"), 86400, task_id)
+
+        with patch.object(mobile_api, "_redis", fake_redis), patch.object(
+            mobile_api.TaskManager, "clear_user_pending_task"
+        ) as mocked_clear, patch("celery.result.AsyncResult") as mocked_async_result:
+            mocked_async_result.return_value.revoke.return_value = None
+            out = mobile_api.chat_cancel(
+                body=mobile_api.ChatCancelRequest(task_id=task_id, reason="clear"),
+                username="u1",
+            )
+
+        self.assertEqual(out["status"], "ok")
+        state = json.loads(fake_redis.get(mobile_api._mobile_chat_state_key(task_id)))
+        self.assertEqual(state.get("status"), "canceled")
+        self.assertIsNone(fake_redis.get(mobile_api._mobile_chat_last_task_key("u1")))
         mocked_clear.assert_called_once_with("u1")
 
 

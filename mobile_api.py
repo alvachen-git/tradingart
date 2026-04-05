@@ -19,6 +19,8 @@ mobile_api.py — 爱波塔手机端专用 FastAPI 后端
 
   POST   /api/chat/submit               提交 AI 问答任务
   GET    /api/chat/status/{task_id}     轮询 AI 任务状态
+  GET    /api/chat/pending              获取最近聊天任务恢复态
+  POST   /api/chat/cancel               取消聊天任务
 
   GET    /api/intel/reports             获取情报站晚报列表（支持分页/频道筛选）
   GET    /api/intel/ai/overview         获取 AI炒股总览（KPI/曲线/持仓/交易/复盘）
@@ -51,6 +53,7 @@ import re
 import sys
 import threading
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from typing import Optional, List, Any, Dict
@@ -89,6 +92,11 @@ _MOBILE_CHAT_PROMPT_KEY_PREFIX = "mobile:chat:raw_prompt:"
 _MOBILE_CHAT_PROMPT_TTL = 7200
 _MOBILE_CHAT_MEMORY_QUEUE_KEY_PREFIX = "mobile:chat:memory:queued:"
 _MOBILE_CHAT_MEMORY_QUEUE_TTL = 7200
+_MOBILE_CHAT_STATE_KEY_PREFIX = "mobile:chat:state:"
+_MOBILE_CHAT_RESULT_KEY_PREFIX = "mobile:chat:result:"
+_MOBILE_CHAT_LAST_TASK_KEY_PREFIX = "mobile:user:last_task:"
+_MOBILE_CHAT_RESULT_TTL_SECONDS = int(str(os.getenv("MOBILE_CHAT_RESULT_TTL_SECONDS", "86400")).strip() or 86400)
+_MOBILE_CHAT_MAX_PENDING_SECONDS = int(str(os.getenv("MOBILE_CHAT_MAX_PENDING_SECONDS", "400")).strip() or 400)
 
 # ════════════════════════════════════════════════════════════
 #  实时行情后台刷新 — 直连新浪行情接口（绕过 akshare 封装层）
@@ -661,6 +669,11 @@ class ChatSubmitRequest(BaseModel):
     history: List[dict] = []    # [{role: "user"/"assistant", content: "..."}]
 
 
+class ChatCancelRequest(BaseModel):
+    task_id: Optional[str] = None
+    reason: Optional[str] = "manual"  # clear | timeout | manual
+
+
 class SubscribeRequest(BaseModel):
     channel_code: str
 
@@ -671,22 +684,116 @@ class PayPurchaseRequest(BaseModel):
     months: int = 1
 
 
+_MOBILE_FOLLOWUP_KEYWORDS = (
+    "刚刚", "刚才", "上一个", "上一条", "上次", "前面",
+    "继续", "接着", "承接", "基于刚才", "刚聊到", "上一轮",
+)
+
+
+def _extract_similarity_tokens(text: str) -> set[str]:
+    if not text:
+        return set()
+    normalized = re.sub(r"[^0-9a-zA-Z\u4e00-\u9fff]+", " ", str(text).lower())
+    tokens: set[str] = set()
+    for word in normalized.split():
+        if len(word) >= 2:
+            tokens.add(word)
+        if re.search(r"[\u4e00-\u9fff]", word) and len(word) >= 2:
+            for i in range(len(word) - 1):
+                tokens.add(word[i:i + 2])
+    return tokens
+
+
+def _is_semantically_related(prompt_text: str, recent_turns: List[dict], threshold: float = 0.18) -> bool:
+    current_tokens = _extract_similarity_tokens(prompt_text)
+    if not current_tokens:
+        return False
+    best_score = 0.0
+    for turn in recent_turns:
+        turn_tokens = _extract_similarity_tokens(str(turn.get("content", "")))
+        if not turn_tokens:
+            continue
+        union = current_tokens | turn_tokens
+        if not union:
+            continue
+        score = len(current_tokens & turn_tokens) / len(union)
+        best_score = max(best_score, score)
+    return best_score >= threshold
+
+
+def _normalize_mobile_history(history: Optional[List[dict]], max_turns: int = 4) -> List[dict]:
+    out: List[dict] = []
+    for turn in history or []:
+        if not isinstance(turn, dict):
+            continue
+        role = str(turn.get("role", "")).strip()
+        content = str(turn.get("content", "")).strip()
+        if role not in {"user", "assistant", "ai"} or not content:
+            continue
+        out.append({"role": role, "content": content})
+    return out[-max_turns:]
+
+
+def _build_recent_context_text(recent_turns: List[dict], max_chars: int = 1200) -> str:
+    role_map = {"user": "用户", "assistant": "AI", "ai": "AI"}
+    lines = []
+    for turn in recent_turns:
+        role = role_map.get(turn.get("role", ""), turn.get("role", ""))
+        content = str(turn.get("content", "")).strip()
+        if not content:
+            continue
+        lines.append(f"{role}: {content[:260]}")
+    return "\n".join(lines)[:max_chars]
+
+
+def _build_mobile_context_payload(prompt_text: str, current_user: str, history: Optional[List[dict]]) -> dict:
+    recent_turns = _normalize_mobile_history(history)
+    recent_context = _build_recent_context_text(recent_turns)
+    is_followup = any(kw in prompt_text for kw in _MOBILE_FOLLOWUP_KEYWORDS)
+    semantic_related = _is_semantically_related(prompt_text, recent_turns)
+    should_load_long_memory = is_followup or semantic_related
+
+    memory_context = ""
+    if current_user and current_user != "访客" and should_load_long_memory:
+        try:
+            import memory_utils as mem
+
+            found = mem.retrieve_relevant_memory(
+                user_id=current_user,
+                query=prompt_text,
+                k=2,
+            )
+            if found:
+                memory_context = str(found)[:1500]
+        except Exception as e:
+            print(f"[mobile-chat] memory retrieval failed user={current_user} err={e}")
+
+    return {
+        "is_followup": bool(is_followup),
+        "recent_turns": recent_turns,
+        "recent_context": recent_context,
+        "memory_context": memory_context,
+        "semantic_related": bool(semantic_related),
+        "conversation_id": f"mobile-{current_user}-{uuid.uuid4()}",
+    }
+
+
+def _detect_mobile_has_portfolio(current_user: str) -> bool:
+    if not current_user or current_user == "访客":
+        return False
+    try:
+        from portfolio_analysis_service import get_user_portfolio_snapshot
+
+        snapshot = get_user_portfolio_snapshot(current_user)
+        return bool(snapshot and snapshot.get("recognized_count", 0) > 0)
+    except Exception as e:
+        print(f"[mobile-chat] portfolio check failed user={current_user} err={e}")
+        return False
+
+
 def _build_mobile_chat_prompt(user_prompt: str) -> str:
-    """为移动端问答补充稳定的输出格式约束，提升手机阅读可读性。"""
-    raw = str(user_prompt or "").strip()
-    if "【移动端输出格式要求】" in raw:
-        return raw
-    style_hint = (
-        "【移动端输出格式要求】\n"
-        "1) 禁止使用 Markdown 表格（不要输出 |---| 等表格语法）。\n"
-        "2) 可使用简短小标题和项目符号，每段不超过2句。\n"
-        "3) 关键结论置顶（先结论，再依据与建议）。\n"
-        "4) 语言尽量简洁，适配手机端阅读。\n"
-        "5) 结尾保留“仅供参考，不构成投资建议”。"
-    )
-    if not raw:
-        return style_hint
-    return f"{style_hint}\n\n【用户问题】\n{raw}"
+    """移动端与网页端保持同一意图路由输入，不再改写用户原问题。"""
+    return str(user_prompt or "").strip()
 
 
 def _mobile_chat_prompt_key(task_id: str) -> str:
@@ -751,6 +858,194 @@ def _queue_mobile_chat_memory_persist(
         except Exception:
             pass
         return "failed"
+
+
+def _mobile_chat_state_key(task_id: str) -> str:
+    return f"{_MOBILE_CHAT_STATE_KEY_PREFIX}{task_id}"
+
+
+def _mobile_chat_result_key(task_id: str) -> str:
+    return f"{_MOBILE_CHAT_RESULT_KEY_PREFIX}{task_id}"
+
+
+def _mobile_chat_last_task_key(username: str) -> str:
+    return f"{_MOBILE_CHAT_LAST_TASK_KEY_PREFIX}{username}"
+
+
+def _parse_iso_ts(value: Any) -> float:
+    txt = str(value or "").strip()
+    if not txt:
+        return 0.0
+    try:
+        return datetime.fromisoformat(txt).timestamp()
+    except Exception:
+        return 0.0
+
+
+def _safe_json_loads(raw: Any) -> dict:
+    if raw is None:
+        return {}
+    if isinstance(raw, dict):
+        return raw
+    txt = str(raw).strip()
+    if not txt:
+        return {}
+    try:
+        data = json.loads(txt)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _read_mobile_chat_state(task_id: str) -> dict:
+    try:
+        return _safe_json_loads(_redis.get(_mobile_chat_state_key(task_id)))
+    except Exception:
+        return {}
+
+
+def _read_mobile_chat_result(task_id: str) -> dict:
+    try:
+        return _safe_json_loads(_redis.get(_mobile_chat_result_key(task_id)))
+    except Exception:
+        return {}
+
+
+def _write_mobile_chat_state(
+    task_id: str,
+    user_id: str,
+    status: str,
+    error: str = "",
+    finished: bool = False,
+):
+    existing = _read_mobile_chat_state(task_id)
+    now_iso = datetime.now().isoformat()
+    payload = {
+        "task_id": task_id,
+        "user_id": str(user_id or ""),
+        "status": str(status or "").strip() or "pending",
+        "error": str(error or "").strip(),
+        "created_at": str(existing.get("created_at") or now_iso),
+        "updated_at": now_iso,
+        "finished_at": now_iso if finished else str(existing.get("finished_at") or ""),
+    }
+    try:
+        _redis.setex(
+            _mobile_chat_state_key(task_id),
+            _MOBILE_CHAT_RESULT_TTL_SECONDS,
+            json.dumps(payload, ensure_ascii=False),
+        )
+    except Exception as e:
+        print(f"[mobile-chat] state write failed task_id={task_id} err={e}")
+
+
+def _write_mobile_chat_result(task_id: str, user_id: str, result_payload: dict):
+    payload = {
+        "task_id": task_id,
+        "user_id": str(user_id or ""),
+        "result": result_payload if isinstance(result_payload, dict) else {},
+        "updated_at": datetime.now().isoformat(),
+    }
+    try:
+        _redis.setex(
+            _mobile_chat_result_key(task_id),
+            _MOBILE_CHAT_RESULT_TTL_SECONDS,
+            json.dumps(payload, ensure_ascii=False),
+        )
+    except Exception as e:
+        print(f"[mobile-chat] result write failed task_id={task_id} err={e}")
+
+
+def _set_mobile_chat_last_task(username: str, task_id: str):
+    if not username or not task_id:
+        return
+    try:
+        _redis.setex(_mobile_chat_last_task_key(username), _MOBILE_CHAT_RESULT_TTL_SECONDS, task_id)
+    except Exception as e:
+        print(f"[mobile-chat] set last_task failed user={username} err={e}")
+
+
+def _get_mobile_chat_last_task(username: str) -> str:
+    if not username:
+        return ""
+    try:
+        return str(_redis.get(_mobile_chat_last_task_key(username)) or "").strip()
+    except Exception:
+        return ""
+
+
+def _clear_mobile_chat_last_task_if_matches(username: str, task_id: str):
+    if not username or not task_id:
+        return
+    key = _mobile_chat_last_task_key(username)
+    try:
+        current = str(_redis.get(key) or "").strip()
+        if current == task_id:
+            _redis.delete(key)
+    except Exception:
+        pass
+
+
+def _build_mobile_chat_success_response(result_payload: dict) -> dict:
+    return {
+        "status": "success",
+        "progress": "已完成",
+        "result": result_payload if isinstance(result_payload, dict) else {},
+        "error": None,
+    }
+
+
+def _build_mobile_chat_error_response(err_msg: str, code: str = "") -> dict:
+    payload = {
+        "status": "error",
+        "progress": "任务失败",
+        "result": None,
+        "error": str(err_msg or "分析失败，请稍后重试"),
+    }
+    if code:
+        payload["code"] = code
+    return payload
+
+
+def _build_mobile_chat_runtime_snapshot(task_id: str, username: str) -> dict:
+    state = _read_mobile_chat_state(task_id)
+    if state and state.get("user_id") and str(state.get("user_id")) != str(username):
+        raise HTTPException(status_code=403, detail="无权限访问该任务")
+
+    result_wrapper = _read_mobile_chat_result(task_id)
+    result_payload = result_wrapper.get("result") if isinstance(result_wrapper, dict) else None
+
+    status_name = str(state.get("status") or "").strip().lower()
+    if status_name == "success" and isinstance(result_payload, dict):
+        return _build_mobile_chat_success_response(result_payload)
+
+    if status_name in {"error", "canceled", "timeout"}:
+        msg = str(state.get("error") or "").strip()
+        if not msg:
+            if status_name == "timeout":
+                msg = "AI思考太久，请重新提问。"
+            elif status_name == "canceled":
+                msg = "任务已取消。"
+            else:
+                msg = "分析失败，请稍后重试。"
+        return _build_mobile_chat_error_response(msg, code=f"task_{status_name}")
+
+    created_ts = _parse_iso_ts(state.get("created_at")) if state else 0.0
+    if created_ts > 0 and status_name in {"pending", "processing"}:
+        elapsed = time.time() - created_ts
+        if elapsed >= _MOBILE_CHAT_MAX_PENDING_SECONDS:
+            _write_mobile_chat_state(
+                task_id=task_id,
+                user_id=str(state.get("user_id") or username),
+                status="timeout",
+                error="AI思考太久，请重新提问。",
+                finished=True,
+            )
+            TaskManager.clear_user_pending_task(username)
+            _clear_mobile_chat_last_task_if_matches(username, task_id)
+            return _build_mobile_chat_error_response("AI思考太久，请重新提问。", code="task_timeout")
+
+    return {}
 
 
 # ════════════════════════════════════════════════════════════
@@ -910,16 +1205,27 @@ def chat_submit(
     profile = de.get_user_profile(username) or {}
     risk = profile.get("risk_preference", "稳健型")
 
-    normalized_prompt = _build_mobile_chat_prompt(body.prompt)
+    raw_prompt = str(body.prompt or "").strip()
+    normalized_prompt = _build_mobile_chat_prompt(raw_prompt)
+    history_for_task = _normalize_mobile_history(body.history, max_turns=4)
+    context_payload = _build_mobile_context_payload(
+        prompt_text=normalized_prompt,
+        current_user=username,
+        history=history_for_task,
+    )
+    has_portfolio = _detect_mobile_has_portfolio(username)
 
     task_id = TaskManager.create_task(
         user_id=username,
         prompt=normalized_prompt,
         risk_preference=risk,
-        history_messages=body.history,
+        history_messages=history_for_task,
+        context_payload=context_payload,
+        has_portfolio=has_portfolio,
     )
+    _write_mobile_chat_state(task_id=task_id, user_id=username, status="pending", error="", finished=False)
+    _set_mobile_chat_last_task(username, task_id)
     try:
-        raw_prompt = str(body.prompt or "").strip()
         if raw_prompt:
             _redis.setex(_mobile_chat_prompt_key(task_id), _MOBILE_CHAT_PROMPT_TTL, raw_prompt)
     except Exception as e:
@@ -933,8 +1239,43 @@ def chat_status(task_id: str, username: str = Depends(get_current_user)):
     轮询 AI 任务状态。
     status 值: pending | processing | success | error
     """
+    runtime_snapshot = _build_mobile_chat_runtime_snapshot(task_id=task_id, username=username)
+    if runtime_snapshot:
+        status_name = str(runtime_snapshot.get("status") or "").strip().lower()
+        if status_name == "success":
+            prompt_key = _mobile_chat_prompt_key(task_id)
+            user_prompt = ""
+            try:
+                user_prompt = str(_redis.get(prompt_key) or "").strip()
+            except Exception as e:
+                print(f"[mobile-memory] prompt load failed task_id={task_id} err={e}")
+
+            ai_response = ""
+            result_payload = runtime_snapshot.get("result")
+            if isinstance(result_payload, dict):
+                ai_response = str(result_payload.get("response") or "").strip()
+
+            queue_status = _queue_mobile_chat_memory_persist(
+                task_id=task_id,
+                username=username,
+                user_prompt=user_prompt,
+                ai_response=ai_response,
+            )
+            if queue_status in {"queued", "already_queued", "invalid_payload"}:
+                try:
+                    _redis.delete(prompt_key)
+                except Exception as e:
+                    print(f"[mobile-memory] prompt cleanup failed task_id={task_id} err={e}")
+
+            TaskManager.clear_user_pending_task(username)
+            _clear_mobile_chat_last_task_if_matches(username, task_id)
+        elif status_name == "error":
+            TaskManager.clear_user_pending_task(username)
+            _clear_mobile_chat_last_task_if_matches(username, task_id)
+        return runtime_snapshot
+
     status = TaskManager.get_task_status(task_id)
-    status_name = status.get("status")
+    status_name = str(status.get("status") or "").strip().lower()
     if status_name == "success":
         prompt_key = _mobile_chat_prompt_key(task_id)
         user_prompt = ""
@@ -947,6 +1288,8 @@ def chat_status(task_id: str, username: str = Depends(get_current_user)):
         result = status.get("result")
         if isinstance(result, dict):
             ai_response = str(result.get("response") or "").strip()
+            _write_mobile_chat_result(task_id=task_id, user_id=username, result_payload=result)
+            _write_mobile_chat_state(task_id=task_id, user_id=username, status="success", error="", finished=True)
 
         queue_status = _queue_mobile_chat_memory_persist(
             task_id=task_id,
@@ -960,9 +1303,129 @@ def chat_status(task_id: str, username: str = Depends(get_current_user)):
             except Exception as e:
                 print(f"[mobile-memory] prompt cleanup failed task_id={task_id} err={e}")
         TaskManager.clear_user_pending_task(username)
+        _clear_mobile_chat_last_task_if_matches(username, task_id)
     elif status_name == "error":
+        err_msg = str(status.get("error") or "分析失败，请稍后重试。")
+        _write_mobile_chat_state(task_id=task_id, user_id=username, status="error", error=err_msg, finished=True)
         TaskManager.clear_user_pending_task(username)
+        _clear_mobile_chat_last_task_if_matches(username, task_id)
+    elif status_name in {"pending", "processing"}:
+        # 兼容旧任务（尚未写入 state），根据用户 pending 元信息做超时兜底
+        pending_meta = TaskManager.get_user_pending_task(username) or {}
+        start_ts = float(pending_meta.get("start_time") or 0.0)
+        if start_ts > 0 and (time.time() - start_ts) >= _MOBILE_CHAT_MAX_PENDING_SECONDS:
+            _write_mobile_chat_state(
+                task_id=task_id,
+                user_id=username,
+                status="timeout",
+                error="AI思考太久，请重新提问。",
+                finished=True,
+            )
+            TaskManager.clear_user_pending_task(username)
+            _clear_mobile_chat_last_task_if_matches(username, task_id)
+            return _build_mobile_chat_error_response("AI思考太久，请重新提问。", code="task_timeout")
     return status
+
+
+@app.get("/api/chat/pending", tags=["AI问答"])
+def chat_pending(username: str = Depends(get_current_user)):
+    """
+    返回当前用户最近一条聊天任务的恢复态。
+    """
+    task_id = _get_mobile_chat_last_task(username)
+    if not task_id:
+        pending_meta = TaskManager.get_user_pending_task(username) or {}
+        task_id = str(pending_meta.get("task_id") or "").strip()
+    if not task_id:
+        return {"has_task": False}
+
+    snapshot = _build_mobile_chat_runtime_snapshot(task_id=task_id, username=username)
+    if not snapshot:
+        snapshot = TaskManager.get_task_status(task_id)
+
+    status_name = str(snapshot.get("status") or "").strip().lower()
+    result_payload = snapshot.get("result") if isinstance(snapshot.get("result"), dict) else None
+    err_msg = str(snapshot.get("error") or "").strip()
+
+    state = _read_mobile_chat_state(task_id)
+    updated_at = str(state.get("updated_at") or state.get("created_at") or "")
+    if not updated_at:
+        updated_at = datetime.now().isoformat()
+
+    # 终态任务只回传一次，避免每次 onShow 重复回放
+    if status_name in {"success", "error", "canceled", "timeout"}:
+        _clear_mobile_chat_last_task_if_matches(username, task_id)
+
+    payload = {
+        "has_task": True,
+        "task_id": task_id,
+        "status": status_name or "pending",
+        "updated_at": updated_at,
+    }
+    if result_payload is not None:
+        payload["result"] = result_payload
+    if err_msg:
+        payload["error"] = err_msg
+    return payload
+
+
+@app.post("/api/chat/cancel", tags=["AI问答"])
+def chat_cancel(
+    body: ChatCancelRequest,
+    username: str = Depends(get_current_user),
+):
+    """
+    取消当前用户聊天任务（用于清空对话、超时兜底）。
+    """
+    task_id = str(body.task_id or "").strip()
+    if not task_id:
+        task_id = _get_mobile_chat_last_task(username)
+    if not task_id:
+        pending_meta = TaskManager.get_user_pending_task(username) or {}
+        task_id = str(pending_meta.get("task_id") or "").strip()
+
+    if not task_id:
+        return {"status": "ok", "message": "无可取消任务"}
+
+    state = _read_mobile_chat_state(task_id)
+    owner = str(state.get("user_id") or "").strip()
+    if owner and owner != username:
+        raise HTTPException(status_code=403, detail="无权限取消该任务")
+
+    reason = str(body.reason or "manual").strip().lower()
+    if reason not in {"clear", "timeout", "manual"}:
+        reason = "manual"
+
+    try:
+        from celery.result import AsyncResult
+        from tasks import process_ai_query
+
+        ar = AsyncResult(task_id, app=process_ai_query.app)
+        ar.revoke(terminate=False)
+    except Exception as e:
+        print(f"[mobile-chat] cancel revoke failed task_id={task_id} err={e}")
+
+    err_msg = "任务已取消。"
+    if reason == "clear":
+        err_msg = "已清空并取消当前任务。"
+    elif reason == "timeout":
+        err_msg = "AI思考太久，请重新提问。"
+
+    _write_mobile_chat_state(
+        task_id=task_id,
+        user_id=username,
+        status="canceled" if reason != "timeout" else "timeout",
+        error=err_msg,
+        finished=True,
+    )
+    TaskManager.clear_user_pending_task(username)
+    _clear_mobile_chat_last_task_if_matches(username, task_id)
+    try:
+        _redis.delete(_mobile_chat_prompt_key(task_id))
+    except Exception:
+        pass
+
+    return {"status": "ok", "task_id": task_id, "message": err_msg}
 
 
 # ════════════════════════════════════════════════════════════

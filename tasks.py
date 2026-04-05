@@ -1,8 +1,11 @@
 # tasks.py
 import os
 import sys
+import json
+from datetime import datetime
 from celery_config import celery_app
 from dotenv import load_dotenv
+import redis
 
 load_dotenv(override=True)
 
@@ -44,6 +47,82 @@ BULL_DIRECTION_TERMS = [
 BEAR_DIRECTION_TERMS = [
     "熊市", "熊市价差", "看跌", "bear", "bear spread", "bear call spread", "bear put spread",
 ]
+
+_TASK_REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+_task_redis = redis.from_url(_TASK_REDIS_URL, decode_responses=True)
+_MOBILE_CHAT_STATE_KEY_PREFIX = "mobile:chat:state:"
+_MOBILE_CHAT_RESULT_KEY_PREFIX = "mobile:chat:result:"
+_MOBILE_CHAT_RESULT_TTL_SECONDS = int(str(os.getenv("MOBILE_CHAT_RESULT_TTL_SECONDS", "86400")).strip() or 86400)
+
+
+def _mobile_chat_state_key(task_id: str) -> str:
+    return f"{_MOBILE_CHAT_STATE_KEY_PREFIX}{task_id}"
+
+
+def _mobile_chat_result_key(task_id: str) -> str:
+    return f"{_MOBILE_CHAT_RESULT_KEY_PREFIX}{task_id}"
+
+
+def _safe_load_state(task_id: str) -> dict:
+    if not task_id:
+        return {}
+    try:
+        raw = _task_redis.get(_mobile_chat_state_key(task_id))
+        if not raw:
+            return {}
+        data = json.loads(raw)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _write_mobile_chat_state(
+    task_id: str,
+    user_id: str,
+    status: str,
+    error: str = "",
+    finished: bool = False,
+):
+    if not task_id:
+        return
+    try:
+        existing = _safe_load_state(task_id)
+        now_iso = datetime.now().isoformat()
+        payload = {
+            "task_id": task_id,
+            "user_id": str(user_id or ""),
+            "status": str(status or "pending").strip(),
+            "error": str(error or "").strip(),
+            "created_at": str(existing.get("created_at") or now_iso),
+            "updated_at": now_iso,
+            "finished_at": now_iso if finished else str(existing.get("finished_at") or ""),
+        }
+        _task_redis.setex(
+            _mobile_chat_state_key(task_id),
+            _MOBILE_CHAT_RESULT_TTL_SECONDS,
+            json.dumps(payload, ensure_ascii=False),
+        )
+    except Exception as e:
+        print(f"[mobile-chat-task] write state failed task_id={task_id} err={e}")
+
+
+def _write_mobile_chat_result(task_id: str, user_id: str, result_payload: dict):
+    if not task_id:
+        return
+    try:
+        payload = {
+            "task_id": task_id,
+            "user_id": str(user_id or ""),
+            "result": result_payload if isinstance(result_payload, dict) else {},
+            "updated_at": datetime.now().isoformat(),
+        }
+        _task_redis.setex(
+            _mobile_chat_result_key(task_id),
+            _MOBILE_CHAT_RESULT_TTL_SECONDS,
+            json.dumps(payload, ensure_ascii=False),
+        )
+    except Exception as e:
+        print(f"[mobile-chat-task] write result failed task_id={task_id} err={e}")
 
 
 def _build_memory_record(ai_response: str, max_chars: int = 4000) -> str:
@@ -519,6 +598,15 @@ def process_ai_query(
 ):
     """后台处理 AI 查询"""
     try:
+        task_id = str(getattr(getattr(self, "request", None), "id", "") or "").strip()
+        _write_mobile_chat_state(
+            task_id=task_id,
+            user_id=str(user_id or ""),
+            status="processing",
+            error="",
+            finished=False,
+        )
+
         prompt_for_graph = prompt
         link_failure_notice = ""
         url_fetch_blocked = False
@@ -559,13 +647,22 @@ def process_ai_query(
 
         if url_fetch_blocked:
             self.update_state(state='PROCESSING', meta={'progress': '链接抓取失败，等待用户补充正文...'})
-            return {
+            payload = {
                 "status": "success",
                 "response": link_failure_notice,
                 "chart": None,
                 "attachments": [],
                 "error": None,
             }
+            _write_mobile_chat_result(task_id=task_id, user_id=str(user_id or ""), result_payload=payload)
+            _write_mobile_chat_state(
+                task_id=task_id,
+                user_id=str(user_id or ""),
+                status="success",
+                error="",
+                finished=True,
+            )
+            return payload
 
         self.update_state(state='PROCESSING', meta={'progress': '正在初始化 AI 模型...'})
 
@@ -806,26 +903,45 @@ def process_ai_query(
         )
         final_response, attachments = _inject_inline_attachment_tokens(final_response, attachments)
 
-        return {
+        payload = {
             "status": "success",
             "response": final_response or "抱歉，暂时没有获取到有效分析结果",
             "chart": chart_img,
             "attachments": attachments,
             "error": None
         }
+        _write_mobile_chat_result(task_id=task_id, user_id=str(user_id or ""), result_payload=payload)
+        _write_mobile_chat_state(
+            task_id=task_id,
+            user_id=str(user_id or ""),
+            status="success",
+            error="",
+            finished=True,
+        )
+        return payload
 
     except Exception as e:
         import traceback
         error_msg = f"任务执行失败: {str(e)}\n{traceback.format_exc()}"
         print(f"❌ {error_msg}")
 
-        return {
+        task_id = str(getattr(getattr(self, "request", None), "id", "") or "").strip()
+        _write_mobile_chat_state(
+            task_id=task_id,
+            user_id=str(user_id or ""),
+            status="error",
+            error="分析过程中出现错误，请稍后重试",
+            finished=True,
+        )
+        payload = {
             "status": "error",
             "response": "分析过程中出现错误，请稍后重试",  # 🔥 [修复] 返回友好提示而非 None
             "chart": None,
             "attachments": [],
             "error": error_msg
         }
+        _write_mobile_chat_result(task_id=task_id, user_id=str(user_id or ""), result_payload=payload)
+        return payload
 
 
 @celery_app.task(bind=True, name="tasks.process_ai_simulation_daily")
