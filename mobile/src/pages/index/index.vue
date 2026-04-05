@@ -92,6 +92,7 @@ function toggleAssistantExpand(msgId: number) {
 
 // ── 初始化：onShow 统一处理，避免 onMounted/onShow 时序竞争 ──
 onShow(async () => {
+  await auth.waitForBootstrap()
   if (!auth.isLoggedIn) { uni.reLaunch({ url: '/pages/login/index' }); return }
   loadHistory()
   await nextTick()

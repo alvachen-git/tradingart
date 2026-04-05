@@ -25,6 +25,7 @@ const agreed = ref(false)
 const error = ref('')
 
 onShow(async () => {
+  await auth.waitForBootstrap()
   auth.restoreFromStorage()
   if (!auth.isLoggedIn) return
   try {

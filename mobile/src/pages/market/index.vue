@@ -343,7 +343,8 @@ const displayedOptions = computed(() => {
 })
 
 // ── 事件处理 ──────────────────────────────────────────────
-onShow(() => {
+onShow(async () => {
+  await auth.waitForBootstrap()
   if (!auth.isLoggedIn) { uni.reLaunch({ url: '/pages/login/index' }); return }
   if (options.value.length === 0) loadOptions()
   startLivePolling()

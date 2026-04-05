@@ -1,10 +1,15 @@
 <script setup lang="ts">
 import { onLaunch } from '@dcloudio/uni-app'
 import { useAuthStore } from './store/auth'
+import { bootstrapAuthSession, setupH5RuntimeFallback } from './utils/session_bootstrap'
+import { enforcePhase1ScopeFallback } from './utils/desktop_fallback'
 
 onLaunch(() => {
   const auth = useAuthStore()
   auth.restoreFromStorage()
+  setupH5RuntimeFallback()
+  enforcePhase1ScopeFallback()
+  auth.setBootstrapPromise(bootstrapAuthSession(auth))
 })
 </script>
 

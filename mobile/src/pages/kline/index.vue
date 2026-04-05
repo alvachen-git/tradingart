@@ -4,6 +4,7 @@ import { onShow, onHide } from '@dcloudio/uni-app'
 import { useAuthStore } from '../../store/auth'
 import BottomNav from '../../components/BottomNav.vue'
 import { klineApi, type KlineBar, type KlineData, type KlineTradeEvent, type LbRow } from '../../api/index'
+import { redirectUnsupportedFeature } from '../../utils/desktop_fallback'
 
 const auth = useAuthStore()
 
@@ -67,10 +68,15 @@ function unbindWindowResize() {
 }
 
 
-onShow(() => {
+onShow(async () => {
+  if (typeof window !== 'undefined') {
+    redirectUnsupportedFeature('kline_game')
+    return
+  }
   bindWindowResize()
   updateOrientation()
   isActive = true
+  await auth.waitForBootstrap()
   if (!auth.isLoggedIn) { uni.reLaunch({ url: '/pages/login/index' }); return }
   // Only resume if we were actively loading (user explicitly started loading).
   // Do NOT trigger on phase==='idle': that would auto-start a game with stale

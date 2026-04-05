@@ -11,6 +11,7 @@ import {
   type UserProfile,
 } from '../../api/index'
 import { useAuthStore } from '../../store/auth'
+import { redirectUnsupportedFeature } from '../../utils/desktop_fallback'
 
 const auth = useAuthStore()
 const loading = ref(false)
@@ -22,14 +23,21 @@ const profile = ref<UserProfile | null>(null)
 const monthMap = ref<Record<string, number>>({})
 const purchasingKey = ref('')
 
-onShow(() => {
+onShow(async () => {
+  if (typeof window !== 'undefined') {
+    redirectUnsupportedFeature('recharge_center')
+    return
+  }
+  await auth.waitForBootstrap()
   if (!auth.isLoggedIn) {
     uni.reLaunch({ url: '/pages/login/index' })
     return
   }
   loadAll()
 })
-onMounted(loadAll)
+onMounted(() => {
+  if (auth.isLoggedIn) loadAll()
+})
 
 function productKey(p: PaidProduct) {
   return `${p.product_type}:${p.code}`

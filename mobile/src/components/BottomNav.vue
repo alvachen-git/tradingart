@@ -1,13 +1,24 @@
 <script setup lang="ts">
+import { computed } from 'vue'
+
 const props = defineProps<{ active: string }>()
 
-const tabs = [
-  { key: 'index',   label: 'AI问答',  icon: '◈', path: '/pages/index/index' },
-  { key: 'intel',   label: '情报站',  icon: '◉', path: '/pages/intel/index' },
-  { key: 'market',  label: '数据',    icon: '◆', path: '/pages/market/index' },
-  { key: 'kline',   label: 'K线游戏',  icon: '◑', path: '/pages/kline/index' },
-  { key: 'profile', label: '我的',    icon: '◍', path: '/pages/profile/index' },
-]
+const isH5 = typeof window !== 'undefined'
+
+const tabs = computed(() => {
+  const baseTabs = [
+    { key: 'index', label: 'AI问答', icon: '◈', path: '/pages/index/index' },
+    { key: 'intel', label: '情报站', icon: '◉', path: '/pages/intel/index' },
+    { key: 'market', label: '数据', icon: '◆', path: '/pages/market/index' },
+    { key: 'profile', label: '我的', icon: '◍', path: '/pages/profile/index' },
+  ]
+  if (isH5) return baseTabs
+  return [
+    ...baseTabs.slice(0, 3),
+    { key: 'kline', label: 'K线游戏', icon: '◑', path: '/pages/kline/index' },
+    ...baseTabs.slice(3),
+  ]
+})
 
 function navigate(path: string) {
   uni.reLaunch({ url: path })

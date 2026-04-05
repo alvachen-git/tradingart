@@ -16,6 +16,7 @@ mobile_api.py — 爱波塔手机端专用 FastAPI 后端
   POST   /api/auth/register                    账号注册（手机号验证）
   POST   /api/auth/logout               登出当前设备
   GET    /api/auth/verify               验证 Token
+  GET    /api/auth/session/bootstrap    同域 Cookie 会话引导
 
   POST   /api/chat/submit               提交 AI 问答任务
   GET    /api/chat/status/{task_id}     轮询 AI 任务状态
@@ -54,6 +55,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from typing import Optional, List, Any, Dict
+from urllib.parse import urlparse
 
 import redis
 from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, Query, Request
@@ -61,6 +63,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
+from sqlalchemy import text
 
 # 确保同目录模块可以 import
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -89,6 +92,9 @@ _MOBILE_CHAT_PROMPT_KEY_PREFIX = "mobile:chat:raw_prompt:"
 _MOBILE_CHAT_PROMPT_TTL = 7200
 _MOBILE_CHAT_MEMORY_QUEUE_KEY_PREFIX = "mobile:chat:memory:queued:"
 _MOBILE_CHAT_MEMORY_QUEUE_TTL = 7200
+_BOOTSTRAP_RATE_LIMIT_KEY_PREFIX = "mobile:auth:bootstrap:rl:"
+_BOOTSTRAP_RATE_LIMIT_PER_MIN = int(str(os.getenv("MOBILE_AUTH_BOOTSTRAP_RATE_LIMIT_PER_MIN", "60")).strip() or 60)
+_BOOTSTRAP_RATE_LIMIT_WINDOW_SEC = 60
 
 # ════════════════════════════════════════════════════════════
 #  实时行情后台刷新 — 直连新浪行情接口（绕过 akshare 封装层）
@@ -671,6 +677,14 @@ class PayPurchaseRequest(BaseModel):
     months: int = 1
 
 
+class SessionBootstrapResponse(BaseModel):
+    logged_in: bool
+    username: Optional[str] = None
+    token: Optional[str] = None
+    expire_at: Optional[str] = None
+    reason: Optional[str] = None
+
+
 def _build_mobile_chat_prompt(user_prompt: str) -> str:
     """为移动端问答补充稳定的输出格式约束，提升手机阅读可读性。"""
     raw = str(user_prompt or "").strip()
@@ -695,6 +709,88 @@ def _mobile_chat_prompt_key(task_id: str) -> str:
 
 def _mobile_chat_memory_queue_key(task_id: str) -> str:
     return f"{_MOBILE_CHAT_MEMORY_QUEUE_KEY_PREFIX}{task_id}"
+
+
+def _get_client_ip(request: Request) -> str:
+    if not request:
+        return ""
+    xff = str(request.headers.get("x-forwarded-for") or "").strip()
+    if xff:
+        return xff.split(",")[0].strip()
+    xri = str(request.headers.get("x-real-ip") or "").strip()
+    if xri:
+        return xri
+    return (request.client.host if request and request.client else "") or ""
+
+
+def _host_from_header(host_text: str) -> str:
+    host = str(host_text or "").strip().lower()
+    if not host:
+        return ""
+    return host.split(",")[0].strip()
+
+
+def _host_from_url(url_text: str) -> str:
+    url = str(url_text or "").strip()
+    if not url:
+        return ""
+    parsed = urlparse(url)
+    return str(parsed.netloc or "").strip().lower()
+
+
+def _ensure_same_origin(request: Request) -> None:
+    host = _host_from_header(request.headers.get("host"))
+    if not host:
+        raise HTTPException(status_code=400, detail="Host 缺失")
+
+    origin = _host_from_url(request.headers.get("origin"))
+    referer = _host_from_url(request.headers.get("referer"))
+    for header_name, header_host in (("Origin", origin), ("Referer", referer)):
+        if header_host and header_host != host:
+            raise HTTPException(status_code=403, detail=f"{header_name} 非同域请求")
+
+
+def _enforce_bootstrap_rate_limit(request: Request) -> None:
+    if _BOOTSTRAP_RATE_LIMIT_PER_MIN <= 0:
+        return
+    client_ip = _get_client_ip(request) or "unknown"
+    key = f"{_BOOTSTRAP_RATE_LIMIT_KEY_PREFIX}{client_ip}"
+    try:
+        count = int(_redis.incr(key))
+        if count == 1:
+            _redis.expire(key, _BOOTSTRAP_RATE_LIMIT_WINDOW_SEC)
+        if count > _BOOTSTRAP_RATE_LIMIT_PER_MIN:
+            raise HTTPException(status_code=429, detail="请求过于频繁，请稍后重试")
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[auth_bootstrap] rate-limit unavailable ip={client_ip} err={e}")
+
+
+def _fetch_session_expire_at(username: str, raw_token: str) -> str:
+    try:
+        with de.engine.begin() as conn:
+            row = conn.execute(
+                text(
+                    """
+                    SELECT token_expire
+                    FROM user_sessions
+                    WHERE username = :u AND session_token = :t
+                    LIMIT 1
+                    """
+                ),
+                {"u": username, "t": raw_token},
+            ).fetchone()
+    except Exception as e:
+        print(f"[auth_bootstrap] query token_expire failed user={username} err={e}")
+        return ""
+
+    if not row:
+        return ""
+    expire_at = row[0]
+    if hasattr(expire_at, "strftime"):
+        return expire_at.strftime("%Y-%m-%d %H:%M:%S")
+    return str(expire_at or "").strip()
 
 
 def _dispatch_mobile_chat_memory_task(
@@ -892,6 +988,37 @@ def logout(credentials: HTTPAuthorizationCredentials = Depends(_bearer)):
 def verify_token(username: str = Depends(get_current_user)):
     """验证 Token 是否仍然有效。"""
     return {"valid": True, "username": username}
+
+
+@app.get("/api/auth/session/bootstrap", tags=["认证"], response_model=SessionBootstrapResponse)
+def bootstrap_session(request: Request):
+    """
+    从同域 Cookie 引导移动 H5 登录态。
+    仅用于同域浏览器场景，不用于跨域 SDK 调用。
+    """
+    _ensure_same_origin(request)
+    _enforce_bootstrap_rate_limit(request)
+
+    username = str(request.cookies.get("username") or "").strip()
+    raw_token = str(request.cookies.get("token") or "").strip()
+    if not username or not raw_token:
+        return {"logged_in": False, "reason": "missing_cookie"}
+
+    try:
+        is_valid = auth.check_token(username, raw_token, strict=True)
+    except Exception as e:
+        print(f"[auth_bootstrap] token check failed user={username} err={e}")
+        raise HTTPException(status_code=503, detail="认证服务繁忙，请稍后重试")
+
+    if not is_valid:
+        return {"logged_in": False, "reason": "invalid_session"}
+
+    return {
+        "logged_in": True,
+        "username": username,
+        "token": _pack_token(username, raw_token),
+        "expire_at": _fetch_session_expire_at(username, raw_token),
+    }
 
 
 # ════════════════════════════════════════════════════════════

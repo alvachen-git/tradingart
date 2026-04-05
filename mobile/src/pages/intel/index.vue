@@ -185,12 +185,15 @@ function drawMpNavChart() {
   // #endif
 }
 
-onShow(() => {
+onShow(async () => {
+  await auth.waitForBootstrap()
   if (!auth.isLoggedIn) uni.reLaunch({ url: '/pages/login/index' })
 })
 
 onMounted(() => {
-  loadReports(true)
+  if (auth.isLoggedIn) {
+    loadReports(true)
+  }
 })
 
 onReachBottom(async () => {

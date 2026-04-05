@@ -4,6 +4,7 @@ import { onShow } from '@dcloudio/uni-app'
 import { userApi, payApi, type UserProfile, type WalletInfo } from '../../api/index'
 import { useAuthStore } from '../../store/auth'
 import BottomNav from '../../components/BottomNav.vue'
+import { redirectUnsupportedFeature } from '../../utils/desktop_fallback'
 
 const auth = useAuthStore()
 const profile = ref<UserProfile | null>(null)
@@ -18,14 +19,17 @@ const SERVICE_CHANNELS = [
   { code: 'trade_signal', name: '盘面观察' },
 ]
 
-onShow(() => {
+onShow(async () => {
+  await auth.waitForBootstrap()
   if (!auth.isLoggedIn) {
     uni.reLaunch({ url: '/pages/login/index' })
     return
   }
   loadAll()
 })
-onMounted(loadAll)
+onMounted(() => {
+  if (auth.isLoggedIn) loadAll()
+})
 
 async function loadAll() {
   loading.value = true
@@ -72,6 +76,10 @@ function isPermissionActive(code: string) {
 }
 
 function goRecharge() {
+  if (typeof window !== 'undefined') {
+    redirectUnsupportedFeature('recharge_center')
+    return
+  }
   uni.navigateTo({ url: '/pages/recharge/index' })
 }
 

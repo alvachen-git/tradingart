@@ -4,6 +4,7 @@ import { ref, computed } from 'vue'
 export const useAuthStore = defineStore('auth', () => {
   const token = ref('')
   const username = ref('')
+  let bootstrapPromise: Promise<void> | null = null
 
   const isLoggedIn = computed(() => !!token.value && !!username.value)
 
@@ -30,5 +31,29 @@ export const useAuthStore = defineStore('auth', () => {
     }
   }
 
-  return { token, username, isLoggedIn, setAuth, clearAuth, restoreFromStorage }
+  function setBootstrapPromise(promise: Promise<void>) {
+    bootstrapPromise = promise
+  }
+
+  async function waitForBootstrap() {
+    if (!bootstrapPromise) return
+    try {
+      await bootstrapPromise
+    } catch {
+      // bootstrap 失败时由调用方按未登录处理
+    } finally {
+      bootstrapPromise = null
+    }
+  }
+
+  return {
+    token,
+    username,
+    isLoggedIn,
+    setAuth,
+    clearAuth,
+    restoreFromStorage,
+    setBootstrapPromise,
+    waitForBootstrap,
+  }
 })
