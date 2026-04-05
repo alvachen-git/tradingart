@@ -467,5 +467,173 @@
       ["mid_ground_infra", "mid_operation_service"],
       ["mid_operation_service", "down_industry_apps"]
     ]
+  },
+  "电力": {
+    "display_name": "电力产业链",
+    "stages": [
+      {
+        "id": "up_generation_supply",
+        "name": "上游-发电侧设备与能源供给",
+        "ths_index_codes": []
+      },
+      {
+        "id": "up_transmission_primary",
+        "name": "上游-输电/特高压与一次设备",
+        "ths_index_codes": []
+      },
+      {
+        "id": "mid_distribution_secondary",
+        "name": "中游-配电自动化与二次设备",
+        "ths_index_codes": []
+      },
+      {
+        "id": "mid_dispatch_digital",
+        "name": "中游-调度控制与电力信息化",
+        "ths_index_codes": []
+      },
+      {
+        "id": "mid_trading_vpp",
+        "name": "中游-电力交易与虚拟电厂",
+        "ths_index_codes": []
+      },
+      {
+        "id": "down_demand_response",
+        "name": "下游-用电服务与需求响应",
+        "ths_index_codes": []
+      }
+    ],
+    "edges": [
+      ["up_generation_supply", "up_transmission_primary"],
+      ["up_transmission_primary", "mid_distribution_secondary"],
+      ["mid_distribution_secondary", "mid_dispatch_digital"],
+      ["mid_dispatch_digital", "mid_trading_vpp"],
+      ["mid_trading_vpp", "down_demand_response"]
+    ]
+  },
+  "核电": {
+    "display_name": "核电产业链",
+    "stages": [
+      {
+        "id": "up_fuel_material",
+        "name": "上游-核燃料与关键材料",
+        "ths_index_codes": []
+      },
+      {
+        "id": "up_main_equipment_forging",
+        "name": "上游-主设备与锻铸件",
+        "ths_index_codes": []
+      },
+      {
+        "id": "mid_island_system",
+        "name": "中游-核岛/常规岛系统设备",
+        "ths_index_codes": []
+      },
+      {
+        "id": "mid_epc_construction",
+        "name": "中游-工程建设与EPC",
+        "ths_index_codes": []
+      },
+      {
+        "id": "mid_operation_safety",
+        "name": "中游-运维与安全服务",
+        "ths_index_codes": []
+      },
+      {
+        "id": "down_nuclear_generation",
+        "name": "下游-核电运营与应用",
+        "ths_index_codes": []
+      }
+    ],
+    "edges": [
+      ["up_fuel_material", "up_main_equipment_forging"],
+      ["up_main_equipment_forging", "mid_island_system"],
+      ["mid_island_system", "mid_epc_construction"],
+      ["mid_epc_construction", "mid_operation_safety"],
+      ["mid_operation_safety", "down_nuclear_generation"]
+    ]
+  },
+  "军工": {
+    "display_name": "军工产业链",
+    "stages": [
+      {
+        "id": "up_special_material_parts",
+        "name": "上游-特种材料与核心元器件",
+        "ths_index_codes": []
+      },
+      {
+        "id": "up_military_electronics",
+        "name": "上游-军工电子与感知系统",
+        "ths_index_codes": []
+      },
+      {
+        "id": "mid_platform_equipment",
+        "name": "中游-整机平台",
+        "ths_index_codes": []
+      },
+      {
+        "id": "mid_command_info",
+        "name": "中游-信息化与指挥控制",
+        "ths_index_codes": []
+      },
+      {
+        "id": "mid_test_maintenance",
+        "name": "中游-试验测试与保障维护",
+        "ths_index_codes": []
+      },
+      {
+        "id": "down_delivery_conversion",
+        "name": "下游-交付与民用转化",
+        "ths_index_codes": []
+      }
+    ],
+    "edges": [
+      ["up_special_material_parts", "up_military_electronics"],
+      ["up_military_electronics", "mid_platform_equipment"],
+      ["mid_platform_equipment", "mid_command_info"],
+      ["mid_command_info", "mid_test_maintenance"],
+      ["mid_test_maintenance", "down_delivery_conversion"]
+    ]
+  },
+  "有色金属": {
+    "display_name": "有色金属产业链",
+    "stages": [
+      {
+        "id": "up_mining_resource",
+        "name": "上游-资源勘采",
+        "ths_index_codes": []
+      },
+      {
+        "id": "up_smelting_refining",
+        "name": "上游-冶炼与精炼",
+        "ths_index_codes": []
+      },
+      {
+        "id": "mid_base_alloy",
+        "name": "中游-基础金属与合金加工",
+        "ths_index_codes": []
+      },
+      {
+        "id": "mid_functional_material",
+        "name": "中游-功能材料",
+        "ths_index_codes": []
+      },
+      {
+        "id": "mid_component_processing",
+        "name": "中游-部件与型材加工",
+        "ths_index_codes": []
+      },
+      {
+        "id": "down_industry_application",
+        "name": "下游-电力/新能源/军工应用",
+        "ths_index_codes": []
+      }
+    ],
+    "edges": [
+      ["up_mining_resource", "up_smelting_refining"],
+      ["up_smelting_refining", "mid_base_alloy"],
+      ["mid_base_alloy", "mid_functional_material"],
+      ["mid_functional_material", "mid_component_processing"],
+      ["mid_component_processing", "down_industry_application"]
+    ]
   }
 }

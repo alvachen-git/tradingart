@@ -222,6 +222,10 @@ def test_load_sector_component_codes_supports_new_sectors(monkeypatch):
         "工业母机": {"stages": [{"id": "s1", "name": "阶段1", "ths_index_codes": []}]},
         "创新药": {"stages": [{"id": "s1", "name": "阶段1", "ths_index_codes": []}]},
         "低空经济": {"stages": [{"id": "s1", "name": "阶段1", "ths_index_codes": []}]},
+        "电力": {"stages": [{"id": "s1", "name": "阶段1", "ths_index_codes": []}]},
+        "核电": {"stages": [{"id": "s1", "name": "阶段1", "ths_index_codes": []}]},
+        "军工": {"stages": [{"id": "s1", "name": "阶段1", "ths_index_codes": []}]},
+        "有色金属": {"stages": [{"id": "s1", "name": "阶段1", "ths_index_codes": []}]},
     }
     monkeypatch.setattr(profile_tags_mod, "load_chain_templates", lambda path=None: templates)
     monkeypatch.setattr(
@@ -233,6 +237,19 @@ def test_load_sector_component_codes_supports_new_sectors(monkeypatch):
         ),
     )
 
-    for sector in ["新能源", "光伏", "航天卫星", "机器人", "储能", "工业母机", "创新药", "低空经济"]:
+    for sector in [
+        "新能源",
+        "光伏",
+        "航天卫星",
+        "机器人",
+        "储能",
+        "工业母机",
+        "创新药",
+        "低空经济",
+        "电力",
+        "核电",
+        "军工",
+        "有色金属",
+    ]:
         codes = load_sector_component_codes(object(), sector)
         assert codes == ["000333.SZ"]

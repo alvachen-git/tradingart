@@ -701,10 +701,7 @@ def main():
             unsafe_allow_html=True,
         )
 
-    for w in meta.get("warnings", []):
-        if _should_hide_runtime_warning(str(w)):
-            continue
-        st.warning(w)
+    # 页面保持简洁，不展示运行期 warning 横条（诊断信息保留在后端 meta）
 
     st.plotly_chart(
         _build_flow_bubble_chart(snapshot, flow_window=flow_window, scale_mode=scale_mode),

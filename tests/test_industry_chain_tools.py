@@ -470,7 +470,20 @@ def test_stage_member_second_level_cache_by_sector_and_trade_date(monkeypatch):
 
 def test_new_sector_templates_have_six_stages_and_five_edges():
     templates = load_chain_templates()
-    for sector in ["新能源", "光伏", "航天卫星", "机器人", "储能", "工业母机", "创新药", "低空经济"]:
+    for sector in [
+        "新能源",
+        "光伏",
+        "航天卫星",
+        "机器人",
+        "储能",
+        "工业母机",
+        "创新药",
+        "低空经济",
+        "电力",
+        "核电",
+        "军工",
+        "有色金属",
+    ]:
         assert sector in templates
         cfg = templates[sector]
         assert len(cfg.get("stages") or []) == 6
@@ -478,7 +491,20 @@ def test_new_sector_templates_have_six_stages_and_five_edges():
 
 
 def test_new_sectors_are_in_strong_filter_set():
-    for sector in ["新能源", "光伏", "航天卫星", "机器人", "储能", "工业母机", "创新药", "低空经济"]:
+    for sector in [
+        "新能源",
+        "光伏",
+        "航天卫星",
+        "机器人",
+        "储能",
+        "工业母机",
+        "创新药",
+        "低空经济",
+        "电力",
+        "核电",
+        "军工",
+        "有色金属",
+    ]:
         assert sector in tools._STRONG_STAGE_FILTER_SECTORS
 
 
@@ -493,7 +519,7 @@ def test_new_sector_dynamic_rules_are_complete():
         "min_companies_before_fallback",
         "company_keep_max_stages",
     }
-    for sector in ["机器人", "储能", "工业母机", "创新药", "低空经济"]:
+    for sector in ["机器人", "储能", "工业母机", "创新药", "低空经济", "电力", "核电", "军工", "有色金属"]:
         rules = tools.AI_CHAIN_DYNAMIC_RULES.get(sector) or {}
         assert len(rules) == 6
         for stage_id, cfg in rules.items():
@@ -501,11 +527,23 @@ def test_new_sector_dynamic_rules_are_complete():
             assert int(cfg.get("company_keep_max_stages") or 0) == 2
 
 
-def test_relaxed_stage_threshold_for_uav_and_bio_equipment():
+def test_relaxed_stage_threshold_for_empty_prone_stages():
     low_alt_rule = tools.AI_CHAIN_DYNAMIC_RULES.get("低空经济", {}).get("mid_uav_evtol", {})
     bio_rule = tools.AI_CHAIN_DYNAMIC_RULES.get("创新药", {}).get("up_bio_equipment_consumables", {})
+    power_dist_rule = tools.AI_CHAIN_DYNAMIC_RULES.get("电力", {}).get("mid_distribution_secondary", {})
+    power_dispatch_rule = tools.AI_CHAIN_DYNAMIC_RULES.get("电力", {}).get("mid_dispatch_digital", {})
+    nuc_ops_rule = tools.AI_CHAIN_DYNAMIC_RULES.get("核电", {}).get("mid_operation_safety", {})
+    nuc_gen_rule = tools.AI_CHAIN_DYNAMIC_RULES.get("核电", {}).get("down_nuclear_generation", {})
+    nonferrous_smelt_rule = tools.AI_CHAIN_DYNAMIC_RULES.get("有色金属", {}).get("up_smelting_refining", {})
+    nonferrous_alloy_rule = tools.AI_CHAIN_DYNAMIC_RULES.get("有色金属", {}).get("mid_base_alloy", {})
     assert int(low_alt_rule.get("stage_relevance_threshold", 1)) == 0
     assert int(bio_rule.get("stage_relevance_threshold", 1)) == 0
+    assert int(power_dist_rule.get("stage_relevance_threshold", 1)) == 0
+    assert int(power_dispatch_rule.get("stage_relevance_threshold", 1)) == 0
+    assert int(nuc_ops_rule.get("stage_relevance_threshold", 1)) == 0
+    assert int(nuc_gen_rule.get("stage_relevance_threshold", 1)) == 0
+    assert int(nonferrous_smelt_rule.get("stage_relevance_threshold", 1)) == 0
+    assert int(nonferrous_alloy_rule.get("stage_relevance_threshold", 1)) == 0
 
 
 def _mock_cached_snapshot():
@@ -685,7 +723,20 @@ def test_new_sector_snapshot_stable_when_dynamic_source_empty():
         def ths_member(self, ts_code):
             return pd.DataFrame(columns=["con_code", "con_name"])
 
-    for sector in ["新能源", "光伏", "航天卫星", "机器人", "储能", "工业母机", "创新药", "低空经济"]:
+    for sector in [
+        "新能源",
+        "光伏",
+        "航天卫星",
+        "机器人",
+        "储能",
+        "工业母机",
+        "创新药",
+        "低空经济",
+        "电力",
+        "核电",
+        "军工",
+        "有色金属",
+    ]:
         snap = get_chain_snapshot(
             sector_name=sector,
             limit_per_stage=10,

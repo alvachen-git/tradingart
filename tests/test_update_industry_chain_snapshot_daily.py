@@ -101,5 +101,5 @@ def test_run_update_force_overwrites_existing(monkeypatch):
 
 
 def test_default_sectors_include_new_boards():
-    for sector in ["机器人", "储能", "工业母机", "创新药", "低空经济"]:
+    for sector in ["机器人", "储能", "工业母机", "创新药", "低空经济", "电力", "核电", "军工", "有色金属"]:
         assert sector in job.DEFAULT_SECTORS
