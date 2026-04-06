@@ -833,6 +833,18 @@ if not user:
         st.page_link("Home.py", label="🏠 返回首页登录", use_container_width=True)
     st.stop()
 
+st.markdown(
+    """
+    <div style="margin: 10px 0 18px 0; border:1px solid rgba(96,165,250,.22); border-radius:18px; padding:18px 18px 16px 18px; background:linear-gradient(135deg, rgba(15,23,42,.92), rgba(8,47,73,.75)); box-shadow:0 12px 30px rgba(0,0,0,.22);">
+      <div style="font-size:12px; letter-spacing:.14em; color:#67e8f9; margin-bottom:6px;">SPECIAL TOPIC</div>
+      <div style="font-size:26px; font-weight:800; color:#f8fbff; margin-bottom:8px;">世界混乱指数</div>
+      <div style="color:#dbeafe; line-height:1.7; max-width:860px; font-size:14px;">把预测市场的概率、影响权重和流动性压成一张地缘风险监控面板，适合快速看主分数、双边风险和最近 24 小时变化。</div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+st.page_link("pages/24_世界混乱指数.py", label="打开专题页：世界混乱指数", use_container_width=True)
+
 # ==========================================
 # ==========================================
 # 馃摵 棰戦亾閫夋嫨
@@ -1071,5 +1083,6 @@ else:
                     # 场景2：付费频道，跳转充值中心
                     if st.button("💳 付费开通", key=f"lock_{content['id']}", type="primary", use_container_width=True):
                         st.switch_page("pages/17_充值中心.py")
+
 
 

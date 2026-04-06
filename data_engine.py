@@ -25,6 +25,11 @@ from cross_asset_iv_index import (
     get_cross_asset_iv_index_history as _cross_asset_iv_index_history_impl,
     refresh_cross_asset_iv_index_for_date as _refresh_cross_asset_iv_index_for_date_impl,
 )
+from risk_index_service import (
+    get_geopolitical_risk_history as _get_geopolitical_risk_history_impl,
+    get_latest_geopolitical_risk_snapshot as _get_latest_geopolitical_risk_snapshot_impl,
+    refresh_geopolitical_risk_snapshot as _refresh_geopolitical_risk_snapshot_impl,
+)
 
 # --- AI 模块 ---
 from langchain_community.chat_models import ChatTongyi
@@ -187,6 +192,31 @@ def backfill_cross_asset_iv_index_history(
         basket_version=CROSS_ASSET_IV_BASKET_VERSION,
         only_missing=only_missing,
     )
+
+
+def refresh_geopolitical_risk_snapshot(persist=True, use_news_explainer=True):
+    """
+    Refresh the geopolitical risk snapshot and optionally persist it.
+    """
+    return _refresh_geopolitical_risk_snapshot_impl(
+        engine=engine,
+        persist=persist,
+        use_news_explainer=use_news_explainer,
+    )
+
+
+def get_latest_geopolitical_risk_snapshot():
+    """
+    Read the latest persisted geopolitical risk snapshot.
+    """
+    return _get_latest_geopolitical_risk_snapshot_impl(engine=engine)
+
+
+def get_geopolitical_risk_history(days=7):
+    """
+    Read recent geopolitical risk snapshot history.
+    """
+    return _get_geopolitical_risk_history_impl(engine=engine, days=days)
 
 
 # --- 新增：定义查库工具 ---

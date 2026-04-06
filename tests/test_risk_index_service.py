@@ -1,0 +1,327 @@
+﻿from datetime import datetime, timedelta, timezone
+import unittest
+
+import risk_index_service as svc
+
+BEIJING_TZ = timezone(timedelta(hours=8))
+
+
+class TestRiskIndexService(unittest.TestCase):
+    def test_normalize_probability_supports_percent_and_decimal(self):
+        self.assertAlmostEqual(svc.normalize_probability(57), 0.57, places=6)
+        self.assertAlmostEqual(svc.normalize_probability(0.57), 0.57, places=6)
+        self.assertAlmostEqual(svc.normalize_probability("12.5"), 0.125, places=6)
+
+    def test_liquidity_factor_is_clamped(self):
+        self.assertGreaterEqual(svc.calc_liquidity_factor(0), 0.6)
+        self.assertLessEqual(svc.calc_liquidity_factor(1_000_000_000), 1.2)
+
+    def test_cap_category_scores_is_passthrough_in_wci_v1(self):
+        values = {"military_conflict": 0.90, "economic_crisis": 0.10}
+        capped, low_diversity = svc.cap_category_scores(values)
+        self.assertFalse(low_diversity)
+        self.assertEqual(capped, values)
+
+    def test_relevant_event_filter_prefers_geopolitics_and_economy_tags(self):
+        geopolitics_event = {
+            "title": "US strike on Cuba by December 31?",
+            "tags": [{"slug": "geopolitics"}, {"slug": "military-strikes"}],
+        }
+        economy_event = {
+            "title": "Will the U.S. default on Treasury debt in 2026?",
+            "tags": [{"slug": "economy"}, {"slug": "sovereign-debt"}],
+        }
+        sports_event = {
+            "title": "2026 FIFA World Cup Winner",
+            "tags": [{"slug": "sports"}, {"slug": "soccer"}],
+        }
+        self.assertTrue(svc._is_relevant_polymarket_event(geopolitics_event))
+        self.assertTrue(svc._is_relevant_polymarket_event(economy_event))
+        self.assertFalse(svc._is_relevant_polymarket_event(sports_event))
+
+    def test_dynamic_conflict_candidate_detects_interstate_markets(self):
+        candidate = {
+            "market_title": "China x Japan military clash before 2027?",
+            "event_title": "China x Japan military clash before 2027?",
+            "market_slug": "china-x-japan-military-clash-before-2027",
+            "event_slug": "china-x-japan-military-clash-before-2027",
+        }
+        self.assertTrue(svc._is_dynamic_conflict_candidate(candidate, now=datetime(2026, 4, 6, 12, 0, tzinfo=BEIJING_TZ)))
+        self.assertEqual(set(svc._detect_candidate_countries(candidate)), {"CHN", "JPN"})
+
+    def test_dynamic_country_weight_prioritizes_usa_and_china(self):
+        self.assertGreater(svc._dynamic_country_weight(["USA", "CUB"]), svc._dynamic_country_weight(["ISR", "TUR"]))
+        self.assertGreater(svc._dynamic_country_weight(["CHN", "JPN"]), svc._dynamic_country_weight(["ISR", "TUR"]))
+        self.assertGreater(svc._dynamic_country_weight(["RUS", "UKR"]), svc._dynamic_country_weight(["ISR", "TUR"]))
+
+    def test_detect_candidate_countries_does_not_false_match_us_in_words(self):
+        candidate = {
+            "market_title": "Will Israel conduct military action in Greater Beirut on April 6, 2026?",
+            "event_title": "Israel military action",
+            "market_slug": "will-israel-conduct-military-action-in-greater-beirut-on-april-6-2026",
+            "event_slug": "israel-military-action",
+        }
+        detected = set(svc._detect_candidate_countries(candidate))
+        self.assertIn("ISR", detected)
+        self.assertNotIn("USA", detected)
+
+    def test_market_theme_key_collapses_date_variants(self):
+        a = {"event_slug": "us-forces-enter-iran-by", "market_title": "US forces enter Iran by April 30?"}
+        b = {"event_slug": "us-forces-enter-iran-by", "market_title": "US forces enter Iran by December 31?"}
+        self.assertEqual(svc._market_theme_key(a), svc._market_theme_key(b))
+
+    def test_dynamic_conflict_candidate_excludes_ceasefire_and_visit_style_markets(self):
+        ceasefire = {
+            "market_title": "US x Iran ceasefire by December 31?",
+            "event_title": "US x Iran ceasefire by December 31?",
+            "market_slug": "us-x-iran-ceasefire-by-december-31",
+            "event_slug": "us-x-iran-ceasefire-by-december-31",
+        }
+        visit = {
+            "market_title": "Will Donald Trump visit North Korea in 2026?",
+            "event_title": "Will Donald Trump visit North Korea in 2026?",
+            "market_slug": "will-donald-trump-visit-north-korea-in-2026",
+            "event_slug": "which-countries-will-donald-trump-visit-in-2026",
+        }
+        self.assertFalse(svc._is_dynamic_conflict_candidate(ceasefire, now=datetime(2026, 4, 6, 12, 0, tzinfo=BEIJING_TZ)))
+        self.assertFalse(svc._is_dynamic_conflict_candidate(visit, now=datetime(2026, 4, 6, 12, 0, tzinfo=BEIJING_TZ)))
+
+    def test_dynamic_conflict_candidate_ignores_description_only_war_language(self):
+        candidate = {
+            "market_title": "US recognizes Russian sovereignty over Ukraine before 2027?",
+            "event_title": "US recognizes Russian sovereignty over Ukraine before 2027?",
+            "market_slug": "us-recognizes-russian-sovereignty-over-ukraine-before-2027",
+            "event_slug": "us-recognizes-russian-sovereignty-over-ukraine-before-2027",
+            "description": "This geopolitical market references war, attack and conflict outcomes in the background text.",
+        }
+        self.assertFalse(svc._is_dynamic_conflict_candidate(candidate, now=datetime(2026, 4, 6, 12, 0, tzinfo=BEIJING_TZ)))
+
+    def test_dedupe_scored_markets_keeps_best_theme_once(self):
+        items = [
+            {"event_slug": "us-forces-enter-iran-by", "market_title": "US forces enter Iran by April 30?", "event_raw": 1.0, "is_dynamic_conflict": False},
+            {"event_slug": "us-forces-enter-iran-by", "market_title": "US forces enter Iran by December 31?", "event_raw": 0.8, "is_dynamic_conflict": True},
+        ]
+        deduped = svc._dedupe_scored_markets(items)
+        self.assertEqual(len(deduped), 1)
+        self.assertEqual(deduped[0]["event_raw"], 1.0)
+
+    def test_scoring_dedupe_key_collapses_same_pair_conflicts(self):
+        a = {"pair_tag": "IRN_USA", "country_codes": ["IRN", "USA"], "event_raw": 0.5}
+        b = {"pair_tag": "USA_IRN", "country_codes": ["USA", "IRN"], "event_raw": 0.7}
+        self.assertEqual(svc._scoring_dedupe_key(a), svc._scoring_dedupe_key(b))
+
+    def test_localized_dynamic_title_prefers_chinese(self):
+        candidate = {
+            "market_title": "US strike on Cuba by December 31?",
+            "event_title": "US strike on Cuba by December 31?",
+            "market_slug": "us-strike-on-cuba-by-december-31",
+            "event_slug": "us-strike-on-cuba-by",
+        }
+        title = svc._localized_dynamic_title(candidate, ["USA", "CUB"])
+        self.assertIn("美国", title)
+        self.assertIn("古巴", title)
+
+    def test_country_detection_ignores_description_side_context(self):
+        candidate = {
+            "market_title": "Will Israel take military action in Gaza on April 5, 2026?",
+            "event_title": "Israel military action against Gaza on...?",
+            "market_slug": "will-israel-take-military-action-in-gaza-on-april-5-2026",
+            "event_slug": "israel-military-action-against-gaza-on",
+            "description": 'This market references foreign statements but does not mention the United States in the title.',
+        }
+        detected = set(svc._detect_candidate_countries(candidate))
+        self.assertEqual(detected, {"ISR"})
+
+    def test_select_representative_market_prefers_allowlist(self):
+        event = {
+            "event_key": "x",
+            "display_title": "Test",
+            "category": "military_conflict",
+            "region_tag": "global",
+            "pair_tag": "X_Y",
+            "impact_weight": 1.0,
+            "query_keywords": ["test keyword"],
+            "event_slug_allowlist": ["event-b"],
+            "market_slug_allowlist": ["market-a"],
+            "active": True,
+        }
+        candidates = [
+            {"market_slug": "market-b", "event_slug": "event-b", "market_title": "other", "volume24hr": 999999},
+            {"market_slug": "market-a", "event_slug": "event-a", "market_title": "other", "volume24hr": 1},
+        ]
+        selected = svc.select_representative_market(event, candidates)
+        self.assertEqual(selected["market_slug"], "market-a")
+
+    def test_select_representative_market_filters_expired_title_windows(self):
+        event = {
+            "event_key": "saudi_iran_regional_escalation",
+            "display_title": "Gulf Regional Escalation",
+            "category": "military_conflict",
+            "region_tag": "middle_east",
+            "pair_tag": "GULF_REGIONAL",
+            "impact_weight": 0.68,
+            "query_keywords": ["middle east war", "gulf war"],
+            "event_slug_allowlist": ["middle-east"],
+            "market_slug_allowlist": ["middle-east"],
+            "must_contain_any_group": [["saudi", "iran"], ["middle east", "war"], ["gulf", "war"]],
+            "must_contain_any": ["middle east", "gulf", "saudi", "iran"],
+            "active": True,
+        }
+        candidates = [
+            {
+                "market_slug": "will-iran-strike-saudi-arabia-in-march",
+                "event_slug": "middle-east-war",
+                "market_title": "Will Iran strike Saudi Arabia in March?",
+                "event_title": "Middle East escalation",
+                "volume24hr": 500000,
+            }
+        ]
+        selected = svc.select_representative_market(
+            event,
+            candidates,
+            now=datetime(2026, 4, 6, 12, 0, tzinfo=BEIJING_TZ),
+        )
+        self.assertIsNone(selected)
+
+    def test_select_representative_market_requires_any_group(self):
+        event = {
+            "event_key": "us_china_direct_clash",
+            "display_title": "US China Direct Clash",
+            "category": "military_conflict",
+            "region_tag": "east_asia",
+            "pair_tag": "USA_CHN",
+            "impact_weight": 0.95,
+            "query_keywords": ["U.S. China war", "South China Sea war"],
+            "event_slug_allowlist": ["usa-china", "south-china-sea"],
+            "market_slug_allowlist": ["usa-china", "south-china-sea"],
+            "must_contain_any_group": [["usa", "china"], ["american", "china"], ["south china sea"]],
+            "must_contain_any": ["war", "clash", "conflict", "attack", "military"],
+            "exclude_keywords": ["taiwan", "visit", "trade", "tariff", "deal"],
+            "active": True,
+        }
+        candidates = [
+            {
+                "market_slug": "will-china-invade-taiwan-by-june-30-2027",
+                "event_slug": "taiwan-crisis",
+                "market_title": "Will China invade Taiwan by June 30, 2027?",
+                "event_title": "Taiwan crisis",
+                "volume24hr": 500000,
+            }
+        ]
+        selected = svc.select_representative_market(event, candidates)
+        self.assertIsNone(selected)
+
+    def test_select_representative_market_ignores_description_leakage(self):
+        event = {
+            "event_key": "russia_nato_direct_clash",
+            "display_title": "俄与北约直接冲突",
+            "category": "military_conflict",
+            "region_tag": "europe",
+            "pair_tag": "RUS_NATO",
+            "impact_weight": 1.0,
+            "query_keywords": ["Russia NATO war", "Article 5 conflict"],
+            "event_slug_allowlist": ["russia-nato", "article-5", "nato-russia"],
+            "market_slug_allowlist": ["russia-nato", "article-5", "nato-russia"],
+            "must_contain_any_group": [["russia", "nato"], ["article 5", "russia"], ["moscow", "nato"]],
+            "must_contain_any": ["war", "clash", "attack", "strike", "article 5", "conflict"],
+            "exclude_keywords": ["security guarantee", "recognizes sovereignty", "ceasefire", "visit", "meeting", "guarantee"],
+            "active": True,
+        }
+        candidates = [
+            {
+                "market_slug": "nothing-ever-happens-2026",
+                "event_slug": "nothing-ever-happens-2026",
+                "market_title": "Nothing Ever Happens: 2026",
+                "event_title": "Nothing Ever Happens: 2026",
+                "description": "A meta market mentioning war, article 5 conflict, Russia and NATO in the background copy.",
+                "volume24hr": 500000,
+            }
+        ]
+        selected = svc.select_representative_market(
+            event,
+            candidates,
+            now=datetime(2026, 4, 6, 12, 0, tzinfo=BEIJING_TZ),
+        )
+        self.assertIsNone(selected)
+
+    def test_build_ongoing_baseline_uses_reverse_markets(self):
+        candidates = [
+            {
+                "market_slug": "russia-x-ukraine-ceasefire-by-june-30-2026",
+                "event_slug": "russia-x-ukraine-ceasefire-by-june-30-2026",
+                "market_title": "Russia x Ukraine ceasefire by June 30, 2026?",
+                "event_title": "Russia x Ukraine ceasefire by June 30, 2026?",
+                "volume24hr": 200000,
+                "outcomePrices": [0.22, 0.78],
+            },
+            {
+                "market_slug": "russia-x-ukraine-ceasefire-before-2027",
+                "event_slug": "russia-x-ukraine-ceasefire-before-2027",
+                "market_title": "Russia x Ukraine ceasefire by end of 2026?",
+                "event_title": "Russia x Ukraine ceasefire by end of 2026?",
+                "volume24hr": 150000,
+                "outcomePrices": [0.41, 0.59],
+            },
+        ]
+        clusters, baseline = svc._build_ongoing_baseline(candidates, datetime(2026, 4, 6, 12, 0, tzinfo=BEIJING_TZ))
+        self.assertTrue(clusters)
+        self.assertGreater(baseline, 0.0)
+        self.assertEqual(clusters[0]["cluster_key"], "ru_ua_war")
+
+    def test_build_risk_snapshot_combines_baseline_and_escalation(self):
+        candidates = [
+            {
+                "market_slug": "russia-x-ukraine-ceasefire-by-june-30-2026",
+                "event_slug": "russia-x-ukraine-ceasefire-by-june-30-2026",
+                "market_title": "Russia x Ukraine ceasefire by June 30, 2026?",
+                "event_title": "Russia x Ukraine ceasefire by June 30, 2026?",
+                "volume24hr": 200000,
+                "outcomePrices": [0.20, 0.80],
+            },
+            {
+                "market_slug": "us-x-iran-ceasefire-by-june-30-2026",
+                "event_slug": "us-x-iran-ceasefire-by-june-30-2026",
+                "market_title": "US x Iran ceasefire by June 30?",
+                "event_title": "US x Iran ceasefire by June 30?",
+                "volume24hr": 180000,
+                "outcomePrices": [0.18, 0.82],
+            },
+            {
+                "market_slug": "will-us-force-enter-iran-by-april-30",
+                "event_slug": "us-forces-enter-iran-by",
+                "market_title": "US forces enter Iran by April 30?",
+                "event_title": "Middle East escalation",
+                "volume24hr": 320000,
+                "oneDayPriceChange": 0.08,
+                "outcomePrices": [0.62, 0.38],
+                "source_url": "https://example.com/a",
+            },
+        ]
+        snapshot = svc.build_risk_snapshot(candidates, previous_snapshot={"score_display": 20}, use_news_explainer=False, now=datetime(2026, 4, 6, 12, 0, tzinfo=BEIJING_TZ))
+        components = snapshot["source_status"]["score_components"]
+        self.assertGreater(components["ongoing_baseline"], 0.0)
+        self.assertGreater(components["escalation_pressure"], 0.0)
+        self.assertIn("ongoing_clusters", snapshot["source_status"])
+        self.assertGreater(snapshot["score_raw"], components["ongoing_baseline"])
+
+    def test_refresh_falls_back_to_previous_snapshot_on_fetch_failure(self):
+        original_fetch = svc.fetch_polymarket_candidates
+        original_latest = svc.get_latest_geopolitical_risk_snapshot
+        try:
+            svc.fetch_polymarket_candidates = lambda **_: (_ for _ in ()).throw(RuntimeError("boom"))
+            svc.get_latest_geopolitical_risk_snapshot = lambda engine: {
+                "score_raw": 55.0,
+                "score_display": 57.0,
+                "stale": False,
+                "source_status": {"polymarket": "ok"},
+            }
+            snapshot = svc.refresh_geopolitical_risk_snapshot(engine=None, persist=False)
+            self.assertTrue(snapshot["stale"])
+            self.assertIn("error:RuntimeError", snapshot["source_status"]["polymarket"])
+        finally:
+            svc.fetch_polymarket_candidates = original_fetch
+            svc.get_latest_geopolitical_risk_snapshot = original_latest
+
+
+if __name__ == "__main__":
+    unittest.main()
