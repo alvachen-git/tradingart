@@ -48,7 +48,7 @@ def main() -> None:
     _load_env()
     engine = _build_engine()
     snapshot = refresh_geopolitical_risk_snapshot(engine=engine, persist=True, use_news_explainer=True)
-    print(json.dumps(snapshot, ensure_ascii=False, indent=2))
+    print(json.dumps(snapshot, ensure_ascii=False, indent=2, default=str))
 
 
 if __name__ == '__main__':
