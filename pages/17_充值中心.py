@@ -751,7 +751,7 @@ updated_text = (
 )
 
 st.markdown('<div class="mall-title">充值中心</div>', unsafe_allow_html=True)
-st.markdown('<div class="mall-subtitle">点数可用于购买晚报与情报套餐，支付成功后权限自动生效。</div>', unsafe_allow_html=True)
+st.markdown('<div class="mall-subtitle">点数可用于购买产品，1元人民币=10点</div>', unsafe_allow_html=True)
 
 with st.container(key="wallet_panel"):
     wallet_info_col, wallet_spacer_col = st.columns([5.8, 6.2], vertical_alignment="top")
