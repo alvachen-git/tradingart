@@ -46,6 +46,10 @@ REPORT_PRODUCTS = [
     {"code": "fund_flow_report", "name": "资金流晚报", "icon": "💸", "points_monthly": 500},
 ]
 _REPORT_PRICE_DEFAULTS = {item["code"]: int(item["points_monthly"]) for item in REPORT_PRODUCTS}
+_CHANNEL_PRICE_DEFAULTS = {
+    **_REPORT_PRICE_DEFAULTS,
+    "trade_signal": 800,
+}
 
 # 套餐产品：包含全部四个晚报
 INTEL_PACKAGE_PRODUCT = {
@@ -842,7 +846,7 @@ def _legacy_purchase_subscription_with_points(
         channel_name = str(row[1])
         price_points_monthly = row[2]
         if price_points_monthly is None:
-            fallback = _REPORT_PRICE_DEFAULTS.get(channel_code)
+            fallback = _CHANNEL_PRICE_DEFAULTS.get(channel_code)
             if fallback is None:
                 return False, "该频道不支持点数购买"
             price_points_monthly = fallback
@@ -992,7 +996,7 @@ def purchase_subscription_with_points(
         channel_name = str(row[1] or channel_code)
         price_points_monthly = row[2]
         if price_points_monthly is None:
-            fallback = _REPORT_PRICE_DEFAULTS.get(channel_code)
+            fallback = _CHANNEL_PRICE_DEFAULTS.get(channel_code)
             if fallback is None:
                 return False, "该频道不支持点数购买"
             price_points_monthly = fallback

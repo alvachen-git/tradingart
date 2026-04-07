@@ -277,6 +277,38 @@ class TestPaymentService(unittest.TestCase):
         self.assertEqual(wallet["balance"], 500)
         self.assertEqual(wallet["total_spent"], 0)
 
+    def test_purchase_trade_signal_uses_default_price_when_db_price_is_null(self):
+        with self.engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO content_channels(id, code, name, icon, is_active, is_premium, sort_order, price_points_monthly)
+                    VALUES (9, 'trade_signal', '突破信号', '⚡', 1, 1, 5, NULL)
+                    """
+                )
+            )
+
+        pay.credit_points("u6", 800, ref_id="seed", description="初始化", tx_type="admin_grant", biz_id="seed_u6")
+        with patch.object(pay.sub_svc, "add_subscription", return_value=(True, "ok")):
+            ok, msg = pay.purchase_subscription_with_points("u6", 9, months=1, biz_id="biz_trade_signal_1")
+
+        self.assertTrue(ok)
+        self.assertIn("购买成功", msg)
+        self.assertEqual(pay.get_user_points("u6")["balance"], 0)
+
+        with self.engine.connect() as conn:
+            spend = conn.execute(
+                text(
+                    """
+                    SELECT amount
+                    FROM points_transactions
+                    WHERE user_id='u6' AND type='spend' AND biz_id='biz_trade_signal_1'
+                    """
+                )
+            ).fetchone()
+        self.assertIsNotNone(spend)
+        self.assertEqual(int(spend[0]), -800)
+
     def test_purchase_intel_package_rolls_back_on_partial_failure(self):
         pay.credit_points("u5", 999, ref_id="seed", description="初始点数", tx_type="admin_grant", biz_id="seed_u5")
 
