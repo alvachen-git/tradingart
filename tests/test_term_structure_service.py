@@ -31,6 +31,31 @@ def _seed(engine, rows):
             )
 
 
+def _seed_index(engine, rows):
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                CREATE TABLE index_price (
+                    trade_date TEXT,
+                    ts_code TEXT,
+                    close_price REAL
+                )
+                """
+            )
+        )
+        for row in rows:
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO index_price (trade_date, ts_code, close_price)
+                    VALUES (:trade_date, :ts_code, :close_price)
+                    """
+                ),
+                row,
+            )
+
+
 class TestTermStructureService(unittest.TestCase):
     def test_normalize_contract_month_supports_3_and_4_digits(self):
         self.assertEqual(svc.normalize_contract_month("2605"), "2605")
@@ -144,6 +169,124 @@ class TestTermStructureService(unittest.TestCase):
         payload = svc.build_term_structure_payload(engine, product_code="AG", window_key="3d", contract_slots=7)
         self.assertNotIn("2608", payload["contracts"])
         self.assertIn("2604", payload["contracts"])
+
+    def test_build_index_basis_payload_calculates_futures_minus_spot(self):
+        engine = create_engine("sqlite:///:memory:")
+        _seed(
+            engine,
+            [
+                {"trade_date": "2026-04-07", "ts_code": "IF2604", "close_price": 4010, "oi": 2200},
+                {"trade_date": "2026-04-07", "ts_code": "IF2605", "close_price": 4020, "oi": 2300},
+                {"trade_date": "2026-04-03", "ts_code": "IF2604", "close_price": 3995, "oi": 2100},
+                {"trade_date": "2026-04-03", "ts_code": "IF2605", "close_price": 4005, "oi": 2250},
+                {"trade_date": "2026-04-02", "ts_code": "IF2604", "close_price": 3988, "oi": 2050},
+                {"trade_date": "2026-04-02", "ts_code": "IF2605", "close_price": 3998, "oi": 2150},
+            ],
+        )
+        _seed_index(
+            engine,
+            [
+                {"trade_date": "2026-04-07", "ts_code": "000300.SH", "close_price": 4000},
+                {"trade_date": "2026-04-03", "ts_code": "000300.SH", "close_price": 3988},
+                {"trade_date": "2026-04-02", "ts_code": "000300.SH", "close_price": 3980},
+            ],
+        )
+
+        payload = svc.build_index_basis_term_structure_payload(
+            engine=engine, product_code="IF", window_key="3d", contract_slots=2
+        )
+        self.assertNotIn("error", payload)
+        self.assertEqual(payload["contracts"], ["2604", "2605"])
+        latest = next(x for x in payload["series"] if x["label"] == svc.ANCHOR_LABEL_LATEST)
+        latest_map = {x["contract"]: x for x in latest["points"]}
+        self.assertAlmostEqual(latest_map["2604"]["basis"], 10.0)
+        self.assertAlmostEqual(latest_map["2605"]["basis"], 20.0)
+        self.assertAlmostEqual(latest_map["2604"]["spot_close"], 4000.0)
+
+    def test_build_index_basis_longterm_payload_rolls_after_day15(self):
+        engine = create_engine("sqlite:///:memory:")
+        _seed(
+            engine,
+            [
+                {"trade_date": "2026-04-14", "ts_code": "IF2604", "close_price": 4001, "oi": 2200},
+                {"trade_date": "2026-04-14", "ts_code": "IF2605", "close_price": 4011, "oi": 2100},
+                {"trade_date": "2026-04-15", "ts_code": "IF2604", "close_price": 4002, "oi": 2250},
+                {"trade_date": "2026-04-15", "ts_code": "IF2605", "close_price": 4012, "oi": 2300},
+                {"trade_date": "2026-04-16", "ts_code": "IF2604", "close_price": 3998, "oi": 2100},
+                {"trade_date": "2026-04-16", "ts_code": "IF2605", "close_price": 4015, "oi": 2350},
+            ],
+        )
+        _seed_index(
+            engine,
+            [
+                {"trade_date": "2026-04-14", "ts_code": "000300.SH", "close_price": 4000},
+                {"trade_date": "2026-04-15", "ts_code": "000300.SH", "close_price": 4000},
+                {"trade_date": "2026-04-16", "ts_code": "000300.SH", "close_price": 4000},
+            ],
+        )
+
+        payload = svc.build_index_basis_longterm_payload(
+            engine=engine, product_code="IF", lookback_years=1
+        )
+        self.assertNotIn("error", payload)
+        point_map = {x["trade_date"]: x for x in payload["points"]}
+        self.assertEqual(point_map["20260414"]["contract"], "2604")
+        self.assertEqual(point_map["20260415"]["contract"], "2605")
+        self.assertEqual(point_map["20260416"]["contract"], "2605")
+
+    def test_build_index_basis_longterm_payload_fallback_to_nearest_month(self):
+        engine = create_engine("sqlite:///:memory:")
+        _seed(
+            engine,
+            [
+                {"trade_date": "2026-04-14", "ts_code": "IF2603", "close_price": 3990, "oi": 2000},
+                {"trade_date": "2026-04-14", "ts_code": "IF2606", "close_price": 4020, "oi": 1800},
+                {"trade_date": "2026-04-15", "ts_code": "IF2606", "close_price": 4022, "oi": 2100},
+            ],
+        )
+        _seed_index(
+            engine,
+            [
+                {"trade_date": "2026-04-14", "ts_code": "000300.SH", "close_price": 4000},
+                {"trade_date": "2026-04-15", "ts_code": "000300.SH", "close_price": 4000},
+            ],
+        )
+
+        payload = svc.build_index_basis_longterm_payload(
+            engine=engine, product_code="IF", lookback_years=1
+        )
+        self.assertNotIn("error", payload)
+        point_map = {x["trade_date"]: x for x in payload["points"]}
+        self.assertEqual(point_map["20260414"]["contract"], "2603")
+        self.assertEqual(point_map["20260415"]["contract"], "2606")
+
+    def test_build_index_basis_longterm_payload_uses_recent_one_year(self):
+        engine = create_engine("sqlite:///:memory:")
+        _seed(
+            engine,
+            [
+                {"trade_date": "2026-04-07", "ts_code": "IF2604", "close_price": 4010, "oi": 2200},
+                {"trade_date": "2025-05-01", "ts_code": "IF2506", "close_price": 3800, "oi": 1800},
+                {"trade_date": "2024-12-31", "ts_code": "IF2501", "close_price": 3600, "oi": 1500},
+            ],
+        )
+        _seed_index(
+            engine,
+            [
+                {"trade_date": "2026-04-07", "ts_code": "000300.SH", "close_price": 4000},
+                {"trade_date": "2025-05-01", "ts_code": "000300.SH", "close_price": 3790},
+                {"trade_date": "2024-12-31", "ts_code": "000300.SH", "close_price": 3580},
+            ],
+        )
+
+        payload = svc.build_index_basis_longterm_payload(
+            engine=engine, product_code="IF", lookback_years=1
+        )
+        self.assertNotIn("error", payload)
+        dates = [x["trade_date"] for x in payload["points"]]
+        self.assertIn("20250501", dates)
+        self.assertNotIn("20241231", dates)
+        self.assertTrue(all(d >= "20250407" for d in dates))
 
 
 if __name__ == "__main__":

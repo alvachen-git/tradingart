@@ -28,6 +28,14 @@ ANCHOR_LABEL_MID = "窗口中点"
 ANCHOR_LABEL_LATEST = "最新"
 
 
+STOCK_INDEX_SPOT_MAP: Dict[str, str] = {
+    "IF": "000300.SH",
+    "IH": "000016.SH",
+    "IC": "000905.SH",
+    "IM": "000852.SH",
+}
+
+
 def normalize_contract_month(raw_month: str) -> Optional[str]:
     """Convert 3/4-digit month suffix into comparable YYMM text."""
     if raw_month is None:
@@ -506,5 +514,400 @@ def build_term_structure_payload(
             "window_key": window_key,
             "latest_trade_date": latest_trade_date,
             "window_label": WINDOW_LABELS.get(window_key, window_key),
+        },
+    }
+
+
+def _is_stock_index_future(product_code: str) -> bool:
+    return _normalize_product_code(product_code) in STOCK_INDEX_SPOT_MAP
+
+
+def _safe_float(value: Any) -> Optional[float]:
+    num = pd.to_numeric(value, errors="coerce")
+    if pd.isna(num):
+        return None
+    return float(num)
+
+
+def _next_month_yymm(yymm: int) -> int:
+    yy = int(yymm) // 100
+    mm = int(yymm) % 100
+    if mm >= 12:
+        yy = (yy + 1) % 100
+        mm = 1
+    else:
+        mm += 1
+    return yy * 100 + mm
+
+
+def _target_near_month(trade_date_key: str) -> Optional[int]:
+    if not trade_date_key:
+        return None
+    dt = pd.to_datetime(trade_date_key, format="%Y%m%d", errors="coerce")
+    if pd.isna(dt):
+        dt = pd.to_datetime(trade_date_key, errors="coerce")
+    if pd.isna(dt):
+        return None
+    yymm = (dt.year % 100) * 100 + dt.month
+    if dt.day >= 15:
+        yymm = _next_month_yymm(yymm)
+    return int(yymm)
+
+
+def _pick_nearest_month(available_months: Sequence[str], target_yymm: int) -> Optional[str]:
+    months_int = []
+    for month in available_months:
+        s = str(month or "").strip()
+        if s.isdigit():
+            months_int.append(int(s))
+    if not months_int:
+        return None
+    best = min(
+        months_int,
+        key=lambda x: (abs(x - int(target_yymm)), 0 if x >= int(target_yymm) else 1, x),
+    )
+    return f"{best:04d}"
+
+
+def _read_index_close_by_compact_dates(
+    engine: Any, index_code: str, dates_compact: Sequence[str]
+) -> pd.DataFrame:
+    if not dates_compact:
+        return pd.DataFrame(columns=["trade_date", "close_price"])
+    in_clause, in_params = _build_in_clause(dates_compact, "idxd")
+    sql = text(
+        f"""
+        SELECT trade_date, close_price
+        FROM index_price
+        WHERE ts_code = :index_code
+          AND REPLACE(REPLACE(trade_date, '-', ''), '/', '') IN ({in_clause})
+        """
+    )
+    params = {"index_code": index_code, **in_params}
+    return pd.read_sql(sql, engine, params=params)
+
+
+def _build_basis_summary(latest_series_points: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+    pseudo_points = []
+    for p in latest_series_points:
+        pseudo_points.append(
+            {
+                "contract": p.get("contract"),
+                "close_price": p.get("basis"),
+            }
+        )
+    return _build_summary(pseudo_points)
+
+
+def build_index_basis_term_structure_payload(
+    engine: Any,
+    product_code: str,
+    window_key: str,
+    contract_slots: int = 7,
+) -> Dict[str, Any]:
+    product = _normalize_product_code(product_code)
+    if not _is_stock_index_future(product):
+        return {
+            "anchors": [],
+            "contracts": [],
+            "series": [],
+            "summary": _build_summary([]),
+            "meta": {
+                "product_code": product,
+                "window_key": window_key,
+                "spot_index_code": None,
+                "basis_formula": "futures_minus_spot",
+            },
+            "error": "non_stock_index_future",
+        }
+
+    payload = build_term_structure_payload(
+        engine=engine,
+        product_code=product,
+        window_key=window_key,
+        contract_slots=contract_slots,
+    )
+    if payload.get("error"):
+        payload["meta"] = {
+            **(payload.get("meta") or {}),
+            "spot_index_code": STOCK_INDEX_SPOT_MAP.get(product),
+            "basis_formula": "futures_minus_spot",
+        }
+        return payload
+
+    anchors = payload.get("anchors") or []
+    contracts = payload.get("contracts") or []
+    src_series = payload.get("series") or []
+    index_code = STOCK_INDEX_SPOT_MAP.get(product)
+    anchor_dates = [str(x.get("trade_date") or "") for x in anchors]
+    spot_df = _read_index_close_by_compact_dates(engine, index_code=index_code, dates_compact=anchor_dates)
+    if spot_df is None or spot_df.empty:
+        return {
+            "anchors": anchors,
+            "contracts": contracts,
+            "series": [],
+            "summary": _build_summary([]),
+            "meta": {
+                **(payload.get("meta") or {}),
+                "spot_index_code": index_code,
+                "basis_formula": "futures_minus_spot",
+            },
+            "error": "no_spot_rows",
+        }
+
+    spot_map: Dict[str, float] = {}
+    for _, row in spot_df.iterrows():
+        key = _to_compact_date(row.get("trade_date"))
+        close_px = _safe_float(row.get("close_price"))
+        if key and close_px is not None and key not in spot_map:
+            spot_map[key] = close_px
+
+    series: List[Dict[str, Any]] = []
+    for s in src_series:
+        date_key = str(s.get("trade_date") or "")
+        spot_close = spot_map.get(date_key)
+        points = []
+        for p in s.get("points", []):
+            futures_close = _safe_float(p.get("close_price"))
+            basis = None
+            if futures_close is not None and spot_close is not None:
+                basis = futures_close - float(spot_close)
+            points.append(
+                {
+                    "contract": p.get("contract"),
+                    "close_price": futures_close,
+                    "futures_close": futures_close,
+                    "spot_close": spot_close,
+                    "basis": basis,
+                    "oi": p.get("oi"),
+                }
+            )
+        series.append(
+            {
+                "label": s.get("label"),
+                "trade_date": date_key,
+                "display_date": s.get("display_date"),
+                "points": points,
+            }
+        )
+
+    latest_series = next((x for x in series if x.get("label") == ANCHOR_LABEL_LATEST), None)
+    summary = _build_basis_summary(latest_series.get("points", []) if latest_series else [])
+    return {
+        "anchors": anchors,
+        "contracts": contracts,
+        "series": series,
+        "summary": summary,
+        "meta": {
+            **(payload.get("meta") or {}),
+            "spot_index_code": index_code,
+            "basis_formula": "futures_minus_spot",
+        },
+    }
+
+
+def build_index_basis_longterm_payload(
+    engine: Any,
+    product_code: str,
+    lookback_years: int = 1,
+) -> Dict[str, Any]:
+    product = _normalize_product_code(product_code)
+    years = max(int(lookback_years), 1)
+    if not _is_stock_index_future(product):
+        return {
+            "points": [],
+            "meta": {
+                "product_code": product,
+                "spot_index_code": None,
+                "lookback_years": years,
+                "basis_formula": "futures_minus_spot",
+            },
+            "error": "non_stock_index_future",
+        }
+    if engine is None:
+        return {
+            "points": [],
+            "meta": {
+                "product_code": product,
+                "spot_index_code": STOCK_INDEX_SPOT_MAP.get(product),
+                "lookback_years": years,
+                "basis_formula": "futures_minus_spot",
+            },
+            "error": "engine_unavailable",
+        }
+
+    dates_df = _read_dates(engine=engine, product_code=product, window_size=420)
+    if dates_df is None or dates_df.empty:
+        return {
+            "points": [],
+            "meta": {
+                "product_code": product,
+                "spot_index_code": STOCK_INDEX_SPOT_MAP.get(product),
+                "lookback_years": years,
+                "basis_formula": "futures_minus_spot",
+            },
+            "error": "no_trade_dates",
+        }
+
+    compact_raw_dates: List[Tuple[str, Any]] = []
+    for raw in dates_df["trade_date"].tolist():
+        key = _to_compact_date(raw)
+        if key:
+            compact_raw_dates.append((key, raw))
+    if not compact_raw_dates:
+        return {
+            "points": [],
+            "meta": {
+                "product_code": product,
+                "spot_index_code": STOCK_INDEX_SPOT_MAP.get(product),
+                "lookback_years": years,
+                "basis_formula": "futures_minus_spot",
+            },
+            "error": "no_trade_dates",
+        }
+
+    latest_trade_date = compact_raw_dates[0][0]
+    latest_dt = pd.to_datetime(latest_trade_date, format="%Y%m%d", errors="coerce")
+    if pd.isna(latest_dt):
+        latest_dt = pd.to_datetime(latest_trade_date, errors="coerce")
+    if pd.isna(latest_dt):
+        return {
+            "points": [],
+            "meta": {
+                "product_code": product,
+                "spot_index_code": STOCK_INDEX_SPOT_MAP.get(product),
+                "lookback_years": years,
+                "basis_formula": "futures_minus_spot",
+            },
+            "error": "invalid_latest_trade_date",
+        }
+
+    threshold_key = (latest_dt - pd.DateOffset(years=years)).strftime("%Y%m%d")
+    selected_pairs = [x for x in compact_raw_dates if x[0] >= threshold_key]
+    if not selected_pairs:
+        return {
+            "points": [],
+            "meta": {
+                "product_code": product,
+                "spot_index_code": STOCK_INDEX_SPOT_MAP.get(product),
+                "lookback_years": years,
+                "basis_formula": "futures_minus_spot",
+            },
+            "error": "no_trade_dates_in_window",
+        }
+
+    selected_compact_dates = [x[0] for x in selected_pairs]
+    selected_raw_dates = [x[1] for x in selected_pairs]
+    rows_df = _read_rows_by_dates(engine=engine, product_code=product, dates=selected_raw_dates)
+    if rows_df is None or rows_df.empty:
+        return {
+            "points": [],
+            "meta": {
+                "product_code": product,
+                "spot_index_code": STOCK_INDEX_SPOT_MAP.get(product),
+                "lookback_years": years,
+                "basis_formula": "futures_minus_spot",
+            },
+            "error": "no_contract_rows",
+        }
+
+    date_map = _build_date_contract_map(rows=rows_df, product_code=product)
+    dates_asc = sorted(set(selected_compact_dates))
+    index_code = STOCK_INDEX_SPOT_MAP.get(product)
+    spot_df = _read_index_close_by_compact_dates(engine=engine, index_code=index_code, dates_compact=dates_asc)
+    if spot_df is None or spot_df.empty:
+        return {
+            "points": [],
+            "meta": {
+                "product_code": product,
+                "spot_index_code": index_code,
+                "lookback_years": years,
+                "latest_trade_date": latest_trade_date,
+                "basis_formula": "futures_minus_spot",
+            },
+            "error": "no_spot_rows",
+        }
+
+    spot_map: Dict[str, float] = {}
+    for _, row in spot_df.iterrows():
+        key = _to_compact_date(row.get("trade_date"))
+        close_px = _safe_float(row.get("close_price"))
+        if key and close_px is not None and key not in spot_map:
+            spot_map[key] = close_px
+
+    points: List[Dict[str, Any]] = []
+    for date_key in dates_asc:
+        day_contract_map = date_map.get(date_key, {})
+        if not day_contract_map:
+            continue
+        target_month = _target_near_month(date_key)
+        if target_month is None:
+            continue
+        selected_month = _pick_nearest_month(
+            available_months=list(day_contract_map.keys()),
+            target_yymm=target_month,
+        )
+        if not selected_month:
+            continue
+        day_value = day_contract_map.get(selected_month, {})
+        futures_close = _safe_float(day_value.get("close_price"))
+        spot_close = spot_map.get(date_key)
+        basis = None
+        if futures_close is not None and spot_close is not None:
+            basis = futures_close - float(spot_close)
+        points.append(
+            {
+                "trade_date": date_key,
+                "display_date": _format_display_date(date_key),
+                "contract": selected_month,
+                "target_month": f"{int(target_month):04d}",
+                "futures_close": futures_close,
+                "spot_close": spot_close,
+                "basis": basis,
+                "oi": day_value.get("oi"),
+            }
+        )
+
+    if not points:
+        return {
+            "points": [],
+            "meta": {
+                "product_code": product,
+                "spot_index_code": index_code,
+                "lookback_years": years,
+                "latest_trade_date": latest_trade_date,
+                "basis_formula": "futures_minus_spot",
+            },
+            "error": "no_longterm_points",
+        }
+
+    valid_basis_count = sum(1 for p in points if p.get("basis") is not None)
+    if valid_basis_count == 0:
+        return {
+            "points": points,
+            "meta": {
+                "product_code": product,
+                "spot_index_code": index_code,
+                "lookback_years": years,
+                "latest_trade_date": latest_trade_date,
+                "basis_formula": "futures_minus_spot",
+            },
+            "error": "no_basis_values",
+        }
+
+    return {
+        "points": points,
+        "summary": {
+            "valid_points": valid_basis_count,
+            "total_points": len(points),
+            "start_date": points[0].get("trade_date"),
+            "end_date": points[-1].get("trade_date"),
+        },
+        "meta": {
+            "product_code": product,
+            "spot_index_code": index_code,
+            "lookback_years": years,
+            "latest_trade_date": latest_trade_date,
+            "basis_formula": "futures_minus_spot",
         },
     }

@@ -28,6 +28,8 @@ from term_structure_service import (  # noqa: E402
     ANCHOR_LABEL_MID,
     ANCHOR_LABEL_START,
     build_term_structure_payload,
+    build_index_basis_term_structure_payload,
+    build_index_basis_longterm_payload,
 )
 
 PAGE_NAME = "期限结构"
@@ -339,6 +341,7 @@ SERIES_COLORS = {
     ANCHOR_LABEL_MID: "#f59e0b",     # amber
     ANCHOR_LABEL_LATEST: "#fb7185",  # rose
 }
+STOCK_INDEX_FUTURES = {"IF", "IH", "IC", "IM"}
 
 
 @st.cache_data(ttl=120, show_spinner=False)
@@ -357,8 +360,50 @@ def _cached_payload(
     )
 
 
+@st.cache_data(ttl=120, show_spinner=False)
+def _cached_basis_anchor_payload(
+    user_id: str,
+    page: str,
+    product_code: str,
+    window_key: str,
+    contract_slots: int,
+):
+    return build_index_basis_term_structure_payload(
+        engine=de.engine,
+        product_code=product_code,
+        window_key=window_key,
+        contract_slots=contract_slots,
+    )
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def _cached_basis_longterm_payload(
+    user_id: str,
+    page: str,
+    product_code: str,
+    lookback_years: int,
+):
+    return build_index_basis_longterm_payload(
+        engine=de.engine,
+        product_code=product_code,
+        lookback_years=lookback_years,
+    )
+
+
 def _series_map(series_list: List[Dict]) -> Dict[str, Dict]:
     return {str(s.get("label")): s for s in (series_list or [])}
+
+
+def _section_title(text_value: str) -> None:
+    st.markdown(
+        (
+            '<div style="margin: 10px 0 6px 0; font-size: 36px; font-weight: 700; '
+            'color: #dbeafe; letter-spacing: 0.01em; text-shadow: 0 2px 10px rgba(2,6,23,.45);">'
+            f"{html.escape(text_value)}"
+            "</div>"
+        ),
+        unsafe_allow_html=True,
+    )
 
 
 with st.sidebar:
@@ -413,10 +458,6 @@ series_by_label = _series_map(series_list)
 if not contracts or not series_list:
     st.warning("当前品种暂无可展示的期限结构数据。")
     st.stop()
-
-if len(contracts) < 7:
-    st.info(f"可用分月合约不足 7 档，当前按 {len(contracts)} 档展示。")
-
 fig = go.Figure()
 visible_series_count = 0
 invisible_labels: list[str] = []
@@ -479,7 +520,7 @@ fig.update_layout(
     ],
 )
 fig.update_xaxes(
-    title="合约月份 (YYMM)",
+    title="\u5408\u7ea6\u6708\u4efd (YYMM)",
     showgrid=False,
     showline=True,
     linecolor="rgba(56, 189, 248, 0.35)",
@@ -490,7 +531,7 @@ fig.update_xaxes(
     categoryarray=[str(x) for x in contracts],
 )
 fig.update_yaxes(
-    title="收盘价",
+    title="\u6536\u76d8\u4ef7",
     showgrid=True,
     gridcolor="rgba(148, 163, 184, 0.22)",
     zeroline=True,
@@ -500,6 +541,213 @@ fig.update_yaxes(
 )
 st.plotly_chart(fig, use_container_width=True)
 
+if product_code in STOCK_INDEX_FUTURES:
+    _section_title("\u80a1\u6307\u5347\u8d34\u6c34\u671f\u9650\u7ed3\u6784")
+    _db_t1 = time.perf_counter()
+    basis_payload = _cached_basis_anchor_payload(
+        _perf_user_id(),
+        PAGE_NAME,
+        product_code,
+        window_key,
+        7,
+    )
+    _perf_page_log(
+        page=PAGE_NAME,
+        db_ms=(time.perf_counter() - _db_t1) * 1000,
+        cache_hit=1,
+        stage="load_basis_anchor",
+    )
+    basis_error = basis_payload.get("error")
+    basis_contracts: List[str] = basis_payload.get("contracts", [])
+    basis_series_list: List[Dict] = basis_payload.get("series", [])
+    basis_series_by_label = _series_map(basis_series_list)
+    if basis_error:
+        st.warning(f"\u80a1\u6307\u5347\u8d34\u6c34\u671f\u9650\u7ed3\u6784\u6682\u4e0d\u53ef\u7528\uff08{basis_error}\uff09\u3002")
+    elif not basis_contracts or not basis_series_list:
+        st.warning("\u80a1\u6307\u5347\u8d34\u6c34\u671f\u9650\u7ed3\u6784\u6682\u65e0\u53ef\u5c55\u793a\u6570\u636e\u3002")
+    else:
+        fig_basis = go.Figure()
+        basis_visible_series_count = 0
+        basis_invisible_labels: list[str] = []
+        for label in SERIES_ORDER:
+            s = basis_series_by_label.get(label)
+            if not s:
+                continue
+            name = f"{s.get('display_date', s.get('trade_date', ''))} | {label}"
+            points = s.get("points", [])
+            y_values = [p.get("basis") for p in points]
+            if all(v is None for v in y_values):
+                basis_invisible_labels.append(label)
+                continue
+            basis_visible_series_count += 1
+            fig_basis.add_trace(
+                go.Scatter(
+                    x=[str(x) for x in basis_contracts],
+                    y=y_values,
+                    mode="lines+markers",
+                    name=name,
+                    line=dict(color=SERIES_COLORS.get(label, "#4b5563"), width=3.5, shape="linear"),
+                    marker=dict(
+                        size=8,
+                        symbol="circle",
+                        color="#f8fafc",
+                        line=dict(width=1.8, color=SERIES_COLORS.get(label, "#4b5563")),
+                    ),
+                    customdata=[[p.get("futures_close"), p.get("spot_close")] for p in points],
+                    hovertemplate=(
+                        "\u5408\u7ea6 %{x}<br>"
+                        "\u5347\u8d34\u6c34 %{y:.2f}<br>"
+                        "\u671f\u8d27 %{customdata[0]}<br>"
+                        "\u73b0\u8d27 %{customdata[1]}<extra></extra>"
+                    ),
+                    connectgaps=False,
+                )
+            )
+        if basis_visible_series_count < 3 and basis_invisible_labels:
+            st.warning(
+                "\u4ee5\u4e0b\u951a\u70b9\u65e5\u671f\u6682\u65e0\u6709\u6548\u5347\u8d34\u6c34\u6570\u636e\uff0c\u672a\u7ed8\u5236\u66f2\u7ebf\uff1a"
+                + ", ".join(basis_invisible_labels)
+            )
+        fig_basis.update_layout(
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="#070f1f",
+            height=500,
+            margin=dict(l=20, r=20, t=18, b=28),
+            legend=dict(
+                orientation="h",
+                yanchor="bottom",
+                y=-0.30,
+                xanchor="center",
+                x=0.5,
+                font=dict(size=14, color="#dbeafe"),
+            ),
+            font=dict(color="#cbd5e1"),
+            annotations=[
+                dict(
+                    x=0.01,
+                    y=0.98,
+                    xref="paper",
+                    yref="paper",
+                    showarrow=False,
+                    align="left",
+                    text=f"{product_code} | {COMMODITIES.get(product_code, product_code)} | \u5347\u8d34\u6c34",
+                    font=dict(size=15, color="#e2e8f0"),
+                )
+            ],
+        )
+        fig_basis.update_xaxes(
+            title="\u5408\u7ea6\u6708\u4efd (YYMM)",
+            showgrid=False,
+            showline=True,
+            linecolor="rgba(56, 189, 248, 0.35)",
+            tickfont=dict(color="#bfdbfe", size=13),
+            title_font=dict(color="#93c5fd", size=20),
+            type="category",
+            categoryorder="array",
+            categoryarray=[str(x) for x in basis_contracts],
+        )
+        fig_basis.update_yaxes(
+            title="\u5347\u8d34\u6c34 (\u671f\u8d27-\u73b0\u8d27)",
+            showgrid=True,
+            gridcolor="rgba(148, 163, 184, 0.22)",
+            zeroline=True,
+            zerolinecolor="rgba(56, 189, 248, 0.26)",
+            tickfont=dict(color="#bfdbfe", size=13),
+            title_font=dict(color="#93c5fd", size=20),
+        )
+        st.plotly_chart(fig_basis, use_container_width=True)
+    _section_title("\u80a1\u6307\u8fd1\u6708\u5347\u8d34\u6c34\uff08\u6700\u8fd11\u5e74\uff09")
+    _db_t2 = time.perf_counter()
+    long_payload = _cached_basis_longterm_payload(
+        _perf_user_id(),
+        PAGE_NAME,
+        product_code,
+        1,
+    )
+    _perf_page_log(
+        page=PAGE_NAME,
+        db_ms=(time.perf_counter() - _db_t2) * 1000,
+        cache_hit=1,
+        stage="load_basis_longterm",
+    )
+    long_error = long_payload.get("error")
+    long_points: List[Dict] = long_payload.get("points", [])
+    if long_error and not long_points:
+        st.warning(f"\u80a1\u6307\u8fd1\u6708\u5347\u8d34\u6c34\u957f\u671f\u56fe\u6682\u4e0d\u53ef\u7528\uff08{long_error}\uff09\u3002")
+    elif not long_points:
+        st.warning("\u80a1\u6307\u8fd1\u6708\u5347\u8d34\u6c34\u957f\u671f\u56fe\u6682\u65e0\u53ef\u5c55\u793a\u6570\u636e\u3002")
+    else:
+        fig_long = go.Figure()
+        fig_long.add_trace(
+            go.Scatter(
+                x=[p.get("display_date", p.get("trade_date")) for p in long_points],
+                y=[p.get("basis") for p in long_points],
+                mode="lines+markers",
+                name=f"{product_code} \u8fd1\u6708\u5347\u8d34\u6c34",
+                line=dict(color="#22d3ee", width=2.6, shape="linear"),
+                marker=dict(size=5, color="#f8fafc", line=dict(width=1.2, color="#22d3ee")),
+                customdata=[
+                    [p.get("contract"), p.get("futures_close"), p.get("spot_close")]
+                    for p in long_points
+                ],
+                hovertemplate=(
+                    "\u65e5\u671f %{x}<br>"
+                    "\u5347\u8d34\u6c34 %{y:.2f}<br>"
+                    "\u8fd1\u6708\u5408\u7ea6 %{customdata[0]}<br>"
+                    "\u671f\u8d27 %{customdata[1]}<br>"
+                    "\u73b0\u8d27 %{customdata[2]}<extra></extra>"
+                ),
+                connectgaps=False,
+            )
+        )
+        fig_long.update_layout(
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="#070f1f",
+            height=460,
+            margin=dict(l=20, r=20, t=18, b=28),
+            legend=dict(
+                orientation="h",
+                yanchor="bottom",
+                y=-0.30,
+                xanchor="center",
+                x=0.5,
+                font=dict(size=14, color="#dbeafe"),
+            ),
+            font=dict(color="#cbd5e1"),
+            annotations=[
+                dict(
+                    x=0.01,
+                    y=0.98,
+                    xref="paper",
+                    yref="paper",
+                    showarrow=False,
+                    align="left",
+                    text=f"{product_code} | \u8fd1\u6708\u5347\u8d34\u6c34 | \u6700\u8fd11\u5e74",
+                    font=dict(size=15, color="#e2e8f0"),
+                )
+            ],
+        )
+        fig_long.update_xaxes(
+            title="\u4ea4\u6613\u65e5",
+            showgrid=False,
+            showline=True,
+            linecolor="rgba(56, 189, 248, 0.35)",
+            tickfont=dict(color="#bfdbfe", size=12),
+            title_font=dict(color="#93c5fd", size=18),
+            type="category",
+        )
+        fig_long.update_yaxes(
+            title="\u5347\u8d34\u6c34 (\u671f\u8d27-\u73b0\u8d27)",
+            showgrid=True,
+            gridcolor="rgba(148, 163, 184, 0.22)",
+            zeroline=True,
+            zerolinecolor="rgba(56, 189, 248, 0.26)",
+            tickfont=dict(color="#bfdbfe", size=13),
+            title_font=dict(color="#93c5fd", size=18),
+        )
+        st.plotly_chart(fig_long, use_container_width=True)
+        if long_error:
+            st.info(f"\u957f\u671f\u56fe\u5b58\u5728\u90e8\u5206\u65e5\u671f\u7f3a\u5931\uff08{long_error}\uff09\uff0c\u5df2\u5c55\u793a\u53ef\u7528\u6570\u636e\u3002")
 structure_type_map = {
     "Contango": "正向市场",
     "Backwardation": "反向市场",
@@ -609,3 +857,4 @@ _perf_page_log(
     cache_hit=-1,
     stage="page_done",
 )
+
