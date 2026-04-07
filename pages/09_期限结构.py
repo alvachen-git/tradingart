@@ -2,6 +2,7 @@ import logging
 import os
 import sys
 import time
+import html
 from typing import Dict, List
 
 import pandas as pd
@@ -26,7 +27,6 @@ from term_structure_service import (  # noqa: E402
     ANCHOR_LABEL_LATEST,
     ANCHOR_LABEL_MID,
     ANCHOR_LABEL_START,
-    WINDOW_LABELS,
     build_term_structure_payload,
 )
 
@@ -192,6 +192,69 @@ st.markdown(
         color: #94a3b8;
         font-size: 13px;
     }
+    .ts-table-wrap {
+        margin-top: 10px;
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        overflow: hidden;
+        background:
+            radial-gradient(900px 260px at 88% -18%, rgba(56, 118, 214, 0.22), transparent 68%),
+            linear-gradient(145deg, rgba(8, 20, 43, 0.92), rgba(6, 16, 36, 0.84));
+        box-shadow: 0 10px 24px rgba(2, 6, 23, 0.35), inset 0 0 0 1px rgba(147, 197, 253, 0.05);
+    }
+    .ts-table-scroll {
+        width: 100%;
+        overflow-x: auto;
+    }
+    .ts-table {
+        width: 100%;
+        min-width: 760px;
+        border-collapse: collapse;
+        font-size: 14px;
+        color: #dbeafe;
+    }
+    .ts-table thead th {
+        text-align: center;
+        padding: 12px 14px;
+        font-weight: 600;
+        color: #7dd3fc;
+        background: rgba(16, 35, 69, 0.92);
+        border-bottom: 1px solid rgba(125, 211, 252, 0.22);
+        letter-spacing: 0.03em;
+        white-space: nowrap;
+    }
+    .ts-table tbody td {
+        text-align: center;
+        padding: 12px 14px;
+        border-bottom: 1px solid rgba(96, 165, 250, 0.14);
+        white-space: nowrap;
+    }
+    .ts-table tbody tr:nth-child(odd) td {
+        background: rgba(9, 23, 48, 0.62);
+    }
+    .ts-table tbody tr:nth-child(even) td {
+        background: rgba(8, 19, 40, 0.48);
+    }
+    .ts-table tbody tr:hover td {
+        background: rgba(14, 41, 82, 0.75);
+        box-shadow: inset 0 0 0 1px rgba(125, 211, 252, 0.15);
+    }
+    .ts-table .col-contract {
+        text-align: center;
+        color: #f8fafc;
+        font-weight: 700;
+        font-family: "IBM Plex Mono", "Consolas", monospace;
+    }
+    .ts-table .col-price {
+        text-align: center;
+        font-family: "IBM Plex Mono", "Consolas", monospace;
+        color: #bfdbfe;
+    }
+    .ts-table-empty {
+        padding: 14px;
+        color: #93c5fd;
+        font-size: 13px;
+    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -313,9 +376,8 @@ with st.sidebar:
 st.markdown(
     """
     <div class="ts-hero">
-      <div class="ts-kicker">TERM STRUCTURE ANALYTICS</div>
       <div class="ts-title">期限结构</div>
-      <div class="ts-sub">固定 7 档近远月横轴，曲线展示窗口起点 / 中点 / 最新三期收盘价</div>
+      <div class="ts-sub">观察期货不同月份的价格差异</div>
     </div>
     """,
     unsafe_allow_html=True,
@@ -494,17 +556,6 @@ with c4:
         unsafe_allow_html=True,
     )
 
-anchor_desc = " | ".join(
-    [f"{a.get('label')}: {a.get('display_date', a.get('trade_date', ''))}" for a in anchors]
-)
-latest_date = meta.get("latest_trade_date") or "--"
-window_desc = WINDOW_LABELS.get(window_key, window_key)
-st.markdown(
-    f'<div class="ts-footnote">品种: {product_code} ({COMMODITIES.get(product_code, product_code)}) | 窗口: {window_desc} | 最新交易日: {latest_date}</div>',
-    unsafe_allow_html=True,
-)
-st.markdown(f'<div class="ts-footnote">曲线锚点: {anchor_desc}</div>', unsafe_allow_html=True)
-
 table_rows = []
 for month in contracts:
     row = {"合约月份": month}
@@ -516,7 +567,41 @@ for month in contracts:
     table_rows.append(row)
 
 df_table = pd.DataFrame(table_rows)
-st.dataframe(df_table, use_container_width=True, hide_index=True)
+display_df = df_table.copy()
+if not display_df.empty:
+    price_cols = [c for c in display_df.columns if c != "合约月份"]
+    for col in price_cols:
+        display_df[col] = display_df[col].map(
+            lambda x: "--" if pd.isna(x) else f"{float(x):,.2f}"
+        )
+
+    header_html = "".join(f"<th>{html.escape(str(col))}</th>" for col in display_df.columns)
+    rows_html = "".join(
+        "<tr>"
+        + "".join(
+            f'<td class="col-contract">{html.escape(str(val))}</td>'
+            if idx == 0
+            else f'<td class="col-price">{html.escape(str(val))}</td>'
+            for idx, val in enumerate(row)
+        )
+        + "</tr>"
+        for row in display_df.itertuples(index=False, name=None)
+    )
+    st.markdown(
+        f"""
+        <div class="ts-table-wrap">
+          <div class="ts-table-scroll">
+            <table class="ts-table">
+              <thead><tr>{header_html}</tr></thead>
+              <tbody>{rows_html}</tbody>
+            </table>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+else:
+    st.markdown('<div class="ts-table-empty">暂无可展示数据</div>', unsafe_allow_html=True)
 
 _perf_page_log(
     page=PAGE_NAME,
