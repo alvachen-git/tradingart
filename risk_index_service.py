@@ -1019,7 +1019,7 @@ def select_representative_market(
         return None
     ranked.sort(key=lambda item: (item[0][0], item[0][2], item[0][1]), reverse=True)
     return dict(ranked[0][1])
-def _make_explanation(top_market: Dict[str, Any], use_external_news: bool) -> Dict[str, Any]:
+def _make_explanation_result(top_market: Dict[str, Any], use_external_news: bool) -> Tuple[Dict[str, Any], str]:
     title = _safe_text(top_market.get("display_title") or top_market.get("market_title") or top_market.get("event_key"))
     probability = normalize_probability(top_market.get("probability"))
     delta = _to_float(top_market.get("delta_24h"), 0.0)
@@ -1030,11 +1030,14 @@ def _make_explanation(top_market: Dict[str, Any], use_external_news: bool) -> Di
     )
 
     if not use_external_news:
-        return {
-            "event_key": _safe_text(top_market.get("event_key")),
-            "one_line_reason": fallback_reason,
-            "source_links": [],
-        }
+        return (
+            {
+                "event_key": _safe_text(top_market.get("event_key")),
+                "one_line_reason": fallback_reason,
+                "source_links": [],
+            },
+            "fallback",
+        )
 
     try:
         from event_extract_tool import extract_event_elements
@@ -1046,19 +1049,37 @@ def _make_explanation(top_market: Dict[str, Any], use_external_news: bool) -> Di
         if events:
             summary = _safe_text(events[0].get("summary") or events[0].get("title"))
             if summary:
-                return {
-                    "event_key": _safe_text(top_market.get("event_key")),
-                    "one_line_reason": summary,
-                    "source_links": [],
-                }
+                return (
+                    {
+                        "event_key": _safe_text(top_market.get("event_key")),
+                        "one_line_reason": summary,
+                        "source_links": [],
+                    },
+                    "external",
+                )
     except Exception:
         pass
 
-    return {
-        "event_key": _safe_text(top_market.get("event_key")),
-        "one_line_reason": fallback_reason,
-        "source_links": [],
-    }
+    return (
+        {
+            "event_key": _safe_text(top_market.get("event_key")),
+            "one_line_reason": fallback_reason,
+            "source_links": [],
+        },
+        "fallback",
+    )
+
+
+def _make_explanation(top_market: Dict[str, Any], use_external_news: bool) -> Dict[str, Any]:
+    explanation, _ = _make_explanation_result(top_market, use_external_news=use_external_news)
+    return explanation
+
+
+def _should_run_news_explainer(top_markets: List[Dict[str, Any]], use_news_explainer: bool) -> bool:
+    if not use_news_explainer:
+        return False
+    threshold = max(0.0, float(RISK_INDEX_CONFIG.get("news_explainer_delta_threshold", 0.05)))
+    return any(abs(_to_float(item.get("delta_24h"), 0.0)) >= threshold for item in top_markets or [])
 
 
 def _candidate_horizon_weight(candidate: Dict[str, Any], now: datetime) -> float:
@@ -1328,7 +1349,12 @@ def build_risk_snapshot(
         monitored_markets.append(item)
         if len(monitored_markets) >= monitored_market_limit:
             break
-    explanations = [_make_explanation(item, use_external_news=use_news_explainer) for item in top_markets[:3]]
+    should_run_news_explainer = _should_run_news_explainer(top_markets, use_news_explainer=use_news_explainer)
+    explanation_results = [
+        _make_explanation_result(item, use_external_news=should_run_news_explainer)
+        for item in top_markets[:3]
+    ]
+    explanations = [item[0] for item in explanation_results]
     for cluster in ongoing_clusters[:2]:
         explanations.append(
             {
@@ -1346,9 +1372,16 @@ def build_risk_snapshot(
     else:
         confidence = "low"
 
+    if should_run_news_explainer:
+        news_explainer_status = "ok" if any(item[1] == "external" for item in explanation_results) else "fallback"
+    elif use_news_explainer:
+        news_explainer_status = "skipped_low_delta"
+    else:
+        news_explainer_status = "fallback"
+
     source_status = {
         "polymarket": "ok" if candidates else "empty",
-        "news_explainer": "ok" if explanations else "fallback",
+        "news_explainer": news_explainer_status,
         "score_components": {
             "ongoing_baseline": round(ongoing_baseline_score, 4),
             "escalation_pressure": round(escalation_score, 4),
@@ -1600,6 +1633,6 @@ def refresh_geopolitical_risk_snapshot(
             "category_breakdown": [],
             "pair_breakdown": [],
             "headline_explanations": [],
-            "source_status": {"polymarket": f"error:{type(exc).__name__}", "news_explainer": "skipped"},
+            "source_status": {"polymarket": f"error:{type(exc).__name__}", "news_explainer": "fallback"},
             "methodology_version": str(RISK_INDEX_CONFIG["methodology_version"]),
         }

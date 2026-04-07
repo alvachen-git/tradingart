@@ -319,6 +319,102 @@ class TestRiskIndexService(unittest.TestCase):
         self.assertIn("ongoing_clusters", snapshot["source_status"])
         self.assertGreater(snapshot["score_raw"], components["ongoing_baseline"])
 
+    def test_build_risk_snapshot_skips_news_explainer_on_low_delta(self):
+        candidates = [
+            {
+                "market_slug": "russia-x-ukraine-ceasefire-by-june-30-2026",
+                "event_slug": "russia-x-ukraine-ceasefire-by-june-30-2026",
+                "market_title": "Russia x Ukraine ceasefire by June 30, 2026?",
+                "event_title": "Russia x Ukraine ceasefire by June 30, 2026?",
+                "volume24hr": 200000,
+                "outcomePrices": [0.20, 0.80],
+            },
+            {
+                "market_slug": "will-us-force-enter-iran-by-april-30",
+                "event_slug": "us-forces-enter-iran-by",
+                "market_title": "US forces enter Iran by April 30?",
+                "event_title": "Middle East escalation",
+                "volume24hr": 320000,
+                "oneDayPriceChange": 0.04,
+                "outcomePrices": [0.62, 0.38],
+                "source_url": "https://example.com/a",
+            },
+        ]
+        original_helper = svc._make_explanation_result
+        helper_flags = []
+        try:
+            def _fake_helper(item, use_external_news):
+                helper_flags.append(bool(use_external_news))
+                return (
+                    {
+                        "event_key": item.get("event_key", "x"),
+                        "one_line_reason": "fallback",
+                        "source_links": [],
+                    },
+                    "fallback",
+                )
+
+            svc._make_explanation_result = _fake_helper
+            snapshot = svc.build_risk_snapshot(
+                candidates,
+                previous_snapshot={"score_display": 20},
+                use_news_explainer=True,
+                now=datetime(2026, 4, 6, 12, 0, tzinfo=BEIJING_TZ),
+            )
+            self.assertTrue(helper_flags)
+            self.assertTrue(all(flag is False for flag in helper_flags))
+            self.assertEqual(snapshot["source_status"]["news_explainer"], "skipped_low_delta")
+        finally:
+            svc._make_explanation_result = original_helper
+
+    def test_build_risk_snapshot_runs_news_explainer_on_large_delta(self):
+        candidates = [
+            {
+                "market_slug": "russia-x-ukraine-ceasefire-by-june-30-2026",
+                "event_slug": "russia-x-ukraine-ceasefire-by-june-30-2026",
+                "market_title": "Russia x Ukraine ceasefire by June 30, 2026?",
+                "event_title": "Russia x Ukraine ceasefire by June 30, 2026?",
+                "volume24hr": 200000,
+                "outcomePrices": [0.20, 0.80],
+            },
+            {
+                "market_slug": "will-us-force-enter-iran-by-april-30",
+                "event_slug": "us-forces-enter-iran-by",
+                "market_title": "US forces enter Iran by April 30?",
+                "event_title": "Middle East escalation",
+                "volume24hr": 320000,
+                "oneDayPriceChange": 0.06,
+                "outcomePrices": [0.62, 0.38],
+                "source_url": "https://example.com/a",
+            },
+        ]
+        original_helper = svc._make_explanation_result
+        helper_flags = []
+        try:
+            def _fake_helper(item, use_external_news):
+                helper_flags.append(bool(use_external_news))
+                return (
+                    {
+                        "event_key": item.get("event_key", "x"),
+                        "one_line_reason": "external",
+                        "source_links": [],
+                    },
+                    "external" if use_external_news else "fallback",
+                )
+
+            svc._make_explanation_result = _fake_helper
+            snapshot = svc.build_risk_snapshot(
+                candidates,
+                previous_snapshot={"score_display": 20},
+                use_news_explainer=True,
+                now=datetime(2026, 4, 6, 12, 0, tzinfo=BEIJING_TZ),
+            )
+            self.assertTrue(helper_flags)
+            self.assertTrue(all(flag is True for flag in helper_flags))
+            self.assertEqual(snapshot["source_status"]["news_explainer"], "ok")
+        finally:
+            svc._make_explanation_result = original_helper
+
     def test_refresh_falls_back_to_previous_snapshot_on_fetch_failure(self):
         original_fetch = svc.fetch_polymarket_candidates
         original_latest = svc.get_latest_geopolitical_risk_snapshot
