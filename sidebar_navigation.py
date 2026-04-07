@@ -65,6 +65,7 @@ def show_navigation() -> None:
 
     with st.expander("量化分析", expanded=False):
         st.page_link("pages/03_商品持仓.py", label="商品持仓")
+        st.page_link("pages/09_期限结构.py", label="期限结构")
         st.page_link("pages/24_世界混乱指数.py", label="世界混乱指数")
         st.page_link("pages/06_相关分析.py", label="相关分析")
         st.page_link("pages/07_对冲分析.py", label="对冲分析")
