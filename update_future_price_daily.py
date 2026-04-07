@@ -1,194 +1,274 @@
-import tushare as ts
-import pandas as pd
-import numpy as np
-from sqlalchemy import create_engine, text
 import os
-from dotenv import load_dotenv
+import sys
 import time
 from datetime import datetime
-import sys
-from requests.exceptions import ReadTimeout, ConnectionError
 
-# --- 1. 初始化配置 ---
+import numpy as np
+import pandas as pd
+import tushare as ts
+from dotenv import load_dotenv
+from requests.exceptions import ConnectionError, ReadTimeout
+from sqlalchemy import create_engine, text
+
 load_dotenv(override=True)
 
 if not os.getenv("DB_USER"):
-    print("❌ [Error] 环境变量未加载，请检查 .env 文件路径")
+    print("[Error] .env not loaded, please check env path.")
     sys.exit(1)
 
-# 数据库连接
-db_url = f"mysql+pymysql://{os.getenv('DB_USER')}:{os.getenv('DB_PASSWORD')}@{os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/{os.getenv('DB_NAME')}"
+db_url = (
+    f"mysql+pymysql://{os.getenv('DB_USER')}:{os.getenv('DB_PASSWORD')}"
+    f"@{os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/{os.getenv('DB_NAME')}"
+)
 engine = create_engine(db_url, pool_recycle=3600)
 
-# Tushare 初始化
 ts.set_token(os.getenv("TUSHARE_TOKEN"))
 pro = ts.pro_api(timeout=120)
 
-# 交易所后缀映射表
 EXCHANGE_CONFIG = {
-    'SHFE': '.SHF',
-    'DCE': '.DCE',
-    'CZCE': '.ZCE',
-    'CFFEX': '.CFX',
-    'INE': '.INE',
-    'GFEX': '.GFE'
+    "SHFE": ".SHF",
+    "DCE": ".DCE",
+    "CZCE": ".ZCE",
+    "CFFEX": ".CFX",
+    "INE": ".INE",
+    "GFEX": ".GFE",
 }
+
+
 def fetch_tushare_safe(api_func, max_retries=5, sleep_time=3, **kwargs):
-    """
-    带自动重试机制的 Tushare 接口调用封装
-    """
     for i in range(max_retries):
         try:
             return api_func(**kwargs)
-        except (ReadTimeout, ConnectionError) as e:
-            print(f"   [⚠️] 网络波动 (超时/连接失败)，正在第 {i + 1}/{max_retries} 次重试...")
+        except (ReadTimeout, ConnectionError):
+            print(f"   [retry] network error, retry {i + 1}/{max_retries}")
             time.sleep(sleep_time)
-        except Exception as e:
-            print(f"   [⚠️] 接口调用异常: {e}，正在第 {i + 1}/{max_retries} 次重试...")
+        except Exception as exc:
+            print(f"   [retry] api error: {exc}, retry {i + 1}/{max_retries}")
             time.sleep(sleep_time)
 
-    print(f"   [❌] 重试 {max_retries} 次后依然失败，跳过本次抓取。")
+    print(f"   [skip] retried {max_retries} times but still failed.")
     return pd.DataFrame()
 
-def get_trade_cal(date_str):
-    """判断今天是否是交易日"""
+
+def is_trading_day(date_str):
+    """
+    Fail-closed:
+    - trade_cal fetch failed / empty -> treat as non-trading day
+    """
     try:
-        df = fetch_tushare_safe(pro.trade_cal, exchange='SHFE', start_date=date_str, end_date=date_str)
-        if not df.empty:
-            return df.iloc[0]['is_open'] == 1
-    except:
-        return True
-    return False
+        df = fetch_tushare_safe(
+            pro.trade_cal, exchange="SHFE", start_date=date_str, end_date=date_str
+        )
+        if df.empty:
+            print(f"[-] trade_cal empty for {date_str}, skip for safety.")
+            return False
+
+        is_open = int(df.iloc[0].get("is_open", 0))
+        return is_open == 1
+    except Exception as exc:
+        print(f"[-] trade calendar check failed: {exc}. skip for safety.")
+        return False
+
+
+def check_futures_price_unique_index():
+    sql = """
+    SELECT INDEX_NAME, GROUP_CONCAT(COLUMN_NAME ORDER BY SEQ_IN_INDEX) AS cols
+    FROM information_schema.STATISTICS
+    WHERE TABLE_SCHEMA = DATABASE()
+      AND TABLE_NAME = 'futures_price'
+      AND NON_UNIQUE = 0
+    GROUP BY INDEX_NAME
+    """
+    try:
+        idx_df = pd.read_sql(sql, engine)
+        if idx_df.empty:
+            print(
+                "[warn] futures_price has no unique index. "
+                "recommend unique key (trade_date, ts_code)."
+            )
+            return
+
+        normalized = {
+            str(cols).replace(" ", "").lower() for cols in idx_df["cols"].tolist()
+        }
+        if "trade_date,ts_code" not in normalized:
+            print(
+                "[warn] futures_price unique key does not contain (trade_date, ts_code). "
+                "recommend adding it for idempotency."
+            )
+    except Exception as exc:
+        print(f"[warn] unique index check failed: {exc}")
+
+
+def _normalize_trade_date(value):
+    if pd.isna(value):
+        return ""
+    s = str(value).strip()
+    if s.endswith(".0"):
+        s = s[:-2]
+    return s
+
+
+def prepare_exchange_data(trade_date, exchange, suffix):
+    df = fetch_tushare_safe(
+        pro.fut_daily, max_retries=5, trade_date=trade_date, exchange=exchange
+    )
+    if df.empty:
+        print(f"   [skip] {exchange} empty response.")
+        return pd.DataFrame()
+
+    if "ts_code" not in df.columns:
+        print(f"   [skip] {exchange} missing ts_code.")
+        return pd.DataFrame()
+
+    df = df[df["ts_code"].astype(str).str.endswith(suffix)].copy()
+    if df.empty:
+        print(f"   [skip] {exchange} filtered empty by suffix {suffix}.")
+        return pd.DataFrame()
+
+    if "trade_date" not in df.columns:
+        print(f"   [skip] {exchange} missing trade_date.")
+        return pd.DataFrame()
+
+    actual_dates = {_normalize_trade_date(v) for v in df["trade_date"]}
+    if actual_dates != {trade_date}:
+        print(
+            f"   [warn] {exchange} trade_date mismatch, expected={trade_date}, "
+            f"actual={sorted(actual_dates)}. skip this exchange."
+        )
+        return pd.DataFrame()
+
+    df["ts_code"] = df["ts_code"].astype(str).str.split(".").str[0].str.upper()
+    df["trade_date"] = trade_date
+
+    df = df.rename(
+        columns={
+            "open": "open_price",
+            "high": "high_price",
+            "low": "low_price",
+            "close": "close_price",
+            "settle": "settle_price",
+        }
+    )
+
+    numeric_cols = [
+        "open_price",
+        "high_price",
+        "low_price",
+        "close_price",
+        "settle_price",
+        "vol",
+        "oi",
+    ]
+    for col in numeric_cols:
+        if col not in df.columns:
+            df[col] = 0
+        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
+
+    mask_fix = (df["close_price"] <= 0.001) & (df["settle_price"] > 0)
+    df.loc[mask_fix, "close_price"] = df.loc[mask_fix, "settle_price"]
+    for col in ["open_price", "high_price", "low_price"]:
+        df.loc[df[col] <= 0.001, col] = df["close_price"]
+
+    if "pct_chg" in df.columns:
+        df["pct_chg"] = pd.to_numeric(df["pct_chg"], errors="coerce").fillna(0.0)
+    elif "pre_close" in df.columns:
+        pre_close = pd.to_numeric(df["pre_close"], errors="coerce").fillna(0.0)
+        df["pct_chg"] = np.where(
+            pre_close > 0,
+            (df["close_price"] - pre_close) / pre_close * 100,
+            0.0,
+        )
+    else:
+        df["pct_chg"] = 0.0
+
+    df["symbol"] = df["ts_code"].str.extract(r"^([a-zA-Z]+)")
+    idx_max = df.dropna(subset=["symbol"]).groupby("symbol")["oi"].idxmax()
+    df_dom = df.loc[idx_max].copy()
+    df_dom["ts_code"] = df_dom["symbol"]
+
+    df_final = pd.concat([df, df_dom], ignore_index=True)
+    df_final = df_final.drop_duplicates(subset=["ts_code"], keep="last")
+
+    final_cols = [
+        "trade_date",
+        "ts_code",
+        "open_price",
+        "high_price",
+        "low_price",
+        "close_price",
+        "settle_price",
+        "vol",
+        "oi",
+        "pct_chg",
+    ]
+    return df_final[final_cols].copy()
 
 
 def update_daily_data(trade_date):
-    """
-    执行单日数据更新：抓取 -> 过滤 -> 清洗 -> 防撞检查 -> 入库
-    """
-    print(f"[*] 启动每日更新任务: {trade_date}")
+    print(f"[*] start daily futures update: {trade_date}")
     start_t = time.time()
 
-    # 1. 全局清理：先删除当天的旧数据
-    # 注意：如果这脚本今天跑了一半挂了，重跑时会把之前跑成功的也删掉，重新来过，这是安全的。
-    with engine.connect() as conn:
-        conn.execute(text(f"DELETE FROM futures_price WHERE trade_date = '{trade_date}'"))
-        conn.commit()
-
-    print(" [√] 已清理当日旧数据，准备重新入库...")
-
+    all_batches = []
     total_records = 0
 
-    # 2. 逐个交易所处理
-    for ex, suffix in EXCHANGE_CONFIG.items():
+    for exchange, suffix in EXCHANGE_CONFIG.items():
         try:
-            # A. 抓取
-            df = fetch_tushare_safe(pro.fut_daily, max_retries=5, trade_date=trade_date, exchange=ex)
-            if df.empty: continue
-
-            # 过滤后缀 (虽然可能拦不住所有脏数据，但还是加上)
-            df = df[df['ts_code'].str.endswith(suffix)].copy()
-            if df.empty: continue
-
-            # B. 基础清洗
-            df['ts_code'] = df['ts_code'].apply(lambda x: x.split('.')[0] if '.' in x else x)
-
-            # 重命名
-            df = df.rename(columns={
-                'open': 'open_price', 'high': 'high_price',
-                'low': 'low_price', 'close': 'close_price',
-                'settle': 'settle_price'
-            })
-
-            # 填充空值
-            cols = ['open_price', 'high_price', 'low_price', 'close_price', 'settle_price', 'vol', 'oi']
-            for c in cols:
-                if c not in df.columns: df[c] = 0
-            df[cols] = df[cols].fillna(0)
-
-            # C. 价格修复
-            mask_fix = (df['close_price'] <= 0.001) & (df['settle_price'] > 0)
-            df.loc[mask_fix, 'close_price'] = df.loc[mask_fix, 'settle_price']
-            for c in ['open_price', 'high_price', 'low_price']:
-                df.loc[df[c] <= 0.001, c] = df['close_price']
-
-            # 计算涨跌幅
-            if 'pct_chg' not in df.columns:
-                if 'pre_close' in df.columns:
-                    df['pre_close'] = df['pre_close'].fillna(0)
-                    df['pct_chg'] = np.where(df['pre_close'] > 0,
-                                             (df['close_price'] - df['pre_close']) / df['pre_close'] * 100,
-                                             0)
-                else:
-                    df['pct_chg'] = 0.0
-
-            # D. 生成主力合约
-            df['symbol'] = df['ts_code'].str.extract(r'^([a-zA-Z]+)')
-            idx_max = df.dropna(subset=['symbol']).groupby('symbol')['oi'].idxmax()
-            df_dom = df.loc[idx_max].copy()
-            df_dom['ts_code'] = df_dom['symbol']
-
-            # E. 合并
-            df_final = pd.concat([df, df_dom], ignore_index=True)
-            df_final = df_final.drop_duplicates(subset=['ts_code'], keep='last')
-
-            # 筛选字段
-            final_cols = ['trade_date', 'ts_code', 'open_price', 'high_price',
-                          'low_price', 'close_price', 'settle_price',
-                          'vol', 'oi', 'pct_chg']
-            df_save = df_final[final_cols]
-
-            # 🔥🔥🔥【核心大招：入库前防撞检查】🔥🔥🔥
-            # 1. 先查一下数据库里今天已经有了哪些代码 (比如 SHFE 已经存了 AL)
-            existing_codes_df = pd.read_sql(
-                f"SELECT ts_code FROM futures_price WHERE trade_date='{trade_date}'",
-                engine
-            )
-            existing_set = set(existing_codes_df['ts_code'].tolist())
-
-            # 2. 只有数据库里没有的，我才插入
-            # 这样如果 Tushare 发疯把 AL 塞进 DCE，这里会发现数据库已有 AL，直接过滤掉
-            initial_save_count = len(df_save)
-            df_save = df_save[~df_save['ts_code'].isin(existing_set)]
-
-            if len(df_save) < initial_save_count:
-                print(
-                    f"   [🛡️] 触发防撞机制：自动剔除了 {initial_save_count - len(df_save)} 条重复/脏数据 (如 {list(set(df_final['ts_code']) - set(df_save['ts_code']))[:3]}...)")
-
-            if df_save.empty:
-                print(f"   [i] {ex} 所有数据均已存在，跳过入库")
+            df_ready = prepare_exchange_data(trade_date, exchange, suffix)
+            if df_ready.empty:
                 continue
+            all_batches.append(df_ready)
+            total_records += len(df_ready)
+            print(f"   [ok] {exchange} prepared {len(df_ready)} rows.")
+        except Exception as exc:
+            print(f"   [!] {exchange} prepare failed: {exc}")
 
-            # 写入数据库
-            df_save.to_sql('futures_price', engine, if_exists='append', index=False, chunksize=2000)
+    if not all_batches:
+        print("[-] no valid futures rows, skip delete/insert.")
+        return
 
-            count = len(df_save)
-            total_records += count
-            print(f"   -> {ex}: 成功入库 {count} 条")
+    df_save = pd.concat(all_batches, ignore_index=True)
+    actual_dates = {_normalize_trade_date(v) for v in df_save["trade_date"]}
+    if actual_dates != {trade_date}:
+        print(
+            f"[warn] final trade_date mismatch, expected={trade_date}, "
+            f"actual={sorted(actual_dates)}. skip write."
+        )
+        return
 
-            del df, df_dom, df_final, df_save
+    with engine.connect() as conn:
+        conn.execute(
+            text("DELETE FROM futures_price WHERE trade_date = :trade_date"),
+            {"trade_date": trade_date},
+        )
+        conn.commit()
 
-        except Exception as e:
-            print(f"   [!] {ex} 更新异常: {e}")
-            continue
+    print("[*] old rows deleted for target date.")
+    df_save.to_sql("futures_price", engine, if_exists="append", index=False, chunksize=2000)
 
     duration = time.time() - start_t
-    print(f" [√] 更新完成。日期: {trade_date}, 总条数: {total_records}, 耗时: {duration:.2f}s\n")
+    print(
+        f"[ok] futures update done. date={trade_date}, rows={total_records}, "
+        f"cost={duration:.2f}s"
+    )
 
 
 if __name__ == "__main__":
     now = datetime.now()
-    today_str = now.strftime('%Y%m%d')
+    today_str = now.strftime("%Y%m%d")
 
     if now.weekday() >= 5:
-        print(f" [-] 今天是周末 ({today_str})，跳过更新。")
+        print(f"[-] weekend ({today_str}), skip.")
         sys.exit(0)
 
-    if not get_trade_cal(today_str):
-        print(f" [-] 今天 ({today_str}) 是非交易日，跳过更新。")
+    if not is_trading_day(today_str):
+        print(f"[-] non-trading day ({today_str}), skip.")
         sys.exit(0)
+
+    check_futures_price_unique_index()
 
     try:
         update_daily_data(today_str)
-    except Exception as e:
-        print(f" [!!!] 脚本执行发生致命错误: {e}")
+    except Exception as exc:
+        print(f"[fatal] update failed: {exc}")
         sys.exit(1)
