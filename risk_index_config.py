@@ -38,6 +38,13 @@ class OngoingChaosClusterConfig(TypedDict):
     exclude_keywords: NotRequired[List[str]]
 
 
+class FocusedConflictWatchConfig(TypedDict):
+    watch_key: str
+    country_codes: List[str]
+    query_keywords: List[str]
+    active: bool
+
+
 RISK_CATEGORIES = {
     "military_conflict": "军事冲突",
     "nuclear_escalation": "核升级",
@@ -61,6 +68,7 @@ RISK_INDEX_CONFIG = {
     "polymarket_candidate_limit": 600,
     "polymarket_fetch_page_size": 200,
     "polymarket_fetch_max_pages": 8,
+    "polymarket_supplemental_max_pages": 6,
     "monitored_markets_limit": 24,
     "dynamic_conflict_limit": 36,
     "dynamic_conflict_base_impact": 0.55,
@@ -196,6 +204,57 @@ RISK_INDEX_CONFIG = {
         "memecoins",
     ],
 }
+
+FOCUSED_CONFLICT_WATCHLIST_V1: List[FocusedConflictWatchConfig] = [
+    {
+        "watch_key": "ISR_TUR",
+        "country_codes": ["ISR", "TUR"],
+        "query_keywords": ["israel turkey", "israel x turkey", "turkey israel", "military clash"],
+        "active": True,
+    },
+    {
+        "watch_key": "CHN_JPN",
+        "country_codes": ["CHN", "JPN"],
+        "query_keywords": ["china japan", "china x japan", "japan china", "military clash"],
+        "active": True,
+    },
+    {
+        "watch_key": "USA_CUB",
+        "country_codes": ["USA", "CUB"],
+        "query_keywords": ["us cuba", "usa cuba", "u.s. cuba", "strike cuba", "invade cuba"],
+        "active": True,
+    },
+    {
+        "watch_key": "USA_MEX",
+        "country_codes": ["USA", "MEX"],
+        "query_keywords": ["us mexico", "usa mexico", "u.s. mexico", "strike mexico", "ground operation mexico"],
+        "active": True,
+    },
+    {
+        "watch_key": "USA_LATAM",
+        "country_codes": ["USA", "COL", "MEX", "CUB"],
+        "query_keywords": ["latin america", "latin american country", "anti-cartel ground operation", "colombia"],
+        "active": True,
+    },
+    {
+        "watch_key": "RUS_NATO",
+        "country_codes": ["RUS", "NATO"],
+        "query_keywords": ["russia nato", "nato article 5", "article 5", "nato clash"],
+        "active": True,
+    },
+    {
+        "watch_key": "PRK_ROK",
+        "country_codes": ["PRK", "ROK"],
+        "query_keywords": ["north korea south korea", "korean war", "north korea attack south korea"],
+        "active": True,
+    },
+    {
+        "watch_key": "CHN_TWN",
+        "country_codes": ["CHN", "TWN"],
+        "query_keywords": ["china taiwan", "taiwan blockade", "taiwan invasion"],
+        "active": True,
+    },
+]
 
 EVENT_BASKET_V1: List[RiskEventConfig] = [
     {

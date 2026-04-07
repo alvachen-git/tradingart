@@ -124,6 +124,30 @@ def _fmt_pct(value: float) -> str:
     return f"{value * 100:.1f}%"
 
 
+def _risk_accent(probability: float) -> tuple[str, str]:
+    p = max(0.0, min(1.0, probability))
+    if p >= 0.75:
+        return "#ef4444", "rgba(239,68,68,.14)"
+    if p >= 0.5:
+        return "#fb923c", "rgba(251,146,60,.14)"
+    if p >= 0.25:
+        return "#facc15", "rgba(250,204,21,.12)"
+    return "#22c55e", "rgba(34,197,94,.12)"
+
+
+def _best_polymarket_url(item: dict) -> str:
+    event_slug = str(item.get("event_slug") or "").strip()
+    if event_slug:
+        return f"https://polymarket.com/event/{event_slug}"
+    source_url = str(item.get("source_url") or "").strip()
+    if source_url:
+        return source_url
+    market_slug = str(item.get("market_slug") or "").strip()
+    if market_slug:
+        return f"https://polymarket.com/event/{market_slug}"
+    return ""
+
+
 def _band_for_score(value: float) -> dict:
     if value < 25:
         return BAND_META["nothing_happens"]
@@ -277,7 +301,7 @@ st.markdown(
         background: linear-gradient(140deg, var(--risk-card), var(--risk-card2));
         box-shadow: 0 16px 44px rgba(0,0,0,.28), inset 0 1px 0 rgba(255,255,255,.03);
     }
-    .hero-card { padding: 18px 22px; min-height: 164px; position: relative; overflow: hidden; }
+    .hero-card { padding: 12px 18px 14px; min-height: 116px; position: relative; overflow: hidden; }
     .hero-card::after {
         content:"";
         position:absolute;
@@ -288,8 +312,11 @@ st.markdown(
         pointer-events:none;
     }
     .hero-title { font-size: clamp(34px,4.6vw,62px); line-height: 1.02; font-weight: 800; }
-    .hero-sub { margin-top: 8px; max-width: 780px; color: var(--risk-muted); font-size: 14px; line-height: 1.45; }
-    .meta-line { display:flex; justify-content:space-between; align-items:center; gap:12px; margin-bottom: 10px; color:#b9cae7; font-size:14px; }
+    .hero-sub { margin-top: 6px; max-width: 780px; color: var(--risk-muted); font-size: 14px; line-height: 1.4; }
+    .meta-line { display:flex; justify-content:flex-end; align-items:center; gap:12px; margin-bottom: 2px; color:#b9cae7; font-size:14px; }
+    .panel-head { display:flex; justify-content:space-between; align-items:flex-start; gap:12px; margin-bottom: 8px; }
+    .panel-head .section-title { text-align:left; }
+    .panel-head .section-sub { text-align:left; margin-bottom: 0; }
     .status-chip {
         display:inline-flex; align-items:center; gap:10px; padding:7px 12px; border-radius:999px;
         border:1px solid rgba(125,211,252,.16); background:linear-gradient(180deg, rgba(7,13,28,.92), rgba(9,16,32,.72));
@@ -301,18 +328,18 @@ st.markdown(
         box-shadow:0 0 12px rgba(34,197,94,.55);
     }
     .status-time { color:#9fb5da; }
-    .panel-card { padding: 14px; }
-    .section-title { font-size: 26px; font-weight: 800; margin: 0; }
-    .section-sub { color: var(--risk-muted); font-size: 13px; margin-top: 4px; margin-bottom: 14px; }
-    .component-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; margin-top: 10px; }
+    .panel-card { padding: 14px 14px 12px; }
+    .section-title { font-size: 24px; font-weight: 800; margin: 0; line-height: 1.05; }
+    .section-sub { color: var(--risk-muted); font-size: 12px; margin-top: 4px; margin-bottom: 12px; }
+    .component-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; margin-top: 8px; }
     .component-card {
-        padding:11px 13px; border-radius:15px; border:1px solid rgba(148,163,184,.12); background:linear-gradient(180deg, rgba(2,6,23,.56), rgba(4,10,22,.34));
+        padding:10px 12px; border-radius:15px; border:1px solid rgba(148,163,184,.12); background:linear-gradient(180deg, rgba(2,6,23,.56), rgba(4,10,22,.34));
         box-shadow: inset 0 1px 0 rgba(255,255,255,.02);
     }
     .component-label { color: var(--risk-muted); font-size: 12px; }
     .component-value { color:#f8fbff; font-size: 21px; font-family:"IBM Plex Mono", monospace; margin-top: 3px; }
     .driving-card {
-        margin-top: 8px; border-radius: 18px; border:1px solid rgba(148,163,184,.14); background:rgba(8,16,33,.78); padding: 14px 16px;
+        margin-top: 8px; border-radius: 18px; border:1px solid rgba(148,163,184,.14); background:rgba(8,16,33,.78); padding: 12px 14px;
     }
     .gauge-shell {
         position: relative;
@@ -430,11 +457,11 @@ st.markdown(
         font-size:13px;
         box-shadow: inset 0 1px 0 rgba(255,255,255,.04);
     }
-    .driving-top { color: var(--risk-muted); font-size: 11px; letter-spacing: .16em; margin-bottom: 8px; }
+    .driving-top { color: var(--risk-muted); font-size: 10px; letter-spacing: .18em; margin-bottom: 6px; }
     .driving-head { display:flex; justify-content:space-between; gap:14px; align-items:flex-start; }
-    .driving-name { font-size: 18px; font-weight: 700; line-height: 1.35; }
-    .driving-prob { font-size: 40px; font-family:"IBM Plex Mono", monospace; color: var(--risk-yellow); white-space: nowrap; }
-    .driving-meta { margin-top: 8px; color: var(--risk-muted); font-size: 12px; }
+    .driving-name { font-size: 18px; font-weight: 700; line-height: 1.28; }
+    .driving-prob { font-size: 38px; font-family:"IBM Plex Mono", monospace; color: var(--risk-yellow); white-space: nowrap; }
+    .driving-meta { margin-top: 6px; color: var(--risk-muted); font-size: 12px; }
     .monitored-wrap { max-height: 760px; overflow-y:auto; padding-right: 2px; }
     .market-row {
         display:flex; justify-content:space-between; gap:12px; align-items:center; padding:10px 10px 10px 12px; border-radius:14px;
@@ -444,6 +471,33 @@ st.markdown(
         position: relative;
         overflow: hidden;
     }
+    .market-link {
+        display:block;
+        text-decoration:none;
+        color:inherit !important;
+        border-radius:14px;
+        transition: transform .14s ease, filter .14s ease;
+    }
+    .market-link, .market-link:hover, .market-link:visited, .market-link:active {
+        text-decoration:none !important;
+        color:inherit !important;
+    }
+    .market-link * {
+        text-decoration:none !important;
+        color:inherit;
+    }
+    .market-link:hover {
+        text-decoration:none;
+        transform: translateY(-1px);
+        filter: brightness(1.03);
+    }
+    .market-link:hover .market-row {
+        border-color: rgba(125,211,252,.26);
+        box-shadow: 0 8px 24px rgba(2,6,23,.24), inset 0 1px 0 rgba(255,255,255,.04);
+    }
+    .market-link .market-row {
+        cursor:pointer;
+    }
     .market-row::before {
         content:"";
         position:absolute;
@@ -452,33 +506,33 @@ st.markdown(
         bottom:10px;
         width:3px;
         border-radius:999px;
-        background: linear-gradient(180deg, rgba(56,189,248,.9), rgba(250,204,21,.9));
+        background: linear-gradient(180deg, var(--market-accent, rgba(56,189,248,.9)), rgba(255,255,255,.16));
         opacity:.9;
     }
     .market-left { display:flex; align-items:flex-start; gap:10px; min-width:0; }
     .market-rank {
-        width:24px; height:24px; border-radius:999px; flex:0 0 24px;
+        width:22px; height:22px; border-radius:999px; flex:0 0 22px;
         display:flex; align-items:center; justify-content:center;
-        font-family:"IBM Plex Mono", monospace; font-size:11px; color:#dbeafe;
-        border:1px solid rgba(125,211,252,.16); background:rgba(15,23,42,.58);
+        font-family:"IBM Plex Mono", monospace; font-size:10px; color:#a9bddf;
+        border:1px solid rgba(125,211,252,.10); background:rgba(15,23,42,.42);
         margin-top:2px;
     }
     .market-dot {
-        width:8px; height:8px; border-radius:999px; background:#22c55e; display:inline-block;
-        box-shadow:0 0 10px rgba(34,197,94,.55);
+        width:8px; height:8px; border-radius:999px; background:var(--market-accent, #22c55e); display:inline-block;
+        box-shadow:0 0 10px var(--market-accent-soft, rgba(34,197,94,.22));
     }
     .market-head { display:flex; align-items:center; gap:8px; }
-    .market-name { font-size: 16px; font-weight: 700; line-height: 1.25; }
-    .market-meta { color: var(--risk-muted); font-size: 11px; margin-top: 4px; letter-spacing: .14em; }
+    .market-name { font-size: 16px; font-weight: 700; line-height: 1.2; }
+    .market-meta { color: rgba(147,169,204,.78); font-size: 10px; margin-top: 4px; letter-spacing: .16em; }
     .market-prob {
-        font-size: 20px; font-family:"IBM Plex Mono", monospace; font-weight: 700; color: var(--risk-yellow); white-space: nowrap;
-        padding:6px 10px; border-radius:12px; background:rgba(250,204,21,.06); border:1px solid rgba(250,204,21,.14);
+        font-size: 20px; font-family:"IBM Plex Mono", monospace; font-weight: 700; color: var(--market-accent, var(--risk-yellow)); white-space: nowrap;
+        padding:6px 10px; border-radius:12px; background:var(--market-accent-soft, rgba(250,204,21,.06)); border:1px solid var(--market-accent-soft, rgba(250,204,21,.14));
     }
-    .table-card { border:1px solid var(--risk-line); border-radius:18px; background:linear-gradient(140deg,var(--risk-card),var(--risk-card2)); padding:14px; margin-top: 12px; }
+    .table-card { border:1px solid var(--risk-line); border-radius:18px; background:linear-gradient(140deg,var(--risk-card),var(--risk-card2)); padding:12px 14px; margin-top: 12px; }
     .table-card h3 { margin:0; font-size:24px; }
-    .table-sub { color: var(--risk-muted); font-size: 12px; margin-top: 5px; margin-bottom: 10px; }
+    .table-sub { color: var(--risk-muted); font-size: 12px; margin-top: 4px; margin-bottom: 8px; }
     .risk-table { width:100%; border-collapse: collapse; }
-    .risk-table th, .risk-table td { padding:10px 8px; border-bottom:1px solid rgba(148,163,184,.10); text-align:left; }
+    .risk-table th, .risk-table td { padding:9px 8px; border-bottom:1px solid rgba(148,163,184,.10); text-align:left; }
     .risk-table th { color:#c9d9f3; font-size:13px; }
     .risk-table td { color:#eff6ff; font-size:14px; }
     .pair-grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(260px, 1fr)); gap:12px; }
@@ -502,7 +556,6 @@ st.markdown(
     f"""
     <div class="hero-card">
       <div class="meta-line">
-        <div></div>
         <div class="status-chip"><span class="status-dot"></span><span>LIVE</span><span class="status-time">{_format_updated_at(updated_at)}</span></div>
       </div>
       <div class="hero-title">世界混乱指数</div>
@@ -511,6 +564,8 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
+
+st.markdown("<div style='height:16px;'></div>", unsafe_allow_html=True)
 
 left, right = st.columns([1.08, 0.92], gap="large")
 with left:
@@ -544,10 +599,27 @@ with left:
     )
 
 with right:
+    market_rows = []
+    for idx, item in enumerate(monitored_markets[:20]):
+        accent, accent_soft = _risk_accent(_safe_num(item.get("probability")))
+        row_html = (
+            f"<div class='market-row' style=\"--market-accent:{accent};--market-accent-soft:{accent_soft};\">"
+            f"<div class='market-left'><div class='market-rank'>{idx + 1:02d}</div><div>"
+            f"<div class='market-head'><span class='market-dot'></span><div class='market-name'>{item.get('display_title','-')}</div></div>"
+            f"<div class='market-meta'>{_region_label(item.get('region_tag'))} · {item.get('pair_tag','-')} · POLYMARKET</div>"
+            f"</div></div><div class='market-prob'>{_fmt_pct(_safe_num(item.get('probability')))}</div></div>"
+        )
+        source_url = _best_polymarket_url(item)
+        if source_url:
+            market_rows.append(
+                f"<a class='market-link' href='{source_url}' target='_blank' rel='noopener noreferrer'>{row_html}</a>"
+            )
+        else:
+            market_rows.append(row_html)
     st.markdown(
         f"""
         <div class="panel-card">
-            <div class="meta-line" style="margin-bottom:0;">
+            <div class="panel-head">
             <div>
               <div class="section-title">监控市场</div>
               <div class="section-sub">数据来源：Polymarket</div>
@@ -555,10 +627,7 @@ with right:
             <div style="font-family:'IBM Plex Mono',monospace;color:#93a9cc;white-space:nowrap;">{identified_count} 个监控市场</div>
           </div>
           <div class="monitored-wrap">
-            {''.join([
-                f"<div class='market-row'><div class='market-left'><div class='market-rank'>{idx + 1:02d}</div><div><div class='market-head'><span class='market-dot'></span><div class='market-name'>{item.get('display_title','-')}</div></div><div class='market-meta'>{_region_label(item.get('region_tag'))} · {item.get('pair_tag','-')} · POLYMARKET</div></div></div><div class='market-prob'>{_fmt_pct(_safe_num(item.get('probability')))}</div></div>"
-                for idx, item in enumerate(monitored_markets[:20])
-            ]) or "<div class='market-row'><div class='market-name'>暂无已识别市场</div><div class='market-prob'>--</div></div>"}
+            {''.join(market_rows) or "<div class='market-row'><div class='market-name'>暂无已识别市场</div><div class='market-prob'>--</div></div>"}
           </div>
         </div>
         """,
@@ -567,7 +636,7 @@ with right:
 
 left_bottom, right_bottom = st.columns([1.08, 0.92], gap="large")
 with left_bottom:
-    st.markdown('<div class="table-card"><h3>核心风险贡献</h3><div class="table-sub">按指数贡献排序的核心市场</div>', unsafe_allow_html=True)
+    st.markdown('<div class="table-card"><h3>主要推升项</h3><div class="table-sub">按指数贡献排序的核心市场</div>', unsafe_allow_html=True)
     if top_markets:
         rows = []
         for item in top_markets[:8]:
@@ -583,23 +652,77 @@ with left_bottom:
         st.markdown('</div>', unsafe_allow_html=True)
 
 with right_bottom:
-    st.markdown('<div class="table-card"><h3>分数构成</h3><div class="table-sub">按风险类别查看持续基础分与升级风险分</div>', unsafe_allow_html=True)
+    st.markdown('<div class="table-card"><h3>风险来源分布</h3><div class="table-sub">按风险类别查看持续基础分与升级风险分</div>', unsafe_allow_html=True)
     if category_breakdown:
         cat_df = pd.DataFrame(category_breakdown)
+        max_total = float((cat_df["baseline"].fillna(0) + cat_df["escalation"].fillna(0)).max() or 0.0)
+        xaxis_max = max(40.0, math.ceil(max_total / 5.0) * 5.0)
+        cat_df = cat_df.sort_values("raw", ascending=True)
         fig = go.Figure()
-        fig.add_trace(go.Bar(y=cat_df["label"], x=cat_df["baseline"], orientation="h", name="持续基础分", marker=dict(color="#22c55e")))
-        fig.add_trace(go.Bar(y=cat_df["label"], x=cat_df["escalation"], orientation="h", name="升级风险分", marker=dict(color="#38bdf8")))
+        fig.add_trace(
+            go.Bar(
+                y=cat_df["label"],
+                x=cat_df["baseline"],
+                orientation="h",
+                name="持续基础分",
+                marker=dict(color="#22c55e"),
+                width=0.78,
+                hovertemplate="%{y}<br>持续基础分 %{x:.1f}<extra></extra>",
+            )
+        )
+        fig.add_trace(
+            go.Bar(
+                y=cat_df["label"],
+                x=cat_df["escalation"],
+                orientation="h",
+                name="升级风险分",
+                marker=dict(color="#38bdf8"),
+                width=0.78,
+                hovertemplate="%{y}<br>升级风险分 %{x:.1f}<extra></extra>",
+            )
+        )
+        total_annotations = []
+        for _, row in cat_df.iterrows():
+            total_value = float(_safe_num(row.get("baseline")) + _safe_num(row.get("escalation")))
+            total_annotations.append(
+                dict(
+                    x=min(xaxis_max - 0.4, total_value + 0.6),
+                    y=row["label"],
+                    xref="x",
+                    yref="y",
+                    text=f"{total_value:.1f}",
+                    showarrow=False,
+                    font=dict(color="#dbeafe", size=12, family="IBM Plex Mono"),
+                    xanchor="left",
+                )
+            )
         fig.update_layout(
             height=330,
-            margin=dict(l=10, r=10, t=10, b=8),
+            margin=dict(l=18, r=24, t=16, b=8),
             barmode="stack",
             template="plotly_dark",
             paper_bgcolor="rgba(0,0,0,0)",
             plot_bgcolor="rgba(0,0,0,0)",
-            xaxis=dict(gridcolor="rgba(148,163,184,.16)", tickfont=dict(color="#dbeafe", size=12), title_font=dict(color="#dbeafe")),
+            xaxis=dict(
+                range=[0, xaxis_max],
+                dtick=5,
+                gridcolor="rgba(148,163,184,.16)",
+                tickfont=dict(color="#dbeafe", size=12),
+                title_font=dict(color="#dbeafe"),
+                zeroline=False,
+            ),
             yaxis=dict(gridcolor="rgba(0,0,0,0)", tickfont=dict(color="#eef4ff", size=14)),
-            legend=dict(orientation="h", y=1.08, x=0, font=dict(color="#dbeafe", size=13)),
+            legend=dict(
+                orientation="h",
+                y=1.12,
+                x=0,
+                font=dict(color="#dbeafe", size=13),
+                bgcolor="rgba(8,16,33,.35)",
+                bordercolor="rgba(148,163,184,.12)",
+                borderwidth=1,
+            ),
             font=dict(color="#eef4ff"),
+            annotations=total_annotations,
         )
         st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
     else:
@@ -628,7 +751,7 @@ else:
     st.info("当前还没有识别到可用于反推长期混乱的反向市场。")
     st.markdown('</div>', unsafe_allow_html=True)
 
-st.markdown('<div class="table-card"><h3>分数变动原因</h3><div class="table-sub">按 24 小时变化与当前贡献度排序，解释世界混乱指数为什么在动</div>', unsafe_allow_html=True)
+st.markdown('<div class="table-card"><h3>今日扰动来源</h3><div class="table-sub">按 24 小时变化与当前贡献度排序，解释世界混乱指数为什么在动</div>', unsafe_allow_html=True)
 move_items = sorted(top_markets, key=lambda item: abs(_safe_num(item.get("delta_24h")) * _safe_num(item.get("event_raw"))), reverse=True)
 if move_items:
     explanation_map = {str(item.get("event_key")): item for item in headline_explanations}
@@ -680,11 +803,12 @@ st.markdown(
     f"""
     <div class="table-card">
       <h3>方法与说明</h3>
-      <div class="table-sub">指数把已经持续存在的混乱和未来可能升级的风险放在一起看。</div>
+      <div class="table-sub">把“已经在持续的混乱”和“未来可能升级的风险”合在一起衡量。</div>
       <div style="line-height:1.85;color:#dbeafe;font-size:14px;">
-        <div>1. 主分数 = 持续基础分 + 升级风险分 + 跨区域联动加成。</div>
-        <div>2. 持续基础分主要看停火、结束、恢复正常这类反向市场，越难结束，基础分越高。</div>
-        <div>3. 升级风险分来自国家冲突和高影响风险市场的实时定价，表格里的“指数贡献”就是它们对主分的贡献大小。</div>
+        <div>1. 持续基础分：看停火、结束、恢复正常这类反向市场，越难结束，分数越高。</div>
+        <div>2. 升级风险分：看冲突升级、封锁、衰退等市场的实时概率，再结合影响权重和流动性计算。</div>
+        <div>3. 联动加成：多个地区同时升温时额外加分。</div>
+        <div>4. 总分固定在 0-100 之间，不会超过 100。</div>
       </div>
     </div>
     """,

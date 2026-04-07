@@ -12,9 +12,11 @@ from sqlalchemy import text
 
 from risk_index_config import (
     EVENT_BASKET_V1,
+    FOCUSED_CONFLICT_WATCHLIST_V1,
     ONGOING_CHAOS_CLUSTERS_V1,
     RISK_CATEGORIES,
     RISK_INDEX_CONFIG,
+    FocusedConflictWatchConfig,
     OngoingChaosClusterConfig,
     RiskEventConfig,
 )
@@ -734,10 +736,10 @@ def _flatten_polymarket_events(events: List[Dict[str, Any]]) -> List[Dict[str, A
                 market.get("question") or market.get("groupItemTitle") or market.get("title") or event_title
             )
             item["source_url"] = _safe_text(market.get("url"))
-            if not item["source_url"] and item["market_slug"]:
-                item["source_url"] = f"https://polymarket.com/event/{item['market_slug']}"
-            elif not item["source_url"] and event_slug:
+            if not item["source_url"] and event_slug:
                 item["source_url"] = f"https://polymarket.com/event/{event_slug}"
+            elif not item["source_url"] and item["market_slug"]:
+                item["source_url"] = f"https://polymarket.com/event/{item['market_slug']}"
             flattened.append(item)
     return flattened
 
@@ -768,6 +770,43 @@ def _event_search_text(event: Dict[str, Any]) -> str:
     return _normalize_text(" ".join(parts))
 
 
+def _watchlist_configs() -> List[FocusedConflictWatchConfig]:
+    return [item for item in FOCUSED_CONFLICT_WATCHLIST_V1 if item.get("active", True)]
+
+
+def _watchlist_event_key(event: Dict[str, Any], watch: FocusedConflictWatchConfig) -> bool:
+    searchable = _event_search_text(event)
+    searchable_tokens = set(_tokenize(searchable))
+    detected_codes = set(_detect_candidate_countries(event))
+    watch_codes = {str(code).upper() for code in (watch.get("country_codes") or []) if _safe_text(code)}
+
+    if len(watch_codes) >= 2:
+        if len(detected_codes & watch_codes) >= 2:
+            return True
+    elif watch_codes and detected_codes & watch_codes:
+        return True
+
+    for keyword in watch.get("query_keywords") or []:
+        if _contains_phrase_or_tokens(searchable, searchable_tokens, keyword):
+            return True
+    return False
+
+
+def _event_watch_hits(event: Dict[str, Any]) -> List[str]:
+    hits: List[str] = []
+    for watch in _watchlist_configs():
+        if _watchlist_event_key(event, watch):
+            hits.append(_safe_text(watch.get("watch_key")))
+    return hits
+
+
+def _event_priority_tuple(event: Dict[str, Any]) -> Tuple[int, float]:
+    watch_hits = event.get("_watch_hits") or []
+    watch_weight = 1 if watch_hits else 0
+    event_volume = _to_float(event.get("volume24hr") or event.get("volume"), 0.0)
+    return watch_weight, event_volume
+
+
 def _is_relevant_polymarket_event(event: Dict[str, Any]) -> bool:
     allowed_tags = {str(item).strip().lower() for item in RISK_INDEX_CONFIG.get("polymarket_allowed_tag_slugs", []) if str(item).strip()}
     excluded_tags = {str(item).strip().lower() for item in RISK_INDEX_CONFIG.get("polymarket_excluded_tag_slugs", []) if str(item).strip()}
@@ -792,9 +831,26 @@ def fetch_polymarket_events(limit: int = 250, timeout: int = 12) -> List[Dict[st
     headers = {"User-Agent": "Mozilla/5.0"}
     page_size = max(50, min(int(RISK_INDEX_CONFIG.get("polymarket_fetch_page_size", 200)), 500))
     max_pages = max(1, int(RISK_INDEX_CONFIG.get("polymarket_fetch_max_pages", 8)))
+    supplemental_max_pages = max(0, int(RISK_INDEX_CONFIG.get("polymarket_supplemental_max_pages", 0)))
     target = max(20, int(limit))
     events: List[Dict[str, Any]] = []
+    supplemental_events: List[Dict[str, Any]] = []
     seen_ids: set[str] = set()
+    pages_scanned = 0
+
+    def _append_event(event: Dict[str, Any], bucket: List[Dict[str, Any]]) -> bool:
+        event_id = _safe_text(event.get("id") or event.get("slug") or event.get("ticker"))
+        if event_id and event_id in seen_ids:
+            return False
+        if event_id:
+            seen_ids.add(event_id)
+        if not _is_relevant_polymarket_event(event):
+            return False
+        watch_hits = _event_watch_hits(event)
+        event_copy = dict(event)
+        event_copy["_watch_hits"] = watch_hits
+        bucket.append(event_copy)
+        return True
 
     for page_idx in range(max_pages):
         params = {
@@ -812,23 +868,75 @@ def fetch_polymarket_events(limit: int = 250, timeout: int = 12) -> List[Dict[st
         batch = data if isinstance(data, list) else []
         if not batch:
             break
+        pages_scanned = page_idx + 1
 
         for event in batch:
-            event_id = _safe_text(event.get("id") or event.get("slug") or event.get("ticker"))
-            if event_id and event_id in seen_ids:
-                continue
-            if event_id:
-                seen_ids.add(event_id)
-            if not _is_relevant_polymarket_event(event):
-                continue
-            events.append(event)
+            _append_event(event, events)
 
         if len(events) >= target:
             break
         if len(batch) < page_size:
             break
 
-    return events[:target]
+    pending_watch_keys = {
+        _safe_text(item.get("watch_key"))
+        for item in _watchlist_configs()
+        if _safe_text(item.get("watch_key"))
+    }
+    found_watch_keys = {
+        hit
+        for event in events
+        for hit in (event.get("_watch_hits") or [])
+        if _safe_text(hit)
+    }
+    missing_watch_keys = pending_watch_keys - found_watch_keys
+
+    for page_offset in range(supplemental_max_pages):
+        if not missing_watch_keys:
+            break
+        page_idx = pages_scanned + page_offset
+        params = {
+            "limit": page_size,
+            "offset": page_idx * page_size,
+            "active": "true",
+            "closed": "false",
+            "archived": "false",
+            "order": "volume24hr",
+            "ascending": "false",
+        }
+        resp = requests.get(POLYMARKET_EVENTS_API, params=params, headers=headers, timeout=timeout)
+        resp.raise_for_status()
+        data = resp.json()
+        batch = data if isinstance(data, list) else []
+        if not batch:
+            break
+
+        for event in batch:
+            watch_hits = _event_watch_hits(event)
+            if not watch_hits or not (set(watch_hits) & missing_watch_keys):
+                event_id = _safe_text(event.get("id") or event.get("slug") or event.get("ticker"))
+                if event_id and event_id not in seen_ids:
+                    seen_ids.add(event_id)
+                continue
+            appended = _append_event(event, supplemental_events)
+            if appended:
+                missing_watch_keys -= set(watch_hits)
+
+        if len(batch) < page_size:
+            break
+
+    events.sort(key=_event_priority_tuple, reverse=True)
+    supplemental_events.sort(key=_event_priority_tuple, reverse=True)
+    combined_events: List[Dict[str, Any]] = []
+    seen_combined: set[str] = set()
+    for event in supplemental_events + events:
+        event_id = _safe_text(event.get("id") or event.get("slug") or event.get("ticker"))
+        if event_id and event_id in seen_combined:
+            continue
+        if event_id:
+            seen_combined.add(event_id)
+        combined_events.append(event)
+    return combined_events[:target]
 
 
 def fetch_polymarket_candidates(limit: int = 250, timeout: int = 12) -> List[Dict[str, Any]]:

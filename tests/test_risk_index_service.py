@@ -49,6 +49,21 @@ class TestRiskIndexService(unittest.TestCase):
         self.assertTrue(svc._is_dynamic_conflict_candidate(candidate, now=datetime(2026, 4, 6, 12, 0, tzinfo=BEIJING_TZ)))
         self.assertEqual(set(svc._detect_candidate_countries(candidate)), {"CHN", "JPN"})
 
+    def test_watchlist_hits_israel_turkey_conflict(self):
+        event = {
+            "title": "Israel x Turkey military clash before 2027?",
+            "description": "",
+            "slug": "israel-x-turkey-military-clash-before-2027",
+            "tags": [{"slug": "geopolitics"}],
+        }
+        hits = set(svc._event_watch_hits(event))
+        self.assertIn("ISR_TUR", hits)
+
+    def test_event_priority_prefers_watchlist_hits(self):
+        watched = {"volume24hr": 50_000, "_watch_hits": ["ISR_TUR"]}
+        unwatched = {"volume24hr": 500_000, "_watch_hits": []}
+        self.assertGreater(svc._event_priority_tuple(watched), svc._event_priority_tuple(unwatched))
+
     def test_dynamic_country_weight_prioritizes_usa_and_china(self):
         self.assertGreater(svc._dynamic_country_weight(["USA", "CUB"]), svc._dynamic_country_weight(["ISR", "TUR"]))
         self.assertGreater(svc._dynamic_country_weight(["CHN", "JPN"]), svc._dynamic_country_weight(["ISR", "TUR"]))
