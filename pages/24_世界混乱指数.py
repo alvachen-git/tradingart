@@ -5,14 +5,12 @@ import os
 import sys
 from datetime import datetime
 
-import extra_streamlit_components as stx
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import auth_utils as auth
 import data_engine as de
 from risk_index_config import EVENT_BASKET_V1, ONGOING_CHAOS_CLUSTERS_V1
 from sidebar_navigation import show_navigation
@@ -55,35 +53,6 @@ REGION_LABELS = {
 }
 
 
-if "is_logged_in" not in st.session_state:
-    st.session_state.is_logged_in = False
-    st.session_state.user_id = None
-    st.session_state.token = None
-
-cookie_manager = stx.CookieManager(key="world_chaos_cookie_manager")
-cookies = cookie_manager.get_all() or {}
-if not st.session_state.get("is_logged_in") and not st.session_state.get("just_logged_out", False):
-    try:
-        auth.restore_login_from_cookies(cookies)
-    except Exception:
-        pass
-if st.session_state.get("just_logged_out", False):
-    st.session_state.just_logged_out = False
-
-if not st.session_state.get("is_logged_in"):
-    st.markdown(
-        """
-        <div style="background:linear-gradient(135deg,#0f172a,#111827);border:1px solid rgba(148,163,184,.25);border-radius:20px;padding:28px 24px;margin-top:16px;">
-          <div style="font-size:30px;font-weight:800;color:#f8fafc;margin-bottom:8px;">爱波塔·世界混乱指数</div>
-          <div style="color:#cbd5e1;font-size:15px;line-height:1.7;max-width:760px;">登录后可查看世界混乱主分数、持续基础分、升级风险分与监控市场。</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-    st.warning("请先登录后查看该专题页。")
-    st.page_link("Home.py", label="返回首页登录", use_container_width=True)
-    st.stop()
-
 snapshot = de.get_latest_geopolitical_risk_snapshot()
 if not snapshot:
     st.warning("暂无可用快照，请先运行更新脚本生成数据。")
@@ -97,6 +66,7 @@ source_status = dict(snapshot.get("source_status") or {})
 score_components = dict(source_status.get("score_components") or {})
 ongoing_clusters = list(source_status.get("ongoing_clusters") or [])
 monitored_markets = list(source_status.get("monitored_markets") or top_markets)
+recent_snapshots = list(de.get_recent_geopolitical_risk_snapshots(limit=8) or [])
 
 score_raw = float(snapshot.get("score_raw") or 0.0)
 score_display = float(snapshot.get("score_display") or 0.0)
@@ -133,6 +103,83 @@ def _risk_accent(probability: float) -> tuple[str, str]:
     if p >= 0.25:
         return "#facc15", "rgba(250,204,21,.12)"
     return "#22c55e", "rgba(34,197,94,.12)"
+
+
+def _market_history_key(item: dict) -> str:
+    return str(
+        item.get("event_slug")
+        or item.get("market_slug")
+        or item.get("event_key")
+        or item.get("pair_tag")
+        or item.get("display_title")
+        or ""
+    ).strip().lower()
+
+
+def _build_market_trend_map(snapshots: list[dict], threshold: float = 0.005) -> dict[str, dict]:
+    series_by_key: dict[str, list[float]] = {}
+    for snap in snapshots or []:
+        items = list((((snap.get("source_status") or {}).get("monitored_markets")) or snap.get("top_markets") or []))
+        seen_in_snapshot: set[str] = set()
+        for item in items:
+            key = _market_history_key(item)
+            if not key or key in seen_in_snapshot:
+                continue
+            seen_in_snapshot.add(key)
+            series_by_key.setdefault(key, []).append(_safe_num(item.get("probability")))
+
+    trend_map: dict[str, dict] = {}
+    for key, values in series_by_key.items():
+        recent_values = values[-4:]
+        if len(recent_values) < 2:
+            continue
+        deltas = [recent_values[idx] - recent_values[idx - 1] for idx in range(1, len(recent_values))]
+        latest_delta = deltas[-1]
+        directions = []
+        for delta in deltas:
+            if delta >= threshold:
+                directions.append(1)
+            elif delta <= -threshold:
+                directions.append(-1)
+            else:
+                directions.append(0)
+        strength = 0
+        direction = 0
+        for expected in (1, -1):
+            run = 0
+            for value in reversed(directions):
+                if value == expected:
+                    run += 1
+                else:
+                    break
+            if run > 0:
+                strength = run
+                direction = expected
+                break
+        arrow_text = ""
+        arrow_direction = ""
+        if strength > 0:
+            strength = min(3, strength)
+            if direction > 0:
+                arrow_text = "▲" * strength
+                arrow_direction = "up"
+            else:
+                arrow_text = "▼" * strength
+                arrow_direction = "down"
+
+        flame_text = ""
+        if latest_delta >= 0.05:
+            flame_text = "🔥"
+
+        if not arrow_text and not flame_text:
+            continue
+        trend_map[key] = {
+            "arrows": arrow_text,
+            "direction": arrow_direction,
+            "flames": flame_text,
+            "latest_delta": latest_delta,
+        }
+    return trend_map
 
 
 def _best_polymarket_url(item: dict) -> str:
@@ -263,6 +310,9 @@ def _build_gauge_markup(value: float) -> str:
       </div>
     </div>
     """
+
+
+market_trend_map = _build_market_trend_map(recent_snapshots, threshold=0.005)
 
 
 st.markdown(
@@ -522,7 +572,37 @@ st.markdown(
         box-shadow:0 0 10px var(--market-accent-soft, rgba(34,197,94,.22));
     }
     .market-head { display:flex; align-items:center; gap:8px; }
+    .market-title-wrap { display:flex; align-items:center; gap:8px; min-width:0; }
     .market-name { font-size: 16px; font-weight: 700; line-height: 1.2; }
+    .market-trend {
+        display:inline-flex;
+        align-items:center;
+        gap:2px;
+        font-family:"IBM Plex Mono", monospace;
+        font-size:11px;
+        letter-spacing:.04em;
+        padding:2px 6px;
+        border-radius:999px;
+        border:1px solid rgba(148,163,184,.14);
+        background:rgba(8,16,33,.52);
+        flex:0 0 auto;
+    }
+    .market-trend-up { color:#f87171; box-shadow:0 0 12px rgba(248,113,113,.08); }
+    .market-trend-down { color:#34d399; box-shadow:0 0 12px rgba(52,211,153,.08); }
+    .market-heat {
+        display:inline-flex;
+        align-items:center;
+        font-size:12px;
+        line-height:1;
+        letter-spacing:.06em;
+        padding:2px 6px;
+        border-radius:999px;
+        border:1px solid rgba(251,146,60,.18);
+        background:rgba(251,146,60,.10);
+        color:#fb923c;
+        box-shadow:0 0 16px rgba(251,146,60,.08);
+        flex:0 0 auto;
+    }
     .market-meta { color: rgba(147,169,204,.78); font-size: 10px; margin-top: 4px; letter-spacing: .16em; }
     .market-prob {
         font-size: 20px; font-family:"IBM Plex Mono", monospace; font-weight: 700; color: var(--market-accent, var(--risk-yellow)); white-space: nowrap;
@@ -602,10 +682,21 @@ with right:
     market_rows = []
     for idx, item in enumerate(monitored_markets[:20]):
         accent, accent_soft = _risk_accent(_safe_num(item.get("probability")))
+        trend_info = market_trend_map.get(_market_history_key(item), {})
+        trend_arrows = str(trend_info.get("arrows") or "")
+        trend_direction = str(trend_info.get("direction") or "")
+        trend_flames = str(trend_info.get("flames") or "")
+        trend_parts = []
+        if trend_arrows:
+            trend_class = "market-trend-up" if trend_direction == "up" else "market-trend-down"
+            trend_parts.append(f"<span class='market-trend {trend_class}'>{trend_arrows}</span>")
+        if trend_flames:
+            trend_parts.append(f"<span class='market-heat'>{trend_flames}</span>")
+        trend_html = "".join(trend_parts)
         row_html = (
             f"<div class='market-row' style=\"--market-accent:{accent};--market-accent-soft:{accent_soft};\">"
             f"<div class='market-left'><div class='market-rank'>{idx + 1:02d}</div><div>"
-            f"<div class='market-head'><span class='market-dot'></span><div class='market-name'>{item.get('display_title','-')}</div></div>"
+            f"<div class='market-head'><span class='market-dot'></span><div class='market-title-wrap'><div class='market-name'>{item.get('display_title','-')}</div>{trend_html}</div></div>"
             f"<div class='market-meta'>{_region_label(item.get('region_tag'))} · {item.get('pair_tag','-')} · POLYMARKET</div>"
             f"</div></div><div class='market-prob'>{_fmt_pct(_safe_num(item.get('probability')))}</div></div>"
         )

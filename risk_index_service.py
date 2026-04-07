@@ -1533,6 +1533,26 @@ def get_geopolitical_risk_history(engine, days: int = 7) -> pd.DataFrame:
     return df if df is not None else pd.DataFrame()
 
 
+def get_recent_geopolitical_risk_snapshots(engine, limit: int = 8) -> List[Dict[str, Any]]:
+    if engine is None:
+        return []
+    _ensure_risk_tables(engine)
+    limit = max(2, min(int(limit), 48))
+    sql = text(
+        f"""
+        SELECT *
+        FROM {GEOPOLITICAL_RISK_TABLE}
+        ORDER BY snapshot_ts DESC
+        LIMIT :limit_rows
+        """
+    )
+    with engine.connect() as conn:
+        rows = conn.execute(sql, {"limit_rows": limit}).mappings().all()
+    snapshots = [_row_to_snapshot(dict(row)) for row in rows]
+    snapshots.reverse()
+    return snapshots
+
+
 def refresh_geopolitical_risk_snapshot(
     engine,
     now: Optional[datetime] = None,

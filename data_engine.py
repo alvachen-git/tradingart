@@ -28,6 +28,7 @@ from cross_asset_iv_index import (
 from risk_index_service import (
     get_geopolitical_risk_history as _get_geopolitical_risk_history_impl,
     get_latest_geopolitical_risk_snapshot as _get_latest_geopolitical_risk_snapshot_impl,
+    get_recent_geopolitical_risk_snapshots as _get_recent_geopolitical_risk_snapshots_impl,
     refresh_geopolitical_risk_snapshot as _refresh_geopolitical_risk_snapshot_impl,
 )
 
@@ -217,6 +218,13 @@ def get_geopolitical_risk_history(days=7):
     Read recent geopolitical risk snapshot history.
     """
     return _get_geopolitical_risk_history_impl(engine=engine, days=days)
+
+
+def get_recent_geopolitical_risk_snapshots(limit=8):
+    """
+    Read recent full geopolitical risk snapshots for UI trend rendering.
+    """
+    return _get_recent_geopolitical_risk_snapshots_impl(engine=engine, limit=limit)
 
 
 # --- 新增：定义查库工具 ---
