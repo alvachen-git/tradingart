@@ -122,6 +122,7 @@ class TestMobilePricesRefreshLoop(unittest.TestCase):
             "contracts": {"SR2605": {"price": 5307, "pct": 0.12, "volume": 123, "trading_day": "20260407"}},
             "is_trading": False,
             "refreshed_at": "15:00:00",
+            "refreshed_ts": int(time.time()),
         }
         with patch.object(mobile_api, "_redis", fake_redis), patch.object(
             mobile_api, "_is_trading_hours", return_value=False
@@ -154,6 +155,7 @@ class TestMobilePricesRefreshLoop(unittest.TestCase):
             "contracts": {"SR2605": {"price": 5317.0, "pct": 0.63, "trading_day": "20260407"}},
             "is_trading": False,
             "refreshed_at": "15:00:00",
+            "refreshed_ts": int(time.time()),
         }
         with patch.object(mobile_api.de, "get_comprehensive_market_data", return_value=df), patch.object(
             mobile_api, "_get_option_product_codes", return_value={"sr"}
@@ -168,6 +170,15 @@ class TestMobilePricesRefreshLoop(unittest.TestCase):
         row = out["items"][0]
         self.assertEqual(row["cur_price"], 5317.0)
         self.assertEqual(row["pct_1d"], 0.63)
+
+    def test_fresh_live_contracts_map_drops_stale_snapshot(self):
+        stale_payload = {
+            "contracts": {"SC2605": {"price": 622.6, "pct": 0.0}},
+            "refreshed_ts": int(time.time()) - 99999,
+        }
+        with patch.object(mobile_api, "_PRICES_LIVE_OVERRIDE_MAX_AGE_SEC", 60):
+            out = mobile_api._get_fresh_live_contracts_map(stale_payload)
+        self.assertEqual(out, {})
 
 
 if __name__ == "__main__":

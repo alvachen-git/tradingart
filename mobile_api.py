@@ -124,6 +124,9 @@ _PRICES_FETCH_CONNECT_TIMEOUT_SEC = float(
 _PRICES_FETCH_READ_TIMEOUT_SEC = float(
     str(os.getenv("MOBILE_PRICES_FETCH_READ_TIMEOUT_SEC", "5")).strip() or 5
 )
+_PRICES_LIVE_OVERRIDE_MAX_AGE_SEC = int(
+    str(os.getenv("MOBILE_PRICES_LIVE_OVERRIDE_MAX_AGE_SEC", "1800")).strip() or 1800
+)
 _PRICES_REFRESH_LOCK_TTL = max(
     3,
     min(
@@ -474,7 +477,13 @@ _contract_cache: list[str] = []
 _contract_cache_ts: float = 0.0
 
 # last snapshot fallback when Redis read fails
-_last_prices_payload: dict = {"items": [], "is_trading": False, "refreshed_at": "", "contracts": {}}
+_last_prices_payload: dict = {
+    "items": [],
+    "is_trading": False,
+    "refreshed_at": "",
+    "refreshed_ts": 0,
+    "contracts": {},
+}
 _last_prices_lock = threading.Lock()
 
 
@@ -507,6 +516,26 @@ def _load_shared_prices_payload() -> dict:
         except Exception:
             pass
     return _load_last_prices_payload()
+
+
+def _get_fresh_live_contracts_map(payload: Optional[dict] = None) -> dict:
+    """
+    返回可用于覆盖展示的“新鲜实时合约映射”。
+    仅当 refreshed_ts 在阈值内时生效，避免收盘后长期使用陈旧盘中价。
+    """
+    p = payload if isinstance(payload, dict) else _load_shared_prices_payload()
+    if not isinstance(p, dict):
+        return {}
+    try:
+        refreshed_ts = int(p.get("refreshed_ts") or 0)
+    except Exception:
+        refreshed_ts = 0
+    if refreshed_ts <= 0:
+        return {}
+    if (time.time() - refreshed_ts) > _PRICES_LIVE_OVERRIDE_MAX_AGE_SEC:
+        return {}
+    contracts = p.get("contracts", {})
+    return contracts if isinstance(contracts, dict) else {}
 
 
 def _extract_contract_code(raw_name: str) -> str:
@@ -616,6 +645,7 @@ def _run_prices_refresh_once(session) -> tuple[float, str]:
         "items": items,
         "is_trading": is_trading,
         "refreshed_at": datetime.now().strftime("%H:%M:%S"),
+        "refreshed_ts": int(time.time()),
         "contracts": contracts,
     }
     payload_obj = enrich_prices_payload_with_trading_day(payload_obj)
@@ -2244,8 +2274,8 @@ def market_options(username: str = Depends(get_current_user)):
         # ── 用实时缓存覆盖收盘后的最后一笔价格/涨跌，避免回落到DB午盘价 ─────────
         try:
             live_payload = _load_shared_prices_payload()
-            live_contracts = live_payload.get("contracts", {}) if isinstance(live_payload, dict) else {}
-            if isinstance(live_contracts, dict) and live_contracts:
+            live_contracts = _get_fresh_live_contracts_map(live_payload)
+            if live_contracts:
                 for r in records:
                     contract_code = _extract_contract_code(r.get("name", ""))
                     if not contract_code:
@@ -2528,13 +2558,21 @@ def market_chart(
         selected_contract = selected_contract if re.match(r"^[A-Z]+[0-9]{3,4}$", selected_contract) else ""
         if selected_contract and not selected_contract.startswith(prod_upper):
             selected_contract = ""
+        is_trading_now = _is_trading_hours()
         cache_key = _market_chart_cache_key(product, selected_contract)
         try:
             cached_raw = _redis.get(cache_key)
             if cached_raw:
                 cached_payload = json.loads(cached_raw)
                 if isinstance(cached_payload, dict):
-                    return cached_payload
+                    if is_trading_now:
+                        return cached_payload
+                    # 收盘后：若缓存是盘中实时覆盖产物（cur != db close），或旧缓存缺少 db 对照字段，则不直接复用
+                    db_cur = cached_payload.get("db_cur_price")
+                    cur = cached_payload.get("cur_price")
+                    if db_cur is not None and cur is not None:
+                        if abs(_safe_float(cur) - _safe_float(db_cur)) < 1e-8:
+                            return cached_payload
         except Exception as cache_err:
             print(f"[market_chart] cache_read_failed key={cache_key} err={cache_err}", flush=True)
 
@@ -2612,11 +2650,13 @@ def market_chart(
         ohlc_df = _pd.read_sql(ohlc_sql, eng)
         if not ohlc_df.empty:
             ohlc_df["dt"] = ohlc_df["dt"].astype(str)
+        db_cur_price = round(float(ohlc_df.iloc[-1]["c"]), 2) if not ohlc_df.empty else None
+        db_cur_pct = round(float(ohlc_df.iloc[-1]["pct_chg"]), 2) if not ohlc_df.empty else None
 
         # ── 2.1 用实时缓存覆盖末根K线，收盘后保持最后一笔，不回退到DB午盘价 ───────
         live_payload = _load_shared_prices_payload()
-        live_contracts = live_payload.get("contracts", {}) if isinstance(live_payload, dict) else {}
-        live_row = live_contracts.get(main_contract) if isinstance(live_contracts, dict) else None
+        live_contracts = _get_fresh_live_contracts_map(live_payload)
+        live_row = live_contracts.get(main_contract) if live_contracts else None
         live_td = ""
         live_price = 0.0
         live_pct: Optional[float] = None
@@ -2657,7 +2697,7 @@ def market_chart(
                     ohlc_df.at[last_idx, "l"] = min(last_low, live_price, last_open)
                     if live_pct is not None:
                         ohlc_df.at[last_idx, "pct_chg"] = live_pct
-                elif live_td and last_dt < live_td and _is_trading_hours():
+                elif live_td and last_dt < live_td and is_trading_now:
                     prev_close = _safe_float(ohlc_df.at[last_idx, "c"], live_price)
                     if live_pct is not None:
                         pct_value = live_pct
@@ -2803,6 +2843,8 @@ def market_chart(
             "main_contract": main_contract,
             "cur_price":     cur_price,
             "cur_pct":       cur_pct,
+            "db_cur_price":  db_cur_price,
+            "db_cur_pct":    db_cur_pct,
             "cur_iv":        cur_iv,
             "dumb_chg_1d":   dumb_chg_1d,
             "ohlc":          ohlc_list,
@@ -2850,7 +2892,7 @@ def market_prices(username: str = Depends(get_current_user)):
     if local_fallback.get("items") or local_fallback.get("contracts"):
         return local_fallback
 
-    return {"items": [], "is_trading": _is_trading_hours(), "refreshed_at": "", "contracts": {}}
+    return {"items": [], "is_trading": _is_trading_hours(), "refreshed_at": "", "refreshed_ts": 0, "contracts": {}}
 
 
 # ════════════════════════════════════════════════════════════
