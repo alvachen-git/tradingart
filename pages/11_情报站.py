@@ -484,6 +484,13 @@ st.markdown("""
         color: #00e676;
         font-weight: bold;
     }
+    .contact-qr {
+        width: 120px;
+        max-width: 100%;
+        border-radius: 10px;
+        margin: 12px auto 8px;
+        display: block;
+    }
 
     /* ========== 鎸夐挳鏍峰紡瑕嗙洊 ========== */
     div.stButton > button {
@@ -799,6 +806,8 @@ with st.sidebar:
         '<div class="contact-title">客服联系</div>'
         '<div class="contact-item">微信：<span class="wechat-highlight">trader-sec</span></div>'
         '<div class="contact-item">电话：<span class="wechat-highlight">17521591756</span></div>'
+        '<img src="https://aiprota-img.oss-cn-beijing.aliyuncs.com/jim.png" class="contact-qr">'
+        '<div class="contact-item">扫码添加客服</div>'
         '<div class="contact-item" style="font-size: 12px; margin-top: 8px;">'
         '沪ICP备2021018087号-2'
         '</div>'

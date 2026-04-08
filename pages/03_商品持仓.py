@@ -257,7 +257,7 @@ with st.sidebar:
         <div class="service-box">
             <div class="service-title">📞实战课程咨询</div>
             <div class="service-phone">17521591756</div>
-            <img src="https://aiprota-img.oss-cn-beijing.aliyuncs.com/QQ%E6%88%AA%E5%9B%BE20240110194356.png" class="qr-img">
+            <img src="https://aiprota-img.oss-cn-beijing.aliyuncs.com/jim.png" class="qr-img">
             <div class="service-desc">扫码添加客服入群</div>
         </div>
         """, unsafe_allow_html=True)
