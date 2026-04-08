@@ -29,6 +29,11 @@ from fund_flow_tools import tool_get_retail_money_flow
 from polymarket_tool import tool_get_polymarket_sentiment
 from plot_tools import draw_chart_tool,draw_macro_compare_chart
 from futures_fund_flow_tools import get_futures_fund_flow, get_futures_fund_ranking, get_futures_margin_profile
+from futures_structure_tools import (
+    get_futures_basis_profile,
+    get_futures_inventory_receipt_profile,
+    get_futures_delivery_tospot_profile,
+)
 from volume_oi_tools import get_volume_oi, get_futures_oi_ranking, get_option_oi_ranking, get_option_volume_abnormal, get_option_oi_abnormal, analyze_etf_option_sentiment, get_etf_option_strikes
 from market_tools import get_market_snapshot, get_price_statistics,tool_query_specific_option,get_historical_price,get_recent_price_series,get_trending_hotspots,get_today_hotlist,analyze_keyword_trend,get_finance_related_trends,search_hotlist_history
 from data_engine import get_commodity_iv_info, check_option_expiry_status,search_broker_holdings_on_date,tool_analyze_position_change,tool_compare_stocks,get_stock_valuation,get_latest_data_date,tool_analyze_broker_positions
@@ -201,6 +206,76 @@ def _enforce_margin_monitor_routing(query: str, plan: List[str]) -> List[str]:
     return deduped
 
 
+def build_generalist_tools():
+    return [
+        analyze_kline_pattern, search_investment_knowledge, get_market_snapshot, get_commodity_iv_info,
+        search_broker_holdings_on_date, tool_analyze_position_change,
+        tool_query_specific_option, get_historical_price, get_volume_oi, get_futures_oi_ranking,
+        get_option_oi_ranking, get_option_volume_abnormal, get_option_oi_abnormal,
+        get_price_statistics, check_option_expiry_status, tool_stock_hedging_analysis,
+        tool_futures_correlation_check, tool_stock_correlation_check, calculate_hedging_beta,
+        tool_get_retail_money_flow, draw_chart_tool, get_stock_valuation, tool_compare_stocks,
+        get_futures_fund_flow, get_futures_fund_ranking, get_futures_margin_profile,
+        get_futures_basis_profile, get_futures_inventory_receipt_profile, get_futures_delivery_tospot_profile,
+        get_available_patterns, analyze_etf_option_sentiment, get_etf_option_strikes,
+        tool_analyze_broker_positions, run_option_strategy_backtest,
+        get_macro_indicator, get_macro_overview, analyze_yield_curve
+    ]
+
+
+def build_monitor_tools():
+    return [
+        tool_get_retail_money_flow,  # 股票行业资金
+        get_futures_fund_flow,  # 期货资金流
+        get_futures_fund_ranking,  # 期货沉淀资金排名
+        get_futures_margin_profile,  # 保证金/合约乘数
+        get_futures_basis_profile,  # 基差/现期结构
+        get_futures_inventory_receipt_profile,  # 库存/仓单
+        get_futures_delivery_tospot_profile,  # 交割/期转现
+        get_commodity_iv_info,  # IV/波动率/Rank
+        search_broker_holdings_on_date,  # 期货商持仓排名
+        tool_analyze_position_change,  # 持仓变动分析
+        get_option_volume_abnormal,
+        get_option_oi_abnormal,
+        get_option_oi_ranking,
+        get_volume_oi,
+        get_market_snapshot,
+        get_historical_price,
+        get_price_statistics,
+        get_recent_price_series,
+        tool_analyze_broker_positions,
+        get_futures_oi_ranking,
+        query_stock_volume,
+        get_macro_indicator
+    ]
+
+
+def build_strategist_tools():
+    return [
+        get_commodity_iv_info,  # IV排名/波动率
+        check_option_expiry_status,  # 到期日状态
+        tool_query_specific_option,  # 查询特定期权合约
+        get_option_volume_abnormal,  # 期权成交异动
+        get_option_oi_abnormal,  # 期权持仓异动
+        get_etf_option_strikes,  # ETF期权行权价
+        get_market_snapshot,  # 标的快照/现价
+        search_investment_knowledge,  # 知识库检索
+        run_option_strategy_backtest,  # 期权回测
+    ]
+
+
+def build_chatter_tools():
+    return [
+        search_investment_knowledge,  # 内部知识库
+        get_financial_news,  # 财经新闻
+        get_market_snapshot,  # 行情快照
+        get_futures_margin_profile,  # 保证金/合约乘数
+        get_futures_basis_profile,  # 基差/现期结构
+        get_futures_inventory_receipt_profile,  # 库存/仓单
+        get_futures_delivery_tospot_profile,  # 交割/期转现
+    ]
+
+
 # ==========================================
 # 2. 定义 Supervisor (大管家)
 # ==========================================
@@ -244,7 +319,7 @@ def supervisor_node(state: AgentState, llm):
 
     【可用员工】
     - analyst: 技术分析师 (看K线、定趋势),分析如何操作
-    - monitor: 数据监控员 (看期货资金流、期货商持仓、查期货持仓量、查价格)
+    - monitor: 数据监控员 (看期货资金流、基差/库存仓单/交割期转现、期货商持仓、查期货持仓量、查价格)
     - researcher: 情报研究员 (看新闻、宏观、热点、地缘政治、货币政策、Polymarket上的概率分析)
     - strategist: 期权策略员 (给策略，**必须依赖 analyst**)
     - screener: 股票大师 (协助"推荐股票"、"选股"、查股票成交量、资金流)
@@ -273,7 +348,7 @@ def supervisor_node(state: AgentState, llm):
     8. 如果用户的问题很模糊 (例如"帮我分析一下"，"黄金怎么看")，要先派chatter去问清楚问题 -> plan=['chatter']。
     9. 只问K线或技术面分析时，只要派analyst，不要再派其他人
     10.如果客户要画图，派 `['generalist']` 。
-    11. 用户问保证金/合约乘数/一手资金占用时，优先派 `monitor`；若同时要策略建议，派 `['monitor','strategist']`。
+    11. 用户问保证金/合约乘数/一手资金占用，或基差/库存仓单/交割期转现等数据问题，优先派 `monitor`；若同时要策略建议，可派 `['monitor','strategist']`。
     """
 
     if is_followup:
@@ -388,18 +463,7 @@ def generalist_node(state: AgentState, llm):
             "chart_img": ""
         }
 
-    tools = [
-        analyze_kline_pattern, search_investment_knowledge, get_market_snapshot, get_commodity_iv_info,
-        search_broker_holdings_on_date, tool_analyze_position_change,
-        tool_query_specific_option, get_historical_price, get_volume_oi, get_futures_oi_ranking,
-        get_option_oi_ranking, get_option_volume_abnormal, get_option_oi_abnormal,
-        get_price_statistics, check_option_expiry_status, tool_stock_hedging_analysis,
-        tool_futures_correlation_check, tool_stock_correlation_check, calculate_hedging_beta,
-        tool_get_retail_money_flow, draw_chart_tool, get_stock_valuation, tool_compare_stocks,
-        get_futures_fund_flow, get_futures_fund_ranking, get_futures_margin_profile, get_available_patterns, analyze_etf_option_sentiment,
-        get_etf_option_strikes,tool_analyze_broker_positions, run_option_strategy_backtest,
-        get_macro_indicator,get_macro_overview,analyze_yield_curve
-    ]
+    tools = build_generalist_tools()
 
 
     prompt = f"""
@@ -424,6 +488,9 @@ def generalist_node(state: AgentState, llm):
         9. 查某期货资金流动 -> get_futures_fund_flow
         10.查全部期货资金沉淀排名 -> get_futures_fund_ranking
         10.1 查期货保证金/合约乘数/资金占用 -> get_futures_margin_profile
+        10.2 查期货基差/现期结构 -> get_futures_basis_profile
+        10.3 查期货库存与仓单 -> get_futures_inventory_receipt_profile
+        10.4 查期货交割/期转现 -> get_futures_delivery_tospot_profile
         11.查商品龙虎榜/期货商持仓 -> search_broker_holdings_on_date  
         12.查某期货商最近持仓变化情况 -> tool_analyze_position_change
         13.查成交量和持仓量 -> get_volume_oi
@@ -701,27 +768,7 @@ def monitor_node(state: AgentState, llm):
     latest_trade_date = get_latest_data_date()
 
     # 1. 装备所有数据类工具
-    tools = [
-        tool_get_retail_money_flow,  # 股票行业资金
-        get_futures_fund_flow,  # 期货资金流
-        get_futures_fund_ranking, # 期货沉淀资金排名
-        get_futures_margin_profile,  # 保证金/合约乘数
-        get_commodity_iv_info,  # IV/波动率/Rank
-        search_broker_holdings_on_date,  # 期货商持仓排名
-        tool_analyze_position_change,  # 持仓变动分析
-        get_option_volume_abnormal,
-        get_option_oi_abnormal,
-        get_option_oi_ranking,
-        get_volume_oi,
-        get_market_snapshot,
-        get_historical_price,
-        get_price_statistics,
-        get_recent_price_series,
-        tool_analyze_broker_positions,
-        get_futures_oi_ranking,
-        query_stock_volume,
-        get_macro_indicator
-    ]
+    tools = build_monitor_tools()
 
     # 判断是否为 ETF (51/159开头) 或 股票
     is_etf_or_stock = False
@@ -758,6 +805,9 @@ def monitor_node(state: AgentState, llm):
     - 查某期货资金流动 -> get_futures_fund_flow
     - 查全部期货资金沉淀排名 -> get_futures_fund_ranking
     - 查期货保证金/合约乘数/资金占用 -> get_futures_margin_profile
+    - 查期货基差/现期结构 -> get_futures_basis_profile
+    - 查期货库存与仓单 -> get_futures_inventory_receipt_profile
+    - 查期货交割/期转现 -> get_futures_delivery_tospot_profile
     - 查某天某品种的期货商持仓排名（龙虎榜） -> search_broker_holdings_on_date 
     - 查某品种一段时间内各期货商的持仓变化 -> tool_analyze_position_change 
     - 查某期货商在各品种的持仓变化 -> tool_analyze_broker_positions （当前净持仓代表期货商对这品种的趋势判断）
@@ -862,20 +912,7 @@ def strategist_node(state: AgentState, llm):
             portfolio_context += f"\n        持仓概况：{portfolio_summary[:100]}"
 
     # === 🔥 期权策略专用工具集 ===
-    tools = [
-        # 期权数据工具
-        get_commodity_iv_info,  # IV排名/波动率
-        check_option_expiry_status,  # 到期日状态
-        tool_query_specific_option,  # 查询特定期权合约
-        get_option_volume_abnormal,  # 期权成交异动
-        get_option_oi_abnormal,  # 期权持仓异动
-        get_etf_option_strikes,  # ETF期权行权价
-        # 标的分析工具
-        get_market_snapshot,  # 标的快照/现价
-        # 辅助工具
-        search_investment_knowledge,  # 知识库检索
-        run_option_strategy_backtest,  # 期权回测(支持任意时间段)
-    ]
+    tools = build_strategist_tools()
 
     # === 🔥 ReAct Prompt - 引导期权策略推理 ===
     prompt = f"""
@@ -888,6 +925,9 @@ def strategist_node(state: AgentState, llm):
         【客户历史记忆】：{mem_context}
         【市场资金面/保证金信息】：{fund}
         【技术面参考】：{trend} 、 {tech_view}{portfolio_context}
+
+        【边界说明】
+        - 基差/库存仓单/交割期转现类数据由上游 monitor 汇总后传入，不在本节点直接查询。
 
         【工作流程】
         **第一步：获取标的价格和波动率**
@@ -1196,18 +1236,7 @@ def chatter_node(state: AgentState, llm=None):
         }
 
     # === 🔥 知识问答专用工具集 ===
-    tools = [
-        # 知识检索工具（优先）
-        search_investment_knowledge,  # 内部知识库 - 最高优先级
-
-        # 网络搜索工具（辅助）
-        get_financial_news,  # 财经新闻
-
-        # 市场数据工具（如果用户问行情相关）
-        get_market_snapshot,  # 快速获取标的价格
-        get_futures_margin_profile,  # 期货保证金/合约乘数
-
-    ]
+    tools = build_chatter_tools()
 
     core_rules = """
         【⚠️ 核心原则：知识库优先】
@@ -1216,6 +1245,9 @@ def chatter_node(state: AgentState, llm=None):
            - `get_financial_news`：获取财经新闻
            - `get_market_snapshot`：获取实时行情
         3. 如果用户问期货保证金/合约乘数/一手资金占用，优先调用 `get_futures_margin_profile`
+        4. 如果用户问基差/现期结构，调用 `get_futures_basis_profile`
+        5. 如果用户问库存/仓单，调用 `get_futures_inventory_receipt_profile`
+        6. 如果用户问交割/期转现，调用 `get_futures_delivery_tospot_profile`
     """
     if is_followup:
         core_rules = """
