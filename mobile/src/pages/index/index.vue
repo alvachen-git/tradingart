@@ -29,13 +29,14 @@ let pollTimer: ReturnType<typeof setInterval> | null = null
 let pollingTaskId = ''
 let pollingStartedAtMs = 0
 let pollingSessionVersion = 0
+let pollingRequestInFlight = false
 let uiSessionVersion = 0
 
 const CHAT_HISTORY_VERSION = 'v2'
 const HISTORY_KEY = computed(() => `chat_history_${CHAT_HISTORY_VERSION}_${auth.username}`)
 const LEGACY_HISTORY_KEYS = computed(() => [`chat_history_${auth.username}`])
 const PENDING_KEY = computed(() => `chat_pending_${auth.username}`)
-const POLL_INTERVAL_MS = 1000
+const POLL_INTERVAL_MS = 3000
 const POLL_TIMEOUT_MS = 400 * 1000
 const SHARE_TITLE = '爱波塔-懂期权的AI'
 const SHARE_PATH = '/pages/login/index'
@@ -389,6 +390,7 @@ function pollStatus(taskId: string, loadingId: number, startedAtMs: number, sess
   pollingTaskId = taskId
   pollingStartedAtMs = startedAtMs
   pollingSessionVersion = sessionVersion
+  pollingRequestInFlight = false
   pollTimer = setInterval(async () => {
     if (isStaleSession(sessionVersion)) {
       stopPoll(sessionVersion)
@@ -405,6 +407,8 @@ function pollStatus(taskId: string, loadingId: number, startedAtMs: number, sess
       return
     }
 
+    if (pollingRequestInFlight) return
+    pollingRequestInFlight = true
     try {
       const res = await chatApi.status(taskId)
       if (isStaleSession(sessionVersion)) return
@@ -416,6 +420,8 @@ function pollStatus(taskId: string, loadingId: number, startedAtMs: number, sess
     } catch {
       if (isStaleSession(sessionVersion)) return
       applyTaskError(taskId, loadingId, '网络异常，请稍后重试', sessionVersion)
+    } finally {
+      pollingRequestInFlight = false
     }
   }, POLL_INTERVAL_MS)
 }
@@ -428,6 +434,7 @@ function stopPoll(expectedSessionVersion?: number) {
   pollingTaskId = ''
   pollingStartedAtMs = 0
   pollingSessionVersion = 0
+  pollingRequestInFlight = false
 }
 
 function pausePollingForBackground() {

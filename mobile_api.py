@@ -104,9 +104,34 @@ _MOBILE_CHAT_MAX_PENDING_SECONDS = int(str(os.getenv("MOBILE_CHAT_MAX_PENDING_SE
 
 _PRICES_KEY = "mobile:futures:prices"
 _PRICES_TTL = 30  # seconds
-_PRICES_REFRESH_INTERVAL = 10  # seconds
 _PRICES_REFRESH_LOCK_KEY = "mobile:futures:prices:refresh:lock"
-_PRICES_REFRESH_LOCK_TTL = 9  # seconds, must be < refresh interval
+_PRICES_CONSUMER_HEARTBEAT_KEY = "mobile:futures:prices:consumer:alive"
+_PRICES_REFRESH_INTERVAL_TRADING_SEC = int(
+    str(os.getenv("MOBILE_PRICES_REFRESH_INTERVAL_TRADING_SEC", "8")).strip() or 8
+)
+_PRICES_REFRESH_INTERVAL_IDLE_SEC = int(
+    str(os.getenv("MOBILE_PRICES_REFRESH_INTERVAL_IDLE_SEC", "30")).strip() or 30
+)
+_PRICES_CONSUMER_TTL_SEC = int(
+    str(os.getenv("MOBILE_PRICES_CONSUMER_TTL_SEC", "90")).strip() or 90
+)
+_PRICES_REQUIRE_REDIS_LOCK = (
+    str(os.getenv("MOBILE_PRICES_REQUIRE_REDIS_LOCK", "1")).strip().lower() not in {"0", "false", "no", "off"}
+)
+_PRICES_FETCH_CONNECT_TIMEOUT_SEC = float(
+    str(os.getenv("MOBILE_PRICES_FETCH_CONNECT_TIMEOUT_SEC", "2")).strip() or 2
+)
+_PRICES_FETCH_READ_TIMEOUT_SEC = float(
+    str(os.getenv("MOBILE_PRICES_FETCH_READ_TIMEOUT_SEC", "5")).strip() or 5
+)
+_PRICES_REFRESH_LOCK_TTL = max(
+    3,
+    min(
+        int(str(os.getenv("MOBILE_PRICES_REFRESH_LOCK_TTL", "7")).strip() or 7),
+        max(3, _PRICES_REFRESH_INTERVAL_TRADING_SEC - 1),
+    ),
+)
+_PRICES_METRICS_LOG_INTERVAL_SEC = 60
 _MARKET_CHART_CACHE_PREFIX = "mobile:market:chart"
 _MARKET_CHART_CACHE_TTL = int(str(os.getenv("MOBILE_MARKET_CHART_CACHE_TTL", "120")).strip() or 120)
 _INSTANCE_ID = f"{os.getenv('HOSTNAME', 'local')}:{os.getpid()}"
@@ -335,7 +360,11 @@ def _get_active_contracts() -> list[str]:
         return []
 
 
-def _fetch_sina_prices(contracts: list[str]) -> dict:
+def _fetch_sina_prices(
+    contracts: list[str],
+    session=None,
+    timeout: Optional[tuple[float, float]] = None,
+) -> dict:
     """直接调用新浪行情接口，绕过 akshare。
     返回 {大写合约代码: {open,high,low,price,pct,volume}}
     """
@@ -354,8 +383,11 @@ def _fetch_sina_prices(contracts: list[str]) -> dict:
     batch_size = 80
     keys = list(sina_map.keys())
     # 不继承系统代理环境，避免 ALL_PROXY/HTTP_PROXY 指向 socks 时触发依赖错误。
-    session = _req.Session()
-    session.trust_env = False
+    own_session = session is None
+    if own_session:
+        session = _req.Session()
+        session.trust_env = False
+    req_timeout = timeout or (_PRICES_FETCH_CONNECT_TIMEOUT_SEC, _PRICES_FETCH_READ_TIMEOUT_SEC)
 
     try:
         for i in range(0, len(keys), batch_size):
@@ -366,7 +398,7 @@ def _fetch_sina_prices(contracts: list[str]) -> dict:
                     "Referer": "https://finance.sina.com.cn",
                     "User-Agent": "Mozilla/5.0",
                 }
-                resp = session.get(url, headers=headers, timeout=10)
+                resp = session.get(url, headers=headers, timeout=req_timeout)
                 text = resp.content.decode("gbk", errors="replace")
                 for line in text.split("\n"):
                     line = line.strip()
@@ -431,7 +463,8 @@ def _fetch_sina_prices(contracts: list[str]) -> dict:
                 print(f"[sina_batch] ERROR: {e}", flush=True)
                 continue
     finally:
-        session.close()
+        if own_session and session is not None:
+            session.close()
 
     return result
 
@@ -457,79 +490,193 @@ def _load_last_prices_payload() -> dict:
         return json.loads(json.dumps(_last_prices_payload, ensure_ascii=False))
 
 
-def _try_acquire_prices_refresh_lock() -> bool:
+def _load_shared_prices_payload() -> dict:
+    """
+    优先读取 Redis 共享行情快照，失败时回退进程内最后快照。
+    """
+    try:
+        raw = _redis.get(_PRICES_KEY)
+    except Exception:
+        raw = None
+    if raw:
+        try:
+            payload = json.loads(raw)
+            if isinstance(payload, dict):
+                _save_last_prices_payload(payload)
+                return payload
+        except Exception:
+            pass
+    return _load_last_prices_payload()
+
+
+def _extract_contract_code(raw_name: str) -> str:
+    """
+    从 'MA2605 (甲醇)' / 'MA2605' 中提取标准合约代码（大写）。
+    """
+    text = str(raw_name or "").strip().upper()
+    if not text:
+        return ""
+    text = text.split("(")[0].strip()
+    m = re.match(r"^([A-Z]+[0-9]{3,4})$", text)
+    return m.group(1) if m else ""
+
+
+def _try_acquire_prices_refresh_lock() -> tuple[bool, str]:
     """Singleflight lock across multi-worker or multi-instance deployment."""
     try:
         ok = _redis.set(_PRICES_REFRESH_LOCK_KEY, _INSTANCE_ID, nx=True, ex=_PRICES_REFRESH_LOCK_TTL)
-        return bool(ok)
+        return bool(ok), ("acquired" if ok else "miss")
+    except Exception as e:
+        if _PRICES_REQUIRE_REDIS_LOCK:
+            print(f"[prices_loop] REDIS_LOCK_FAIL strict=1 err={e}", flush=True)
+            return False, "redis_error_strict"
+        print(f"[prices_loop] REDIS_LOCK_FAIL strict=0 fallback_local=1 err={e}", flush=True)
+        return True, "redis_error_fallback"
+
+
+def _touch_prices_consumer_heartbeat() -> None:
+    try:
+        _redis.setex(_PRICES_CONSUMER_HEARTBEAT_KEY, _PRICES_CONSUMER_TTL_SEC, str(int(time.time())))
     except Exception:
-        # If Redis is unavailable, fallback to local refresh so service still works
-        return True
+        # 心跳写失败只影响节流策略，不影响接口返回
+        pass
+
+
+def _has_active_prices_consumer() -> bool:
+    try:
+        return bool(_redis.get(_PRICES_CONSUMER_HEARTBEAT_KEY))
+    except Exception:
+        return False
+
+
+def _run_prices_refresh_once(session) -> tuple[float, str]:
+    """
+    执行一轮价格刷新逻辑。
+    返回：(下一轮sleep秒数, 结果标签)。
+    """
+    global _contract_cache, _contract_cache_ts
+
+    is_trading = _is_trading_hours()
+    has_consumer = _has_active_prices_consumer()
+
+    if not (is_trading and has_consumer):
+        # 无消费者/非交易时段：不抓上游，但维持最后快照续期，避免读者回退到DB午盘价。
+        last_payload = _load_last_prices_payload()
+        if last_payload.get("items") or last_payload.get("contracts"):
+            last_payload["is_trading"] = is_trading
+            try:
+                _redis.setex(_PRICES_KEY, _PRICES_TTL, json.dumps(last_payload, ensure_ascii=False))
+            except Exception:
+                pass
+        return float(_PRICES_REFRESH_INTERVAL_IDLE_SEC), "refresh_skip_no_consumer"
+
+    interval_sec = float(_PRICES_REFRESH_INTERVAL_TRADING_SEC)
+    acquired, lock_status = _try_acquire_prices_refresh_lock()
+    if not acquired:
+        if lock_status == "miss":
+            return interval_sec, "refresh_skip_lock_miss"
+        return interval_sec, "refresh_skip_lock_error"
+
+    # 收盘后保留最后一笔实时快照，避免前端回退到午盘 DB 价。
+    last_payload = _load_last_prices_payload()
+    contracts: dict = last_payload.get("contracts", {}) or {}
+    items: list = last_payload.get("items", []) or []
+
+    # refresh active contracts from DB hourly
+    if time.time() - _contract_cache_ts > 3600 or not _contract_cache:
+        _contract_cache = _get_active_contracts()
+        _contract_cache_ts = time.time()
+
+    if _contract_cache:
+        contracts = _fetch_sina_prices(
+            _contract_cache,
+            session=session,
+            timeout=(_PRICES_FETCH_CONNECT_TIMEOUT_SEC, _PRICES_FETCH_READ_TIMEOUT_SEC),
+        )
+
+        # choose major contract per product by max volume
+        prod_best: dict = {}
+        for code, data in contracts.items():
+            m = re.match(r"^([A-Z]+)\d+$", code)
+            if not m:
+                continue
+            prod = m.group(1).lower()
+            if prod not in prod_best or data["volume"] > prod_best[prod]["volume"]:
+                prod_best[prod] = {
+                    "code": prod,
+                    "name": code,
+                    "price": data["price"],
+                    "pct": data["pct"],
+                    "volume": data["volume"],
+                    "updated_at": "",
+                }
+        items = sorted(prod_best.values(), key=lambda x: x["code"])
+
+    payload_obj = {
+        "items": items,
+        "is_trading": is_trading,
+        "refreshed_at": datetime.now().strftime("%H:%M:%S"),
+        "contracts": contracts,
+    }
+    payload_obj = enrich_prices_payload_with_trading_day(payload_obj)
+    payload_raw = json.dumps(payload_obj, ensure_ascii=False)
+
+    try:
+        _redis.setex(_PRICES_KEY, _PRICES_TTL, payload_raw)
+    except Exception as e:
+        print(f"[prices_loop] REDIS_WRITE_FAIL: {e}", flush=True)
+
+    _save_last_prices_payload(payload_obj)
+    return interval_sec, "refresh_ok"
 
 
 def _prices_refresh_loop():
-    """Background thread: refresh once every 10 seconds and write shared snapshot to Redis."""
-    global _contract_cache, _contract_cache_ts
-    while True:
-        try:
-            # singleflight: only one instance fetches upstream data per refresh window
-            if not _try_acquire_prices_refresh_lock():
-                time.sleep(_PRICES_REFRESH_INTERVAL)
-                continue
+    """Background thread: adaptive refresh with consumer-aware throttling."""
+    import requests as _req
 
-            is_trading = _is_trading_hours()
-            # 收盘后保留最后一笔实时快照，避免前端回退到午盘 DB 价。
-            last_payload = _load_last_prices_payload()
-            contracts: dict = last_payload.get("contracts", {}) or {}
-            items: list = last_payload.get("items", []) or []
+    metrics = {
+        "refresh_ok": 0,
+        "refresh_skip_no_consumer": 0,
+        "refresh_skip_lock_miss": 0,
+        "refresh_skip_lock_error": 0,
+        "refresh_err": 0,
+    }
+    last_metrics_log_at = time.time()
+    session = _req.Session()
+    session.trust_env = False
 
-            if is_trading:
-                # refresh active contracts from DB hourly
-                if time.time() - _contract_cache_ts > 3600 or not _contract_cache:
-                    _contract_cache = _get_active_contracts()
-                    _contract_cache_ts = time.time()
-
-                if _contract_cache:
-                    contracts = _fetch_sina_prices(_contract_cache)
-
-                    # choose major contract per product by max volume
-                    prod_best: dict = {}
-                    for code, data in contracts.items():
-                        m = re.match(r"^([A-Z]+)\d+$", code)
-                        if not m:
-                            continue
-                        prod = m.group(1).lower()
-                        if prod not in prod_best or data["volume"] > prod_best[prod]["volume"]:
-                            prod_best[prod] = {
-                                "code": prod,
-                                "name": code,
-                                "price": data["price"],
-                                "pct": data["pct"],
-                                "volume": data["volume"],
-                                "updated_at": "",
-                            }
-                    items = sorted(prod_best.values(), key=lambda x: x["code"])
-
-            payload_obj = {
-                "items": items,
-                "is_trading": is_trading,
-                "refreshed_at": datetime.now().strftime("%H:%M:%S"),
-                "contracts": contracts,
-            }
-            payload_obj = enrich_prices_payload_with_trading_day(payload_obj)
-            payload_raw = json.dumps(payload_obj, ensure_ascii=False)
-
+    try:
+        while True:
+            started = time.time()
+            interval_sec = float(_PRICES_REFRESH_INTERVAL_IDLE_SEC)
+            outcome = "refresh_err"
             try:
-                _redis.setex(_PRICES_KEY, _PRICES_TTL, payload_raw)
+                interval_sec, outcome = _run_prices_refresh_once(session)
             except Exception as e:
-                print(f"[prices_loop] REDIS_WRITE_FAIL: {e}", flush=True)
+                print(f"[prices_loop] CRASH: {e}", flush=True)
+                outcome = "refresh_err"
 
-            _save_last_prices_payload(payload_obj)
+            metrics[outcome] = metrics.get(outcome, 0) + 1
+            now = time.time()
+            if now - last_metrics_log_at >= _PRICES_METRICS_LOG_INTERVAL_SEC:
+                print(
+                    "[prices_loop] metrics "
+                    f"ok={metrics.get('refresh_ok', 0)} "
+                    f"skip_no_consumer={metrics.get('refresh_skip_no_consumer', 0)} "
+                    f"skip_lock_miss={metrics.get('refresh_skip_lock_miss', 0)} "
+                    f"skip_lock_err={metrics.get('refresh_skip_lock_error', 0)} "
+                    f"err={metrics.get('refresh_err', 0)}",
+                    flush=True,
+                )
+                for k in list(metrics.keys()):
+                    metrics[k] = 0
+                last_metrics_log_at = now
 
-        except Exception as e:
-            print(f"[prices_loop] CRASH: {e}", flush=True)
-
-        time.sleep(_PRICES_REFRESH_INTERVAL)
+            elapsed = time.time() - started
+            sleep_sec = max(0.2, float(interval_sec) - elapsed)
+            time.sleep(sleep_sec)
+    finally:
+        session.close()
 
 
 # ════════════════════════════════════════════════════════════
@@ -2094,6 +2241,26 @@ def market_options(username: str = Depends(get_current_user)):
             except Exception:
                 pass  # 价格查询失败不影响其他字段
 
+        # ── 用实时缓存覆盖收盘后的最后一笔价格/涨跌，避免回落到DB午盘价 ─────────
+        try:
+            live_payload = _load_shared_prices_payload()
+            live_contracts = live_payload.get("contracts", {}) if isinstance(live_payload, dict) else {}
+            if isinstance(live_contracts, dict) and live_contracts:
+                for r in records:
+                    contract_code = _extract_contract_code(r.get("name", ""))
+                    if not contract_code:
+                        continue
+                    live = live_contracts.get(contract_code)
+                    if not isinstance(live, dict):
+                        continue
+                    live_price = _safe_float(live.get("price"), 0.0)
+                    if live_price > 0:
+                        r["cur_price"] = round(live_price, 2)
+                    if live.get("pct") is not None:
+                        r["pct_1d"] = round(_safe_float(live.get("pct"), 0.0), 2)
+        except Exception:
+            pass
+
         for r in records:
             r.pop("_iv_chg_missing", None)
 
@@ -2443,6 +2610,71 @@ def market_chart(
             LIMIT 300
         """
         ohlc_df = _pd.read_sql(ohlc_sql, eng)
+        if not ohlc_df.empty:
+            ohlc_df["dt"] = ohlc_df["dt"].astype(str)
+
+        # ── 2.1 用实时缓存覆盖末根K线，收盘后保持最后一笔，不回退到DB午盘价 ───────
+        live_payload = _load_shared_prices_payload()
+        live_contracts = live_payload.get("contracts", {}) if isinstance(live_payload, dict) else {}
+        live_row = live_contracts.get(main_contract) if isinstance(live_contracts, dict) else None
+        live_td = ""
+        live_price = 0.0
+        live_pct: Optional[float] = None
+        if isinstance(live_row, dict):
+            live_td = str(live_row.get("trading_day") or "").strip()
+            live_price = _safe_float(live_row.get("price"), 0.0)
+            if live_row.get("pct") is not None:
+                live_pct = round(_safe_float(live_row.get("pct"), 0.0), 2)
+
+        if live_td and not ohlc_df.empty:
+            # 若 DB 出现晚于实时 trading_day 的“幽灵行”，直接剔除，避免多一根K线。
+            filtered_df = ohlc_df[ohlc_df["dt"] <= live_td].copy()
+            if not filtered_df.empty:
+                ohlc_df = filtered_df
+
+        if live_price > 0:
+            if ohlc_df.empty:
+                dt_value = live_td or datetime.now().strftime("%Y%m%d")
+                pct_value = live_pct if live_pct is not None else 0.0
+                ohlc_df = _pd.DataFrame([{
+                    "dt": dt_value,
+                    "o": live_price,
+                    "h": live_price,
+                    "l": live_price,
+                    "c": live_price,
+                    "pct_chg": pct_value,
+                    "oi": 0,
+                }])
+            else:
+                last_idx = ohlc_df.index[-1]
+                last_dt = str(ohlc_df.at[last_idx, "dt"])
+                if live_td and last_dt == live_td:
+                    last_open = _safe_float(ohlc_df.at[last_idx, "o"], live_price)
+                    last_high = _safe_float(ohlc_df.at[last_idx, "h"], live_price)
+                    last_low = _safe_float(ohlc_df.at[last_idx, "l"], live_price)
+                    ohlc_df.at[last_idx, "c"] = live_price
+                    ohlc_df.at[last_idx, "h"] = max(last_high, live_price, last_open)
+                    ohlc_df.at[last_idx, "l"] = min(last_low, live_price, last_open)
+                    if live_pct is not None:
+                        ohlc_df.at[last_idx, "pct_chg"] = live_pct
+                elif live_td and last_dt < live_td and _is_trading_hours():
+                    prev_close = _safe_float(ohlc_df.at[last_idx, "c"], live_price)
+                    if live_pct is not None:
+                        pct_value = live_pct
+                    elif prev_close > 0:
+                        pct_value = round((live_price - prev_close) / prev_close * 100, 2)
+                    else:
+                        pct_value = 0.0
+                    new_row = {
+                        "dt": live_td,
+                        "o": prev_close if prev_close > 0 else live_price,
+                        "h": max(prev_close, live_price) if prev_close > 0 else live_price,
+                        "l": min(prev_close, live_price) if prev_close > 0 else live_price,
+                        "c": live_price,
+                        "pct_chg": pct_value,
+                        "oi": _safe_float(ohlc_df.at[last_idx, "oi"], 0.0),
+                    }
+                    ohlc_df = _pd.concat([ohlc_df, _pd.DataFrame([new_row])], ignore_index=True)
 
         # ── 3. 拉取 IV 历史（与价格数据时间范围对齐）────────────
         if selected_contract:
@@ -2559,6 +2791,10 @@ def market_chart(
 
         cur_price = ohlc_list[-1]["c"] if ohlc_list else None
         cur_pct   = round(float(ohlc_df.iloc[-1]["pct_chg"]), 2) if not ohlc_df.empty else None
+        if live_price > 0:
+            cur_price = round(live_price, 2)
+        if live_pct is not None:
+            cur_pct = live_pct
         cur_iv    = iv_list[-1]["v"] if iv_list else None
 
         payload = {
@@ -2592,6 +2828,8 @@ def market_prices(username: str = Depends(get_current_user)):
     Shared futures prices from server-side cache.
     All users read the same Redis snapshot; no repeated upstream fetch per request.
     """
+    _touch_prices_consumer_heartbeat()
+
     try:
         raw = _redis.get(_PRICES_KEY)
     except Exception as e:
