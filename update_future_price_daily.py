@@ -109,6 +109,38 @@ def _normalize_trade_date(value):
     return s
 
 
+def dedupe_by_primary_key(df, key_cols):
+    """
+    入库前按主键去重，优先保留 oi/vol 更大的记录，避免 to_sql 触发主键冲突。
+    """
+    if df.empty:
+        return df
+
+    dup_mask = df.duplicated(subset=key_cols, keep=False)
+    if not dup_mask.any():
+        return df
+
+    dup_keys = df.loc[dup_mask, key_cols].drop_duplicates()
+    sample_keys = (
+        dup_keys.astype(str).agg("-".join, axis=1).head(10).tolist()
+    )
+    print(
+        f"[warn] detected duplicated primary keys before insert: {len(dup_keys)} keys. "
+        f"sample={sample_keys}"
+    )
+
+    deduped = (
+        df.sort_values(
+            by=key_cols + ["oi", "vol"],
+            ascending=[True] * len(key_cols) + [False, False],
+        )
+        .drop_duplicates(subset=key_cols, keep="first")
+        .reset_index(drop=True)
+    )
+    print(f"[*] dedupe done: {len(df)} -> {len(deduped)} rows.")
+    return deduped
+
+
 def prepare_exchange_data(trade_date, exchange, suffix):
     df = fetch_tushare_safe(
         pro.fut_daily, max_retries=5, trade_date=trade_date, exchange=exchange
@@ -228,6 +260,8 @@ def update_daily_data(trade_date):
         return
 
     df_save = pd.concat(all_batches, ignore_index=True)
+    df_save = dedupe_by_primary_key(df_save, ["trade_date", "ts_code"])
+    total_records = len(df_save)
     actual_dates = {_normalize_trade_date(v) for v in df_save["trade_date"]}
     if actual_dates != {trade_date}:
         print(
