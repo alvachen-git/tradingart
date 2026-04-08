@@ -127,6 +127,9 @@ _PRICES_FETCH_READ_TIMEOUT_SEC = float(
 _PRICES_LIVE_OVERRIDE_MAX_AGE_SEC = int(
     str(os.getenv("MOBILE_PRICES_LIVE_OVERRIDE_MAX_AGE_SEC", "1800")).strip() or 1800
 )
+_PRICES_POST_CLOSE_CAPTURE_MINUTES = int(
+    str(os.getenv("MOBILE_PRICES_POST_CLOSE_CAPTURE_MINUTES", "90")).strip() or 90
+)
 _PRICES_REFRESH_LOCK_TTL = max(
     3,
     min(
@@ -177,6 +180,23 @@ def _is_trading_hours() -> bool:
         (21 * 60 <= t <= 23 * 60 + 59) or
         (0 <= t <= 2 * 60 + 30)
     )
+
+
+def _is_post_close_capture_window() -> bool:
+    """
+    收盘后短窗口继续低频抓取，确保拿到最终收盘口径。
+    默认覆盖：
+    - 日盘收盘后：15:00 ~ 15:00+N分钟
+    - 夜盘收盘后：02:30 ~ 02:30+N分钟
+    """
+    import pytz
+
+    now = datetime.now(pytz.timezone("Asia/Shanghai"))
+    t = now.hour * 60 + now.minute
+    day_close = 15 * 60
+    night_close = 2 * 60 + 30
+    window = max(1, _PRICES_POST_CLOSE_CAPTURE_MINUTES)
+    return (day_close <= t <= day_close + window) or (night_close <= t <= night_close + window)
 
 
 def _safe_float(v, default: float = 0.0) -> float:
@@ -587,8 +607,9 @@ def _run_prices_refresh_once(session) -> tuple[float, str]:
 
     is_trading = _is_trading_hours()
     has_consumer = _has_active_prices_consumer()
+    should_capture_post_close = (not is_trading) and has_consumer and _is_post_close_capture_window()
 
-    if not (is_trading and has_consumer):
+    if not (is_trading and has_consumer) and not should_capture_post_close:
         # 无消费者/非交易时段：不抓上游，但维持最后快照续期，避免读者回退到DB午盘价。
         last_payload = _load_last_prices_payload()
         if last_payload.get("items") or last_payload.get("contracts"):
@@ -599,7 +620,7 @@ def _run_prices_refresh_once(session) -> tuple[float, str]:
                 pass
         return float(_PRICES_REFRESH_INTERVAL_IDLE_SEC), "refresh_skip_no_consumer"
 
-    interval_sec = float(_PRICES_REFRESH_INTERVAL_TRADING_SEC)
+    interval_sec = float(_PRICES_REFRESH_INTERVAL_TRADING_SEC if is_trading else _PRICES_REFRESH_INTERVAL_IDLE_SEC)
     acquired, lock_status = _try_acquire_prices_refresh_lock()
     if not acquired:
         if lock_status == "miss":
@@ -2567,6 +2588,15 @@ def market_chart(
                 if isinstance(cached_payload, dict):
                     if is_trading_now:
                         return cached_payload
+                    if selected_contract:
+                        fresh_contracts = _get_fresh_live_contracts_map()
+                        fresh_live_row = fresh_contracts.get(selected_contract) if fresh_contracts else None
+                        if isinstance(fresh_live_row, dict):
+                            live_price = _safe_float(fresh_live_row.get("price"), 0.0)
+                            cached_cur = _safe_float(cached_payload.get("cur_price"), 0.0)
+                            if live_price > 0 and abs(live_price - cached_cur) >= 1e-8:
+                                # 收盘后如果实时最新价与缓存价不一致，强制回源重算
+                                raise ValueError("stale_chart_cache_vs_fresh_live_price")
                     # 收盘后：若缓存是盘中实时覆盖产物（cur != db close），或旧缓存缺少 db 对照字段，则不直接复用
                     db_cur = cached_payload.get("db_cur_price")
                     cur = cached_payload.get("cur_price")

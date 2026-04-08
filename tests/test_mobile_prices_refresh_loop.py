@@ -55,6 +55,41 @@ class TestMobilePricesRefreshLoop(unittest.TestCase):
         self.assertEqual(interval, float(mobile_api._PRICES_REFRESH_INTERVAL_IDLE_SEC))
         mocked_fetch.assert_not_called()
 
+    def test_run_once_post_close_with_consumer_still_fetches(self):
+        fake_redis = _FakeRedis()
+        contracts = {
+            "SC2605": {
+                "open": 640.0,
+                "high": 650.0,
+                "low": 620.0,
+                "price": 621.0,
+                "pct": -12.5,
+                "volume": 100,
+                "updated_at": "",
+            }
+        }
+        with patch.object(mobile_api, "_redis", fake_redis), patch.object(
+            mobile_api, "_is_trading_hours", return_value=False
+        ), patch.object(
+            mobile_api, "_has_active_prices_consumer", return_value=True
+        ), patch.object(
+            mobile_api, "_is_post_close_capture_window", return_value=True
+        ), patch.object(
+            mobile_api, "_try_acquire_prices_refresh_lock", return_value=(True, "acquired")
+        ), patch.object(
+            mobile_api, "_fetch_sina_prices", return_value=contracts
+        ), patch.object(
+            mobile_api, "_contract_cache", ["SC2605"]
+        ), patch.object(
+            mobile_api, "_contract_cache_ts", time.time()
+        ):
+            interval, outcome = mobile_api._run_prices_refresh_once(session=object())
+
+        self.assertEqual(outcome, "refresh_ok")
+        self.assertEqual(interval, float(mobile_api._PRICES_REFRESH_INTERVAL_IDLE_SEC))
+        saved = json.loads(fake_redis.data[mobile_api._PRICES_KEY])
+        self.assertEqual(saved["contracts"]["SC2605"]["price"], 621.0)
+
     def test_run_once_skips_fetch_on_lock_miss(self):
         with patch.object(mobile_api, "_is_trading_hours", return_value=True), patch.object(
             mobile_api, "_has_active_prices_consumer", return_value=True
