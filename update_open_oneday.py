@@ -8,6 +8,11 @@ import time
 from datetime import datetime, timedelta
 import gc
 import akshare as ak  # 确保已安装: pip install akshare --upgrade
+import requests
+import zipfile
+from io import BytesIO
+from functools import lru_cache
+import warnings
 
 # --- 1. 初始化配置 ---
 load_dotenv(override=True)
@@ -32,6 +37,44 @@ if not token:
 
 ts.set_token(token)
 pro = ts.pro_api()
+
+FORCE_GFEX_AK_PATCH = str(os.getenv("FORCE_GFEX_AK_PATCH", "false")).strip().lower() in {"1", "true", "yes", "on"}
+FORCE_SHFE_AK_PATCH = str(os.getenv("FORCE_SHFE_AK_PATCH", "false")).strip().lower() in {"1", "true", "yes", "on"}
+ENABLE_DCE_LG_PATCH = str(os.getenv("ENABLE_DCE_LG_PATCH", "true")).strip().lower() in {"1", "true", "yes", "on"}
+_DCE_LG_UPSTREAM_BLOCKED = False
+
+
+@lru_cache(maxsize=512)
+def is_trading_day(date_str: str) -> bool:
+    """
+    使用 Tushare 交易日历判断是否为交易日；失败时退化为工作日规则。
+    """
+    try:
+        cal = pro.trade_cal(exchange="", start_date=date_str, end_date=date_str)
+        if not cal.empty and "is_open" in cal.columns:
+            return str(cal.iloc[0]["is_open"]) == "1"
+    except Exception:
+        pass
+
+    try:
+        return datetime.strptime(date_str, "%Y%m%d").weekday() < 5
+    except Exception:
+        return False
+
+
+def ensure_akshare_calendar(date_str: str) -> None:
+    """
+    AkShare 本地 calendar 在 2026 年后已过期，交易日场景下手动补齐，避免误判“非交易日”。
+    """
+    try:
+        from akshare.futures import cot as ak_cot
+
+        calendar = getattr(ak_cot, "calendar", None)
+        if isinstance(calendar, list) and date_str not in calendar:
+            calendar.append(date_str)
+            calendar.sort()
+    except Exception:
+        return
 
 
 # ==========================================
@@ -62,8 +105,12 @@ def fetch_gfex_patch(date_str):
         func = get_gfex_function()
         if not func: return
 
+        ensure_akshare_calendar(date_str)
+
         # 1. 调用接口 (AkShare 会一次性返回该交易所当天的所有数据)
-        raw_data = func(date=date_str)
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message=rf"{date_str}非交易日")
+            raw_data = func(date=date_str)
 
         # 2. 处理字典/DataFrame 兼容性
         df = pd.DataFrame()
@@ -200,19 +247,25 @@ def fetch_shfe_patch(date_str):
             print(" [-] 未找到 AkShare SHFE 接口")
             return
 
+        ensure_akshare_calendar(date_str)
+
         # 1. 调用接口 (不同 AkShare 版本参数名可能不同，逐个尝试)
         raw_data = None
         call_errors = []
         for kwargs in ({'date': date_str}, {'trade_date': date_str}):
             try:
-                raw_data = func(**kwargs)
+                with warnings.catch_warnings():
+                    warnings.filterwarnings("ignore", message=rf"{date_str}非交易日")
+                    raw_data = func(**kwargs)
                 break
             except TypeError as e:
                 call_errors.append(str(e))
                 continue
         if raw_data is None:
             try:
-                raw_data = func(date_str)
+                with warnings.catch_warnings():
+                    warnings.filterwarnings("ignore", message=rf"{date_str}非交易日")
+                    raw_data = func(date_str)
             except Exception as e:
                 call_errors.append(str(e))
                 raise RuntimeError(" / ".join(call_errors + [str(e)]))
@@ -323,18 +376,349 @@ def fetch_shfe_patch(date_str):
         print(f" [!] AkShare 补丁异常: {e}")
 
 
+def _has_symbol_holding(date_str: str, symbol: str) -> bool:
+    """
+    检查指定交易日是否已有该品种持仓数据。
+    """
+    try:
+        sql = text(
+            "SELECT COUNT(*) FROM futures_holding "
+            "WHERE trade_date=:d AND ts_code=:s"
+        )
+        with engine.connect() as conn:
+            cnt = conn.execute(sql, {"d": date_str, "s": symbol.lower()}).scalar() or 0
+        return int(cnt) > 0
+    except Exception:
+        return False
+
+
+def _parse_dce_rank_text(raw_bytes: bytes, file_name: str) -> pd.DataFrame:
+    """
+    解析大商所 batchDownload 压缩包中的单个 TXT 文件。
+    返回与 AkShare futures_dce_position_rank 一致的字段集。
+    """
+    try:
+        data = pd.read_table(BytesIO(raw_bytes), header=None, sep="\t")
+        if data.empty:
+            return pd.DataFrame()
+        if (data.iloc[:, 0].astype(str).str.find("会员类别") == 0).sum() > 0:
+            data = data.iloc[:-6]
+        if len(data) < 12:
+            return pd.DataFrame()
+
+        head_idx = data[data.iloc[:, 0].astype(str).str.find("名次") == 0].index.tolist()
+        if len(head_idx) < 3:
+            return pd.DataFrame()
+        if head_idx[1] - head_idx[0] < 5:
+            return pd.DataFrame()
+
+        data = data.iloc[
+            head_idx[0]:,
+            data.columns[data.iloc[head_idx[0], :].notnull()],
+        ]
+        data.reset_index(inplace=True, drop=True)
+        head_idx = data[data.iloc[:, 0].astype(str).str.find("名次") == 0].index.tolist()
+        tail_idx = data[data.iloc[:, 0].astype(str).str.contains(r"(?:总计|合计)", na=False)].index.tolist()
+        if len(head_idx) < 3 or len(tail_idx) < 3:
+            return pd.DataFrame()
+
+        part_one = data[head_idx[0]: tail_idx[0]].iloc[1:, :]
+        part_two = data[head_idx[1]: tail_idx[1]].iloc[1:, :]
+        part_three = data[head_idx[2]: tail_idx[2]].iloc[1:, :]
+        temp_df = pd.concat(
+            objs=[
+                part_one.reset_index(drop=True),
+                part_two.reset_index(drop=True),
+                part_three.reset_index(drop=True),
+            ],
+            axis=1,
+            ignore_index=True,
+        )
+        if temp_df.empty or temp_df.shape[1] < 12:
+            return pd.DataFrame()
+
+        temp_df = temp_df.iloc[:, :12]
+        temp_df.columns = [
+            "名次",
+            "会员简称",
+            "成交量",
+            "增减",
+            "名次",
+            "会员简称",
+            "持买单量",
+            "增减",
+            "名次",
+            "会员简称",
+            "持卖单量",
+            "增减",
+        ]
+        temp_df["rank"] = range(1, len(temp_df) + 1)
+        del temp_df["名次"]
+        temp_df.columns = [
+            "vol_party_name",
+            "vol",
+            "vol_chg",
+            "long_party_name",
+            "long_open_interest",
+            "long_open_interest_chg",
+            "short_party_name",
+            "short_open_interest",
+            "short_open_interest_chg",
+            "rank",
+        ]
+
+        contract = file_name.split("_")[1].upper()
+        temp_df["symbol"] = contract
+        temp_df["variety"] = re.sub(r"\d", "", contract).upper()
+        temp_df = temp_df[
+            [
+                "long_open_interest",
+                "long_open_interest_chg",
+                "long_party_name",
+                "rank",
+                "short_open_interest",
+                "short_open_interest_chg",
+                "short_party_name",
+                "vol",
+                "vol_chg",
+                "vol_party_name",
+                "symbol",
+                "variety",
+            ]
+        ]
+        temp_df = temp_df.map(lambda x: str(x).replace(",", ""))
+        num_cols = [
+            "long_open_interest",
+            "long_open_interest_chg",
+            "short_open_interest",
+            "short_open_interest_chg",
+            "vol",
+            "vol_chg",
+            "rank",
+        ]
+        for col in num_cols:
+            temp_df[col] = pd.to_numeric(temp_df[col], errors="coerce")
+        return temp_df
+    except Exception:
+        return pd.DataFrame()
+
+
+def _fetch_dce_rank_via_batch_download(date_str: str, variety: str = "lg") -> dict:
+    """
+    直接请求大商所 batchDownload 接口，规避 AkShare 日历过期导致的非交易日判断。
+    """
+    url = "http://www.dce.com.cn/dcereport/publicweb/dailystat/memberDealPosi/batchDownload"
+    referer = "http://www.dce.com.cn/dalianshangpin/xqsj/tjsj26/rtj/rcjccpm/index.html"
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        ),
+        "Accept": "*/*",
+        "Content-Type": "application/json;charset=UTF-8",
+        "Origin": "http://www.dce.com.cn",
+        "Referer": referer,
+        "X-Requested-With": "XMLHttpRequest",
+    }
+    # 这里沿用 AkShare 官方实现里的通用占位参数。
+    # batchDownload 返回的是交易日整包 ZIP，再按文件名过滤目标品种；
+    # 不要把具体品种/合约硬编码进请求，否则更容易命中上游校验。
+    payload = {
+        "tradeDate": date_str,
+        "varietyId": "a",
+        "contractId": "a2601",
+        "tradeType": "1",
+        "lang": "zh",
+    }
+
+    session = requests.Session()
+    session.headers.update(headers)
+    # 先访问详情页拿 cookie，部分节点会校验来源
+    session.get(referer, timeout=20)
+    resp = session.post(url, json=payload, timeout=20)
+    if resp.status_code != 200:
+        if resp.status_code == 412:
+            raise RuntimeError("DCE batchDownload HTTP 412 (upstream anti-bot or signature challenge)")
+        raise RuntimeError(f"DCE batchDownload HTTP {resp.status_code}")
+
+    content_type = str(resp.headers.get("Content-Type", "")).lower()
+    if "zip" not in content_type and not resp.content.startswith(b"PK"):
+        raise RuntimeError(f"DCE batchDownload 非ZIP响应: {content_type or 'unknown'}")
+
+    out = {}
+    with zipfile.ZipFile(BytesIO(resp.content), mode="r") as zf:
+        for name in zf.namelist():
+            if not str(name).startswith(date_str):
+                continue
+            parts = str(name).split("_")
+            if len(parts) < 2:
+                continue
+            contract = str(parts[1]).lower()
+            if not contract.startswith(variety.lower()):
+                continue
+            parsed = _parse_dce_rank_text(zf.read(name), name)
+            if parsed is not None and not parsed.empty:
+                out[parts[1]] = parsed
+    return out
+
+
+def _rank_dict_to_holding_df(raw_data: dict, date_str: str, target_symbol: str) -> pd.DataFrame:
+    """
+    将 DCE 排名 dict 统一转为 futures_holding 标准列。
+    """
+    if not isinstance(raw_data, dict) or not raw_data:
+        return pd.DataFrame()
+
+    long_frames = []
+    short_frames = []
+    target_symbol = target_symbol.lower().strip()
+    for key, frame in raw_data.items():
+        if frame is None or frame.empty:
+            continue
+        contract = str(key).lower()
+        if not contract.startswith(target_symbol):
+            continue
+
+        if not {
+            "long_party_name",
+            "long_open_interest",
+            "long_open_interest_chg",
+            "short_party_name",
+            "short_open_interest",
+            "short_open_interest_chg",
+        }.issubset(set(frame.columns)):
+            continue
+
+        long_df = frame[["long_party_name", "long_open_interest", "long_open_interest_chg"]].copy()
+        long_df.columns = ["broker", "long_vol", "long_chg"]
+        short_df = frame[["short_party_name", "short_open_interest", "short_open_interest_chg"]].copy()
+        short_df.columns = ["broker", "short_vol", "short_chg"]
+        long_frames.append(long_df)
+        short_frames.append(short_df)
+
+    if not long_frames:
+        return pd.DataFrame()
+
+    df_long = pd.concat(long_frames, ignore_index=True)
+    df_short = pd.concat(short_frames, ignore_index=True)
+    filter_pat = "合计|共计|总计"
+    df_long = df_long[df_long["broker"].notna() & (~df_long["broker"].astype(str).str.contains(filter_pat))]
+    df_short = df_short[df_short["broker"].notna() & (~df_short["broker"].astype(str).str.contains(filter_pat))]
+
+    for col in ["long_vol", "long_chg"]:
+        df_long[col] = pd.to_numeric(df_long[col], errors="coerce").fillna(0)
+    for col in ["short_vol", "short_chg"]:
+        df_short[col] = pd.to_numeric(df_short[col], errors="coerce").fillna(0)
+
+    df_final = pd.merge(df_long, df_short, on="broker", how="outer").fillna(0)
+    df_final = df_final.groupby("broker")[["long_vol", "long_chg", "short_vol", "short_chg"]].sum().reset_index()
+    df_final["trade_date"] = date_str
+    df_final["ts_code"] = target_symbol
+    df_final["net_vol"] = df_final["long_vol"] - df_final["short_vol"]
+    return df_final[
+        ["trade_date", "ts_code", "broker", "long_vol", "long_chg", "short_vol", "short_chg", "net_vol"]
+    ]
+
+
+def fetch_dce_lg_patch(date_str: str):
+    """
+    DCE 原木(LG)补丁：
+    当 Tushare 不返回 LG 时，尝试 AkShare 和 DCE 官网直连兜底。
+    """
+    global _DCE_LG_UPSTREAM_BLOCKED
+    target_symbol = "lg"
+    if not ENABLE_DCE_LG_PATCH:
+        print(f" [i] DCE原木补丁关闭：ENABLE_DCE_LG_PATCH=0")
+        return
+
+    if _DCE_LG_UPSTREAM_BLOCKED:
+        print(f" [i] DCE原木补丁跳过：已检测到上游接口阻断")
+        return
+
+    if _has_symbol_holding(date_str, target_symbol):
+        print(f" [i] DCE原木补丁跳过：{date_str} 已有 LG 持仓")
+        return
+
+    print(f" [*] [补丁] 尝试修补 DCE 原木持仓 (LG) {date_str} ...", end="")
+    attempts = []
+
+    # 1) AkShare 官方函数（先绕过日历判断）
+    try:
+        ensure_akshare_calendar(date_str)
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message=rf"{date_str}非交易日")
+            raw = ak.futures_dce_position_rank(date=date_str, vars_list=["LG"])
+        df = _rank_dict_to_holding_df(raw, date_str, target_symbol)
+        if not df.empty:
+            save_to_db(df, date_str)
+            print(f" [√] AkShare futures_dce_position_rank 成功 ({len(df)}条)")
+            return
+        attempts.append("ak.futures_dce_position_rank empty")
+    except Exception as e:
+        attempts.append(f"ak.futures_dce_position_rank err={e}")
+
+    # 2) AkShare 备用接口
+    try:
+        ensure_akshare_calendar(date_str)
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message=rf"{date_str}非交易日")
+            raw = ak.get_dce_rank_table(date=date_str, vars_list=["LG"])
+        df = _rank_dict_to_holding_df(raw, date_str, target_symbol)
+        if not df.empty:
+            save_to_db(df, date_str)
+            print(f" [√] AkShare get_dce_rank_table 成功 ({len(df)}条)")
+            return
+        attempts.append("ak.get_dce_rank_table empty")
+    except Exception as e:
+        attempts.append(f"ak.get_dce_rank_table err={e}")
+
+    # 3) AkShare 旧 HTML 表格接口
+    try:
+        ensure_akshare_calendar(date_str)
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message=rf"{date_str}非交易日")
+            raw = ak.futures_dce_position_rank_other(date=date_str)
+        df = _rank_dict_to_holding_df(raw, date_str, target_symbol)
+        if not df.empty:
+            save_to_db(df, date_str)
+            print(f" [√] AkShare futures_dce_position_rank_other 成功 ({len(df)}条)")
+            return
+        attempts.append("ak.futures_dce_position_rank_other empty")
+    except Exception as e:
+        attempts.append(f"ak.futures_dce_position_rank_other err={e}")
+
+    # 4) 交易所直连
+    try:
+        raw = _fetch_dce_rank_via_batch_download(date_str, variety=target_symbol)
+        df = _rank_dict_to_holding_df(raw, date_str, target_symbol)
+        if not df.empty:
+            save_to_db(df, date_str)
+            print(f" [√] DCE batchDownload 成功 ({len(df)}条)")
+            return
+        attempts.append("dce.batchDownload empty")
+    except Exception as e:
+        attempts.append(f"dce.batchDownload err={e}")
+
+    attempts_text = " | ".join(attempts)
+    if "HTTP 412" in attempts_text or "list index out of range" in attempts_text:
+        _DCE_LG_UPSTREAM_BLOCKED = True
+    print(f" [-] 原木补丁失败: {' | '.join(attempts)}")
+
+
 # --- 2. 核心逻辑：获取、清洗、筛选字段 ---
 def fetch_and_save_tushare(date_str, exchange):
     """
     exchange: GFEX(广期), DCE(大商), CZCE(郑商), SHFE(上期), CFFEX(中金)
     """
     print(f"[*] 正在请求 Tushare [{exchange}] {date_str} ...", end="")
+    has_tushare_data = False
 
     try:
         # 1. 调用接口
         df = pro.fut_holding(trade_date=date_str, exchange=exchange)
 
         if not df.empty:
+            has_tushare_data = True
             # 2. 数据预处理
             df['ts_code'] = df['symbol'].apply(lambda x: re.sub(r'\d+', '', x).lower().strip())
 
@@ -381,14 +765,20 @@ def fetch_and_save_tushare(date_str, exchange):
         #  修改处：在 Tushare 逻辑执行完后，启动广期所补丁
         # ==========================================
         if exchange == 'GFEX':
-            # 这里的补丁会覆盖 Tushare 可能不完整的数据 (si, lc, ps, pt, pd)
-            # 以 AkShare 官网数据为准
-            print("")  # 换行
-            fetch_gfex_patch(date_str)
+            # 默认只在 Tushare 无数据时触发；如需强制覆盖，可设置 FORCE_GFEX_AK_PATCH=1
+            if FORCE_GFEX_AK_PATCH or (not has_tushare_data):
+                print("")  # 换行
+                fetch_gfex_patch(date_str)
         elif exchange == 'SHFE':
-            # 上期所也增加 AkShare 修补，处理 Tushare 偶发缺数/空数据
-            print("")  # 换行
-            fetch_shfe_patch(date_str)
+            # 默认只在 Tushare 无数据时触发；如需强制覆盖，可设置 FORCE_SHFE_AK_PATCH=1
+            if FORCE_SHFE_AK_PATCH or (not has_tushare_data):
+                print("")  # 换行
+                fetch_shfe_patch(date_str)
+        elif exchange == 'DCE':
+            # 大商所补丁：Tushare 近阶段不稳定返回 LG（原木），增加兜底抓取
+            if ENABLE_DCE_LG_PATCH:
+                print("")  # 换行
+                fetch_dce_lg_patch(date_str)
 
     except Exception as e:
         print(f" [!] 异常: {e}")
@@ -446,7 +836,9 @@ def run_job(start_date, end_date):
 
     for single_date in dates:
         date_str = single_date.strftime('%Y%m%d')
-        if single_date.weekday() >= 5: continue
+        if not is_trading_day(date_str):
+            print(f"\n--- 跳过非交易日: {date_str} ---")
+            continue
 
         print(f"\n--- 处理日期: {date_str} ---")
         for ex in EXCHANGES:
@@ -454,6 +846,21 @@ def run_job(start_date, end_date):
 
             # 处理完一个交易所后，再休息一下
             time.sleep(1)
+
+
+def run_lg_backfill(start_date: str, end_date: str):
+    """
+    仅回补 DCE 原木(LG)持仓，用于历史断档修复。
+    """
+    dates = pd.date_range(start=start_date, end=end_date)
+    print(f"\n=== LG 持仓回补: {start_date} -> {end_date} ===")
+    for single_date in dates:
+        date_str = single_date.strftime('%Y%m%d')
+        if not is_trading_day(date_str):
+            continue
+        fetch_dce_lg_patch(date_str)
+        time.sleep(0.8)
+    print("=== LG 持仓回补结束 ===")
 
 
 if __name__ == "__main__":
@@ -465,3 +872,8 @@ if __name__ == "__main__":
 
     print(f"开始任务: {start} -> {today}")
     run_job(start, today)
+
+    # 可选：设置环境变量 LG_BACKFILL_START=YYYYMMDD 后，自动触发原木持仓历史回补
+    lg_backfill_start = os.getenv("LG_BACKFILL_START", "").strip()
+    if lg_backfill_start:
+        run_lg_backfill(lg_backfill_start, today)
