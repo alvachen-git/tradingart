@@ -812,7 +812,7 @@ with st.sidebar:
 render_quant_ops_header(
     "情报站",
     "",
-    "AI结合市场数据和团队实战经验生成报告",
+    "AI结合市场数据和团队实战经验生成报告（复盘晚报和交易信号支持Email通知）",
 )
 
 # ==========================================
@@ -1071,5 +1071,3 @@ else:
                     # 场景2：付费频道，跳转充值中心
                     if st.button("💳 付费开通", key=f"lock_{content['id']}", type="primary", use_container_width=True):
                         st.switch_page("pages/17_充值中心.py")
-
-
