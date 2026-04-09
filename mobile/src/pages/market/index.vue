@@ -540,6 +540,10 @@ function chaosBarWidth(v: number): string {
   const pct = Math.max(0, Math.min(100, (v / chaosCategoryMax.value) * 100))
   return `${pct}%`
 }
+function chaosGaugeAngle(score: number): number {
+  const clamped = Math.max(0, Math.min(100, Number(score) || 0))
+  return -90 + clamped * 1.8
+}
 
 onShareAppMessage(() => ({
   title: SHARE_TITLE,
@@ -758,6 +762,22 @@ onShareTimeline(() => ({
             <text class="chaos-core-title">混乱指数</text>
             <text class="chaos-core-time">{{ chaosData?.updated_time_text || '--:--:--' }}</text>
           </view>
+          <view class="chaos-gauge-wrap">
+            <view class="chaos-gauge-track">
+              <view class="chaos-gauge-seg chaos-gauge-seg-1"></view>
+              <view class="chaos-gauge-seg chaos-gauge-seg-2"></view>
+              <view class="chaos-gauge-seg chaos-gauge-seg-3"></view>
+              <view class="chaos-gauge-seg chaos-gauge-seg-4"></view>
+            </view>
+            <view class="chaos-gauge-inner"></view>
+            <view class="chaos-gauge-needle-wrap" :style="{ transform: `translateX(-50%) rotate(${chaosGaugeAngle(chaosData?.score_raw || 0)}deg)` }">
+              <view class="chaos-gauge-needle"></view>
+            </view>
+            <view class="chaos-gauge-cap"></view>
+            <text class="chaos-gauge-tick chaos-gauge-tick-left">0</text>
+            <text class="chaos-gauge-tick chaos-gauge-tick-mid">50</text>
+            <text class="chaos-gauge-tick chaos-gauge-tick-right">100</text>
+          </view>
           <view class="chaos-core-main">
             <text class="chaos-score">{{ chaosData?.score_raw.toFixed(1) }}</text>
             <text class="chaos-band" :style="{ color: chaosBandColor(chaosData?.band || '') }">{{ chaosData?.band_label }}</text>
@@ -787,7 +807,11 @@ onShareTimeline(() => ({
             <view v-for="m in chaosData?.monitored_markets || []" :key="`${m.rank}-${m.display_title}`" class="chaos-market-row">
               <text class="chaos-rank">{{ m.rank }}</text>
               <view class="chaos-market-main">
-                <text class="chaos-market-title">{{ m.display_title }}</text>
+                <view class="chaos-market-title-line">
+                  <text class="chaos-market-title">{{ m.display_title }}</text>
+                  <text v-if="m.trend_arrows" class="chaos-trend" :class="m.trend_direction === 'up' ? 'chaos-trend-up' : 'chaos-trend-down'">{{ m.trend_arrows }}</text>
+                  <text v-if="m.trend_flames" class="chaos-trend-heat">{{ m.trend_flames }}</text>
+                </view>
                 <text class="chaos-market-meta">{{ m.region_label }} · {{ m.pair_tag }}</text>
               </view>
               <view class="chaos-market-right">
@@ -1061,6 +1085,85 @@ onShareTimeline(() => ({
 }
 .chaos-core-title { font-size: 28rpx; color: #f0f0f0; font-weight: 700; }
 .chaos-core-time { font-size: 22rpx; color: #94a3b8; font-variant-numeric: tabular-nums; }
+.chaos-gauge-wrap {
+  position: relative;
+  height: 232rpx;
+  margin-top: 8rpx;
+}
+.chaos-gauge-track {
+  position: absolute;
+  left: 50%;
+  bottom: 16rpx;
+  transform: translateX(-50%);
+  width: 420rpx;
+  height: 210rpx;
+  border-radius: 210rpx 210rpx 0 0;
+  overflow: hidden;
+  display: flex;
+  border: 2rpx solid #223451;
+  border-bottom: none;
+  box-sizing: border-box;
+}
+.chaos-gauge-seg { flex: 1; }
+.chaos-gauge-seg-1 { background: linear-gradient(180deg, #22c55e, #16a34a); }
+.chaos-gauge-seg-2 { background: linear-gradient(180deg, #facc15, #eab308); }
+.chaos-gauge-seg-3 { background: linear-gradient(180deg, #fb923c, #f97316); }
+.chaos-gauge-seg-4 { background: linear-gradient(180deg, #ef4444, #dc2626); }
+.chaos-gauge-inner {
+  position: absolute;
+  left: 50%;
+  bottom: 16rpx;
+  transform: translateX(-50%);
+  width: 326rpx;
+  height: 163rpx;
+  border-radius: 163rpx 163rpx 0 0;
+  background: #0f1b2e;
+  border: 2rpx solid #223451;
+  border-bottom: none;
+  box-sizing: border-box;
+}
+.chaos-gauge-needle-wrap {
+  position: absolute;
+  left: 50%;
+  bottom: 16rpx;
+  width: 0;
+  height: 0;
+  transform-origin: 50% 100%;
+  z-index: 2;
+}
+.chaos-gauge-needle {
+  width: 6rpx;
+  height: 132rpx;
+  background: linear-gradient(180deg, #fde68a, #f59e0b);
+  border-radius: 999rpx;
+  transform: translate(-50%, -100%);
+  box-shadow: 0 0 10rpx rgba(245, 158, 11, 0.45);
+}
+.chaos-gauge-cap {
+  position: absolute;
+  left: 50%;
+  bottom: 8rpx;
+  transform: translateX(-50%);
+  width: 24rpx;
+  height: 24rpx;
+  border-radius: 50%;
+  background: #f59e0b;
+  border: 3rpx solid #fde68a;
+  z-index: 3;
+}
+.chaos-gauge-tick {
+  position: absolute;
+  bottom: 0;
+  font-size: 20rpx;
+  color: #94a3b8;
+  font-variant-numeric: tabular-nums;
+}
+.chaos-gauge-tick-left { left: 12rpx; }
+.chaos-gauge-tick-mid {
+  left: 50%;
+  transform: translateX(-50%);
+}
+.chaos-gauge-tick-right { right: 12rpx; }
 .chaos-core-main {
   margin-top: 10rpx;
   display: flex;
@@ -1116,13 +1219,38 @@ onShareTimeline(() => ({
   font-variant-numeric: tabular-nums;
 }
 .chaos-market-main { flex: 1; min-width: 0; }
+.chaos-market-title-line { display: flex; align-items: center; gap: 8rpx; min-width: 0; }
 .chaos-market-title {
-  display: block;
+  display: inline-block;
   font-size: 24rpx;
   color: #f0f0f0;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+.chaos-trend {
+  font-size: 18rpx;
+  font-variant-numeric: tabular-nums;
+  padding: 2rpx 8rpx;
+  border-radius: 999rpx;
+  border: 1px solid #334155;
+  line-height: 1.1;
+  flex-shrink: 0;
+}
+.chaos-trend-up {
+  color: #f87171;
+  background: rgba(248, 113, 113, 0.12);
+  border-color: rgba(248, 113, 113, 0.34);
+}
+.chaos-trend-down {
+  color: #34d399;
+  background: rgba(52, 211, 153, 0.12);
+  border-color: rgba(52, 211, 153, 0.34);
+}
+.chaos-trend-heat {
+  font-size: 19rpx;
+  line-height: 1;
+  flex-shrink: 0;
 }
 .chaos-market-meta { display: block; margin-top: 3rpx; font-size: 20rpx; color: #64748b; }
 .chaos-market-right { width: 150rpx; text-align: right; }

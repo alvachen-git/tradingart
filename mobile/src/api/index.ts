@@ -253,6 +253,10 @@ export interface ChaosMarketItem {
   probability: number
   delta_24h: number
   event_raw: number
+  trend_arrows: string
+  trend_direction: string
+  trend_flames: string
+  trend_latest_delta: number
 }
 
 export interface ChaosTopDriverItem {

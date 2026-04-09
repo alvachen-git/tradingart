@@ -239,6 +239,81 @@ _CHAOS_CATEGORY_LABELS = {
 }
 
 
+def _chaos_market_history_key(item: Dict[str, Any]) -> str:
+    return _safe_text(
+        item.get("event_slug")
+        or item.get("market_slug")
+        or item.get("event_key")
+        or item.get("pair_tag")
+        or item.get("display_title")
+    ).lower()
+
+
+def _build_chaos_market_trend_map(snapshots: List[Dict[str, Any]], threshold: float = 0.005) -> Dict[str, Dict[str, Any]]:
+    series_by_key: Dict[str, List[float]] = {}
+    for snap in snapshots or []:
+        if not isinstance(snap, dict):
+            continue
+        source_status = snap.get("source_status") if isinstance(snap.get("source_status"), dict) else {}
+        items = source_status.get("monitored_markets") or snap.get("top_markets") or []
+        seen: set[str] = set()
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            key = _chaos_market_history_key(item)
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            series_by_key.setdefault(key, []).append(_safe_float(item.get("probability"), 0.0))
+
+    trend_map: Dict[str, Dict[str, Any]] = {}
+    for key, values in series_by_key.items():
+        recent_values = values[-4:]
+        if len(recent_values) < 2:
+            continue
+        deltas = [recent_values[i] - recent_values[i - 1] for i in range(1, len(recent_values))]
+        latest_delta = deltas[-1]
+        directions: List[int] = []
+        for delta in deltas:
+            if delta >= threshold:
+                directions.append(1)
+            elif delta <= -threshold:
+                directions.append(-1)
+            else:
+                directions.append(0)
+
+        strength = 0
+        direction = 0
+        for expected in (1, -1):
+            run = 0
+            for value in reversed(directions):
+                if value == expected:
+                    run += 1
+                else:
+                    break
+            if run > 0:
+                strength = min(3, run)
+                direction = expected
+                break
+
+        arrows = ""
+        trend_direction = ""
+        if strength > 0:
+            arrows = ("▲" if direction > 0 else "▼") * strength
+            trend_direction = "up" if direction > 0 else "down"
+        flames = "🔥" if latest_delta >= 0.05 else ""
+
+        if not arrows and not flames:
+            continue
+        trend_map[key] = {
+            "trend_arrows": arrows,
+            "trend_direction": trend_direction,
+            "trend_flames": flames,
+            "trend_latest_delta": latest_delta,
+        }
+    return trend_map
+
+
 def _chaos_region_label(region_tag: str) -> str:
     key = _safe_text(region_tag)
     if not key:
@@ -279,7 +354,7 @@ def _empty_chaos_payload() -> Dict[str, Any]:
     }
 
 
-def _build_chaos_payload(snapshot: Dict[str, Any]) -> Dict[str, Any]:
+def _build_chaos_payload(snapshot: Dict[str, Any], trend_map: Optional[Dict[str, Dict[str, Any]]] = None) -> Dict[str, Any]:
     if not isinstance(snapshot, dict) or not snapshot:
         return _empty_chaos_payload()
 
@@ -289,10 +364,12 @@ def _build_chaos_payload(snapshot: Dict[str, Any]) -> Dict[str, Any]:
     top_markets = snapshot.get("top_markets") or []
     category_src = snapshot.get("category_breakdown") or []
 
+    trend_map = trend_map or {}
     monitored_markets: List[Dict[str, Any]] = []
     for idx, item in enumerate(monitored_src[:12]):
         if not isinstance(item, dict):
             continue
+        trend = trend_map.get(_chaos_market_history_key(item), {})
         monitored_markets.append(
             {
                 "rank": idx + 1,
@@ -302,6 +379,10 @@ def _build_chaos_payload(snapshot: Dict[str, Any]) -> Dict[str, Any]:
                 "probability": _safe_float(item.get("probability"), 0.0),
                 "delta_24h": _safe_float(item.get("delta_24h"), 0.0),
                 "event_raw": _safe_float(item.get("event_raw"), 0.0),
+                "trend_arrows": _safe_text(trend.get("trend_arrows")),
+                "trend_direction": _safe_text(trend.get("trend_direction")),
+                "trend_flames": _safe_text(trend.get("trend_flames")),
+                "trend_latest_delta": _safe_float(trend.get("trend_latest_delta"), 0.0),
             }
         )
 
@@ -2383,7 +2464,15 @@ def market_chaos(username: str = Depends(get_current_user)):
     _ = username
     try:
         snapshot = de.get_latest_geopolitical_risk_snapshot()
-        return _build_chaos_payload(snapshot if isinstance(snapshot, dict) else {})
+        recent_snapshots = de.get_recent_geopolitical_risk_snapshots(limit=8)
+        trend_map = _build_chaos_market_trend_map(
+            recent_snapshots if isinstance(recent_snapshots, list) else [],
+            threshold=0.005,
+        )
+        return _build_chaos_payload(
+            snapshot if isinstance(snapshot, dict) else {},
+            trend_map=trend_map,
+        )
     except Exception as e:
         print(f"[market_chaos] fallback_on_error: {e}", flush=True)
         return _empty_chaos_payload()

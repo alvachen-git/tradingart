@@ -15,6 +15,7 @@ class TestMobileApiMarketChaos(unittest.TestCase):
         monitored_markets = [
             {
                 "display_title": f"事件{i}",
+                "event_slug": f"e{i}",
                 "region_tag": "middle_east" if i % 2 == 0 else "global",
                 "pair_tag": f"P{i}",
                 "probability": 0.1 * i,
@@ -55,7 +56,61 @@ class TestMobileApiMarketChaos(unittest.TestCase):
             },
         }
 
-        with patch.object(mobile_api.de, "get_latest_geopolitical_risk_snapshot", return_value=snapshot):
+        recent_snapshots = [
+            {
+                "source_status": {
+                    "monitored_markets": [
+                        {
+                            "event_slug": "e1",
+                            "display_title": "事件1",
+                            "probability": 0.10,
+                        },
+                        {
+                            "event_slug": "e2",
+                            "display_title": "事件2",
+                            "probability": 0.20,
+                        },
+                    ]
+                }
+            },
+            {
+                "source_status": {
+                    "monitored_markets": [
+                        {
+                            "event_slug": "e1",
+                            "display_title": "事件1",
+                            "probability": 0.14,
+                        },
+                        {
+                            "event_slug": "e2",
+                            "display_title": "事件2",
+                            "probability": 0.15,
+                        },
+                    ]
+                }
+            },
+            {
+                "source_status": {
+                    "monitored_markets": [
+                        {
+                            "event_slug": "e1",
+                            "display_title": "事件1",
+                            "probability": 0.20,
+                        },
+                        {
+                            "event_slug": "e2",
+                            "display_title": "事件2",
+                            "probability": 0.09,
+                        },
+                    ]
+                }
+            },
+        ]
+
+        with (
+            patch.object(mobile_api.de, "get_latest_geopolitical_risk_snapshot", return_value=snapshot),
+            patch.object(mobile_api.de, "get_recent_geopolitical_risk_snapshots", return_value=recent_snapshots),
+        ):
             out = mobile_api.market_chaos(username="tester")
 
         self.assertTrue(out["has_data"])
@@ -67,13 +122,21 @@ class TestMobileApiMarketChaos(unittest.TestCase):
         self.assertEqual(out["monitored_markets"][0]["rank"], 1)
         self.assertEqual(out["monitored_markets"][0]["region_label"], "全球")
         self.assertEqual(out["monitored_markets"][1]["region_label"], "中东")
+        self.assertEqual(out["monitored_markets"][0]["trend_arrows"], "▲▲")
+        self.assertEqual(out["monitored_markets"][0]["trend_direction"], "up")
+        self.assertEqual(out["monitored_markets"][0]["trend_flames"], "🔥")
+        self.assertEqual(out["monitored_markets"][1]["trend_arrows"], "▼▼")
+        self.assertEqual(out["monitored_markets"][1]["trend_direction"], "down")
         self.assertEqual(len(out["top_drivers"]), 5)
         self.assertEqual(out["category_breakdown"][0]["label"], "军事冲突")
         self.assertEqual(out["category_breakdown"][1]["label"], "经济风险")
         self.assertAlmostEqual(out["category_breakdown"][0]["total"], 21.0, places=6)
 
     def test_market_chaos_returns_empty_payload_when_no_snapshot(self):
-        with patch.object(mobile_api.de, "get_latest_geopolitical_risk_snapshot", return_value={}):
+        with (
+            patch.object(mobile_api.de, "get_latest_geopolitical_risk_snapshot", return_value={}),
+            patch.object(mobile_api.de, "get_recent_geopolitical_risk_snapshots", return_value=[]),
+        ):
             out = mobile_api.market_chaos(username="tester")
 
         self.assertFalse(out["has_data"])
