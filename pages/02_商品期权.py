@@ -85,7 +85,7 @@ def _cached_recent_contract_pool(
     return [str(r[0]) for r in rows if r and r[0]]
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
+@st.cache_data(ttl=300, show_spinner=False)
 def _cached_comprehensive_market_data(
     user_id: str, page: str, symbol: str, date_window: str
 ) -> pd.DataFrame:

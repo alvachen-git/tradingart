@@ -340,6 +340,14 @@ inject_sidebar_toggle_style(mode="high_contrast")
 
 col_title, col_refresh = st.columns([5, 1])
 
+
+def _format_latest_date(date_text):
+    raw = str(date_text or "").replace("-", "").replace("/", "").strip()
+    if len(raw) == 8 and raw.isdigit():
+        return f"{raw[:4]}-{raw[4:6]}-{raw[6:]}"
+    return raw or "未知"
+
+
 with col_title:
     st.markdown("""
     <div style="display: flex; align-items: center; gap: 16px; margin-bottom: 8px;">
@@ -368,7 +376,17 @@ with col_title:
 
 refresh_requested = False
 with col_refresh:
+    latest_date_raw = de.get_latest_data_date() if hasattr(de, "get_latest_data_date") else ""
+    latest_date_display = _format_latest_date(latest_date_raw)
     refresh_requested = st.button("🔄 刷新数据", key="refresh_btn", use_container_width=True)
+    st.markdown(
+        f"""
+        <div style="margin-top:6px; text-align:right; font-size:12px; color:#94a3b8;">
+            最新数据日期：<span style="color:#e2e8f0; font-weight:600;">{latest_date_display}</span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 # ============================================================
@@ -389,6 +407,8 @@ def load_data():
 if refresh_requested:
     # 仅清理本页 load_data 缓存，避免全局缓存被清空后引发整站重算。
     load_data.clear()
+    if hasattr(de, "get_latest_data_date") and hasattr(de.get_latest_data_date, "clear"):
+        de.get_latest_data_date.clear()
 
 
 # 数据加载：保留缓存，移除固定 sleep，避免命中缓存时仍然“看起来很慢”
@@ -814,4 +834,3 @@ else:
 - 数据库是否运行
 - 运行数据更新脚本
         """)
-

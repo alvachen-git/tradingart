@@ -3,9 +3,12 @@ import numpy as np
 from scipy import stats
 import re
 import json
+import logging
 from symbol_match import sql_prefix_condition
 import os
 import sys
+import threading
+import time
 from sqlalchemy import create_engine, text
 from kline_tools import analyze_kline_pattern
 from dotenv import load_dotenv
@@ -884,8 +887,57 @@ def fmt_date(d):
     return str(d).replace('-', '').replace('/', '').split(' ')[0]
 
 
+_PERF_LOGGER = logging.getLogger(__name__)
+_MARKET_SNAPSHOT_LOCK = threading.Lock()
+_MARKET_SNAPSHOT_LAST_DF = None
+_MARKET_SNAPSHOT_LAST_AT = 0.0
+_MARKET_SNAPSHOT_TTL_SEC = 300
+_MARKET_SNAPSHOT_STALE_MAX_SEC = 1800
+_MARKET_SNAPSHOT_WAIT_SEC = 0.8
+
+
+def _snapshot_copy(max_age_sec):
+    """Return a defensive copy of the in-process snapshot when it is fresh enough."""
+    global _MARKET_SNAPSHOT_LAST_DF, _MARKET_SNAPSHOT_LAST_AT
+    if _MARKET_SNAPSHOT_LAST_DF is None:
+        return None
+    age_sec = time.time() - _MARKET_SNAPSHOT_LAST_AT
+    if age_sec > max_age_sec:
+        return None
+    return _MARKET_SNAPSHOT_LAST_DF.copy(deep=True)
+
+
+def _snapshot_store(df):
+    """Store the latest successful snapshot for anti-stampede fallback."""
+    global _MARKET_SNAPSHOT_LAST_DF, _MARKET_SNAPSHOT_LAST_AT
+    if df is None or df.empty:
+        return
+    _MARKET_SNAPSHOT_LAST_DF = df.copy(deep=True)
+    _MARKET_SNAPSHOT_LAST_AT = time.time()
+
+
+def clear_comprehensive_market_data_snapshot():
+    """Clear in-process market snapshot cache used by get_comprehensive_market_data."""
+    global _MARKET_SNAPSHOT_LAST_DF, _MARKET_SNAPSHOT_LAST_AT
+    with _MARKET_SNAPSHOT_LOCK:
+        _MARKET_SNAPSHOT_LAST_DF = None
+        _MARKET_SNAPSHOT_LAST_AT = 0.0
+
+
+def _log_market_perf(*, cache_hit: int, sql_ms: float, compute_ms: float, rows: int, total_ms: float, note: str):
+    msg = (
+        f"PERF_MARKET_DATA cache_hit={cache_hit} sql_ms={sql_ms:.1f} "
+        f"compute_ms={compute_ms:.1f} rows={rows} total_ms={total_ms:.1f} note={note}"
+    )
+    _PERF_LOGGER.info(msg)
+    if total_ms > 1500:
+        _PERF_LOGGER.warning(msg)
+
+
 def get_join_key(ts_code):
     """标准 Join Key 生成器"""
+    if isinstance(ts_code, (bytes, bytearray)):
+        ts_code = ts_code.decode("utf-8", errors="ignore")
     if not isinstance(ts_code, str): return ""
     base = ts_code.strip().upper().split('.')[0]
     if '-' in base: base = base.split('-')[0]
@@ -901,6 +953,8 @@ def get_join_key(ts_code):
 
 def get_product_code(raw_code):
     """提取纯品种代码 (锰硅SM -> SM)"""
+    if isinstance(raw_code, (bytes, bytearray)):
+        raw_code = raw_code.decode("utf-8", errors="ignore")
     if not isinstance(raw_code, str): return ""
     base = raw_code.strip().upper().split('.')[0]
     return "".join(re.findall("[A-Z]", base))
@@ -965,7 +1019,6 @@ def check_expiry_validity(row, current_date_str):
         print(f"Expiry check error: {e}")
         return True  # 出错时默认不过滤，防止数据全空
 
-@st.cache_data(ttl=3600)
 def get_comprehensive_market_data():
     """
     优化版全市场监控数据
@@ -977,51 +1030,119 @@ def get_comprehensive_market_data():
     if engine is None:
         return pd.DataFrame()
 
+    total_t0 = time.perf_counter()
+    sql_ms = 0.0
+    lock_acquired = False
+
+    def read_sql_timed(sql):
+        nonlocal sql_ms
+        t0 = time.perf_counter()
+        df = pd.read_sql(sql, engine)
+        sql_ms += (time.perf_counter() - t0) * 1000
+        return df
+
+    hot_snapshot = _snapshot_copy(_MARKET_SNAPSHOT_TTL_SEC)
+    if hot_snapshot is not None:
+        total_ms = (time.perf_counter() - total_t0) * 1000
+        _log_market_perf(
+            cache_hit=1,
+            sql_ms=0.0,
+            compute_ms=total_ms,
+            rows=len(hot_snapshot),
+            total_ms=total_ms,
+            note="snapshot_hit_fast",
+        )
+        return hot_snapshot
+
     try:
+        lock_acquired = _MARKET_SNAPSHOT_LOCK.acquire(timeout=_MARKET_SNAPSHOT_WAIT_SEC)
+        if not lock_acquired:
+            stale_snapshot = _snapshot_copy(_MARKET_SNAPSHOT_STALE_MAX_SEC)
+            if stale_snapshot is not None:
+                total_ms = (time.perf_counter() - total_t0) * 1000
+                _log_market_perf(
+                    cache_hit=1,
+                    sql_ms=0.0,
+                    compute_ms=total_ms,
+                    rows=len(stale_snapshot),
+                    total_ms=total_ms,
+                    note="stale_fallback_timeout",
+                )
+                return stale_snapshot
+            _MARKET_SNAPSHOT_LOCK.acquire()
+            lock_acquired = True
+
+        hot_snapshot = _snapshot_copy(_MARKET_SNAPSHOT_TTL_SEC)
+        if hot_snapshot is not None:
+            total_ms = (time.perf_counter() - total_t0) * 1000
+            _log_market_perf(
+                cache_hit=1,
+                sql_ms=0.0,
+                compute_ms=total_ms,
+                rows=len(hot_snapshot),
+                total_ms=total_ms,
+                note="snapshot_hit",
+            )
+            return hot_snapshot
+
         # === 第1步：获取日期（保持不变）===
-        dates_df = pd.read_sql(
+        dates_df = read_sql_timed(
             "SELECT DISTINCT trade_date FROM futures_price ORDER BY trade_date DESC LIMIT 10",
-            engine
         )
         if len(dates_df) < 6:
             return pd.DataFrame()
 
-        today = fmt_date(dates_df.iloc[0]['trade_date'])
-        prev_day = fmt_date(dates_df.iloc[1]['trade_date'])
-        day_5_ago = fmt_date(dates_df.iloc[5]['trade_date'])
+        today_dt = pd.to_datetime(dates_df.iloc[0]['trade_date'])
+        prev_day_dt = pd.to_datetime(dates_df.iloc[1]['trade_date'])
+        day_5_ago_dt = pd.to_datetime(dates_df.iloc[5]['trade_date'])
+
+        today = today_dt.strftime('%Y%m%d')
+        prev_day = prev_day_dt.strftime('%Y%m%d')
+        day_5_ago = day_5_ago_dt.strftime('%Y%m%d')
 
         # === 【优化1】合并价格查询 - 一次性获取3天数据 ===
         sql_price_all = f"""
-        SELECT ts_code, close_price, oi, REPLACE(trade_date, '-', '') as trade_date 
+        SELECT ts_code, close_price, oi, trade_date
         FROM futures_price 
-        WHERE REPLACE(trade_date, '-', '') IN ('{today}', '{prev_day}', '{day_5_ago}')
+        WHERE trade_date IN ('{today}', '{prev_day}', '{day_5_ago}')
         """
-        df_prices_all = pd.read_sql(sql_price_all, engine)
+        df_prices_all = read_sql_timed(sql_price_all)
+        if not df_prices_all.empty:
+            df_prices_all['close_price'] = pd.to_numeric(df_prices_all['close_price'], errors='coerce').fillna(0.0)
+            df_prices_all['oi'] = pd.to_numeric(df_prices_all['oi'], errors='coerce').fillna(0.0)
+            df_prices_all['trade_date_key'] = pd.to_datetime(df_prices_all['trade_date']).dt.strftime('%Y%m%d')
+        else:
+            df_prices_all['trade_date_key'] = ""
 
         # 分离数据
-        df_now = df_prices_all[df_prices_all['trade_date'] == today].copy()
-        df_hp = df_prices_all[df_prices_all['trade_date'].isin([prev_day, day_5_ago])].copy()
+        df_now = df_prices_all[df_prices_all['trade_date_key'] == today].copy()
+        df_hp = df_prices_all[df_prices_all['trade_date_key'].isin([prev_day, day_5_ago])].copy()
 
         # 处理join_key
         df_now['join_key'] = df_now['ts_code'].apply(get_join_key)
         df_now = df_now[df_now['join_key'] != ""]
 
         # === 【优化2】合并IV查询 - 一次性获取历史和最新数据 ===
-        date_7d = (pd.to_datetime(today) - pd.Timedelta(days=7)).strftime('%Y%m%d')
-        date_1y = (pd.to_datetime(today) - pd.Timedelta(days=252)).strftime('%Y%m%d')
+        date_7d = (today_dt - pd.Timedelta(days=7)).strftime('%Y%m%d')
+        date_1y = (today_dt - pd.Timedelta(days=252)).strftime('%Y%m%d')
 
         sql_iv_all = f"""
-        SELECT ts_code, iv, REPLACE(trade_date, '-', '') as trade_date 
+        SELECT ts_code, iv, trade_date
         FROM commodity_iv_history 
-        WHERE REPLACE(trade_date, '-', '') >= '{date_1y}'
+        WHERE trade_date >= '{date_1y}'
         """
-        df_iv_all = pd.read_sql(sql_iv_all, engine)
+        df_iv_all = read_sql_timed(sql_iv_all)
+        if not df_iv_all.empty:
+            df_iv_all['iv'] = pd.to_numeric(df_iv_all['iv'], errors='coerce').fillna(0.0)
+            df_iv_all['trade_date_key'] = pd.to_datetime(df_iv_all['trade_date']).dt.strftime('%Y%m%d')
+        else:
+            df_iv_all['trade_date_key'] = ""
         df_iv_all['join_key'] = df_iv_all['ts_code'].apply(get_join_key)
         df_iv_all = df_iv_all[df_iv_all['join_key'] != ""]
 
         # 分离最新7天和全年数据
-        df_iv_recent = df_iv_all[df_iv_all['trade_date'] >= date_7d].copy()
-        df_iv_latest = df_iv_recent.sort_values('trade_date').groupby('join_key').tail(1)[['join_key', 'iv']]
+        df_iv_recent = df_iv_all[df_iv_all['trade_date_key'] >= date_7d].copy()
+        df_iv_latest = df_iv_recent.sort_values('trade_date_key').groupby('join_key').tail(1)[['join_key', 'iv']]
 
         # === 第4步：智能选择合约（保持不变）===
         df_cand = df_now.merge(df_iv_latest, on='join_key', how='left')
@@ -1057,11 +1178,8 @@ def get_comprehensive_market_data():
         # === 第5步：计算IV Rank（使用已加载的全年数据）===
         keys = df_selected['join_key'].unique().tolist()
         if keys:
-            date_1y = (pd.to_datetime(today) - pd.Timedelta(days=252)).strftime('%Y%m%d')
-            sql_h = f"SELECT ts_code, iv FROM commodity_iv_history WHERE REPLACE(trade_date, '-', '') >= '{date_1y}'"
-            df_h = pd.read_sql(sql_h, engine)
-            df_h['join_key'] = df_h['ts_code'].apply(get_join_key)
-            df_h = df_h[df_h['join_key'].isin(keys)]
+            # 复用已加载的一年IV数据，避免重复全量扫描
+            df_h = df_iv_all[df_iv_all['join_key'].isin(keys)][['join_key', 'iv']].copy()
 
             # --- 【核心修改】 过滤掉 IV 为 0 的异常值 ---
             # 只有大于 0.0001 的 IV 才参与统计
@@ -1091,11 +1209,11 @@ def get_comprehensive_market_data():
             df_final['iv_rank'] = 0
 
         # === 第6步：历史IV数据（使用已加载的数据）===
-        df_hiv = df_iv_all[df_iv_all['trade_date'].isin([prev_day, day_5_ago])].copy()
-        df_hiv = df_hiv.groupby(['join_key', 'trade_date'])['iv'].mean().reset_index()
+        df_hiv = df_iv_all[df_iv_all['trade_date_key'].isin([prev_day, day_5_ago])].copy()
+        df_hiv = df_hiv.groupby(['join_key', 'trade_date_key'])['iv'].mean().reset_index()
 
         # === 【优化3】持仓数据 - 使用IN替代LIKE ===
-        date_15d = (pd.to_datetime(today) - pd.Timedelta(days=20)).strftime('%Y%m%d')
+        date_15d = (today_dt - pd.Timedelta(days=20)).strftime('%Y%m%d')
 
         # 精确匹配列表（比LIKE快10倍+）
         target_brokers = BROKERS_DUMB + BROKERS_SMART
@@ -1103,14 +1221,17 @@ def get_comprehensive_market_data():
 
         try:
             sql_hold = f"""
-            SELECT ts_code, broker, long_vol, short_vol, REPLACE(trade_date, '-', '') as trade_date
+            SELECT ts_code, broker, long_vol, short_vol, trade_date
             FROM futures_holding 
-            WHERE REPLACE(trade_date, '-', '') >= '{date_15d}'
+            WHERE trade_date >= '{date_15d}'
               AND broker IN ({broker_placeholders})
             """
-            df_hold = pd.read_sql(sql_hold, engine)
+            df_hold = read_sql_timed(sql_hold)
 
             if not df_hold.empty:
+                df_hold['long_vol'] = pd.to_numeric(df_hold['long_vol'], errors='coerce').fillna(0.0)
+                df_hold['short_vol'] = pd.to_numeric(df_hold['short_vol'], errors='coerce').fillna(0.0)
+                df_hold['trade_date_key'] = pd.to_datetime(df_hold['trade_date']).dt.strftime('%Y%m%d')
                 df_hold['product'] = df_hold['ts_code'].apply(get_product_code)
                 df_hold['net_vol'] = df_hold['long_vol'] - df_hold['short_vol']
 
@@ -1122,14 +1243,14 @@ def get_comprehensive_market_data():
                     return 'other'
 
                 df_hold['type'] = df_hold['broker'].apply(get_type)
-                df_h_agg = df_hold.groupby(['product', 'trade_date', 'type'])['net_vol'].sum().unstack(
+                df_h_agg = df_hold.groupby(['product', 'trade_date_key', 'type'])['net_vol'].sum().unstack(
                     fill_value=0).reset_index()
 
                 if 'dumb' not in df_h_agg.columns: df_h_agg['dumb'] = 0
                 if 'smart' not in df_h_agg.columns: df_h_agg['smart'] = 0
                 df_h_agg.rename(columns={'dumb': 'dumb_net', 'smart': 'smart_net'}, inplace=True)
 
-                df_h_agg = df_h_agg.sort_values(['product', 'trade_date'])
+                df_h_agg = df_h_agg.sort_values(['product', 'trade_date_key'])
                 df_h_agg['dumb_chg_1d'] = df_h_agg.groupby('product')['dumb_net'].diff(1).fillna(0)
                 df_h_agg['smart_chg_1d'] = df_h_agg.groupby('product')['smart_net'].diff(1).fillna(0)
                 df_h_agg['dumb_chg_5d'] = df_h_agg.groupby('product')['dumb_net'].diff(5).fillna(0)
@@ -1144,8 +1265,8 @@ def get_comprehensive_market_data():
 
         # === 第8步：数据合并（优化版）===
         def get_hist_data(date):
-            p = df_hp[df_hp['trade_date'] == date][['ts_code', 'close_price']]
-            i = df_hiv[df_hiv['trade_date'] == date][['join_key', 'iv']]
+            p = df_hp[df_hp['trade_date_key'] == date][['ts_code', 'close_price']]
+            i = df_hiv[df_hiv['trade_date_key'] == date][['join_key', 'iv']]
             return p, i
 
         p_prev, i_prev = get_hist_data(prev_day)
@@ -1210,14 +1331,41 @@ def get_comprehensive_market_data():
         res = df_final[cols].copy()
         res.columns = ['合约', '当前IV', 'IV Rank', 'IV变动(日)', 'IV变动(5日)', '涨跌%(日)', '涨跌%(5日)',
                        '散户变动(日)', '散户变动(5日)', '机构变动(日)', '机构变动(5日)']
+        res = res.round(2)
+        _snapshot_store(res)
 
-        return res.round(2)
+        total_ms = (time.perf_counter() - total_t0) * 1000
+        compute_ms = max(total_ms - sql_ms, 0.0)
+        _log_market_perf(
+            cache_hit=0,
+            sql_ms=sql_ms,
+            compute_ms=compute_ms,
+            rows=len(res),
+            total_ms=total_ms,
+            note="build",
+        )
+        return res
 
     except Exception as e:
         print(f"DataEngine Error: {e}")
         import traceback
         traceback.print_exc()
+        stale_snapshot = _snapshot_copy(_MARKET_SNAPSHOT_STALE_MAX_SEC)
+        if stale_snapshot is not None:
+            total_ms = (time.perf_counter() - total_t0) * 1000
+            _log_market_perf(
+                cache_hit=1,
+                sql_ms=sql_ms,
+                compute_ms=max(total_ms - sql_ms, 0.0),
+                rows=len(stale_snapshot),
+                total_ms=total_ms,
+                note="error_stale_fallback",
+            )
+            return stale_snapshot
         return pd.DataFrame()
+    finally:
+        if lock_acquired:
+            _MARKET_SNAPSHOT_LOCK.release()
 
 
 # ==========================================
