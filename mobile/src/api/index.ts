@@ -239,9 +239,59 @@ export interface BrokerDetailRow {
   cum_score: number // 累计得分
 }
 
+export interface ChaosComponents {
+  ongoing_baseline: number
+  escalation_pressure: number
+  contagion_bonus: number
+}
+
+export interface ChaosMarketItem {
+  rank: number
+  display_title: string
+  region_label: string
+  pair_tag: string
+  probability: number
+  delta_24h: number
+  event_raw: number
+}
+
+export interface ChaosTopDriverItem {
+  display_title: string
+  region_label: string
+  probability: number
+  delta_24h: number
+  event_raw: number
+}
+
+export interface ChaosCategoryItem {
+  key: string
+  label: string
+  baseline: number
+  escalation: number
+  total: number
+}
+
+export interface ChaosSnapshotPayload {
+  has_data: boolean
+  score_raw: number
+  score_display: number
+  band: string
+  band_label: string
+  updated_at: string
+  updated_time_text: string
+  methodology_version: string
+  components: ChaosComponents
+  monitored_markets: ChaosMarketItem[]
+  top_drivers: ChaosTopDriverItem[]
+  category_breakdown: ChaosCategoryItem[]
+}
+
 export const marketApi = {
   snapshot: () =>
     request<{ data: any }>('GET', '/api/market/snapshot'),
+
+  chaos: () =>
+    request<ChaosSnapshotPayload>('GET', '/api/market/chaos'),
 
   options: () =>
     request<{ items: OptionItem[]; updated_at: string }>('GET', '/api/market/options'),

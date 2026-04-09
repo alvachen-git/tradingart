@@ -207,6 +207,158 @@ def _safe_float(v, default: float = 0.0) -> float:
         return default
 
 
+def _safe_text(v, default: str = "") -> str:
+    try:
+        text = str(v or "").strip()
+    except Exception:
+        text = ""
+    return text or default
+
+
+_CHAOS_BAND_LABELS = {
+    "nothing_happens": "局势偏稳",
+    "something_might_happen": "混乱升温",
+    "something_is_brewing": "全球失序",
+    "things_are_happening": "世界大战",
+}
+_CHAOS_REGION_LABELS = {
+    "middle_east": "中东",
+    "east_asia": "东亚",
+    "korean_peninsula": "朝鲜半岛",
+    "europe": "欧洲",
+    "global": "全球",
+    "north_america": "北美",
+    "balkans": "巴尔干",
+}
+_CHAOS_CATEGORY_LABELS = {
+    "military_conflict": "军事冲突",
+    "nuclear_escalation": "核升级",
+    "political_instability": "政治失稳",
+    "economic_crisis": "经济危机",
+    "public_health": "公共卫生",
+}
+
+
+def _chaos_region_label(region_tag: str) -> str:
+    key = _safe_text(region_tag)
+    if not key:
+        return "全球"
+    return _CHAOS_REGION_LABELS.get(key, key.replace("_", " "))
+
+
+def _format_chaos_updated_time(value: str) -> str:
+    text = _safe_text(value)
+    if not text:
+        return ""
+    iso = text[:-1] + "+00:00" if text.endswith("Z") else text
+    try:
+        dt = datetime.fromisoformat(iso)
+        return dt.strftime("%H:%M:%S")
+    except Exception:
+        return text
+
+
+def _empty_chaos_payload() -> Dict[str, Any]:
+    return {
+        "has_data": False,
+        "score_raw": 0.0,
+        "score_display": 0.0,
+        "band": "nothing_happens",
+        "band_label": _CHAOS_BAND_LABELS["nothing_happens"],
+        "updated_at": "",
+        "updated_time_text": "",
+        "methodology_version": "",
+        "components": {
+            "ongoing_baseline": 0.0,
+            "escalation_pressure": 0.0,
+            "contagion_bonus": 0.0,
+        },
+        "monitored_markets": [],
+        "top_drivers": [],
+        "category_breakdown": [],
+    }
+
+
+def _build_chaos_payload(snapshot: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(snapshot, dict) or not snapshot:
+        return _empty_chaos_payload()
+
+    source_status = snapshot.get("source_status") if isinstance(snapshot.get("source_status"), dict) else {}
+    score_components = source_status.get("score_components") if isinstance(source_status.get("score_components"), dict) else {}
+    monitored_src = source_status.get("monitored_markets") or snapshot.get("top_markets") or []
+    top_markets = snapshot.get("top_markets") or []
+    category_src = snapshot.get("category_breakdown") or []
+
+    monitored_markets: List[Dict[str, Any]] = []
+    for idx, item in enumerate(monitored_src[:12]):
+        if not isinstance(item, dict):
+            continue
+        monitored_markets.append(
+            {
+                "rank": idx + 1,
+                "display_title": _safe_text(item.get("display_title"), "-"),
+                "region_label": _chaos_region_label(_safe_text(item.get("region_tag"))),
+                "pair_tag": _safe_text(item.get("pair_tag"), "-"),
+                "probability": _safe_float(item.get("probability"), 0.0),
+                "delta_24h": _safe_float(item.get("delta_24h"), 0.0),
+                "event_raw": _safe_float(item.get("event_raw"), 0.0),
+            }
+        )
+
+    top_drivers: List[Dict[str, Any]] = []
+    for item in top_markets[:5]:
+        if not isinstance(item, dict):
+            continue
+        top_drivers.append(
+            {
+                "display_title": _safe_text(item.get("display_title"), "-"),
+                "region_label": _chaos_region_label(_safe_text(item.get("region_tag"))),
+                "probability": _safe_float(item.get("probability"), 0.0),
+                "delta_24h": _safe_float(item.get("delta_24h"), 0.0),
+                "event_raw": _safe_float(item.get("event_raw"), 0.0),
+            }
+        )
+
+    category_breakdown: List[Dict[str, Any]] = []
+    for item in category_src:
+        if not isinstance(item, dict):
+            continue
+        key = _safe_text(item.get("key"))
+        label = _safe_text(item.get("label")) or _CHAOS_CATEGORY_LABELS.get(key, key or "未分类")
+        baseline = _safe_float(item.get("baseline"), 0.0)
+        escalation = _safe_float(item.get("escalation"), 0.0)
+        category_breakdown.append(
+            {
+                "key": key,
+                "label": label,
+                "baseline": baseline,
+                "escalation": escalation,
+                "total": baseline + escalation,
+            }
+        )
+
+    band = _safe_text(snapshot.get("band"), "nothing_happens")
+    updated_at = _safe_text(snapshot.get("updated_at"))
+    return {
+        "has_data": True,
+        "score_raw": _safe_float(snapshot.get("score_raw"), 0.0),
+        "score_display": _safe_float(snapshot.get("score_display"), 0.0),
+        "band": band,
+        "band_label": _CHAOS_BAND_LABELS.get(band, _CHAOS_BAND_LABELS["nothing_happens"]),
+        "updated_at": updated_at,
+        "updated_time_text": _format_chaos_updated_time(updated_at),
+        "methodology_version": _safe_text(snapshot.get("methodology_version")),
+        "components": {
+            "ongoing_baseline": _safe_float(score_components.get("ongoing_baseline"), 0.0),
+            "escalation_pressure": _safe_float(score_components.get("escalation_pressure"), 0.0),
+            "contagion_bonus": _safe_float(score_components.get("contagion_bonus"), 0.0),
+        },
+        "monitored_markets": monitored_markets,
+        "top_drivers": top_drivers,
+        "category_breakdown": category_breakdown,
+    }
+
+
 def _market_chart_cache_key(product: str, contract: str) -> str:
     p = str(product or "").strip().lower()
     c = str(contract or "").strip().upper() or "_"
@@ -2217,6 +2369,24 @@ def market_snapshot(username: str = Depends(get_current_user)):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"行情获取失败: {e}")
+
+
+@app.get("/api/market/chaos", tags=["行情"])
+def market_chaos(username: str = Depends(get_current_user)):
+    """
+    世界混乱指数（小程序轻量版）：
+    - 核心指数
+    - 监控市场（最多12条）
+    - 主要推升项（最多5条）
+    - 风险来源分布
+    """
+    _ = username
+    try:
+        snapshot = de.get_latest_geopolitical_risk_snapshot()
+        return _build_chaos_payload(snapshot if isinstance(snapshot, dict) else {})
+    except Exception as e:
+        print(f"[market_chaos] fallback_on_error: {e}", flush=True)
+        return _empty_chaos_payload()
 
 
 @app.get("/api/market/options", tags=["行情"])

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, computed } from 'vue'
 import { onShow, onHide, onShareAppMessage, onShareTimeline } from '@dcloudio/uni-app'
-import { marketApi, type OptionItem, type ContractLiveItem } from '../../api/index'
+import { marketApi, type OptionItem, type ContractLiveItem, type ChaosSnapshotPayload } from '../../api/index'
 import { useAuthStore } from '../../store/auth'
 import BottomNav from '../../components/BottomNav.vue'
 
@@ -10,7 +10,7 @@ const SHARE_TITLE = '爱波塔 - 市场数据学习工具'
 const SHARE_PATH = '/pages/login/index'
 
 // ── Tab ──────────────────────────────────────────────────
-type Tab = 'options' | 'holding'
+type Tab = 'options' | 'holding' | 'chaos'
 const activeTab = ref<Tab>('options')
 
 // ── 商品期权数据 ──────────────────────────────────────────
@@ -83,6 +83,11 @@ const holdingProduct = ref('')
 const holdingBrokers = ref<any[]>([])
 const holdingDate = ref('')
 const holdingLoading = ref(false)
+
+// ── 世界混乱指数 ───────────────────────────────────────────
+const chaosData = ref<ChaosSnapshotPayload | null>(null)
+const chaosLoading = ref(false)
+const chaosError = ref('')
 
 // 与网站版 03_商品持仓.py COMMODITIES 保持相同顺序
 const HOLDING_PRODUCTS = [
@@ -210,6 +215,12 @@ const sortedHoldingBrokers = computed(() => {
     return holdingSortDesc.value ? bv - av : av - bv
   })
   return list
+})
+
+const chaosCategoryMax = computed(() => {
+  const rows = chaosData.value?.category_breakdown ?? []
+  const maxVal = rows.reduce((acc, item) => Math.max(acc, item.total || 0), 0)
+  return maxVal > 0 ? maxVal : 1
 })
 
 function toHoldingBrokerDetail(b: any) {
@@ -345,8 +356,19 @@ const displayedOptions = computed(() => {
 // ── 事件处理 ──────────────────────────────────────────────
 onShow(() => {
   if (!auth.isLoggedIn) { uni.reLaunch({ url: '/pages/login/index' }); return }
-  if (options.value.length === 0) loadOptions()
-  startLivePolling()
+  if (activeTab.value === 'options') {
+    if (options.value.length === 0) loadOptions()
+    startLivePolling()
+  } else if (activeTab.value === 'holding') {
+    if (!holdingProduct.value) {
+      holdingProduct.value = HOLDING_PRODUCTS[0].code
+      loadHolding(holdingProduct.value)
+    }
+    stopLivePolling()
+  } else if (activeTab.value === 'chaos') {
+    if (!chaosData.value) loadChaos()
+    stopLivePolling()
+  }
 })
 
 onHide(() => {
@@ -355,11 +377,17 @@ onHide(() => {
 
 async function switchTab(t: Tab) {
   activeTab.value = t
-  if (t === 'options' && options.value.length === 0) loadOptions()
+  if (t === 'options') {
+    if (options.value.length === 0) loadOptions()
+    startLivePolling()
+  } else {
+    stopLivePolling()
+  }
   if (t === 'holding' && !holdingProduct.value) {
     holdingProduct.value = HOLDING_PRODUCTS[0].code
     loadHolding(holdingProduct.value)
   }
+  if (t === 'chaos' && !chaosData.value) loadChaos()
 }
 
 async function loadOptions() {
@@ -386,6 +414,20 @@ async function loadHolding(product: string) {
     uni.showToast({ title: e.message || '加载失败', icon: 'none' })
   } finally {
     holdingLoading.value = false
+  }
+}
+
+async function loadChaos() {
+  chaosLoading.value = true
+  chaosError.value = ''
+  try {
+    const res = await marketApi.chaos()
+    chaosData.value = res
+  } catch (e: any) {
+    chaosError.value = e.message || '加载失败'
+    uni.showToast({ title: chaosError.value, icon: 'none' })
+  } finally {
+    chaosLoading.value = false
   }
 }
 
@@ -424,10 +466,12 @@ function refresh() {
   if (activeTab.value === 'options') {
     options.value = []
     loadOptions()
+    fetchLive()
   } else if (activeTab.value === 'holding') {
     if (holdingProduct.value) loadHolding(holdingProduct.value)
+  } else if (activeTab.value === 'chaos') {
+    loadChaos()
   }
-  fetchLive()
 }
 
 function toDetail(item: OptionItem) {
@@ -474,6 +518,28 @@ function posIcon(v: number): string { return v > 0 ? '▲' : v < 0 ? '▼' : '�
 function posColor(v: number): string { return v > 0 ? '#e84040' : v < 0 ? '#22c55e' : '#555555' }
 function scoreColor(v: number): string { return v > 0 ? '#e84040' : v < 0 ? '#22c55e' : '#888888' }
 function dirColor(d: string): string { return d === '多' ? '#e84040' : d === '空' ? '#22c55e' : '#888888' }
+function chaosBandColor(band: string): string {
+  if (band === 'things_are_happening') return '#ef4444'
+  if (band === 'something_is_brewing') return '#f97316'
+  if (band === 'something_might_happen') return '#f5c518'
+  return '#22c55e'
+}
+function chaosPct(v: number): string {
+  return `${(v * 100).toFixed(1)}%`
+}
+function chaosDelta(v: number): string {
+  if (!v) return '0.0%'
+  return `${v > 0 ? '+' : ''}${(v * 100).toFixed(1)}%`
+}
+function chaosDeltaColor(v: number): string {
+  if (v > 0) return '#f97316'
+  if (v < 0) return '#22c55e'
+  return '#94a3b8'
+}
+function chaosBarWidth(v: number): string {
+  const pct = Math.max(0, Math.min(100, (v / chaosCategoryMax.value) * 100))
+  return `${pct}%`
+}
 
 onShareAppMessage(() => ({
   title: SHARE_TITLE,
@@ -496,12 +562,15 @@ onShareTimeline(() => ({
       <view class="tab-item" :class="{ active: activeTab === 'holding' }" @tap="switchTab('holding')">
         <text>仓位变化</text>
       </view>
+      <view class="tab-item" :class="{ active: activeTab === 'chaos' }" @tap="switchTab('chaos')">
+        <text>世界混乱指数</text>
+      </view>
       <!-- 实时状态指示点 -->
-      <view v-if="liveTrading" class="live-dot-wrap">
+      <view v-if="activeTab === 'options' && liveTrading" class="live-dot-wrap">
         <view class="live-dot" /><text class="live-dot-text">{{ liveAt }}</text>
       </view>
       <view class="tab-refresh" @tap="refresh">
-        <text class="refresh-icon" :class="{ spinning: optLoading || holdingLoading }">↻</text>
+        <text class="refresh-icon" :class="{ spinning: optLoading || holdingLoading || chaosLoading }">↻</text>
       </view>
     </view>
 
@@ -674,6 +743,101 @@ onShareTimeline(() => ({
 
       <view v-else-if="!holdingLoading" class="center-tip">
         <text class="muted-text">该品种暂无持仓数据</text>
+      </view>
+    </view>
+
+    <!-- ══ 世界混乱指数 Tab ══ -->
+    <view v-else-if="activeTab === 'chaos'" class="chaos-wrap">
+      <view v-if="chaosLoading" class="center-tip">
+        <text class="muted-text">加载中...</text>
+      </view>
+
+      <view v-else-if="chaosData?.has_data" class="chaos-content">
+        <view class="chaos-card chaos-core">
+          <view class="chaos-core-head">
+            <text class="chaos-core-title">世界混乱指数</text>
+            <text class="chaos-core-time">{{ chaosData?.updated_time_text || '--:--:--' }}</text>
+          </view>
+          <view class="chaos-core-main">
+            <text class="chaos-score">{{ chaosData?.score_raw.toFixed(1) }}</text>
+            <text class="chaos-band" :style="{ color: chaosBandColor(chaosData?.band || '') }">{{ chaosData?.band_label }}</text>
+          </view>
+          <view class="chaos-meta-row">
+            <view class="chaos-meta-item">
+              <text class="chaos-meta-label">持续基础分</text>
+              <text class="chaos-meta-val">{{ chaosData?.components.ongoing_baseline.toFixed(1) }}</text>
+            </view>
+            <view class="chaos-meta-item">
+              <text class="chaos-meta-label">升级风险分</text>
+              <text class="chaos-meta-val">{{ chaosData?.components.escalation_pressure.toFixed(1) }}</text>
+            </view>
+            <view class="chaos-meta-item">
+              <text class="chaos-meta-label">联动加成</text>
+              <text class="chaos-meta-val">{{ chaosData?.components.contagion_bonus.toFixed(1) }}</text>
+            </view>
+          </view>
+        </view>
+
+        <view class="chaos-card">
+          <view class="chaos-card-head">
+            <text class="chaos-card-title">监控市场</text>
+            <text class="chaos-card-sub">Top {{ chaosData?.monitored_markets.length || 0 }}</text>
+          </view>
+          <view class="chaos-market-list">
+            <view v-for="m in chaosData?.monitored_markets || []" :key="`${m.rank}-${m.display_title}`" class="chaos-market-row">
+              <text class="chaos-rank">{{ m.rank }}</text>
+              <view class="chaos-market-main">
+                <text class="chaos-market-title">{{ m.display_title }}</text>
+                <text class="chaos-market-meta">{{ m.region_label }} · {{ m.pair_tag }}</text>
+              </view>
+              <view class="chaos-market-right">
+                <text class="chaos-market-prob">{{ chaosPct(m.probability) }}</text>
+                <text class="chaos-market-delta" :style="{ color: chaosDeltaColor(m.delta_24h) }">{{ chaosDelta(m.delta_24h) }}</text>
+              </view>
+            </view>
+          </view>
+        </view>
+
+        <view class="chaos-card">
+          <view class="chaos-card-head">
+            <text class="chaos-card-title">主要推升项</text>
+            <text class="chaos-card-sub">Top {{ chaosData?.top_drivers.length || 0 }}</text>
+          </view>
+          <view class="chaos-driver-head">
+            <text class="chaos-driver-col chaos-driver-title-col">事件</text>
+            <text class="chaos-driver-col">概率</text>
+            <text class="chaos-driver-col">24h</text>
+          </view>
+          <view v-for="item in chaosData?.top_drivers || []" :key="item.display_title" class="chaos-driver-row">
+            <view class="chaos-driver-title-col">
+              <text class="chaos-driver-title">{{ item.display_title }}</text>
+              <text class="chaos-driver-meta">{{ item.region_label }}</text>
+            </view>
+            <text class="chaos-driver-col">{{ chaosPct(item.probability) }}</text>
+            <text class="chaos-driver-col" :style="{ color: chaosDeltaColor(item.delta_24h) }">{{ chaosDelta(item.delta_24h) }}</text>
+          </view>
+        </view>
+
+        <view class="chaos-card">
+          <view class="chaos-card-head">
+            <text class="chaos-card-title">风险来源分布</text>
+            <text class="chaos-card-sub">类别构成</text>
+          </view>
+          <view v-for="item in chaosData?.category_breakdown || []" :key="item.key" class="chaos-cat-row">
+            <view class="chaos-cat-top">
+              <text class="chaos-cat-label">{{ item.label }}</text>
+              <text class="chaos-cat-total">{{ item.total.toFixed(1) }}</text>
+            </view>
+            <view class="chaos-bar-wrap">
+              <view class="chaos-bar-base" :style="{ width: chaosBarWidth(item.baseline) }"></view>
+              <view class="chaos-bar-esca" :style="{ width: chaosBarWidth(item.escalation) }"></view>
+            </view>
+          </view>
+        </view>
+      </view>
+
+      <view v-else class="center-tip">
+        <text class="muted-text">{{ chaosError || '暂无数据，点刷新重试' }}</text>
       </view>
     </view>
 
@@ -880,6 +1044,150 @@ onShareTimeline(() => ({
 .pct-row { display: flex; align-items: center; gap: 6rpx; justify-content: flex-end; }
 .live-badge { display: flex; align-items: center; }
 .live-badge-text { font-size: 14rpx; color: #22c55e; line-height: 1; }
+
+/* 世界混乱指数 */
+.chaos-wrap { padding: 16rpx; }
+.chaos-content { display: flex; flex-direction: column; gap: 16rpx; }
+.chaos-card {
+  background: #0f1b2e;
+  border: 1px solid #1f2f4c;
+  border-radius: 16rpx;
+  padding: 18rpx;
+}
+.chaos-core-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.chaos-core-title { font-size: 28rpx; color: #f0f0f0; font-weight: 700; }
+.chaos-core-time { font-size: 22rpx; color: #94a3b8; font-variant-numeric: tabular-nums; }
+.chaos-core-main {
+  margin-top: 10rpx;
+  display: flex;
+  align-items: baseline;
+  gap: 16rpx;
+}
+.chaos-score {
+  font-size: 68rpx;
+  font-weight: 800;
+  line-height: 1;
+  color: #f5c518;
+  font-variant-numeric: tabular-nums;
+}
+.chaos-band { font-size: 28rpx; font-weight: 700; }
+.chaos-meta-row { display: flex; gap: 12rpx; margin-top: 12rpx; }
+.chaos-meta-item {
+  flex: 1;
+  border-radius: 12rpx;
+  border: 1px solid #233656;
+  background: #101f36;
+  padding: 10rpx 12rpx;
+}
+.chaos-meta-label { display: block; font-size: 20rpx; color: #7e95b8; }
+.chaos-meta-val {
+  display: block;
+  margin-top: 4rpx;
+  font-size: 30rpx;
+  color: #f0f0f0;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.chaos-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10rpx;
+}
+.chaos-card-title { font-size: 26rpx; color: #f0f0f0; font-weight: 700; }
+.chaos-card-sub { font-size: 20rpx; color: #64748b; }
+.chaos-market-row {
+  display: flex;
+  align-items: center;
+  gap: 12rpx;
+  padding: 12rpx 0;
+  border-bottom: 1px solid #15243c;
+}
+.chaos-market-row:last-child { border-bottom: none; }
+.chaos-rank {
+  width: 34rpx;
+  text-align: center;
+  font-size: 20rpx;
+  color: #94a3b8;
+  font-variant-numeric: tabular-nums;
+}
+.chaos-market-main { flex: 1; min-width: 0; }
+.chaos-market-title {
+  display: block;
+  font-size: 24rpx;
+  color: #f0f0f0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.chaos-market-meta { display: block; margin-top: 3rpx; font-size: 20rpx; color: #64748b; }
+.chaos-market-right { width: 150rpx; text-align: right; }
+.chaos-market-prob {
+  display: block;
+  font-size: 24rpx;
+  color: #f5c518;
+  font-variant-numeric: tabular-nums;
+}
+.chaos-market-delta {
+  display: block;
+  margin-top: 3rpx;
+  font-size: 20rpx;
+  font-variant-numeric: tabular-nums;
+}
+.chaos-driver-head,
+.chaos-driver-row {
+  display: flex;
+  align-items: center;
+  border-bottom: 1px solid #15243c;
+}
+.chaos-driver-head { padding: 8rpx 0; }
+.chaos-driver-row { padding: 12rpx 0; }
+.chaos-driver-row:last-child { border-bottom: none; }
+.chaos-driver-col {
+  width: 120rpx;
+  text-align: right;
+  font-size: 22rpx;
+  color: #cbd5e1;
+  font-variant-numeric: tabular-nums;
+}
+.chaos-driver-title-col { flex: 1; text-align: left; width: auto; min-width: 0; }
+.chaos-driver-title {
+  display: block;
+  font-size: 23rpx;
+  color: #f0f0f0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.chaos-driver-meta { display: block; margin-top: 3rpx; font-size: 19rpx; color: #64748b; }
+.chaos-cat-row { margin-bottom: 14rpx; }
+.chaos-cat-row:last-child { margin-bottom: 0; }
+.chaos-cat-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8rpx;
+}
+.chaos-cat-label { font-size: 22rpx; color: #dbeafe; }
+.chaos-cat-total {
+  font-size: 22rpx;
+  color: #f8fafc;
+  font-variant-numeric: tabular-nums;
+}
+.chaos-bar-wrap {
+  height: 16rpx;
+  background: #13223a;
+  border-radius: 999rpx;
+  border: 1px solid #1f2f4c;
+  overflow: hidden;
+  display: flex;
+}
+.chaos-bar-base { height: 100%; background: linear-gradient(90deg, #22c55e, #16a34a); }
+.chaos-bar-esca { height: 100%; background: linear-gradient(90deg, #38bdf8, #3b82f6); }
 
 /* 通用 */
 .center-tip { text-align: center; padding: 60rpx 0; }
