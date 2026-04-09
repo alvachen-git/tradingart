@@ -19,14 +19,14 @@ from typing import Optional
 
 _NIGHT_SESSION_PRODUCTS = {
     # SHFE / INE
-    "au", "ag", "cu", "al", "zn", "pb", "ni", "sn", "rb", "hc", "ss",
+    "au", "ag", "cu", "al", "zn", "pb", "ni", "sn", "rb", "hc", "ss", "br",
     "fu", "bu", "ru", "sp", "sc", "lu", "bc", "ao",
     # DCE
     "a", "b", "m", "y", "p", "c", "cs", "jd", "l", "pp", "v", "eb",
-    "eg", "j", "jm", "i", "rr", "pg", "lh",
+    "eg", "j", "jm", "i", "rr", "pg",
     # CZCE
     "sr", "cf", "ta", "ma", "rm", "oi", "zc", "fg", "sa", "ur", "ap",
-    "cj", "lc", "si", "ps", "pr", "sf", "sm", "pf", "cy",
+    "pr", "pf", "cy",
 }
 
 _SH_TZ = timezone(timedelta(hours=8))
