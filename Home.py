@@ -24,12 +24,14 @@ import time
 import extra_streamlit_components as stx
 import streamlit.components.v1 as components
 import uuid #用于生成唯一ID
+import base64
 from market_tools import get_market_snapshot,tool_query_specific_option
 from ui_components import inject_sidebar_toggle_style
 from sqlalchemy import text
 from dotenv import load_dotenv
 from pathlib import Path
 from zoneinfo import ZoneInfo
+import requests
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.outputs import LLMResult
 # --- AI 相关导入 ---
@@ -764,6 +766,22 @@ def native_share_button(user_content, ai_content, key):
     container_id = f"share-container-{unique_id}"
     btn_id = f"btn-{unique_id}"
     share_qr_url = "https://aiprota-img.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2026-04-09%20%E4%B8%8B%E5%8D%886.05.01.png"
+    share_qr_src = share_qr_url
+    try:
+        # OSS 未开启 CORS 时，浏览器侧 html2canvas 无法稳定抓取跨域图；先在后端转 data URL。
+        resp = requests.get(
+            share_qr_url,
+            timeout=8,
+            headers={
+                "User-Agent": "Mozilla/5.0",
+                "Referer": "https://www.aiprota.com/",
+            },
+        )
+        resp.raise_for_status()
+        mime_type = (resp.headers.get("Content-Type") or "image/png").split(";")[0].strip() or "image/png"
+        share_qr_src = f"data:{mime_type};base64,{base64.b64encode(resp.content).decode('ascii')}"
+    except Exception as e:
+        print(f"[Share] QR code preload failed, fallback to url: {e}")
 
     # Markdown 转 HTML
     html_content = markdown.markdown(
@@ -829,10 +847,9 @@ def native_share_button(user_content, ai_content, key):
             </div>
             <div style="text-align:center; margin-left: 12px;">
                 <img
-                    src="{share_qr_url}"
-                    crossorigin="anonymous"
+                    src="{share_qr_src}"
                     alt="爱波塔小程序二维码"
-                    onerror="this.parentElement.style.display='none';"
+                    onerror="this.style.display='none';"
                     style="display:block; width:72px; height:72px; padding:4px; border-radius:8px; background:#ffffff;"
                 />
                 <div style="margin-top:4px; font-size:10px; color:#94a3b8;">扫码使用小程序</div>
