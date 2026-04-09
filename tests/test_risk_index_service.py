@@ -136,6 +136,71 @@ class TestRiskIndexService(unittest.TestCase):
         self.assertIn("美国", title)
         self.assertIn("古巴", title)
 
+    def test_conditional_outcome_market_is_classified_and_localized_correctly(self):
+        candidate = {
+            "market_title": "Will the Iranian regime survive U.S. military strikes?",
+            "event_title": "Will the Iranian regime survive U.S. military strikes?",
+            "market_slug": "will-the-iranian-regime-survive-us-military-strikes",
+            "event_slug": "will-the-iranian-regime-survive-us-military-strikes",
+        }
+        countries = svc._detect_candidate_countries(candidate)
+        semantics = svc._dynamic_market_semantics(candidate, countries)
+        title = svc._localized_dynamic_title(candidate, countries, market_semantics=semantics)
+        self.assertEqual(semantics, "conditional_outcome")
+        self.assertEqual(title, "美国打击伊朗后的政权存续风险")
+
+    def test_direct_conflict_market_remains_direct_semantics(self):
+        candidate = {
+            "market_title": "Israel x Turkey military clash before 2027?",
+            "event_title": "Israel x Turkey military clash before 2027?",
+            "market_slug": "israel-x-turkey-military-clash-before-2027",
+            "event_slug": "israel-x-turkey-military-clash-before-2027",
+        }
+        countries = svc._detect_candidate_countries(candidate)
+        semantics = svc._dynamic_market_semantics(candidate, countries)
+        self.assertEqual(semantics, "direct_conflict")
+
+    def test_conditional_outcome_market_is_downweighted_in_dynamic_conflicts(self):
+        candidates = [
+            {
+                "market_title": "Will the Iranian regime survive U.S. military strikes?",
+                "event_title": "Will the Iranian regime survive U.S. military strikes?",
+                "market_slug": "will-the-iranian-regime-survive-us-military-strikes",
+                "event_slug": "will-the-iranian-regime-survive-us-military-strikes",
+                "volume24hr": 300000,
+                "outcomePrices": [0.90, 0.10],
+            },
+            {
+                "market_title": "US strike on Cuba by December 31?",
+                "event_title": "US strike on Cuba by December 31?",
+                "market_slug": "us-strike-on-cuba-by-december-31",
+                "event_slug": "us-strike-on-cuba-by-december-31",
+                "volume24hr": 300000,
+                "outcomePrices": [0.90, 0.10],
+            },
+        ]
+        items = svc._build_dynamic_conflict_markets(candidates, set(), now=datetime(2026, 4, 9, 10, 0, tzinfo=BEIJING_TZ))
+        by_slug = {item["event_slug"]: item for item in items}
+        conditional_item = by_slug["will-the-iranian-regime-survive-us-military-strikes"]
+        direct_item = by_slug["us-strike-on-cuba-by-december-31"]
+        self.assertEqual(conditional_item["market_semantics"], "conditional_outcome")
+        self.assertEqual(direct_item["market_semantics"], "direct_conflict")
+        self.assertAlmostEqual(conditional_item["semantics_weight_multiplier"], 0.35, places=6)
+        self.assertLess(conditional_item["event_raw"], direct_item["event_raw"])
+
+    def test_conditional_outcome_explanation_mentions_consequence_pricing(self):
+        item = {
+            "event_key": "dynamic::test",
+            "display_title": "美国打击伊朗后的政权存续风险",
+            "probability": 0.90,
+            "delta_24h": 0.02,
+            "market_semantics": "conditional_outcome",
+        }
+        explanation, status = svc._make_explanation_result(item, use_external_news=True)
+        self.assertEqual(status, "fallback")
+        self.assertIn("冲突后果", explanation["one_line_reason"])
+        self.assertIn("不等于冲突本身发生概率", explanation["one_line_reason"])
+
     def test_country_detection_ignores_description_side_context(self):
         candidate = {
             "market_title": "Will Israel take military action in Gaza on April 5, 2026?",

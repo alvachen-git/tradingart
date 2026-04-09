@@ -570,6 +570,44 @@ def _dynamic_region_tag(country_codes: List[str]) -> str:
     return "global"
 
 
+def _dynamic_market_semantics(candidate: Dict[str, Any], country_codes: List[str]) -> str:
+    if len(country_codes) < 2:
+        return "direct_conflict"
+    combined = _normalize_text(
+        " ".join(
+            [
+                _safe_text(candidate.get("market_title")),
+                _safe_text(candidate.get("event_title")),
+                _safe_text(candidate.get("market_slug")),
+                _safe_text(candidate.get("event_slug")),
+            ]
+        )
+    )
+    conditional_terms = [
+        _normalize_text(item)
+        for item in RISK_INDEX_CONFIG.get("dynamic_conflict_conditional_keywords", [])
+        if _safe_text(item)
+    ]
+    action_terms = [
+        _normalize_text(item)
+        for item in RISK_INDEX_CONFIG.get("dynamic_conflict_action_keywords", [])
+        if _safe_text(item)
+    ]
+    has_action = any(term and term in combined for term in action_terms)
+    has_conditional = any(term and term in combined for term in conditional_terms)
+    if not (has_action and has_conditional):
+        return "direct_conflict"
+    if "survive" in combined and "strike" in combined:
+        return "conditional_outcome"
+    if "regime" in combined and ("strike" in combined or "attack" in combined or "military action" in combined):
+        return "conditional_outcome"
+    if ("collapse" in combined or "fall" in combined or "removed" in combined or "overthrown" in combined) and (
+        "after" in combined or "following" in combined
+    ):
+        return "conditional_outcome"
+    return "direct_conflict"
+
+
 def _market_theme_key(item: Dict[str, Any]) -> str:
     event_slug = _safe_text(item.get("event_slug")).lower()
     if event_slug:
@@ -585,7 +623,7 @@ def _market_theme_key(item: Dict[str, Any]) -> str:
     return title
 
 
-def _localized_dynamic_title(candidate: Dict[str, Any], country_codes: List[str]) -> str:
+def _localized_dynamic_title(candidate: Dict[str, Any], country_codes: List[str], market_semantics: str = "direct_conflict") -> str:
     ordered = _ordered_candidate_countries(candidate)
     countries = ordered or country_codes
     countries = [code for code in countries if code in _COUNTRY_LABELS_ZH]
@@ -602,6 +640,16 @@ def _localized_dynamic_title(candidate: Dict[str, Any], country_codes: List[str]
     if len(countries) >= 2:
         a = _COUNTRY_LABELS_ZH.get(countries[0], countries[0])
         b = _COUNTRY_LABELS_ZH.get(countries[1], countries[1])
+        if market_semantics == "conditional_outcome":
+            actor = b
+            target = a
+            if "survive" in combined and "regime" in combined and "strike" in combined:
+                return f"{actor}打击{target}后的政权存续风险"
+            if "survive" in combined and "strike" in combined:
+                return f"{actor}打击{target}后的结果风险"
+            if "collapse" in combined or "fall" in combined or "removed" in combined or "overthrown" in combined:
+                return f"{actor}-{target}冲突后果风险"
+            return f"{actor}-{target}结果风险"
         if "invade" in combined or "invasion" in combined:
             return f"{a}入侵{b}风险"
         if "strike" in combined:
@@ -649,22 +697,28 @@ def _build_dynamic_conflict_markets(
             continue
 
         countries = _detect_candidate_countries(candidate)
+        market_semantics = _dynamic_market_semantics(candidate, countries)
         country_weight = _dynamic_country_weight(countries)
         probability = extract_probability_from_market(candidate)
         if probability <= 0:
             continue
         liquidity_usd = extract_liquidity_usd_from_market(candidate)
         liquidity_factor = calc_liquidity_factor(liquidity_usd)
-        event_raw = probability * base_impact * country_weight * liquidity_factor
+        semantics_multiplier = (
+            _to_float(RISK_INDEX_CONFIG.get("conditional_outcome_weight_multiplier"), 0.35)
+            if market_semantics == "conditional_outcome"
+            else 1.0
+        )
+        event_raw = probability * base_impact * country_weight * liquidity_factor * semantics_multiplier
         item = {
             "event_key": f"dynamic::{_safe_text(candidate.get('market_slug') or candidate.get('event_slug') or identity)}",
-            "display_title": _localized_dynamic_title(candidate, countries),
+            "display_title": _localized_dynamic_title(candidate, countries, market_semantics=market_semantics),
             "category": "military_conflict",
             "region_tag": _dynamic_region_tag(countries),
             "pair_tag": _dynamic_pair_tag(countries),
             "probability": probability,
             "delta_24h": extract_delta_24h_from_market(candidate),
-            "impact_weight": round(base_impact * country_weight, 4),
+            "impact_weight": round(base_impact * country_weight * semantics_multiplier, 4),
             "liquidity_usd": liquidity_usd,
             "liquidity_factor": liquidity_factor,
             "event_raw": event_raw,
@@ -674,6 +728,8 @@ def _build_dynamic_conflict_markets(
             "event_slug": _safe_text(candidate.get("event_slug")),
             "country_codes": sorted(set(countries)),
             "is_dynamic_conflict": True,
+            "market_semantics": market_semantics,
+            "semantics_weight_multiplier": round(semantics_multiplier, 4),
         }
         theme_key = _canonical_pair_tag_from_codes(countries)
         if not theme_key or theme_key == "DYNAMIC_CONFLICT":
@@ -1024,6 +1080,20 @@ def _make_explanation_result(top_market: Dict[str, Any], use_external_news: bool
     probability = normalize_probability(top_market.get("probability"))
     delta = _to_float(top_market.get("delta_24h"), 0.0)
     delta_text = f"{delta * 100:+.1f}%"
+    market_semantics = _safe_text(top_market.get("market_semantics")) or "direct_conflict"
+    if market_semantics == "conditional_outcome":
+        conditional_reason = (
+            f"{title} 当前市场定价约为 {probability * 100:.1f}%，24 小时变化 {delta_text}，"
+            f"这是对潜在冲突后果的定价，不等于冲突本身发生概率。"
+        )
+        return (
+            {
+                "event_key": _safe_text(top_market.get("event_key")),
+                "one_line_reason": conditional_reason,
+                "source_links": [],
+            },
+            "fallback",
+        )
     fallback_reason = (
         f"{title} 当前市场定价约为 {probability * 100:.1f}%，24 小时变化 {delta_text}，"
         f"属于 {RISK_CATEGORIES.get(_safe_text(top_market.get('category')), '风险')} 的核心扰动。"
@@ -1267,6 +1337,7 @@ def build_risk_snapshot(
                 "market_slug": _safe_text(selected.get("market_slug")),
                 "event_slug": _safe_text(selected.get("event_slug")),
                 "is_dynamic_conflict": False,
+                "market_semantics": "direct_conflict",
             }
         )
 

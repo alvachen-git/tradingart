@@ -73,6 +73,7 @@ RISK_INDEX_CONFIG = {
     "monitored_markets_limit": 24,
     "dynamic_conflict_limit": 36,
     "dynamic_conflict_base_impact": 0.55,
+    "conditional_outcome_weight_multiplier": 0.35,
     "dynamic_conflict_country_weights": {
         "USA": 1.00,
         "CHN": 1.00,
@@ -80,6 +81,16 @@ RISK_INDEX_CONFIG = {
         "IND": 0.75,
         "default": 0.35,
     },
+    "dynamic_conflict_conditional_keywords": [
+        "survive",
+        "regime",
+        "collapse",
+        "fall",
+        "removed",
+        "overthrown",
+        "after",
+        "following",
+    ],
     "dynamic_conflict_action_keywords": [
         "war",
         "strike",
