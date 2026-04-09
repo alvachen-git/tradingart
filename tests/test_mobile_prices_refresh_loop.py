@@ -33,6 +33,16 @@ class _FakeRedis:
 
 @unittest.skipIf(mobile_api is None, f"mobile_api import failed: {_IMPORT_ERROR}")
 class TestMobilePricesRefreshLoop(unittest.TestCase):
+    def test_should_use_live_when_trading_day_is_newer_than_db(self):
+        live = {"price": 621.0, "trading_day": "20260408"}
+        out = mobile_api._should_use_live_contract_for_display(live, "20260407", fresh=False)
+        self.assertTrue(out)
+
+    def test_should_not_use_live_when_same_day_and_not_fresh(self):
+        live = {"price": 621.0, "trading_day": "20260408"}
+        out = mobile_api._should_use_live_contract_for_display(live, "20260408", fresh=False)
+        self.assertFalse(out)
+
     def test_market_prices_touches_consumer_heartbeat(self):
         fake_redis = _FakeRedis()
         fake_redis.setex(
@@ -205,6 +215,80 @@ class TestMobilePricesRefreshLoop(unittest.TestCase):
         row = out["items"][0]
         self.assertEqual(row["cur_price"], 5317.0)
         self.assertEqual(row["pct_1d"], 0.63)
+
+    def test_market_options_uses_stale_live_when_db_day_is_behind(self):
+        df = pd.DataFrame([
+            {
+                "合约": "SC2605 (原油)",
+                "当前IV": 0.0,
+                "IV Rank": 97,
+                "IV变动(日)": 0.0,
+                "涨跌%(日)": 0.0,
+                "涨跌%(5日)": -1.0,
+                "散户变动(日)": 0,
+                "机构变动(日)": 0,
+            }
+        ])
+        iv_recent_df = pd.DataFrame()
+        price_df = pd.DataFrame([
+            {"code": "sc2605", "td": "20260407", "close_price": 710.0},
+        ])
+        stale_live_payload = {
+            "items": [],
+            "contracts": {"SC2605": {"price": 621.0, "pct": -12.31, "trading_day": "20260408"}},
+            "is_trading": False,
+            "refreshed_at": "15:00:00",
+            "refreshed_ts": int(time.time()) - 99999,
+        }
+        with patch.object(mobile_api.de, "get_comprehensive_market_data", return_value=df), patch.object(
+            mobile_api, "_get_option_product_codes", return_value={"sc"}
+        ), patch.object(
+            mobile_api, "_load_shared_prices_payload", return_value=stale_live_payload
+        ), patch.object(
+            mobile_api, "_PRICES_LIVE_OVERRIDE_MAX_AGE_SEC", 60
+        ), patch(
+            "pandas.read_sql", side_effect=[iv_recent_df, price_df]
+        ):
+            out = mobile_api.market_options(username="u1")
+
+        self.assertTrue(out.get("items"))
+        row = out["items"][0]
+        self.assertEqual(row["cur_price"], 621.0)
+        self.assertEqual(row["pct_1d"], -12.31)
+
+    def test_market_options_keeps_rank_for_index_when_catalog_missing(self):
+        df = pd.DataFrame([
+            {
+                "合约": "IF2606 (沪深300)",
+                "当前IV": 16.89,
+                "IV Rank": 9,
+                "IV变动(日)": 0.0,
+                "涨跌%(日)": -0.89,
+                "涨跌%(5日)": 1.14,
+                "散户变动(日)": 0,
+                "机构变动(日)": 0,
+            }
+        ])
+        iv_recent_df = pd.DataFrame([
+            {"code": "if2606", "td": "20260408", "iv": 16.89},
+            {"code": "if2606", "td": "20260407", "iv": 16.20},
+        ])
+        price_df = pd.DataFrame([
+            {"code": "if2606", "td": "20260408", "close_price": 4499.0},
+        ])
+        with patch.object(mobile_api.de, "get_comprehensive_market_data", return_value=df), patch.object(
+            mobile_api, "_get_option_product_codes", return_value=set()
+        ), patch.object(
+            mobile_api, "_load_shared_prices_payload", return_value={"items": [], "contracts": {}, "refreshed_ts": 0}
+        ), patch(
+            "pandas.read_sql", side_effect=[iv_recent_df, price_df]
+        ):
+            out = mobile_api.market_options(username="u1")
+
+        self.assertTrue(out.get("items"))
+        row = out["items"][0]
+        self.assertEqual(row["iv_rank"], 9.0)
+        self.assertEqual(row["iv_chg_1d"], 0.69)
 
     def test_fresh_live_contracts_map_drops_stale_snapshot(self):
         stale_payload = {

@@ -287,6 +287,26 @@ def _extract_product_code_from_contract(name: str) -> str:
     return m.group(1).lower() if m else ""
 
 
+def _row_implies_has_option(raw_iv: Any, iv_rank_raw: Any) -> bool:
+    """
+    从单行综合数据推断“该品种/合约有期权”。
+    用于补齐 commodity_option_basic 未覆盖的品类（如股指相关）。
+    """
+    iv_val = _safe_float(raw_iv, 0.0)
+    if iv_val > 0:
+        return True
+
+    rank_text = str(iv_rank_raw or "").strip()
+    if not rank_text:
+        return False
+    if rank_text == "快到期":
+        return True
+    try:
+        return float(rank_text) > 0
+    except Exception:
+        return False
+
+
 def _get_option_product_codes(cache_ttl_sec: int = 600) -> set[str]:
     """读取“有期权品种”清单（带短缓存）。"""
     now_ts = time.time()
@@ -568,6 +588,30 @@ def _extract_contract_code(raw_name: str) -> str:
     text = text.split("(")[0].strip()
     m = re.match(r"^([A-Z]+[0-9]{3,4})$", text)
     return m.group(1) if m else ""
+
+
+def _should_use_live_contract_for_display(
+    live_row: Optional[dict],
+    db_trade_day: str,
+    *,
+    fresh: bool,
+) -> bool:
+    """
+    展示层是否采用实时合约价覆盖。
+    规则：
+    1) 若实时交易日 > DB交易日，则无条件使用实时（直到DB追平）。
+    2) 若交易日相同，仅在实时快照“新鲜”时使用实时覆盖。
+    """
+    if not isinstance(live_row, dict):
+        return False
+    live_price = _safe_float(live_row.get("price"), 0.0)
+    if live_price <= 0:
+        return False
+    live_td = str(live_row.get("trading_day") or "").strip()
+    db_td = str(db_trade_day or "").strip()
+    if live_td and (not db_td or live_td > db_td):
+        return True
+    return bool(fresh)
 
 
 def _try_acquire_prices_refresh_lock() -> tuple[bool, str]:
@@ -2192,6 +2236,7 @@ def market_options(username: str = Depends(get_current_user)):
         for _, row in df.iterrows():
             iv_rank = row.get("IV Rank", 0)
             is_expiring = str(iv_rank).strip() == "快到期"
+            raw_iv = float(row.get("当前IV", 0) or 0)
             try:
                 iv_rank_num = float(iv_rank) if iv_rank not in ("快到期", None, "") else IV_RANK_EXPIRING
             except Exception:
@@ -2200,10 +2245,10 @@ def market_options(username: str = Depends(get_current_user)):
             # 提取品种代码（合约格式如 "m2605 (豆粕)"，取括号前的字母部分）
             name_str = str(row.get("合约", ""))
             product_code = _extract_product_code_from_contract(name_str)
-            has_option = product_code in option_product_codes
-
-            # 当前IV：已经是百分比形式（如 18.53 = 18.53%），直接使用
-            raw_iv = float(row.get("当前IV", 0) or 0)
+            has_option = (
+                product_code in option_product_codes
+                or _row_implies_has_option(raw_iv, iv_rank)
+            )
             # IV变动(日)：优先使用综合数据，缺失时走历史回退计算
             iv_chg_raw = row.get("IV变动(日)", None)
             iv_chg_missing = _is_missing_value(iv_chg_raw)
@@ -2266,6 +2311,8 @@ def market_options(username: str = Depends(get_current_user)):
                 pass
 
         # ── 批量查询最新收盘价 ────────────────────────────────
+        db_trade_day_map: dict[str, str] = {}
+
         if records:
             try:
                 # name 格式如 "EB2604 (苯乙烯)"，提取合约代码小写
@@ -2275,6 +2322,7 @@ def market_options(username: str = Depends(get_current_user)):
                     f"""
                     SELECT
                         LOWER(SUBSTRING_INDEX(ts_code, '.', 1)) AS code,
+                        REPLACE(trade_date,'-','')              AS td,
                         close_price
                     FROM futures_price
                     WHERE LOWER(SUBSTRING_INDEX(ts_code, '.', 1)) IN ('{codes_sql}')
@@ -2285,24 +2333,34 @@ def market_options(username: str = Depends(get_current_user)):
                     de.engine
                 )
                 if not price_df.empty:
-                    price_map = price_df.groupby("code")["close_price"].first().to_dict()
+                    latest_price_df = price_df.drop_duplicates(subset=["code"], keep="first")
+                    price_map = latest_price_df.set_index("code")["close_price"].to_dict()
+                    db_trade_day_map = latest_price_df.set_index("code")["td"].astype(str).to_dict()
                     for r in records:
                         code = r["name"].split("(")[0].strip().lower()
                         r["cur_price"] = round(float(price_map.get(code, 0) or 0), 2)
+                        r["_db_td"] = str(db_trade_day_map.get(code) or "")
             except Exception:
                 pass  # 价格查询失败不影响其他字段
 
-        # ── 用实时缓存覆盖收盘后的最后一笔价格/涨跌，避免回落到DB午盘价 ─────────
+        # ── 用实时缓存覆盖列表价格/涨跌：
+        # 1) 实时交易日 > DB交易日：无条件覆盖（直到DB追平）
+        # 2) 同交易日：仅新鲜快照覆盖
         try:
             live_payload = _load_shared_prices_payload()
-            live_contracts = _get_fresh_live_contracts_map(live_payload)
-            if live_contracts:
+            fresh_live_contracts = _get_fresh_live_contracts_map(live_payload)
+            all_live_contracts = live_payload.get("contracts", {}) if isinstance(live_payload, dict) else {}
+            if isinstance(all_live_contracts, dict) and all_live_contracts:
                 for r in records:
                     contract_code = _extract_contract_code(r.get("name", ""))
                     if not contract_code:
                         continue
-                    live = live_contracts.get(contract_code)
+                    live = all_live_contracts.get(contract_code)
                     if not isinstance(live, dict):
+                        continue
+                    db_td = str(r.get("_db_td") or "")
+                    is_fresh = isinstance(fresh_live_contracts.get(contract_code), dict)
+                    if not _should_use_live_contract_for_display(live, db_td, fresh=is_fresh):
                         continue
                     live_price = _safe_float(live.get("price"), 0.0)
                     if live_price > 0:
@@ -2314,6 +2372,7 @@ def market_options(username: str = Depends(get_current_user)):
 
         for r in records:
             r.pop("_iv_chg_missing", None)
+            r.pop("_db_td", None)
 
         # 按 IV Rank 降序排列，快到期(-1)排最后
         records.sort(key=lambda x: x["iv_rank"] if x["iv_rank"] >= 0 else -999, reverse=True)
@@ -2437,7 +2496,8 @@ def market_contracts(product: str, username: str = Depends(get_current_user)):
             cur_iv  = float(iv_map.get(ts, 0) or 0)
             prev_iv = float(iv_prev_map.get(ts, 0) or 0)
             iv_chg  = round(cur_iv - prev_iv, 2) if prev_iv > 0 else 0.0
-            if not has_option:
+            row_has_option = has_option or cur_iv > 0 or prev_iv > 0
+            if not row_has_option:
                 rank = IV_RANK_NO_OPTION
             else:
                 rank = iv_rank(ts, cur_iv)
@@ -2588,15 +2648,23 @@ def market_chart(
                 if isinstance(cached_payload, dict):
                     if is_trading_now:
                         return cached_payload
-                    if selected_contract:
-                        fresh_contracts = _get_fresh_live_contracts_map()
-                        fresh_live_row = fresh_contracts.get(selected_contract) if fresh_contracts else None
-                        if isinstance(fresh_live_row, dict):
-                            live_price = _safe_float(fresh_live_row.get("price"), 0.0)
+                    cache_contract = selected_contract or str(cached_payload.get("main_contract") or "").strip().upper()
+                    if cache_contract:
+                        live_payload_for_cache = _load_shared_prices_payload()
+                        fresh_contracts = _get_fresh_live_contracts_map(live_payload_for_cache)
+                        all_contracts = (
+                            live_payload_for_cache.get("contracts", {})
+                            if isinstance(live_payload_for_cache, dict) else {}
+                        )
+                        live_row = all_contracts.get(cache_contract) if isinstance(all_contracts, dict) else None
+                        db_td_cached = str(cached_payload.get("db_cur_td") or "")
+                        is_fresh = isinstance(fresh_contracts.get(cache_contract), dict)
+                        if _should_use_live_contract_for_display(live_row, db_td_cached, fresh=is_fresh):
+                            live_price = _safe_float((live_row or {}).get("price"), 0.0)
                             cached_cur = _safe_float(cached_payload.get("cur_price"), 0.0)
                             if live_price > 0 and abs(live_price - cached_cur) >= 1e-8:
-                                # 收盘后如果实时最新价与缓存价不一致，强制回源重算
-                                raise ValueError("stale_chart_cache_vs_fresh_live_price")
+                                # 收盘后如果实时目标价与缓存价不一致，强制回源重算
+                                raise ValueError("stale_chart_cache_vs_live_price")
                     # 收盘后：若缓存是盘中实时覆盖产物（cur != db close），或旧缓存缺少 db 对照字段，则不直接复用
                     db_cur = cached_payload.get("db_cur_price")
                     cur = cached_payload.get("cur_price")
@@ -2682,11 +2750,20 @@ def market_chart(
             ohlc_df["dt"] = ohlc_df["dt"].astype(str)
         db_cur_price = round(float(ohlc_df.iloc[-1]["c"]), 2) if not ohlc_df.empty else None
         db_cur_pct = round(float(ohlc_df.iloc[-1]["pct_chg"]), 2) if not ohlc_df.empty else None
+        db_cur_td = str(ohlc_df.iloc[-1]["dt"]) if not ohlc_df.empty else ""
 
-        # ── 2.1 用实时缓存覆盖末根K线，收盘后保持最后一笔，不回退到DB午盘价 ───────
+        # ── 2.1 用实时缓存覆盖末根K线：
+        # 若实时交易日领先DB交易日，收盘后也继续保留最后一笔实时价，直到DB追平。
         live_payload = _load_shared_prices_payload()
-        live_contracts = _get_fresh_live_contracts_map(live_payload)
-        live_row = live_contracts.get(main_contract) if live_contracts else None
+        fresh_live_contracts = _get_fresh_live_contracts_map(live_payload)
+        all_live_contracts = live_payload.get("contracts", {}) if isinstance(live_payload, dict) else {}
+        live_row_raw = all_live_contracts.get(main_contract) if isinstance(all_live_contracts, dict) else None
+        use_live_for_display = _should_use_live_contract_for_display(
+            live_row_raw,
+            db_cur_td,
+            fresh=isinstance((fresh_live_contracts or {}).get(main_contract), dict),
+        )
+        live_row = live_row_raw if use_live_for_display else None
         live_td = ""
         live_price = 0.0
         live_pct: Optional[float] = None
@@ -2727,7 +2804,7 @@ def market_chart(
                     ohlc_df.at[last_idx, "l"] = min(last_low, live_price, last_open)
                     if live_pct is not None:
                         ohlc_df.at[last_idx, "pct_chg"] = live_pct
-                elif live_td and last_dt < live_td and is_trading_now:
+                elif live_td and last_dt < live_td:
                     prev_close = _safe_float(ohlc_df.at[last_idx, "c"], live_price)
                     if live_pct is not None:
                         pct_value = live_pct
@@ -2875,6 +2952,7 @@ def market_chart(
             "cur_pct":       cur_pct,
             "db_cur_price":  db_cur_price,
             "db_cur_pct":    db_cur_pct,
+            "db_cur_td":     db_cur_td,
             "cur_iv":        cur_iv,
             "dumb_chg_1d":   dumb_chg_1d,
             "ohlc":          ohlc_list,
