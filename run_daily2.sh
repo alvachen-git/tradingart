@@ -8,12 +8,23 @@ PYTHON_BIN="${APP_DIR}/venv/bin/python"
 FAILED_STEPS=0
 US_CHUNK_STATE_FILE="${APP_DIR}/.us_chunk_state"
 LOCK_FILE="/tmp/run_daily2.lock"
+
+# Step timeout controls (seconds)
 DEFAULT_STEP_TIMEOUT_SECONDS="${DEFAULT_STEP_TIMEOUT_SECONDS:-2400}"
 STEP1_TIMEOUT_SECONDS="${STEP1_TIMEOUT_SECONDS:-2400}"
 STEP2_TIMEOUT_SECONDS="${STEP2_TIMEOUT_SECONDS:-2400}"
 STEP3_TIMEOUT_SECONDS="${STEP3_TIMEOUT_SECONDS:-1800}"
 STEP4_TIMEOUT_SECONDS="${STEP4_TIMEOUT_SECONDS:-1800}"
 STEP5_TIMEOUT_SECONDS="${STEP5_TIMEOUT_SECONDS:-1800}"
+
+# DXY guard defaults for update_micro_daily.py (can still be overridden by env)
+DXY_REQUIRED="${DXY_REQUIRED:-1}"
+DXY_MAX_STALE_DAYS="${DXY_MAX_STALE_DAYS:-3}"
+DXY_FETCH_ROUNDS="${DXY_FETCH_ROUNDS:-4}"
+DXY_RETRY_SLEEP_SECONDS="${DXY_RETRY_SLEEP_SECONDS:-60}"
+DXY_BACKFILL_DAYS="${DXY_BACKFILL_DAYS:-60}"
+DXY_FRED_FETCH_DAYS="${DXY_FRED_FETCH_DAYS:-180}"
+DXY_FRED_SERIES_CANDIDATES="${DXY_FRED_SERIES_CANDIDATES:-DTWEXBGS,DTWEXAFEGS,DTWEXEMEGS,DTWEXM}"
 
 cd "${APP_DIR}" || exit 1
 
@@ -57,7 +68,6 @@ run_step() {
 
   timeout_seconds="$(normalize_timeout "${5:-${DEFAULT_STEP_TIMEOUT_SECONDS}}")"
   started_at=$(date +%s)
-
   echo ">>> [${idx}/${total}] 开始${title} (timeout=${timeout_seconds}s)..." >> "${LOG_FILE}"
 
   if command -v timeout >/dev/null 2>&1; then
@@ -80,7 +90,7 @@ run_step() {
   fi
   echo "" >> "${LOG_FILE}"
 
-  if [ ${rc} -ne 0 ]; then
+  if [ "${rc}" -ne 0 ]; then
     FAILED_STEPS=$((FAILED_STEPS + 1))
   fi
 }
@@ -121,34 +131,39 @@ prepare_us_chunk_env() {
 }
 
 check_dxy_freshness() {
-  local source_line backfill_line latest_line
-  local dxy_source dxy_backfilled latest_date
-  local now_epoch latest_epoch age_days
+  local source_line backfill_line latest_line age_line
+  local dxy_source dxy_backfilled latest_date age_days
+  local now_epoch latest_epoch
 
   source_line=$(grep -E "DXY_SOURCE=" "${LOG_FILE}" | tail -n 1 || true)
   backfill_line=$(grep -E "DXY_BACKFILLED_DATES=" "${LOG_FILE}" | tail -n 1 || true)
   latest_line=$(grep -E "DXY_LATEST_DATE=" "${LOG_FILE}" | tail -n 1 || true)
+  age_line=$(grep -E "DXY_AGE_DAYS=" "${LOG_FILE}" | tail -n 1 || true)
 
   dxy_source="${source_line#*=}"
   dxy_backfilled="${backfill_line#*=}"
   latest_date="${latest_line#*=}"
+  age_days="${age_line#*=}"
 
   if [ -z "${latest_line}" ] || [ -z "${latest_date}" ] || [ "${latest_date}" = "NONE" ]; then
-    echo "⚠️ DXY 新鲜度检查: 未获取到最新日期标记(DXY_LATEST_DATE)" >> "${LOG_FILE}"
+    echo "⚠️ DXY 新鲜度检查: 未获取到 DXY_LATEST_DATE" >> "${LOG_FILE}"
     return 0
   fi
 
-  latest_epoch=$(date -d "${latest_date}" +%s 2>/dev/null || echo "")
-  now_epoch=$(date +%s)
-  if [ -z "${latest_epoch}" ]; then
-    echo "⚠️ DXY 新鲜度检查: 无法解析日期 ${latest_date}" >> "${LOG_FILE}"
-    return 0
+  # Prefer application-emitted DXY_AGE_DAYS, fallback to local calc.
+  if ! [[ "${age_days}" =~ ^-?[0-9]+$ ]]; then
+    latest_epoch=$(date -d "${latest_date}" +%s 2>/dev/null || echo "")
+    now_epoch=$(date +%s)
+    if [ -z "${latest_epoch}" ]; then
+      echo "⚠️ DXY 新鲜度检查: 无法解析日期 ${latest_date}" >> "${LOG_FILE}"
+      return 0
+    fi
+    age_days=$(((now_epoch - latest_epoch) / 86400))
   fi
 
-  age_days=$(((now_epoch - latest_epoch) / 86400))
-  echo "ℹ️ DXY 状态: source=${dxy_source:-unknown}, backfilled=${dxy_backfilled:-0}, latest=${latest_date}, age_days=${age_days}" >> "${LOG_FILE}"
-  if [ ${age_days} -gt 3 ]; then
-    echo "⚠️ DXY 新鲜度告警: 最新日期距今 ${age_days} 天(>3天)，请人工检查宏观数据源" >> "${LOG_FILE}"
+  echo "ℹ️ DXY 状态: source=${dxy_source:-unknown}, backfilled=${dxy_backfilled:-0}, latest=${latest_date}, age_days=${age_days}, max_stale_days=${DXY_MAX_STALE_DAYS}" >> "${LOG_FILE}"
+  if [ "${age_days}" -gt "${DXY_MAX_STALE_DAYS}" ]; then
+    echo "⚠️ DXY 新鲜度告警: 最新日期距今 ${age_days} 天(>${DXY_MAX_STALE_DAYS}天)，请检查上游数据源" >> "${LOG_FILE}"
   fi
 }
 
@@ -158,16 +173,26 @@ echo "⏰ 任务开始: $(date)" >> "${LOG_FILE}"
 echo "🐍 Python: ${PYTHON_BIN}" >> "${LOG_FILE}"
 echo "🔒 Lock: ${LOCK_FILE}" >> "${LOG_FILE}"
 echo "⏱️ 默认步骤超时: ${DEFAULT_STEP_TIMEOUT_SECONDS}s" >> "${LOG_FILE}"
+echo "DXY_GUARD_CONFIG: required=${DXY_REQUIRED}, max_stale_days=${DXY_MAX_STALE_DAYS}, rounds=${DXY_FETCH_ROUNDS}, retry_sleep=${DXY_RETRY_SLEEP_SECONDS}s, backfill_days=${DXY_BACKFILL_DAYS}, fred_fetch_days=${DXY_FRED_FETCH_DAYS}, fred_candidates=${DXY_FRED_SERIES_CANDIDATES}" >> "${LOG_FILE}"
 
 run_step 1 5 "更新期货席位数据" "update_open_oneday.py" "${STEP1_TIMEOUT_SECONDS}"
 prepare_us_chunk_env
 run_step 2 5 "更新美股价格数据" "update_stock_tiingo.py" "${STEP2_TIMEOUT_SECONDS}"
 run_step 3 5 "更新债券收益数据" "update_bond_data.py" "${STEP3_TIMEOUT_SECONDS}"
 run_step 4 5 "更新热搜数据" "trend_monitor.py" "${STEP4_TIMEOUT_SECONDS}"
+
+export DXY_REQUIRED
+export DXY_MAX_STALE_DAYS
+export DXY_FETCH_ROUNDS
+export DXY_RETRY_SLEEP_SECONDS
+export DXY_BACKFILL_DAYS
+export DXY_FRED_FETCH_DAYS
+export DXY_FRED_SERIES_CANDIDATES
 run_step 5 5 "更新宏观数据" "update_micro_daily.py" "${STEP5_TIMEOUT_SECONDS}"
+
 check_dxy_freshness
 
-if [ ${FAILED_STEPS} -gt 0 ]; then
+if [ "${FAILED_STEPS}" -gt 0 ]; then
   echo "⚠️ 本次任务失败步骤数: ${FAILED_STEPS}" >> "${LOG_FILE}"
 else
   echo "✅ 本次任务全部步骤成功" >> "${LOG_FILE}"

@@ -35,6 +35,19 @@ VERBOSE_TRACEBACK = os.getenv("MACRO_VERBOSE_TRACEBACK", "0") == "1"
 FRED_API_KEY = os.getenv("FRED_API_KEY", "")
 DXY_FRED_SERIES_ID = os.getenv("DXY_FRED_SERIES_ID", "DTWEXM").strip() or "DTWEXM"
 DXY_BACKFILL_DAYS = int(os.getenv("DXY_BACKFILL_DAYS", "20"))
+DXY_REQUIRED = os.getenv("DXY_REQUIRED", "1").strip().lower() in {"1", "true", "yes", "on"}
+DXY_MAX_STALE_DAYS = int(os.getenv("DXY_MAX_STALE_DAYS", "3"))
+DXY_FETCH_ROUNDS = max(1, int(os.getenv("DXY_FETCH_ROUNDS", "3")))
+DXY_RETRY_SLEEP_SECONDS = max(1, int(os.getenv("DXY_RETRY_SLEEP_SECONDS", "45")))
+DXY_FRED_FETCH_DAYS = max(30, int(os.getenv("DXY_FRED_FETCH_DAYS", "180")))
+DXY_FRED_SERIES_CANDIDATES = [
+    s.strip()
+    for s in os.getenv(
+        "DXY_FRED_SERIES_CANDIDATES",
+        f"{DXY_FRED_SERIES_ID},DTWEXBGS,DTWEXAFEGS,DTWEXEMEGS",
+    ).split(",")
+    if s.strip()
+]
 
 # Third-party warning noise should not pollute daily update logs.
 warnings.filterwarnings("ignore", category=FutureWarning, module="akshare")
@@ -424,33 +437,34 @@ def _is_rate_limit_err(err: Exception) -> bool:
 
 
 def fetch_dxy_index() -> tuple[dict, str]:
-    """统一美元指数口径: Yahoo(DX-Y.NYB)主源, AkShare回退, FRED最终兜底。"""
+    """统一美元指数口径: Yahoo主源, AkShare回退, FRED多序列兜底。"""
     results = {}
     source = "none"
     print(f"  更新美元指数(近{LOOKBACK_DAYS}天)...")
 
-    # 1) 主源: Yahoo Finance
-    try:
-        def _fetch_dxy_yf():
-            ticker = yf.Ticker("DX-Y.NYB")
-            return ticker.history(period="1mo", interval="1d")
+    # 1) 主源: Yahoo Finance (双ticker容错)
+    for ticker in ("DX-Y.NYB", "DX=F"):
+        try:
+            def _fetch_dxy_yf():
+                t = yf.Ticker(ticker)
+                return t.history(period="2mo", interval="1d")
 
-        df = _retry_call("yfinance:DX-Y.NYB", _fetch_dxy_yf, attempts=2, base_sleep=3.0)
-        if not df.empty:
-            df = df.reset_index()
-            if "Date" in df.columns and pd.api.types.is_datetime64tz_dtype(df["Date"]):
-                df["Date"] = df["Date"].dt.tz_localize(None)
-            series_df = _normalize_series(df, "Date", "Close")
-            if not series_df.empty:
-                results["DXY"] = {"df": series_df, "name": "美元指数", "category": "fx"}
-                print(f"    ✓ DXY: 获取 {len(series_df)} 条 (source=yahoo:DX-Y.NYB)")
-                return results, "yahoo"
-        print("    ⚠️ Yahoo DXY 数据为空，切换 AkShare 回退源")
-    except Exception as e:
-        if _is_rate_limit_err(e):
-            print("    ⚠️ Yahoo DXY 被限流，切换 AkShare 回退源")
-        else:
-            print(f"    ⚠️ Yahoo DXY 异常，切换 AkShare 回退源: {e}")
+            df = _retry_call(f"yfinance:{ticker}", _fetch_dxy_yf, attempts=2, base_sleep=3.0)
+            if not df.empty:
+                df = df.reset_index()
+                if "Date" in df.columns and pd.api.types.is_datetime64tz_dtype(df["Date"]):
+                    df["Date"] = df["Date"].dt.tz_localize(None)
+                series_df = _normalize_series(df, "Date", "Close")
+                if not series_df.empty:
+                    results["DXY"] = {"df": series_df, "name": "美元指数", "category": "fx"}
+                    print(f"    ✓ DXY: 获取 {len(series_df)} 条 (source=yahoo:{ticker})")
+                    return results, f"yahoo:{ticker}"
+            print(f"    ⚠️ Yahoo({ticker}) DXY 数据为空，尝试下一源")
+        except Exception as e:
+            if _is_rate_limit_err(e):
+                print(f"    ⚠️ Yahoo({ticker}) 被限流，尝试下一源")
+            else:
+                print(f"    ⚠️ Yahoo({ticker}) 异常，尝试下一源: {e}")
 
     # 2) 回退: AkShare 东方财富
     try:
@@ -476,30 +490,100 @@ def fetch_dxy_index() -> tuple[dict, str]:
     except Exception as e:
         print(f"    ⚠️ AkShare DXY 异常，切换 FRED 兜底源: {e}")
 
-    # 3) 最终兜底: FRED (DTWEXM 默认，可通过环境变量切换)
-    try:
-        df_fred = _retry_call(
-            f"fred:{DXY_FRED_SERIES_ID}",
-            lambda: _fetch_fred_series(DXY_FRED_SERIES_ID),
-            attempts=2,
-            base_sleep=2.0,
-        )
-        if not df_fred.empty:
-            series_df = _normalize_series(df_fred, "trade_date", "close_value")
-            if not series_df.empty:
-                results["DXY"] = {"df": series_df, "name": "美元指数", "category": "fx"}
-                source = "fred"
-                print(f"    ✓ DXY: 获取 {len(series_df)} 条 (source=fred:{DXY_FRED_SERIES_ID})")
-                return results, source
+    # 3) 最终兜底: FRED 多候选序列
+    if not FRED_API_KEY:
+        print("    ⚠️ FRED 未配置，DXY 无可用兜底源")
+        return results, source
 
-        if not FRED_API_KEY:
-            print("    ⚠️ FRED 未配置，DXY 无可用兜底源")
-        else:
-            print(f"    ⚠️ FRED({DXY_FRED_SERIES_ID}) 返回空数据或无有效序列")
-    except Exception as e:
-        _log_error("    ❌ DXY 全部数据源失败", e)
+    fred_start = (datetime.now() - timedelta(days=DXY_FRED_FETCH_DAYS)).strftime("%Y-%m-%d")
+    fred_end = datetime.now().strftime("%Y-%m-%d")
+    for series_id in DXY_FRED_SERIES_CANDIDATES:
+        try:
+            df_fred = _retry_call(
+                f"fred:{series_id}",
+                lambda sid=series_id: _fetch_fred_series(
+                    sid,
+                    observation_start=fred_start,
+                    observation_end=fred_end,
+                ),
+                attempts=2,
+                base_sleep=2.0,
+            )
+            if df_fred.empty:
+                print(f"    ⚠️ FRED({series_id}) 返回空数据，尝试下一序列")
+                continue
+
+            # FRED 序列发布节奏可能慢于 LOOKBACK_DAYS，不用全局窗口截断。
+            series_df = _build_series(
+                df_fred,
+                "trade_date",
+                "close_value",
+                start_date=datetime.now() - timedelta(days=DXY_FRED_FETCH_DAYS),
+            )
+            if series_df.empty:
+                print(f"    ⚠️ FRED({series_id}) 归一化后为空，尝试下一序列")
+                continue
+
+            results["DXY"] = {"df": series_df, "name": "美元指数", "category": "fx"}
+            source = f"fred:{series_id}"
+            print(f"    ✓ DXY: 获取 {len(series_df)} 条 (source={source})")
+            return results, source
+        except Exception as e:
+            print(f"    ⚠️ FRED({series_id}) 异常，尝试下一序列: {e}")
+
+    print("    ❌ DXY 全部数据源失败")
 
     return results, source
+
+
+def _dxy_latest_age_days() -> tuple[str, int]:
+    latest = get_latest_indicator_date("DXY")
+    if latest == "NONE":
+        return latest, -1
+    latest_ts = pd.to_datetime(latest, errors="coerce")
+    if pd.isna(latest_ts):
+        return latest, -1
+    return latest, (datetime.now().date() - latest_ts.date()).days
+
+
+def ensure_dxy_daily_update() -> tuple[str, int, int, int]:
+    """
+    DXY 守护流程:
+    1) 多轮抓取写库
+    2) 每轮后做 FRED 缺口回补
+    3) 每轮检查最新日期是否满足新鲜度
+    """
+    total_backfilled = 0
+    total_saved = 0
+    last_source = "none"
+
+    for round_idx in range(1, DXY_FETCH_ROUNDS + 1):
+        print(f"  DXY 守护轮次: {round_idx}/{DXY_FETCH_ROUNDS}")
+        dxy_data, last_source = fetch_dxy_index()
+        total_saved += save_to_db(dxy_data)
+
+        backfilled = backfill_dxy_from_fred(DXY_BACKFILL_DAYS)
+        total_backfilled += backfilled
+
+        latest, age_days = _dxy_latest_age_days()
+        print(
+            f"DXY_GUARD_ROUND={round_idx}|SOURCE={last_source}|LATEST={latest}|"
+            f"AGE_DAYS={age_days}|BACKFILLED_TOTAL={total_backfilled}"
+        )
+
+        if age_days >= 0 and age_days <= DXY_MAX_STALE_DAYS:
+            return last_source, total_backfilled, age_days, total_saved
+
+        if round_idx < DXY_FETCH_ROUNDS:
+            sleep_sec = DXY_RETRY_SLEEP_SECONDS * round_idx
+            print(
+                f"  ⚠️ DXY 仍不新鲜(age_days={age_days}, threshold={DXY_MAX_STALE_DAYS})，"
+                f"{sleep_sec}s 后重试"
+            )
+            time.sleep(sleep_sec)
+
+    latest, age_days = _dxy_latest_age_days()
+    return last_source, total_backfilled, age_days, total_saved
 
 
 def _get_indicator_dates(indicator_code: str, start_dt: datetime, end_dt: datetime) -> set:
@@ -755,9 +839,8 @@ def run_daily_update() -> None:
 
     total = 0
     total += save_to_db(fetch_bond_yields())
-    dxy_data, dxy_source = fetch_dxy_index()
-    total += save_to_db(dxy_data)
-    dxy_backfilled = backfill_dxy_from_fred(DXY_BACKFILL_DAYS)
+    dxy_source, dxy_backfilled, dxy_age_days, dxy_saved_rows = ensure_dxy_daily_update()
+    total += dxy_saved_rows
     total += dxy_backfilled
     total += save_to_db(fetch_offshore_cny_yahoo())
     total += save_to_db(fetch_bdi_index())
@@ -769,10 +852,20 @@ def run_daily_update() -> None:
 
     print(f"\n任务完成! 共更新 {total} 条数据。")
     print(f"DXY_SOURCE={dxy_source}")
+    print(f"DXY_SAVED_ROWS={dxy_saved_rows}")
     print(f"DXY_BACKFILLED_DATES={dxy_backfilled}")
     print(f"DXY_LATEST_DATE={dxy_latest_date}")
+    print(f"DXY_AGE_DAYS={dxy_age_days}")
+    print(f"DXY_REQUIRED={1 if DXY_REQUIRED else 0}")
+    print(f"DXY_MAX_STALE_DAYS={DXY_MAX_STALE_DAYS}")
     print(f"FRED_FETCH_OK={','.join(sorted(fred_ok_codes)) if fred_ok_codes else 'NONE'}")
     print(f"FRED_FETCH_FAIL={','.join(sorted(fred_fail_codes)) if fred_fail_codes else 'NONE'}")
+
+    if DXY_REQUIRED and (dxy_age_days < 0 or dxy_age_days > DXY_MAX_STALE_DAYS):
+        raise RuntimeError(
+            f"DXY freshness check failed: latest={dxy_latest_date}, "
+            f"age_days={dxy_age_days}, threshold={DXY_MAX_STALE_DAYS}"
+        )
 
 
 if __name__ == "__main__":
