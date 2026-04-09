@@ -11,7 +11,7 @@ const SHARE_PATH = '/pages/login/index'
 
 // ── Tab ──────────────────────────────────────────────────
 type Tab = 'options' | 'holding' | 'chaos'
-const activeTab = ref<Tab>('options')
+const activeTab = ref<Tab>('chaos')
 
 // ── 商品期权数据 ──────────────────────────────────────────
 const options = ref<OptionItem[]>([])
@@ -84,7 +84,7 @@ const holdingBrokers = ref<any[]>([])
 const holdingDate = ref('')
 const holdingLoading = ref(false)
 
-// ── 世界混乱指数 ───────────────────────────────────────────
+// ── 混乱指数 ───────────────────────────────────────────────
 const chaosData = ref<ChaosSnapshotPayload | null>(null)
 const chaosLoading = ref(false)
 const chaosError = ref('')
@@ -556,14 +556,14 @@ onShareTimeline(() => ({
   <view class="page">
     <!-- Tab（含刷新）-->
     <view class="tab-bar">
+      <view class="tab-item" :class="{ active: activeTab === 'chaos' }" @tap="switchTab('chaos')">
+        <text>混乱指数</text>
+      </view>
       <view class="tab-item" :class="{ active: activeTab === 'options' }" @tap="switchTab('options')">
         <text>市场数据</text>
       </view>
       <view class="tab-item" :class="{ active: activeTab === 'holding' }" @tap="switchTab('holding')">
         <text>仓位变化</text>
-      </view>
-      <view class="tab-item" :class="{ active: activeTab === 'chaos' }" @tap="switchTab('chaos')">
-        <text>世界混乱指数</text>
       </view>
       <!-- 实时状态指示点 -->
       <view v-if="activeTab === 'options' && liveTrading" class="live-dot-wrap">
@@ -746,7 +746,7 @@ onShareTimeline(() => ({
       </view>
     </view>
 
-    <!-- ══ 世界混乱指数 Tab ══ -->
+    <!-- ══ 混乱指数 Tab ══ -->
     <view v-else-if="activeTab === 'chaos'" class="chaos-wrap">
       <view v-if="chaosLoading" class="center-tip">
         <text class="muted-text">加载中...</text>
@@ -755,7 +755,7 @@ onShareTimeline(() => ({
       <view v-else-if="chaosData?.has_data" class="chaos-content">
         <view class="chaos-card chaos-core">
           <view class="chaos-core-head">
-            <text class="chaos-core-title">世界混乱指数</text>
+            <text class="chaos-core-title">混乱指数</text>
             <text class="chaos-core-time">{{ chaosData?.updated_time_text || '--:--:--' }}</text>
           </view>
           <view class="chaos-core-main">
@@ -1045,7 +1045,7 @@ onShareTimeline(() => ({
 .live-badge { display: flex; align-items: center; }
 .live-badge-text { font-size: 14rpx; color: #22c55e; line-height: 1; }
 
-/* 世界混乱指数 */
+/* 混乱指数 */
 .chaos-wrap { padding: 16rpx; }
 .chaos-content { display: flex; flex-direction: column; gap: 16rpx; }
 .chaos-card {
