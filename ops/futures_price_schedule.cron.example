@@ -1,0 +1,10 @@
+CRON_TZ=Asia/Shanghai
+
+# 08:03 晨更（仅夜盘品种）
+3 8 * * 1-5  cd /root/finance_app/future-app && bash run_morning.sh
+
+# 12:05 中午更新
+5 12 * * 1-5 cd /root/finance_app/future-app && bash run_noon.sh
+
+# 17:20 收盘后更新
+20 17 * * 1-5 cd /root/finance_app/future-app && bash run_daily.sh
