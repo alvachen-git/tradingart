@@ -945,6 +945,22 @@ if "home_cookie_retry_once" not in st.session_state:
     st.session_state.home_cookie_retry_once = False
 if "home_invalid_retry_count" not in st.session_state:
     st.session_state.home_invalid_retry_count = 0
+if "home_post_login_restore_needed" not in st.session_state:
+    st.session_state.home_post_login_restore_needed = False
+if "home_post_login_restore_done" not in st.session_state:
+    st.session_state.home_post_login_restore_done = False
+if "home_auto_login_toast_token" not in st.session_state:
+    st.session_state.home_auto_login_toast_token = ""
+if "home_auth_verify_needed" not in st.session_state:
+    st.session_state.home_auth_verify_needed = False
+if "home_auth_verified_sig" not in st.session_state:
+    st.session_state.home_auth_verified_sig = ""
+if "home_invalid_token_signature" not in st.session_state:
+    st.session_state.home_invalid_token_signature = ""
+if "home_masked_email_user" not in st.session_state:
+    st.session_state.home_masked_email_user = ""
+if "home_masked_email_value" not in st.session_state:
+    st.session_state.home_masked_email_value = ""
 
 
 def _restore_login_with_cookie_state(cookies: dict):
@@ -969,6 +985,68 @@ def _restore_login_with_cookie_state(cookies: dict):
     if (c_user and not c_token) or (c_token and not c_user):
         return False, "partial"
     return False, "invalid"
+
+
+def _auth_signature(username: str, token: str) -> str:
+    user = str(username or "").strip()
+    tok = str(token or "").strip()
+    if not user or not tok:
+        return ""
+    return f"{user}:{tok}"
+
+
+def _mark_auth_verified(username: str, token: str):
+    st.session_state.home_auth_verify_needed = False
+    st.session_state.home_auth_verified_sig = _auth_signature(username, token)
+    st.session_state.home_invalid_token_signature = ""
+
+
+def _ensure_auth_verified_for_protected_action() -> bool:
+    """Strictly verify token for privileged actions (task submit/recovery)."""
+    if not st.session_state.get("is_logged_in", False):
+        return True
+
+    user = str(st.session_state.get("user_id") or "").strip()
+    token = str(st.session_state.get("token") or "").strip()
+    if not user or not token:
+        return True
+
+    sig = _auth_signature(user, token)
+    if (
+        not st.session_state.get("home_auth_verify_needed", False)
+        and st.session_state.get("home_auth_verified_sig", "") == sig
+    ):
+        return True
+
+    try:
+        ok = bool(auth.check_token(user, token))
+    except Exception as e:
+        print(f"鉴权校验异常: {e}")
+        ok = False
+
+    if ok:
+        _mark_auth_verified(user, token)
+        return True
+
+    # token 失效：避免下一次再次乐观恢复同一个失效 token
+    st.session_state.home_invalid_token_signature = sig
+    st.session_state["is_logged_in"] = False
+    st.session_state["user_id"] = None
+    st.session_state["token"] = None
+    st.session_state.home_post_login_restore_needed = False
+    st.session_state.home_post_login_restore_done = False
+    st.session_state.home_auto_login_toast_token = ""
+    st.session_state.home_auth_verify_needed = False
+    st.session_state.home_auth_verified_sig = ""
+    st.session_state.home_masked_email_user = ""
+    st.session_state.home_masked_email_value = ""
+    try:
+        cookie_manager.delete("username", key="auth_verify_del_user")
+        cookie_manager.delete("token", key="auth_verify_del_token")
+    except Exception:
+        pass
+    st.warning("登录状态已过期，请重新登录。")
+    return False
 
 # 🔥 [关键修复] 在任何 rerun 之前，先读取公告状态并保存到 session_state
 # 这样即使后面触发 rerun，公告状态也不会丢失
@@ -1009,76 +1087,30 @@ should_auto_login = (
 )
 
 if should_auto_login:
-    restored, restore_state = _restore_login_with_cookie_state(cookies)
+    c_user = str(cookies.get("username") or "").strip()
+    c_token = str(cookies.get("token") or "").strip()
+    cookie_sig = _auth_signature(c_user, c_token)
+    invalid_sig = str(st.session_state.get("home_invalid_token_signature") or "").strip()
 
-    if restored:
+    if c_user and c_token and cookie_sig and cookie_sig != invalid_sig:
+        # 乐观恢复：优先恢复登录态并渲染首屏，严校验延后到关键动作前。
+        st.session_state["is_logged_in"] = True
+        st.session_state["user_id"] = c_user
+        st.session_state["token"] = c_token
         st.session_state.home_cookie_retry_once = False
         st.session_state.home_invalid_retry_count = 0
-        c_user = st.session_state.get("user_id")
-
-        # 🔥 [新增] 自动登录后，尝试从 Redis 恢复待处理任务
-        from task_manager import TaskManager
-
-        task_manager = TaskManager()
-        pending_task_data = task_manager.get_user_pending_task(str(c_user))
-        pending_deep_task_data = None
-        if ENABLE_DEEP_MODE and DeepTaskManager is not None:
-            deep_task_manager = DeepTaskManager()
-            pending_deep_task_data = deep_task_manager.get_user_pending_task(str(c_user))
-        pending_portfolio_data = task_manager.get_user_pending_portfolio_task(str(c_user))
-        if not pending_task_data and pending_deep_task_data:
-            pending_task_data = pending_deep_task_data
-
-        if pending_task_data:
-            # 恢复任务信息到 Session State
-            st.session_state.pending_task = {
-                "task_id": pending_task_data["task_id"],
-                "prompt": pending_task_data["prompt"],
-                "image_context": pending_task_data.get("image_context", ""),
-                "mode": pending_task_data.get("mode", "normal"),
-                "risk": pending_task_data.get("risk_preference", "稳健型"),
-                "start_time": pending_task_data["start_time"]
-            }
-
-            # 恢复用户消息到历史（如果 messages 为空）
-            if not st.session_state.get("messages"):
-                st.session_state.messages = [
-                    {"role": "user", "content": pending_task_data["prompt"]}
-                ]
-
-            st.toast(f"欢迎回来，{c_user} (已恢复您的任务)")
-            print(f"✅ 自动登录后恢复任务: {pending_task_data['task_id']}")
-        else:
-            st.toast(f"欢迎回来，{c_user} (自动登录)")
-
-        if pending_portfolio_data:
-            st.session_state.pending_portfolio_task = {
-                "task_id": pending_portfolio_data["task_id"],
-                "start_time": pending_portfolio_data["start_time"],
-                "screenshot_hash": pending_portfolio_data.get("screenshot_hash", ""),
-                "positions_count": pending_portfolio_data.get("positions_count", 0),
-            }
-            print(f"✅ 自动登录后恢复持仓任务: {pending_portfolio_data['task_id']}")
-
-        time.sleep(0.3)
-        st.rerun()
-
-    # 某些浏览器首次载入时 Cookie 组件还没就绪，或只读到部分字段：重跑一次再读
-    elif restore_state in ("empty", "partial", "error") and not st.session_state.get("home_cookie_retry_once", False):
+        st.session_state.home_auth_verify_needed = True
+        st.session_state.home_auth_verified_sig = ""
+        st.session_state.home_post_login_restore_needed = True
+        st.session_state.home_post_login_restore_done = False
+    elif (not c_user and not c_token) and not st.session_state.get("home_cookie_retry_once", False):
+        # 某些浏览器首轮 Cookie 组件还没就绪，允许一次重跑。
         st.session_state.home_cookie_retry_once = True
-        time.sleep(0.15)
         st.rerun()
-    elif restore_state == "invalid":
-        # Do not aggressively delete cookies on first invalid read.
-        # During cross-page transitions, cookie/component timing may briefly misclassify state.
-        st.session_state.home_invalid_retry_count = int(st.session_state.get("home_invalid_retry_count", 0)) + 1
-        print(
-            f"[AUTH_RESTORE] invalid cookie state, retry_count={st.session_state.home_invalid_retry_count}, "
-            f"user_cookie={bool(cookies.get('username'))}, token_cookie={bool(cookies.get('token'))}"
-        )
-        if st.session_state.home_invalid_retry_count <= 2:
-            time.sleep(0.15)
-            st.rerun()
+    elif ((c_user and not c_token) or (c_token and not c_user)) and not st.session_state.get("home_cookie_retry_once", False):
+        # 只读到部分字段，允许一次重跑。
+        st.session_state.home_cookie_retry_once = True
+        st.rerun()
 
 # 【关键修复 2】如果已经是登出后的重跑，现在可以重置标记了
 # 这样下次用户刷新页面(F5)时，如果 Cookie 还在(虽然应该删了)，还能尝试登录，或者单纯重置状态
@@ -1091,6 +1123,8 @@ if 'is_logged_in' not in st.session_state:
     st.session_state['user_id'] = None
     st.session_state['username'] = None
     st.session_state['token'] = None
+    st.session_state.home_auth_verify_needed = False
+    st.session_state.home_auth_verified_sig = ""
 
 
 
@@ -1104,6 +1138,85 @@ if "conversation_id" not in st.session_state:
 # 🔥 [新增] 图片上传器的动态 key，用于清除图片
 if "uploader_key" not in st.session_state:
     st.session_state.uploader_key = 0
+
+
+def _restore_pending_tasks_after_auto_login_once():
+    """Restore pending tasks once after auto login, without blocking first paint."""
+    if not st.session_state.get("is_logged_in", False):
+        return
+    # 登录首屏优先，待用户触发关键动作并完成严校验后再恢复后台任务。
+    if st.session_state.get("home_auth_verify_needed", False):
+        return
+    if not st.session_state.get("home_post_login_restore_needed", False):
+        return
+    if st.session_state.get("home_post_login_restore_done", False):
+        return
+
+    c_user = str(st.session_state.get("user_id") or "").strip()
+    c_token = str(st.session_state.get("token") or "").strip()
+    if not c_user:
+        st.session_state.home_post_login_restore_needed = False
+        st.session_state.home_post_login_restore_done = True
+        return
+
+    task_manager = TaskManager()
+    pending_task_data = task_manager.get_user_pending_task(c_user)
+    pending_deep_task_data = None
+    if ENABLE_DEEP_MODE and DeepTaskManager is not None:
+        deep_task_manager = DeepTaskManager()
+        pending_deep_task_data = deep_task_manager.get_user_pending_task(c_user)
+    pending_portfolio_data = task_manager.get_user_pending_portfolio_task(c_user)
+    if not pending_task_data and pending_deep_task_data:
+        pending_task_data = pending_deep_task_data
+
+    restored_any = False
+    if pending_task_data and not st.session_state.get("pending_task"):
+        st.session_state.pending_task = {
+            "task_id": pending_task_data["task_id"],
+            "prompt": pending_task_data["prompt"],
+            "image_context": pending_task_data.get("image_context", ""),
+            "mode": pending_task_data.get("mode", "normal"),
+            "risk": pending_task_data.get("risk_preference", "稳健型"),
+            "start_time": pending_task_data["start_time"],
+        }
+        if not st.session_state.get("messages"):
+            st.session_state.messages = [{"role": "user", "content": pending_task_data["prompt"]}]
+        restored_any = True
+        print(f"✅ 自动登录后恢复任务: {pending_task_data['task_id']}")
+
+    if pending_portfolio_data and not st.session_state.get("pending_portfolio_task"):
+        st.session_state.pending_portfolio_task = {
+            "task_id": pending_portfolio_data["task_id"],
+            "start_time": pending_portfolio_data["start_time"],
+            "screenshot_hash": pending_portfolio_data.get("screenshot_hash", ""),
+            "positions_count": pending_portfolio_data.get("positions_count", 0),
+        }
+        restored_any = True
+        print(f"✅ 自动登录后恢复持仓任务: {pending_portfolio_data['task_id']}")
+
+    toast_token = f"{c_user}:{c_token}"
+    if st.session_state.get("home_auto_login_toast_token") != toast_token:
+        if restored_any:
+            st.toast(f"欢迎回来，{c_user} (已恢复您的任务)")
+        else:
+            st.toast(f"欢迎回来，{c_user} (自动登录)")
+        st.session_state.home_auto_login_toast_token = toast_token
+
+    st.session_state.home_post_login_restore_done = True
+    st.session_state.home_post_login_restore_needed = False
+
+
+def _get_cached_masked_email(user: str) -> str:
+    user = str(user or "").strip()
+    if not user:
+        return ""
+    cached_user = str(st.session_state.get("home_masked_email_user") or "").strip()
+    if cached_user == user:
+        return str(st.session_state.get("home_masked_email_value") or "")
+    masked = str(auth.get_masked_email(user) or "")
+    st.session_state.home_masked_email_user = user
+    st.session_state.home_masked_email_value = masked
+    return masked
 
 # ==========================================
 #  4. AI Agent 定义 (完全保留您的核心逻辑)
@@ -1495,6 +1608,15 @@ def auto_submit_portfolio_task(uploaded_img):
 def process_user_input(prompt_text, deep_mode=False):
     """处理用户输入（无论是来自输入框还是快捷卡片）"""
     deep_mode = bool(deep_mode and ENABLE_DEEP_MODE and DeepTaskManager is not None)
+    current_user = st.session_state.get('user_id', "访客")
+
+    # 关键动作前再做严格鉴权，避免首页每次自动登录都阻塞。
+    if current_user != "访客":
+        if not _ensure_auth_verified_for_protected_action():
+            st.stop()
+        # 用户开始新交互后，不再自动恢复旧待处理任务，避免状态回灌冲突。
+        st.session_state.home_post_login_restore_needed = False
+        st.session_state.home_post_login_restore_done = True
 
     # --- 1. 图片识别逻辑 (保留) ---
     image_context = ""
@@ -1510,7 +1632,6 @@ def process_user_input(prompt_text, deep_mode=False):
             with st.chat_message("ai"):
                 st.caption(f"已识别图片内容：\n{vision_result[:100]}...")
 
-    current_user = st.session_state.get('user_id', "访客")
     # 在追加当前问题前构造上下文，避免本轮内容混进历史
     context_payload = build_context_payload(prompt_text=prompt_text, current_user=current_user)
 
@@ -1875,6 +1996,11 @@ with st.sidebar:
                         st.session_state['user_id'] = real_username
                         st.session_state['token'] = token
                         st.session_state['just_manual_logged_in'] = True
+                        _mark_auth_verified(real_username, token)
+                        st.session_state.home_post_login_restore_needed = True
+                        st.session_state.home_post_login_restore_done = False
+                        st.session_state.home_masked_email_user = ""
+                        st.session_state.home_masked_email_value = ""
 
                         expires = datetime.now() + timedelta(days=30)
                         cookie_manager.set("username", real_username, expires_at=expires, key="set_user_cookie")
@@ -2003,6 +2129,11 @@ with st.sidebar:
                                 st.session_state['user_id'] = final_username
                                 st.session_state['token'] = token
                                 st.session_state['just_manual_logged_in'] = True
+                                _mark_auth_verified(final_username, token)
+                                st.session_state.home_post_login_restore_needed = True
+                                st.session_state.home_post_login_restore_done = False
+                                st.session_state.home_masked_email_user = ""
+                                st.session_state.home_masked_email_value = ""
 
                                 for k in [
                                     "reg_step1_ok",
@@ -2073,7 +2204,7 @@ with st.sidebar:
 
         # 显示邮箱绑定状态
         if user != "访客":
-            masked_email = auth.get_masked_email(user)
+            masked_email = _get_cached_masked_email(user)
             if masked_email:
                 st.caption(f"📧 {masked_email}")
             else:
@@ -2101,6 +2232,14 @@ with st.sidebar:
             st.session_state['pending_task'] = None
             st.session_state['pending_portfolio_task'] = None
             st.session_state['portfolio_last_attempt_hash'] = None
+            st.session_state['home_post_login_restore_needed'] = False
+            st.session_state['home_post_login_restore_done'] = False
+            st.session_state['home_auto_login_toast_token'] = ""
+            st.session_state['home_auth_verify_needed'] = False
+            st.session_state['home_auth_verified_sig'] = ""
+            st.session_state['home_invalid_token_signature'] = ""
+            st.session_state['home_masked_email_user'] = ""
+            st.session_state['home_masked_email_value'] = ""
             if 'token' in st.session_state:
                 del st.session_state['token']
 
@@ -2181,6 +2320,9 @@ if "pending_prompt" in st.session_state:
         del st.session_state.pending_prompt  # 消费掉，防止循环
         process_user_input(prompt, deep_mode=bool(st.session_state.get("deep_mode_enabled", False)))
         st.rerun()  # 重新加载以显示新消息
+
+# 自动登录后置恢复：首屏渲染后执行一次，降低首页切换卡顿感。
+_restore_pending_tasks_after_auto_login_once()
 
 # ==========================================
 #  B. 界面显示逻辑
