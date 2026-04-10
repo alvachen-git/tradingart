@@ -40,10 +40,16 @@ load_dotenv(override=True)
 db_url = f"mysql+pymysql://{os.getenv('DB_USER')}:{os.getenv('DB_PASSWORD')}@{os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/{os.getenv('DB_NAME')}"
 engine = create_engine(db_url)
 
-llm = ChatTongyi(model="qwen-plus", api_key=os.getenv("DASHSCOPE_API_KEY"))
+llm = ChatTongyi(model="qwen-plus", temperature=0.1, api_key=os.getenv("DASHSCOPE_API_KEY"))
 
 HIGH_IV_RANK_THRESHOLD = 70.0
-CONTRACT_CODE_RE = re.compile(r"[A-Z]{1,3}\d{4}-[CP]-\d+\.[A-Z]+")
+# Match both styles:
+# 1) legacy hyphen style: M2506-C-3200.ZCE
+# 2) compact exchange style: MA605C3200.ZCE
+CONTRACT_CODE_RE = re.compile(
+    r"(?:[A-Z]{1,3}\d{4}-[CP]-\d+|[A-Z]{1,3}\d{3,4}[CP]\d+)\.[A-Z]+",
+    flags=re.IGNORECASE,
+)
 MULTI_LEG_STRATEGY_LEGS = {
     "双卖": 2,
     "Short Straddle": 2,
@@ -126,6 +132,7 @@ COMMODITY_NAME_MAP = {
     "ZC": "动力煤",
     "PF": "短纤",
     "PL": "丙烯",
+    "PR": "瓶片",
     "OP": "双胶纸",
     "SN": "锡",
     "PB": "铅",
@@ -1127,6 +1134,7 @@ def extract_contract_codes(text: str) -> list[str]:
     seen = set()
     codes = []
     for code in CONTRACT_CODE_RE.findall(text or ""):
+        code = str(code).upper()
         if code not in seen:
             seen.add(code)
             codes.append(code)
@@ -1166,27 +1174,95 @@ def clean_generated_html(raw_html: str) -> str:
     return html.replace("```html", "").replace("```", "").strip()
 
 
+def _build_canonical_symbol_name_map(sections: list[dict]) -> dict[str, str]:
+    """
+    Build canonical symbol->name map for post-generation correction.
+    Priority:
+    1) static maps (commodity + ETF)
+    2) per-run section values (highest priority, override static)
+    """
+    symbol_map: dict[str, str] = {}
+
+    for code, name in COMMODITY_NAME_MAP.items():
+        k = str(code or "").strip().upper()
+        v = str(name or "").strip()
+        if k and v:
+            symbol_map[k] = v
+
+    for code, name in ETF_NAME_MAP.items():
+        k = normalize_etf_code(code)
+        v = str(name or "").strip()
+        if k and v:
+            symbol_map[k] = v
+
+    for section in sections or []:
+        code = str(section.get("underlying") or "").strip().upper()
+        name = str(section.get("name") or "").strip()
+        if not code or not name:
+            continue
+        symbol_map[code] = name
+        if re.fullmatch(r"\d{6}", code):
+            symbol_map[f"{code}.SH"] = name
+            symbol_map[f"{code}.SZ"] = name
+
+    return symbol_map
+
+
 def enforce_symbol_label_consistency(html: str, sections: list[dict]) -> str:
     """
-    Normalize mismatched labels like `159915.SZ(豆粕ETF)` to canonical names from section mapping.
-    Only rewrites `code(name)` fragments to avoid touching contract rows.
+    Normalize mismatched labels like `RM(豆粕)` or `159915.SZ(豆粕ETF)` to canonical names.
+    Keep `code(name)` order for generic text blocks.
     """
     fixed = html or ""
-    for section in sections or []:
-        code = str(section.get("underlying") or "").strip()
-        opt_type = str(section.get("option_type") or "").strip()
-        if opt_type == "ETF期权":
-            canonical_name = resolve_etf_name(code)
-        else:
-            canonical_name = resolve_commodity_name(code)
-
-        canonical_name = str(canonical_name or "").strip()
-        if not code or not canonical_name or canonical_name == code:
+    symbol_map = _build_canonical_symbol_name_map(sections)
+    for code, canonical_name in symbol_map.items():
+        if not code or not canonical_name:
             continue
-
-        pattern = rf"({re.escape(code)})\s*[（(][^）)<]*[）)]"
-        fixed = re.sub(pattern, rf"\1（{canonical_name}）", fixed, flags=re.IGNORECASE)
+        pattern = re.compile(
+            rf"(?<![A-Za-z0-9])({re.escape(code)})\s*[（(][^）)<]{{1,30}}[）)]",
+            flags=re.IGNORECASE,
+        )
+        fixed = pattern.sub(lambda m, c=code, n=canonical_name: f"{c}（{n}）", fixed)
     return fixed
+
+
+def enforce_section_title_symbol_order(html: str, sections: list[dict]) -> str:
+    """
+    For section titles, force canonical display as `中文名（代码）`.
+    This keeps the visual style stable (same as historical reports).
+    """
+    fixed = html or ""
+    symbol_map = _build_canonical_symbol_name_map(sections)
+    if not symbol_map:
+        return fixed
+
+    def _fix_title_block(match: re.Match) -> str:
+        block = match.group(0)
+        for code, canonical_name in symbol_map.items():
+            if not code or not canonical_name:
+                continue
+            # code(name) -> name(code)
+            block = re.sub(
+                rf"(?<![A-Za-z0-9]){re.escape(code)}\s*[（(][^）)<]{{1,30}}[）)]",
+                f"{canonical_name}（{code}）",
+                block,
+                flags=re.IGNORECASE,
+            )
+            # anyName(code) -> canonicalName(code)
+            block = re.sub(
+                rf"[A-Za-z0-9\u4e00-\u9fff·\-\s]{{1,30}}\s*[（(]{re.escape(code)}[）)]",
+                f"{canonical_name}（{code}）",
+                block,
+                flags=re.IGNORECASE,
+            )
+        return block
+
+    return re.sub(
+        r"<h2 class=\"section-title\">.*?</h2>",
+        _fix_title_block,
+        fixed,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
 
 
 def enforce_etf_contract_display_consistency(html: str, sections: list[dict]) -> str:
@@ -1437,6 +1513,11 @@ def generate_report(sections: list[dict]) -> str:
     if fixed_html != html:
         print("  ⚠️ 检测到标的名称错配，已按代码映射自动纠偏。")
         html = fixed_html
+
+    normalized_titles_html = enforce_section_title_symbol_order(html, sections)
+    if normalized_titles_html != html:
+        print("  ⚠️ 标题标的名已统一为“中文名（代码）”。")
+        html = normalized_titles_html
 
     normalized_html = enforce_etf_contract_display_consistency(html, sections)
     if normalized_html != html:
