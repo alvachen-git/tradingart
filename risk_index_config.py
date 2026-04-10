@@ -18,6 +18,10 @@ class RiskEventConfig(TypedDict):
     must_contain_all: NotRequired[List[str]]
     must_contain_any_group: NotRequired[List[List[str]]]
     exclude_keywords: NotRequired[List[str]]
+    market_structure: NotRequired[str]
+    target_outcome_mode: NotRequired[str]
+    target_outcome_keywords: NotRequired[List[str]]
+    fallback_if_outcome_missing: NotRequired[str]
 
 
 class OngoingChaosClusterConfig(TypedDict):
@@ -36,6 +40,10 @@ class OngoingChaosClusterConfig(TypedDict):
     must_contain_all: NotRequired[List[str]]
     must_contain_any_group: NotRequired[List[List[str]]]
     exclude_keywords: NotRequired[List[str]]
+    market_structure: NotRequired[str]
+    target_outcome_mode: NotRequired[str]
+    target_outcome_keywords: NotRequired[List[str]]
+    fallback_if_outcome_missing: NotRequired[str]
 
 
 class FocusedConflictWatchConfig(TypedDict):
@@ -74,6 +82,7 @@ RISK_INDEX_CONFIG = {
     "dynamic_conflict_limit": 36,
     "dynamic_conflict_base_impact": 0.55,
     "conditional_outcome_weight_multiplier": 0.35,
+    "multi_outcome_min_options": 3,
     "dynamic_conflict_country_weights": {
         "USA": 1.00,
         "CHN": 1.00,
@@ -627,7 +636,7 @@ EVENT_BASKET_V1: List[RiskEventConfig] = [
     },
     {
         "event_key": "oil_price_spike_extreme",
-        "display_title": "原油极端飙升冲击",
+        "display_title": "原油冲上120美元风险",
         "category": "economic_crisis",
         "region_tag": "global",
         "pair_tag": "GLOBAL_OIL",
@@ -636,6 +645,10 @@ EVENT_BASKET_V1: List[RiskEventConfig] = [
         "event_slug_allowlist": ["crude-oil", "oil-hit", "oil-spike"],
         "market_slug_allowlist": ["crude-oil", "oil-hit", "oil-spike"],
         "must_contain_any": ["crude oil", "oil spike", "oil hit"],
+        "market_structure": "multi_outcome_range",
+        "target_outcome_mode": "threshold_gte",
+        "target_outcome_keywords": ["120"],
+        "fallback_if_outcome_missing": "skip_scoring",
         "active": True,
     },
     {

@@ -201,6 +201,107 @@ class TestRiskIndexService(unittest.TestCase):
         self.assertIn("冲突后果", explanation["one_line_reason"])
         self.assertIn("不等于冲突本身发生概率", explanation["one_line_reason"])
 
+    def test_multi_outcome_market_uses_target_bucket_probability(self):
+        event = {
+            "event_key": "oil_price_spike_extreme",
+            "display_title": "原油冲上120美元风险",
+            "category": "economic_crisis",
+            "region_tag": "global",
+            "pair_tag": "GLOBAL_OIL",
+            "impact_weight": 0.46,
+            "query_keywords": ["crude oil", "wti"],
+            "market_structure": "multi_outcome_range",
+            "target_outcome_mode": "threshold_gte",
+            "target_outcome_keywords": ["120"],
+            "fallback_if_outcome_missing": "skip_scoring",
+        }
+        candidate = {
+            "market_title": "What will WTI Crude Oil (WTI) hit in April 2026?",
+            "event_title": "What will WTI Crude Oil (WTI) hit in April 2026?",
+            "market_slug": "wti-crude-oil-hit-april-2026",
+            "event_slug": "wti-crude-oil-hit-april-2026",
+            "outcomes": ["↑ $140", "↑ $130", "↑ $120", "↓ $90", "↓ $80"],
+            "outcomePrices": [0.13, 0.23, 0.38, 0.64, 0.28],
+        }
+        resolved = svc._resolve_target_outcome_selection(candidate, event)
+        self.assertIsNotNone(resolved)
+        self.assertEqual(resolved["outcome_label"], "↑ $120")
+        self.assertAlmostEqual(svc.extract_probability_from_market(candidate, event=event), 0.38, places=6)
+
+    def test_select_representative_market_prefers_target_bucket_submarket(self):
+        event = {
+            "event_key": "oil_price_spike_extreme",
+            "display_title": "原油冲上120美元风险",
+            "category": "economic_crisis",
+            "region_tag": "global",
+            "pair_tag": "GLOBAL_OIL",
+            "impact_weight": 0.46,
+            "query_keywords": ["crude oil", "wti"],
+            "must_contain_any": ["crude oil"],
+            "market_structure": "multi_outcome_range",
+            "target_outcome_mode": "threshold_gte",
+            "target_outcome_keywords": ["120"],
+            "fallback_if_outcome_missing": "skip_scoring",
+        }
+        candidates = [
+            {
+                "groupItemTitle": "↓ $90",
+                "market_title": "What will WTI Crude Oil (WTI) hit in April 2026?",
+                "event_title": "What will WTI Crude Oil (WTI) hit in April 2026?",
+                "market_slug": "wti-under-90-april-2026",
+                "event_slug": "wti-crude-oil-hit-april-2026",
+                "outcomePrices": [0.64, 0.36],
+            },
+            {
+                "groupItemTitle": "↑ $120",
+                "market_title": "What will WTI Crude Oil (WTI) hit in April 2026?",
+                "event_title": "What will WTI Crude Oil (WTI) hit in April 2026?",
+                "market_slug": "wti-above-120-april-2026",
+                "event_slug": "wti-crude-oil-hit-april-2026",
+                "outcomePrices": [0.38, 0.62],
+            },
+        ]
+        selected = svc.select_representative_market(event, candidates)
+        self.assertIsNotNone(selected)
+        self.assertEqual(selected["groupItemTitle"], "↑ $120")
+
+    def test_multi_outcome_market_without_target_is_skipped(self):
+        event = {
+            "event_key": "x",
+            "display_title": "Test",
+            "category": "economic_crisis",
+            "region_tag": "global",
+            "pair_tag": "X",
+            "impact_weight": 1.0,
+            "query_keywords": ["wti crude oil"],
+            "market_structure": "multi_outcome_range",
+            "fallback_if_outcome_missing": "skip_scoring",
+        }
+        candidate = {
+            "market_title": "What will WTI Crude Oil (WTI) hit in April 2026?",
+            "event_title": "What will WTI Crude Oil (WTI) hit in April 2026?",
+            "market_slug": "wti-crude-oil-hit-april-2026",
+            "event_slug": "wti-crude-oil-hit-april-2026",
+            "outcomes": ["↑ $140", "↑ $130", "↑ $120", "↓ $90"],
+            "outcomePrices": [0.13, 0.23, 0.38, 0.64],
+        }
+        self.assertIsNone(svc.select_representative_market(event, [candidate]))
+
+    def test_multi_outcome_explanation_mentions_target_bucket(self):
+        item = {
+            "event_key": "oil_price_spike_extreme",
+            "display_title": "原油冲上120美元风险",
+            "probability": 0.38,
+            "delta_24h": -0.14,
+            "market_structure": "multi_outcome_range_market",
+            "target_outcome_label": "↑ $120",
+            "category": "economic_crisis",
+        }
+        explanation, status = svc._make_explanation_result(item, use_external_news=True)
+        self.assertEqual(status, "fallback")
+        self.assertIn("120", explanation["one_line_reason"])
+        self.assertIn("回落", explanation["one_line_reason"])
+
     def test_country_detection_ignores_description_side_context(self):
         candidate = {
             "market_title": "Will Israel take military action in Gaza on April 5, 2026?",

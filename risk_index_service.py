@@ -398,7 +398,204 @@ def _extract_outcome_prices(market: Dict[str, Any]) -> List[float]:
     return [normalize_probability(value) for value in raw_prices]
 
 
-def extract_probability_from_market(market: Dict[str, Any]) -> float:
+def _extract_text_list(raw_value: Any) -> List[str]:
+    if isinstance(raw_value, str):
+        try:
+            parsed = json.loads(raw_value)
+            raw_value = parsed
+        except Exception:
+            raw_value = [raw_value]
+    if not isinstance(raw_value, list):
+        return []
+    out: List[str] = []
+    for item in raw_value:
+        if isinstance(item, dict):
+            text_value = _safe_text(
+                item.get("name")
+                or item.get("label")
+                or item.get("title")
+                or item.get("value")
+            )
+        else:
+            text_value = _safe_text(item)
+        if text_value:
+            out.append(text_value)
+    return out
+
+
+def _extract_outcome_names(market: Dict[str, Any]) -> List[str]:
+    for key in ("outcomes", "outcomeLabels", "outcomeNames", "options"):
+        names = _extract_text_list(market.get(key))
+        if names:
+            return names
+    return []
+
+
+def _extract_outcome_deltas(market: Dict[str, Any]) -> List[float]:
+    for key in ("oneDayPriceChange", "oneDayPriceChangePercent", "priceChange24h", "delta24h"):
+        raw_value = market.get(key)
+        if raw_value in (None, ""):
+            continue
+        if isinstance(raw_value, str):
+            try:
+                raw_value = json.loads(raw_value)
+            except Exception:
+                return []
+        if not isinstance(raw_value, list):
+            return []
+        deltas: List[float] = []
+        for item in raw_value:
+            delta = _to_float(item, 0.0)
+            if abs(delta) > 1.0:
+                delta /= 100.0
+            deltas.append(max(-1.0, min(1.0, delta)))
+        if deltas:
+            return deltas
+    return []
+
+
+def _configured_market_structure(event: Optional[Dict[str, Any]]) -> str:
+    structure = _safe_text((event or {}).get("market_structure")).lower()
+    if structure in {"binary", "binary_market"}:
+        return "binary_market"
+    if structure in {"conditional_outcome", "conditional_outcome_market"}:
+        return "conditional_outcome_market"
+    if structure in {"multi_outcome_range", "multi_outcome_range_market"}:
+        return "multi_outcome_range_market"
+    return ""
+
+
+def _market_structure_for_candidate(candidate: Dict[str, Any], event: Optional[Dict[str, Any]] = None) -> str:
+    configured = _configured_market_structure(event)
+    if configured:
+        return configured
+
+    outcome_count = max(
+        len(_extract_outcome_names(candidate)),
+        len(_extract_outcome_prices(candidate)),
+    )
+    min_options = int(RISK_INDEX_CONFIG.get("multi_outcome_min_options", 3))
+    if outcome_count >= max(3, min_options):
+        return "multi_outcome_range_market"
+    return "binary_market"
+
+
+def _first_number(text: str) -> Optional[float]:
+    match = re.search(r"(\d+(?:\.\d+)?)", _safe_text(text))
+    if not match:
+        return None
+    try:
+        return float(match.group(1))
+    except Exception:
+        return None
+
+
+def _outcome_direction(label: str) -> str:
+    normalized = _normalize_text(label)
+    if "↑" in label or any(token in normalized for token in ("above", "over", "greater", "at least", "gte", "hit ")):
+        return "up"
+    if "↓" in label or any(token in normalized for token in ("below", "under", "less", "at most", "lte")):
+        return "down"
+    return "neutral"
+
+
+def _target_outcome_keywords(event: Optional[Dict[str, Any]]) -> List[str]:
+    return [_safe_text(item) for item in (event or {}).get("target_outcome_keywords") or [] if _safe_text(item)]
+
+
+def _target_outcome_match_score(label: str, event: Optional[Dict[str, Any]]) -> float:
+    mode = _safe_text((event or {}).get("target_outcome_mode")).lower()
+    keywords = _target_outcome_keywords(event)
+    normalized = _normalize_text(label)
+    tokens = set(_tokenize(label))
+    if not mode or not keywords:
+        return 0.0
+
+    if mode in {"exact_match", "keyword_match"}:
+        best = 0.0
+        for keyword in keywords:
+            best = max(best, _phrase_match_score(normalized, tokens, keyword))
+        return best
+
+    threshold = _first_number(" ".join(keywords))
+    label_num = _first_number(label)
+    if threshold is None or label_num is None:
+        return 0.0
+
+    direction = _outcome_direction(label)
+    if mode == "threshold_gte":
+        if direction == "down" or label_num < threshold:
+            return 0.0
+        return 1000.0 - abs(label_num - threshold)
+    if mode == "threshold_lte":
+        if direction == "up" or label_num > threshold:
+            return 0.0
+        return 1000.0 - abs(label_num - threshold)
+    return 0.0
+
+
+def _multi_outcome_fallback_mode(event: Optional[Dict[str, Any]]) -> str:
+    fallback = _safe_text((event or {}).get("fallback_if_outcome_missing")).lower()
+    return fallback or "skip_scoring"
+
+
+def _resolve_target_outcome_selection(candidate: Dict[str, Any], event: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+    if _market_structure_for_candidate(candidate, event) != "multi_outcome_range_market":
+        return None
+
+    label_candidates = []
+    for key in ("groupItemTitle", "question", "market_title", "title"):
+        label = _safe_text(candidate.get(key))
+        if label:
+            label_candidates.append(label)
+    best_label = ""
+    best_score = 0.0
+    for label in label_candidates:
+        score = _target_outcome_match_score(label, event)
+        if score > best_score:
+            best_score = score
+            best_label = label
+    if best_score > 0:
+        return {
+            "outcome_label": best_label,
+            "probability": extract_probability_from_market({k: v for k, v in candidate.items() if k not in {"outcomes", "outcomePrices"}}),
+            "delta_24h": extract_delta_24h_from_market({k: v for k, v in candidate.items() if k not in {"outcomes", "outcomePrices"}}),
+            "match_score": best_score,
+        }
+
+    outcome_labels = _extract_outcome_names(candidate)
+    outcome_prices = _extract_outcome_prices(candidate)
+    outcome_deltas = _extract_outcome_deltas(candidate)
+    if not outcome_labels or not outcome_prices:
+        return None
+
+    best_index = -1
+    best_index_score = 0.0
+    for idx, label in enumerate(outcome_labels):
+        score = _target_outcome_match_score(label, event)
+        if score > best_index_score:
+            best_index_score = score
+            best_index = idx
+    if best_index < 0 or best_index >= len(outcome_prices) or best_index_score <= 0:
+        return None
+
+    return {
+        "outcome_label": _safe_text(outcome_labels[best_index]),
+        "probability": normalize_probability(outcome_prices[best_index]),
+        "delta_24h": outcome_deltas[best_index] if best_index < len(outcome_deltas) else 0.0,
+        "match_score": best_index_score,
+    }
+
+
+def extract_probability_from_market(market: Dict[str, Any], event: Optional[Dict[str, Any]] = None) -> float:
+    structure = _market_structure_for_candidate(market, event)
+    if structure == "multi_outcome_range_market":
+        resolved = _resolve_target_outcome_selection(market, event)
+        if resolved is not None:
+            return normalize_probability(resolved.get("probability"))
+        if _multi_outcome_fallback_mode(event) in {"skip_scoring", "monitor_only"}:
+            return 0.0
+
     for key in ("probability", "yesPrice", "lastTradePrice", "price", "groupPrice"):
         if market.get(key) not in (None, ""):
             prob = normalize_probability(market.get(key))
@@ -411,7 +608,18 @@ def extract_probability_from_market(market: Dict[str, Any]) -> float:
     return 0.0
 
 
-def extract_delta_24h_from_market(market: Dict[str, Any]) -> float:
+def extract_delta_24h_from_market(market: Dict[str, Any], event: Optional[Dict[str, Any]] = None) -> float:
+    structure = _market_structure_for_candidate(market, event)
+    if structure == "multi_outcome_range_market":
+        resolved = _resolve_target_outcome_selection(market, event)
+        if resolved is not None:
+            delta = _to_float(resolved.get("delta_24h"), 0.0)
+            if abs(delta) > 1.0:
+                delta /= 100.0
+            return max(-1.0, min(1.0, delta))
+        if _multi_outcome_fallback_mode(event) in {"skip_scoring", "monitor_only"}:
+            return 0.0
+
     for key in ("oneDayPriceChange", "oneDayPriceChangePercent", "priceChange24h", "delta24h"):
         if market.get(key) not in (None, ""):
             delta = _to_float(market.get(key), 0.0)
@@ -1005,7 +1213,9 @@ def _candidate_match_tuple(event: Dict[str, Any], candidate: Dict[str, Any], now
     event_slug = _safe_text(candidate.get("event_slug")).lower()
     combined_raw = " ".join(
         [
+            _safe_text(candidate.get("groupItemTitle")),
             _safe_text(candidate.get("market_title")),
+            _safe_text(candidate.get("title")),
             _safe_text(candidate.get("question")),
             _safe_text(candidate.get("event_title")),
             market_slug,
@@ -1042,10 +1252,18 @@ def _candidate_match_tuple(event: Dict[str, Any], candidate: Dict[str, Any], now
     if must_contain_any and not any(_contains_phrase_or_tokens(combined, combined_tokens, item) for item in must_contain_any):
         return 0, 0.0, 0
 
+    structure = _market_structure_for_candidate(candidate, event)
+    if structure == "multi_outcome_range_market":
+        resolved = _resolve_target_outcome_selection(candidate, event)
+        if resolved is None and _multi_outcome_fallback_mode(event) in {"skip_scoring", "monitor_only"}:
+            return 0, 0.0, 0
+
     if market_slug and any(allow in market_slug for allow in market_allow):
-        return 3, extract_liquidity_usd_from_market(candidate), 999
+        bonus = int((_resolve_target_outcome_selection(candidate, event) or {}).get("match_score", 0))
+        return 3, extract_liquidity_usd_from_market(candidate), 999 + bonus
     if event_slug and any(allow in event_slug for allow in event_allow):
-        return 2, extract_liquidity_usd_from_market(candidate), 999
+        bonus = int((_resolve_target_outcome_selection(candidate, event) or {}).get("match_score", 0))
+        return 2, extract_liquidity_usd_from_market(candidate), 999 + bonus
 
     phrase_score = 0.0
     matched_phrases = 0
@@ -1057,7 +1275,8 @@ def _candidate_match_tuple(event: Dict[str, Any], candidate: Dict[str, Any], now
 
     if matched_phrases <= 0:
         return 0, 0.0, 0
-    return 1, extract_liquidity_usd_from_market(candidate), int(phrase_score * 100 + matched_phrases)
+    semantics_bonus = int((_resolve_target_outcome_selection(candidate, event) or {}).get("match_score", 0))
+    return 1, extract_liquidity_usd_from_market(candidate), int(phrase_score * 100 + matched_phrases + semantics_bonus)
 
 
 def select_representative_market(
@@ -1081,6 +1300,7 @@ def _make_explanation_result(top_market: Dict[str, Any], use_external_news: bool
     delta = _to_float(top_market.get("delta_24h"), 0.0)
     delta_text = f"{delta * 100:+.1f}%"
     market_semantics = _safe_text(top_market.get("market_semantics")) or "direct_conflict"
+    target_outcome_label = _safe_text(top_market.get("target_outcome_label"))
     if market_semantics == "conditional_outcome":
         conditional_reason = (
             f"{title} 当前市场定价约为 {probability * 100:.1f}%，24 小时变化 {delta_text}，"
@@ -1090,6 +1310,19 @@ def _make_explanation_result(top_market: Dict[str, Any], use_external_news: bool
             {
                 "event_key": _safe_text(top_market.get("event_key")),
                 "one_line_reason": conditional_reason,
+                "source_links": [],
+            },
+            "fallback",
+        )
+    if _safe_text(top_market.get("market_structure")) == "multi_outcome_range_market":
+        range_reason = (
+            f"{title} 当前跟踪的是 {target_outcome_label or '目标档位'}，市场定价约为 {probability * 100:.1f}%，"
+            f"24 小时变化 {delta_text}，说明对应区间风险{'上升' if delta > 0 else '回落' if delta < 0 else '维持稳定'}。"
+        )
+        return (
+            {
+                "event_key": _safe_text(top_market.get("event_key")),
+                "one_line_reason": range_reason,
                 "source_links": [],
             },
             "fallback",
@@ -1315,7 +1548,11 @@ def build_risk_snapshot(
         identity = _candidate_identity(selected)
         if identity:
             used_candidate_ids.add(identity)
-        probability = extract_probability_from_market(selected)
+        selected_structure = _market_structure_for_candidate(selected, event)
+        target_outcome = _resolve_target_outcome_selection(selected, event) if selected_structure == "multi_outcome_range_market" else None
+        probability = extract_probability_from_market(selected, event=event)
+        if probability <= 0:
+            continue
         liquidity_usd = extract_liquidity_usd_from_market(selected)
         liquidity_factor = calc_liquidity_factor(liquidity_usd)
         event_raw = probability * float(event["impact_weight"]) * liquidity_factor
@@ -1327,7 +1564,7 @@ def build_risk_snapshot(
                 "region_tag": event["region_tag"],
                 "pair_tag": event["pair_tag"],
                 "probability": probability,
-                "delta_24h": extract_delta_24h_from_market(selected),
+                "delta_24h": extract_delta_24h_from_market(selected, event=event),
                 "impact_weight": float(event["impact_weight"]),
                 "liquidity_usd": liquidity_usd,
                 "liquidity_factor": liquidity_factor,
@@ -1338,6 +1575,8 @@ def build_risk_snapshot(
                 "event_slug": _safe_text(selected.get("event_slug")),
                 "is_dynamic_conflict": False,
                 "market_semantics": "direct_conflict",
+                "market_structure": selected_structure,
+                "target_outcome_label": _safe_text((target_outcome or {}).get("outcome_label")),
             }
         )
 
