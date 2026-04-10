@@ -16,6 +16,7 @@ STEP2_TIMEOUT_SECONDS="${STEP2_TIMEOUT_SECONDS:-2400}"
 STEP3_TIMEOUT_SECONDS="${STEP3_TIMEOUT_SECONDS:-1800}"
 STEP4_TIMEOUT_SECONDS="${STEP4_TIMEOUT_SECONDS:-1800}"
 STEP5_TIMEOUT_SECONDS="${STEP5_TIMEOUT_SECONDS:-1800}"
+US_SYMBOL_RUN_ALL_CHUNKS="${US_SYMBOL_RUN_ALL_CHUNKS:-1}"
 
 # DXY guard defaults for update_micro_daily.py
 DXY_REQUIRED="${DXY_REQUIRED:-1}"
@@ -56,6 +57,21 @@ normalize_timeout() {
     return
   fi
   echo "${raw}"
+}
+
+is_truthy() {
+  local v
+  v="$(echo "${1:-}" | tr '[:upper:]' '[:lower:]')"
+  [[ "${v}" == "1" || "${v}" == "true" || "${v}" == "yes" || "${v}" == "on" ]]
+}
+
+resolve_us_chunk_total() {
+  local chunk_total
+  chunk_total="${US_SYMBOL_CHUNK_TOTAL:-4}"
+  if ! [[ "${chunk_total}" =~ ^[0-9]+$ ]] || [ "${chunk_total}" -lt 1 ]; then
+    chunk_total=4
+  fi
+  echo "${chunk_total}"
 }
 
 run_step() {
@@ -131,6 +147,25 @@ prepare_us_chunk_env() {
   export US_SYMBOL_CHUNK_INDEX="${chunk_index}"
 }
 
+run_us_stock_step() {
+  local idx="$1"
+  local total="$2"
+  local chunk_total chunk_index
+  chunk_total="$(resolve_us_chunk_total)"
+
+  if is_truthy "${US_SYMBOL_RUN_ALL_CHUNKS}"; then
+    echo "INFO: US chunk mode=all, total=${chunk_total}" >> "${LOG_FILE}"
+    for ((chunk_index=0; chunk_index<chunk_total; chunk_index++)); do
+      export US_SYMBOL_CHUNK_TOTAL="${chunk_total}"
+      export US_SYMBOL_CHUNK_INDEX="${chunk_index}"
+      run_step "${idx}" "${total}" "update us stocks chunk $((chunk_index + 1))/${chunk_total}" "update_stock_tiingo.py" "${STEP2_TIMEOUT_SECONDS}"
+    done
+  else
+    prepare_us_chunk_env
+    run_step "${idx}" "${total}" "update us stocks" "update_stock_tiingo.py" "${STEP2_TIMEOUT_SECONDS}"
+  fi
+}
+
 check_dxy_freshness() {
   local source_line backfill_line latest_line age_line
   local dxy_source dxy_backfilled latest_date age_days
@@ -173,15 +208,14 @@ echo "TASK_START: $(date)" >> "${LOG_FILE}"
 echo "PYTHON_BIN: ${PYTHON_BIN}" >> "${LOG_FILE}"
 echo "LOCK_FILE: ${LOCK_FILE}" >> "${LOG_FILE}"
 echo "STEP_TIMEOUT_DEFAULT: ${DEFAULT_STEP_TIMEOUT_SECONDS}s" >> "${LOG_FILE}"
+echo "US_CHUNK_CONFIG: run_all=${US_SYMBOL_RUN_ALL_CHUNKS}, total=${US_SYMBOL_CHUNK_TOTAL:-4}" >> "${LOG_FILE}"
 echo "DCE_LG_PATCH_CONFIG: ENABLE_DCE_LG_PATCH=${ENABLE_DCE_LG_PATCH}" >> "${LOG_FILE}"
 echo "DXY_GUARD_CONFIG: required=${DXY_REQUIRED}, max_stale_days=${DXY_MAX_STALE_DAYS}, rounds=${DXY_FETCH_ROUNDS}, retry_sleep=${DXY_RETRY_SLEEP_SECONDS}s, backfill_days=${DXY_BACKFILL_DAYS}, fred_fetch_days=${DXY_FRED_FETCH_DAYS}, fred_candidates=${DXY_FRED_SERIES_CANDIDATES}" >> "${LOG_FILE}"
 
 export ENABLE_DCE_LG_PATCH
 run_step 1 5 "update futures holding" "update_open_oneday.py" "${STEP1_TIMEOUT_SECONDS}"
-prepare_us_chunk_env
-run_step 2 5 "update us stocks" "update_stock_tiingo.py" "${STEP2_TIMEOUT_SECONDS}"
-run_step 3 5 "update bonds" "update_bond_data.py" "${STEP3_TIMEOUT_SECONDS}"
-run_step 4 5 "update trend monitor" "trend_monitor.py" "${STEP4_TIMEOUT_SECONDS}"
+run_step 2 5 "update bonds" "update_bond_data.py" "${STEP3_TIMEOUT_SECONDS}"
+run_step 3 5 "update trend monitor" "trend_monitor.py" "${STEP4_TIMEOUT_SECONDS}"
 
 export DXY_REQUIRED
 export DXY_MAX_STALE_DAYS
@@ -190,7 +224,8 @@ export DXY_RETRY_SLEEP_SECONDS
 export DXY_BACKFILL_DAYS
 export DXY_FRED_FETCH_DAYS
 export DXY_FRED_SERIES_CANDIDATES
-run_step 5 5 "update macro" "update_micro_daily.py" "${STEP5_TIMEOUT_SECONDS}"
+run_step 4 5 "update macro" "update_micro_daily.py" "${STEP5_TIMEOUT_SECONDS}"
+run_us_stock_step 5 5
 
 check_dxy_freshness
 
