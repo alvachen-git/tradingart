@@ -17,7 +17,7 @@ STEP3_TIMEOUT_SECONDS="${STEP3_TIMEOUT_SECONDS:-1800}"
 STEP4_TIMEOUT_SECONDS="${STEP4_TIMEOUT_SECONDS:-1800}"
 STEP5_TIMEOUT_SECONDS="${STEP5_TIMEOUT_SECONDS:-1800}"
 
-# DXY guard defaults for update_micro_daily.py (can still be overridden by env)
+# DXY guard defaults for update_micro_daily.py
 DXY_REQUIRED="${DXY_REQUIRED:-1}"
 DXY_MAX_STALE_DAYS="${DXY_MAX_STALE_DAYS:-3}"
 DXY_FETCH_ROUNDS="${DXY_FETCH_ROUNDS:-4}"
@@ -26,14 +26,16 @@ DXY_BACKFILL_DAYS="${DXY_BACKFILL_DAYS:-60}"
 DXY_FRED_FETCH_DAYS="${DXY_FRED_FETCH_DAYS:-180}"
 DXY_FRED_SERIES_CANDIDATES="${DXY_FRED_SERIES_CANDIDATES:-DTWEXBGS,DTWEXAFEGS,DTWEXEMEGS,DTWEXM}"
 
+# Disable DCE LG patch by default to prevent step-1 hanging.
+ENABLE_DCE_LG_PATCH="${ENABLE_DCE_LG_PATCH:-0}"
+
 cd "${APP_DIR}" || exit 1
 
 if [ ! -x "${PYTHON_BIN}" ]; then
   echo "" >> "${LOG_FILE}"
   echo "========================================" >> "${LOG_FILE}"
-  echo "❌ 任务开始: $(date)" >> "${LOG_FILE}"
-  echo "❌ 未找到虚拟环境解释器: ${PYTHON_BIN}" >> "${LOG_FILE}"
-  echo "❌ 任务终止，请先创建/修复 venv 环境" >> "${LOG_FILE}"
+  echo "ERROR: task start $(date)" >> "${LOG_FILE}"
+  echo "ERROR: python venv not found: ${PYTHON_BIN}" >> "${LOG_FILE}"
   echo "========================================" >> "${LOG_FILE}"
   exit 1
 fi
@@ -42,8 +44,7 @@ exec 9>"${LOCK_FILE}"
 if ! flock -n 9; then
   echo "" >> "${LOG_FILE}"
   echo "========================================" >> "${LOG_FILE}"
-  echo "⚠️ 任务跳过: $(date)" >> "${LOG_FILE}"
-  echo "⚠️ 检测到已有 run_daily2.sh 在运行，避免重复执行 (lock=${LOCK_FILE})" >> "${LOG_FILE}"
+  echo "WARN: skip duplicated run at $(date) (lock=${LOCK_FILE})" >> "${LOG_FILE}"
   echo "========================================" >> "${LOG_FILE}"
   exit 0
 fi
@@ -68,25 +69,25 @@ run_step() {
 
   timeout_seconds="$(normalize_timeout "${5:-${DEFAULT_STEP_TIMEOUT_SECONDS}}")"
   started_at=$(date +%s)
-  echo ">>> [${idx}/${total}] 开始${title} (timeout=${timeout_seconds}s)..." >> "${LOG_FILE}"
+  echo ">>> [${idx}/${total}] START ${title} (timeout=${timeout_seconds}s)" >> "${LOG_FILE}"
 
   if command -v timeout >/dev/null 2>&1; then
     timeout --signal=TERM --kill-after=30 "${timeout_seconds}" "${PYTHON_BIN}" -u "${script}" >> "${LOG_FILE}" 2>&1
     rc=$?
   else
-    echo "⚠️ 未找到 timeout 命令，本步骤不设超时保护" >> "${LOG_FILE}"
+    echo "WARN: timeout command not found, run without timeout protection" >> "${LOG_FILE}"
     "${PYTHON_BIN}" -u "${script}" >> "${LOG_FILE}" 2>&1
     rc=$?
   fi
 
   ended_at=$(date +%s)
   elapsed=$((ended_at - started_at))
-  echo "<<< [${idx}/${total}] 结束${title} (rc=${rc}, elapsed=${elapsed}s)" >> "${LOG_FILE}"
+  echo "<<< [${idx}/${total}] END ${title} (rc=${rc}, elapsed=${elapsed}s)" >> "${LOG_FILE}"
 
   if [ "${rc}" -eq 124 ]; then
-    echo "⚠️ [${idx}/${total}] ${title} 超时(${timeout_seconds}s)，已终止并继续后续步骤" >> "${LOG_FILE}"
+    echo "WARN: [${idx}/${total}] ${title} timeout(${timeout_seconds}s), continue next step" >> "${LOG_FILE}"
   elif [ "${rc}" -eq 137 ]; then
-    echo "⚠️ [${idx}/${total}] ${title} 被强制杀死(SIGKILL)，已继续后续步骤" >> "${LOG_FILE}"
+    echo "WARN: [${idx}/${total}] ${title} killed(SIGKILL), continue next step" >> "${LOG_FILE}"
   fi
   echo "" >> "${LOG_FILE}"
 
@@ -112,7 +113,7 @@ prepare_us_chunk_env() {
     if [ "${chunk_index}" -lt 0 ]; then
       chunk_index=$((chunk_index + chunk_total))
     fi
-    echo "ℹ️ 美股分片: 使用外部指定 index=${chunk_index}, total=${chunk_total}" >> "${LOG_FILE}"
+    echo "INFO: US chunk use external index=${chunk_index}, total=${chunk_total}" >> "${LOG_FILE}"
   else
     last_idx=-1
     if [ -f "${US_CHUNK_STATE_FILE}" ]; then
@@ -123,7 +124,7 @@ prepare_us_chunk_env() {
     fi
     chunk_index=$(((last_idx + 1 + chunk_total) % chunk_total))
     printf "%s\n" "${chunk_index}" > "${US_CHUNK_STATE_FILE}"
-    echo "ℹ️ 美股分片: 自动轮转 index=${chunk_index}, total=${chunk_total}" >> "${LOG_FILE}"
+    echo "INFO: US chunk rotate index=${chunk_index}, total=${chunk_total}" >> "${LOG_FILE}"
   fi
 
   export US_SYMBOL_CHUNK_TOTAL="${chunk_total}"
@@ -146,40 +147,41 @@ check_dxy_freshness() {
   age_days="${age_line#*=}"
 
   if [ -z "${latest_line}" ] || [ -z "${latest_date}" ] || [ "${latest_date}" = "NONE" ]; then
-    echo "⚠️ DXY 新鲜度检查: 未获取到 DXY_LATEST_DATE" >> "${LOG_FILE}"
+    echo "WARN: DXY freshness check missing DXY_LATEST_DATE" >> "${LOG_FILE}"
     return 0
   fi
 
-  # Prefer application-emitted DXY_AGE_DAYS, fallback to local calc.
   if ! [[ "${age_days}" =~ ^-?[0-9]+$ ]]; then
     latest_epoch=$(date -d "${latest_date}" +%s 2>/dev/null || echo "")
     now_epoch=$(date +%s)
     if [ -z "${latest_epoch}" ]; then
-      echo "⚠️ DXY 新鲜度检查: 无法解析日期 ${latest_date}" >> "${LOG_FILE}"
+      echo "WARN: DXY freshness check cannot parse date ${latest_date}" >> "${LOG_FILE}"
       return 0
     fi
     age_days=$(((now_epoch - latest_epoch) / 86400))
   fi
 
-  echo "ℹ️ DXY 状态: source=${dxy_source:-unknown}, backfilled=${dxy_backfilled:-0}, latest=${latest_date}, age_days=${age_days}, max_stale_days=${DXY_MAX_STALE_DAYS}" >> "${LOG_FILE}"
+  echo "INFO: DXY source=${dxy_source:-unknown}, backfilled=${dxy_backfilled:-0}, latest=${latest_date}, age_days=${age_days}, max_stale_days=${DXY_MAX_STALE_DAYS}" >> "${LOG_FILE}"
   if [ "${age_days}" -gt "${DXY_MAX_STALE_DAYS}" ]; then
-    echo "⚠️ DXY 新鲜度告警: 最新日期距今 ${age_days} 天(>${DXY_MAX_STALE_DAYS}天)，请检查上游数据源" >> "${LOG_FILE}"
+    echo "WARN: DXY stale ${age_days} days (> ${DXY_MAX_STALE_DAYS})" >> "${LOG_FILE}"
   fi
 }
 
 echo "" >> "${LOG_FILE}"
 echo "========================================" >> "${LOG_FILE}"
-echo "⏰ 任务开始: $(date)" >> "${LOG_FILE}"
-echo "🐍 Python: ${PYTHON_BIN}" >> "${LOG_FILE}"
-echo "🔒 Lock: ${LOCK_FILE}" >> "${LOG_FILE}"
-echo "⏱️ 默认步骤超时: ${DEFAULT_STEP_TIMEOUT_SECONDS}s" >> "${LOG_FILE}"
+echo "TASK_START: $(date)" >> "${LOG_FILE}"
+echo "PYTHON_BIN: ${PYTHON_BIN}" >> "${LOG_FILE}"
+echo "LOCK_FILE: ${LOCK_FILE}" >> "${LOG_FILE}"
+echo "STEP_TIMEOUT_DEFAULT: ${DEFAULT_STEP_TIMEOUT_SECONDS}s" >> "${LOG_FILE}"
+echo "DCE_LG_PATCH_CONFIG: ENABLE_DCE_LG_PATCH=${ENABLE_DCE_LG_PATCH}" >> "${LOG_FILE}"
 echo "DXY_GUARD_CONFIG: required=${DXY_REQUIRED}, max_stale_days=${DXY_MAX_STALE_DAYS}, rounds=${DXY_FETCH_ROUNDS}, retry_sleep=${DXY_RETRY_SLEEP_SECONDS}s, backfill_days=${DXY_BACKFILL_DAYS}, fred_fetch_days=${DXY_FRED_FETCH_DAYS}, fred_candidates=${DXY_FRED_SERIES_CANDIDATES}" >> "${LOG_FILE}"
 
-run_step 1 5 "更新期货席位数据" "update_open_oneday.py" "${STEP1_TIMEOUT_SECONDS}"
+export ENABLE_DCE_LG_PATCH
+run_step 1 5 "update futures holding" "update_open_oneday.py" "${STEP1_TIMEOUT_SECONDS}"
 prepare_us_chunk_env
-run_step 2 5 "更新美股价格数据" "update_stock_tiingo.py" "${STEP2_TIMEOUT_SECONDS}"
-run_step 3 5 "更新债券收益数据" "update_bond_data.py" "${STEP3_TIMEOUT_SECONDS}"
-run_step 4 5 "更新热搜数据" "trend_monitor.py" "${STEP4_TIMEOUT_SECONDS}"
+run_step 2 5 "update us stocks" "update_stock_tiingo.py" "${STEP2_TIMEOUT_SECONDS}"
+run_step 3 5 "update bonds" "update_bond_data.py" "${STEP3_TIMEOUT_SECONDS}"
+run_step 4 5 "update trend monitor" "trend_monitor.py" "${STEP4_TIMEOUT_SECONDS}"
 
 export DXY_REQUIRED
 export DXY_MAX_STALE_DAYS
@@ -188,15 +190,15 @@ export DXY_RETRY_SLEEP_SECONDS
 export DXY_BACKFILL_DAYS
 export DXY_FRED_FETCH_DAYS
 export DXY_FRED_SERIES_CANDIDATES
-run_step 5 5 "更新宏观数据" "update_micro_daily.py" "${STEP5_TIMEOUT_SECONDS}"
+run_step 5 5 "update macro" "update_micro_daily.py" "${STEP5_TIMEOUT_SECONDS}"
 
 check_dxy_freshness
 
 if [ "${FAILED_STEPS}" -gt 0 ]; then
-  echo "⚠️ 本次任务失败步骤数: ${FAILED_STEPS}" >> "${LOG_FILE}"
+  echo "WARN: failed steps count=${FAILED_STEPS}" >> "${LOG_FILE}"
 else
-  echo "✅ 本次任务全部步骤成功" >> "${LOG_FILE}"
+  echo "OK: all steps success" >> "${LOG_FILE}"
 fi
 
-echo "✅ 任务结束: $(date)" >> "${LOG_FILE}"
+echo "TASK_END: $(date)" >> "${LOG_FILE}"
 echo "========================================" >> "${LOG_FILE}"

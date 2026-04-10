@@ -40,7 +40,8 @@ pro = ts.pro_api()
 
 FORCE_GFEX_AK_PATCH = str(os.getenv("FORCE_GFEX_AK_PATCH", "false")).strip().lower() in {"1", "true", "yes", "on"}
 FORCE_SHFE_AK_PATCH = str(os.getenv("FORCE_SHFE_AK_PATCH", "false")).strip().lower() in {"1", "true", "yes", "on"}
-ENABLE_DCE_LG_PATCH = str(os.getenv("ENABLE_DCE_LG_PATCH", "true")).strip().lower() in {"1", "true", "yes", "on"}
+# Default disabled to avoid long hangs in DCE LG patch path.
+ENABLE_DCE_LG_PATCH = str(os.getenv("ENABLE_DCE_LG_PATCH", "false")).strip().lower() in {"1", "true", "yes", "on"}
 _DCE_LG_UPSTREAM_BLOCKED = False
 
 
