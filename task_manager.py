@@ -8,7 +8,27 @@ from celery.result import AsyncResult
 load_dotenv(override=True)
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-redis_client = redis.from_url(REDIS_URL, decode_responses=True)
+
+
+def _read_redis_timeout(env_name: str, default: float) -> float:
+    try:
+        value = float(str(os.getenv(env_name, default)).strip())
+        if value <= 0:
+            return float(default)
+        return value
+    except (TypeError, ValueError):
+        return float(default)
+
+
+REDIS_CONNECT_TIMEOUT_SEC = _read_redis_timeout("TASK_REDIS_CONNECT_TIMEOUT_SEC", 0.15)
+REDIS_SOCKET_TIMEOUT_SEC = _read_redis_timeout("TASK_REDIS_SOCKET_TIMEOUT_SEC", 0.20)
+
+redis_client = redis.from_url(
+    REDIS_URL,
+    decode_responses=True,
+    socket_connect_timeout=REDIS_CONNECT_TIMEOUT_SEC,
+    socket_timeout=REDIS_SOCKET_TIMEOUT_SEC,
+)
 
 TASK_META_PREFIX = "task_meta:"
 USER_TASK_PREFIX = "user_pending_task:"  # 🔥 [新增] 用于存储用户待处理任务
