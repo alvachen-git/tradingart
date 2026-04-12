@@ -941,6 +941,8 @@ def native_share_button(user_content, ai_content, key):
 # ==========================================
 cookie_manager = stx.CookieManager(key="main_cookie_manager")
 cookies = cookie_manager.get_all() or {}
+cookie_user = str(cookies.get("username") or "").strip()
+cookie_token = str(cookies.get("token") or "").strip()
 if "home_cookie_retry_once" not in st.session_state:
     st.session_state.home_cookie_retry_once = False
 if "home_invalid_retry_count" not in st.session_state:
@@ -1087,8 +1089,8 @@ should_auto_login = (
 )
 
 if should_auto_login:
-    c_user = str(cookies.get("username") or "").strip()
-    c_token = str(cookies.get("token") or "").strip()
+    c_user = cookie_user
+    c_token = cookie_token
     cookie_sig = _auth_signature(c_user, c_token)
     invalid_sig = str(st.session_state.get("home_invalid_token_signature") or "").strip()
 
@@ -1112,10 +1114,10 @@ if should_auto_login:
         st.session_state.home_cookie_retry_once = True
         st.rerun()
 
-# 【关键修复 2】如果已经是登出后的重跑，现在可以重置标记了
-# 这样下次用户刷新页面(F5)时，如果 Cookie 还在(虽然应该删了)，还能尝试登录，或者单纯重置状态
 if st.session_state.get('just_logged_out', False):
-    st.session_state['just_logged_out'] = False
+    # 仅在确认 Cookie 已清空后才允许重新进入自动登录流程。
+    if not cookie_user and not cookie_token:
+        st.session_state['just_logged_out'] = False
 
 # 只有第一次运行时才初始化，如果已经登录了，不要重置它
 if 'is_logged_in' not in st.session_state:
@@ -2278,6 +2280,10 @@ with st.sidebar:
 
         # 🔥 登出回调函数
         def do_logout():
+            logout_user = str(st.session_state.get("user_id") or "").strip()
+            logout_token = str(st.session_state.get("token") or "").strip()
+            logout_sig = _auth_signature(logout_user, logout_token)
+
             # 1. 使数据库中的 token 失效（只删当前设备，不影响其他设备）
             if user != "访客":
                 auth.logout_user(user, st.session_state.get("token"))
@@ -2289,6 +2295,13 @@ with st.sidebar:
                         DeepTaskManager().clear_user_pending_task(user)
                 except Exception as e:
                     print(f"清理待处理任务失败: {e}")
+
+            # 2. 删除 Cookie（组件写入可能异步，just_logged_out 会阻断乐观自动登录）
+            try:
+                cookie_manager.delete("username", key="logout_del_user")
+                cookie_manager.delete("token", key="logout_del_token")
+            except Exception as e:
+                print(f"登出删除 cookie 失败: {e}")
 
             # 2. 清除 session state
             st.session_state['is_logged_in'] = False
@@ -2302,7 +2315,7 @@ with st.sidebar:
             st.session_state['home_auto_login_toast_token'] = ""
             st.session_state['home_auth_verify_needed'] = False
             st.session_state['home_auth_verified_sig'] = ""
-            st.session_state['home_invalid_token_signature'] = ""
+            st.session_state['home_invalid_token_signature'] = logout_sig
             st.session_state['home_masked_email_user'] = ""
             st.session_state['home_masked_email_value'] = ""
             if 'token' in st.session_state:
@@ -2310,15 +2323,7 @@ with st.sidebar:
 
 
         # 登出按钮
-        if st.button("🚪 登出", type="primary", use_container_width=True, on_click=do_logout):
-            # 删除 Cookie
-            try:
-                cookie_manager.delete("username", key="logout_del_user")
-                cookie_manager.delete("token", key="logout_del_token")
-            except:
-                pass
-            time.sleep(0.3)
-            st.rerun()
+        st.button("🚪 登出", type="primary", use_container_width=True, on_click=do_logout)
 
         # 清空对话历史（使用 popover 防误触）
         with st.popover("🗑️ 清空对话历史", use_container_width=True):
