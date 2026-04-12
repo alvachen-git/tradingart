@@ -503,6 +503,53 @@ def fetch_ushy_from_fred() -> dict:
         return results
 
 
+def fetch_sp500_pe_from_multpl() -> dict:
+    """
+    抓取标普500 PE(TTM) 月度数据（用于美股股债比）。
+    数据源: https://www.multpl.com/s-p-500-pe-ratio/table/by-month
+    """
+    results = {}
+    try:
+        print("  📡 抓取标普500 PE (multpl)...")
+        tables = pd.read_html("https://www.multpl.com/s-p-500-pe-ratio/table/by-month")
+        if not tables:
+            print("  ⚠️ multpl 返回空表")
+            return results
+
+        df = tables[0].copy()
+        if df.shape[1] < 2:
+            print("  ⚠️ multpl 表结构异常")
+            return results
+
+        d_col, v_col = df.columns[0], df.columns[1]
+        df = df[[d_col, v_col]].copy()
+        df.columns = ["trade_date", "close_value"]
+        df["trade_date"] = pd.to_datetime(df["trade_date"], errors="coerce")
+        df["close_value"] = pd.to_numeric(df["close_value"].astype(str).str.replace(r"[^0-9.\-]", "", regex=True), errors="coerce")
+        df = df.dropna(subset=["trade_date", "close_value"])
+        if df.empty:
+            print("  ⚠️ multpl 无有效数值")
+            return results
+
+        # 仅保留近15年，足够覆盖分位统计且减小重复写入压力。
+        cutoff = datetime.now() - timedelta(days=365 * 15)
+        df = df[df["trade_date"] >= cutoff].copy()
+        df = df.sort_values("trade_date").drop_duplicates(subset=["trade_date"], keep="last")
+        if df.empty:
+            return results
+
+        results["SP500_PE"] = {
+            "df": df,
+            "name": "标普500市盈率(PE-TTM)",
+            "category": "valuation",
+        }
+        print(f"    ✅ SP500_PE: {len(df)} 条")
+        return results
+    except Exception as e:
+        print(f"  ❌ multpl 标普PE失败: {e}")
+        return results
+
+
 # ==========================================
 # 数据处理和保存
 # ==========================================
@@ -611,38 +658,43 @@ def run_fetch():
     all_results = {}
 
     # 1. 中美国债利率 (AKShare)
-    print("\n🔄 [1/6] 抓取中美国债利率 (AKShare)...")
+    print("\n🔄 [1/7] 抓取中美国债利率 (AKShare)...")
     results = fetch_bond_rates()
     all_results.update(results)
     time.sleep(1)
 
     # 2. 波罗的海指数 (AKShare)
-    print("\n🔄 [2/6] 抓取波罗的海指数 (AKShare)...")
+    print("\n🔄 [2/7] 抓取波罗的海指数 (AKShare)...")
     results = fetch_bdi()
     all_results.update(results)
     time.sleep(1)
 
     # 3. 汇率 (AKShare) + 交叉汇率计算
-    print("\n🔄 [3/6] 抓取汇率 & 计算交叉汇率 (AKShare)...")
+    print("\n🔄 [3/7] 抓取汇率 & 计算交叉汇率 (AKShare)...")
     results = fetch_currency_rates()
     all_results.update(results)
     time.sleep(1)
 
     # 4. 美元指数 + 离岸人民币 (FRED)
-    print("\n🔄 [4/6] 抓取美元指数 & 离岸人民币 (FRED)...")
+    print("\n🔄 [4/7] 抓取美元指数 & 离岸人民币 (FRED)...")
     results = fetch_usd_index_from_fred()
     all_results.update(results)
     results = fetch_offshore_cny_from_fred()
     all_results.update(results)
 
     # 5. 日本国债 (FRED)
-    print("\n🔄 [5/6] 抓取日本国债 (FRED)...")
+    print("\n🔄 [5/7] 抓取日本国债 (FRED)...")
     results = fetch_japan_bond_from_fred()
     all_results.update(results)
 
     # 6. 美国高收益债 (FRED)
-    print("\n🔄 [6/6] 抓取美国高收益债 (FRED)...")
+    print("\n🔄 [6/7] 抓取美国高收益债 (FRED)...")
     results = fetch_ushy_from_fred()
+    all_results.update(results)
+
+    # 7. 标普500估值 (multpl)
+    print("\n🔄 [7/7] 抓取标普500估值 (multpl)...")
+    results = fetch_sp500_pe_from_multpl()
     all_results.update(results)
 
     # 保存到数据库
@@ -676,6 +728,7 @@ def run_fetch():
     bonds = [k for k in all_results if all_results[k]['category'] == 'bond']
     fx = [k for k in all_results if all_results[k]['category'] == 'fx']
     shipping = [k for k in all_results if all_results[k]['category'] == 'shipping']
+    valuation = [k for k in all_results if all_results[k]['category'] == 'valuation']
 
     if bonds:
         print("\n  🏦 国债利率:")
@@ -690,6 +743,11 @@ def run_fetch():
     if shipping:
         print("\n  🚢 航运:")
         for code in sorted(shipping):
+            print(f"    • {code}: {all_results[code]['name']}")
+
+    if valuation:
+        print("\n  📊 估值:")
+        for code in sorted(valuation):
             print(f"    • {code}: {all_results[code]['name']}")
 
     # 提示缺失的指标

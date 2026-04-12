@@ -57,6 +57,7 @@ def show_navigation() -> None:
         st.page_link("pages/22_AI炒股2号.py", label="AI炒股2号")
 
     with st.expander("期权数据", expanded=False):
+        st.page_link("pages/期权学习.py", label="期权学习")
         st.page_link("pages/01_ETF期权.py", label="ETF期权")
         st.page_link("pages/02_商品期权.py", label="商品期权")
         st.page_link("pages/12_策略回测.py", label="策略回测")
@@ -72,7 +73,8 @@ def show_navigation() -> None:
         st.page_link("pages/08_股票资金.py", label="股票资金")
         st.page_link("pages/21_产业链图谱.py", label="产业链图谱")
 
-    with st.expander("K线训练", expanded=False):
+    with st.expander("学习交易", expanded=False):
+        st.page_link("pages/25_期权重盾班.py", label="期权重盾班")
         st.page_link("pages/K线训练.py", label="K线训练")
         st.page_link("pages/19_K线复盘.py", label="交易复盘")
 

@@ -58,6 +58,7 @@ FORCE_PAID_CHANNEL_CODES = {
     "expiry_option_radar",
     "broker_position_report",
     "fund_flow_report",
+    "macro_risk_radar",
 }
 EFFECTIVE_FREE_CHANNEL_CODES = FREE_SELF_SUBSCRIBE_CHANNEL_CODES - FORCE_PAID_CHANNEL_CODES
 with st.sidebar:

@@ -64,7 +64,8 @@ WHERE code IN (
     'expiry_option_radar',
     'daily_report',
     'broker_position_report',
-    'fund_flow_report'
+    'fund_flow_report',
+    'macro_risk_radar'
 )
   AND (price_points_monthly IS NULL OR price_points_monthly = 0);
 

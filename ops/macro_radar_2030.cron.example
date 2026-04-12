@@ -1,0 +1,4 @@
+# Macro Risk Radar
+# Every day at 20:30 (Asia/Shanghai)
+30 20 * * * /root/finance_app/future-app/run_macro_radar.sh
+

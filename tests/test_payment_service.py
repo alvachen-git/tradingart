@@ -123,7 +123,8 @@ class TestPaymentService(unittest.TestCase):
                     (1, 'daily_report', '复盘晚报', '📪', 1, 1, 1, 500),
                     (2, 'expiry_option_radar', '末日期权晚报', '📅', 1, 1, 2, 500),
                     (3, 'broker_position_report', '持仓密报', '🔥', 1, 1, 3, 500),
-                    (4, 'fund_flow_report', '资金流晚报', '💰', 1, 1, 4, 500)
+                    (4, 'fund_flow_report', '资金流晚报', '💰', 1, 1, 4, 500),
+                    (5, 'macro_risk_radar', '宏观周报', '🌍', 1, 1, 5, 500)
                     """
                 )
             )
@@ -283,7 +284,7 @@ class TestPaymentService(unittest.TestCase):
                 text(
                     """
                     INSERT INTO content_channels(id, code, name, icon, is_active, is_premium, sort_order, price_points_monthly)
-                    VALUES (9, 'trade_signal', '突破信号', '⚡', 1, 1, 5, NULL)
+                    VALUES (9, 'trade_signal', '突破信号', '⚡', 1, 1, 6, NULL)
                     """
                 )
             )
@@ -308,6 +309,28 @@ class TestPaymentService(unittest.TestCase):
             ).fetchone()
         self.assertIsNotNone(spend)
         self.assertEqual(int(spend[0]), -800)
+
+    def test_paid_products_include_macro_radar_and_package_includes_it(self):
+        products = pay.get_paid_products()
+        channel_codes = [
+            str(item.get("code") or "")
+            for item in products
+            if str(item.get("product_type") or "") == "channel"
+        ]
+        self.assertIn("macro_risk_radar", channel_codes)
+
+        package = next(
+            (
+                item
+                for item in products
+                if str(item.get("product_type") or "") == "package"
+                and str(item.get("code") or "") == str(pay.INTEL_PACKAGE_PRODUCT["code"])
+            ),
+            None,
+        )
+        self.assertIsNotNone(package)
+        include_codes = [str(x or "") for x in (package.get("includes") or [])]
+        self.assertIn("macro_risk_radar", include_codes)
 
     def test_purchase_intel_package_rolls_back_on_partial_failure(self):
         pay.credit_points("u5", 999, ref_id="seed", description="初始点数", tx_type="admin_grant", biz_id="seed_u5")

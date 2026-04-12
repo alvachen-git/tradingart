@@ -972,7 +972,8 @@ with shop_paid_tab:
         "expiry_option_radar": 1,
         "broker_position_report": 2,
         "fund_flow_report": 3,
-        "trade_signal": 4,
+        "macro_risk_radar": 4,
+        "trade_signal": 5,
     }
     products.sort(
         key=lambda item: (
@@ -989,6 +990,7 @@ with shop_paid_tab:
         "expiry_option_radar": "针对快到期期权，综合技术面和波动率，给出适合的策略。",
         "broker_position_report": "分析正指标机构 + 反指标散户的期货持仓，给出期货操盘建议。",
         "fund_flow_report": "分析每天股票市场的资金流动，跟踪成交量异常的潜力股。",
+        "macro_risk_radar": "每周聚焦宏观主线，结合收益率、通胀、就业与联储流动性做跨资产解读。",
         "trade_signal": "每天下午2点半，全市场扫描判断突破品种。",
     }
     product_name_map = {

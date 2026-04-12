@@ -27,11 +27,15 @@ DEFAULT_NEW_USER_TRIAL_CHANNEL_CODES = [
     for item in str(
         os.getenv(
             "NEW_USER_TRIAL_CHANNEL_CODES",
-            "",
+            "daily_report,expiry_option_radar,broker_position_report,fund_flow_report,macro_risk_radar",
         )
     ).split(",")
     if item.strip()
 ]
+
+CHANNEL_NAME_OVERRIDES = {
+    "macro_risk_radar": "宏观周报",
+}
 
 
 def _normalize_channel_codes(codes: Optional[List[str]]) -> List[str]:
@@ -68,6 +72,14 @@ def _resolve_new_user_trial_channel_codes(conn, channel_codes: Optional[List[str
         )
     ).fetchall()
     return _normalize_channel_codes([r[0] for r in rows])
+
+
+def _apply_channel_display_overrides(channel: Dict[str, Any]) -> Dict[str, Any]:
+    code = str(channel.get("code") or "").strip().lower()
+    override_name = CHANNEL_NAME_OVERRIDES.get(code)
+    if override_name:
+        channel["name"] = override_name
+    return channel
 
 
 def _has_subscription_source_columns(conn) -> bool:
@@ -277,7 +289,7 @@ def get_all_channels(only_active: bool = True) -> List[Dict]:
 
             channels = []
             for row in result:
-                channels.append({
+                channels.append(_apply_channel_display_overrides({
                     "id": row[0],
                     "code": row[1],
                     "name": row[2],
@@ -286,7 +298,7 @@ def get_all_channels(only_active: bool = True) -> List[Dict]:
                     "is_premium": bool(row[5]),
                     "price_monthly": float(row[6]) if row[6] else None,
                     "sort_order": row[7]
-                })
+                }))
             return channels
     except Exception as e:
         print(f"获取频道列表失败: {e}")
@@ -306,14 +318,14 @@ def get_channel_by_code(code: str) -> Optional[Dict]:
             row = conn.execute(sql, {"code": code}).fetchone()
 
             if row:
-                return {
+                return _apply_channel_display_overrides({
                     "id": row[0],
                     "code": row[1],
                     "name": row[2],
                     "icon": row[3],
                     "description": row[4],
                     "is_premium": bool(row[5])
-                }
+                })
             return None
     except Exception as e:
         print(f"获取频道失败: {e}")

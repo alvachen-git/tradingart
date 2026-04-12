@@ -44,6 +44,7 @@ REPORT_PRODUCTS = [
     {"code": "expiry_option_radar", "name": "末日期权晚报", "icon": "🗓️", "points_monthly": 500},
     {"code": "broker_position_report", "name": "期货商持仓晚报", "icon": "🏦", "points_monthly": 500},
     {"code": "fund_flow_report", "name": "资金流晚报", "icon": "💸", "points_monthly": 500},
+    {"code": "macro_risk_radar", "name": "宏观周报", "icon": "🌍", "points_monthly": 500},
 ]
 _REPORT_PRICE_DEFAULTS = {item["code"]: int(item["points_monthly"]) for item in REPORT_PRODUCTS}
 _CHANNEL_PRICE_DEFAULTS = {
@@ -760,10 +761,14 @@ def get_points_channels() -> list[Dict[str, Any]]:
             code = str(row[1] or "")
             if code not in meta_map:
                 continue
+            display_name = row[2] or meta_map.get(code, {}).get("name")
+            # Keep channel display name consistent after the product rename.
+            if code == "macro_risk_radar":
+                display_name = meta_map.get(code, {}).get("name") or display_name
             by_code[code] = {
                 "id": int(row[0]),
                 "code": code,
-                "name": row[2] or meta_map.get(code, {}).get("name"),
+                "name": display_name,
                 "icon": row[3] or meta_map.get(code, {}).get("icon"),
                 "is_premium": bool(row[4]),
                 "price_points_monthly": int(row[5]) if row[5] is not None else _REPORT_PRICE_DEFAULTS.get(code),
