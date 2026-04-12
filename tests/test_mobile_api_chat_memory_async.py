@@ -1,7 +1,8 @@
 import unittest
 import json
+import types
 from datetime import datetime, timedelta
-from unittest.mock import patch
+from unittest.mock import patch, Mock
 
 
 _IMPORT_ERROR = None
@@ -105,6 +106,42 @@ class TestMobileApiChatMemoryAsync(unittest.TestCase):
         ctx = mocked_create.call_args.kwargs.get("context_payload") or {}
         self.assertTrue(ctx.get("is_followup"))
         self.assertIn("用户: 先看黄金技术面", ctx.get("recent_context", ""))
+
+    def test_mobile_context_cross_domain_does_not_inject_recent_or_memory(self):
+        history = [
+            {"role": "user", "content": "我的股票持仓要不要调仓"},
+            {"role": "assistant", "content": "你当前股票持仓较分散。"},
+        ]
+        out = mobile_api._build_mobile_context_payload(
+            prompt_text="创业板期权持仓怎么调？",
+            current_user="u1",
+            history=history,
+        )
+        self.assertEqual(out.get("intent_domain"), "option")
+        self.assertEqual(out.get("recent_domain"), "stock_portfolio")
+        self.assertEqual(out.get("recent_context"), "")
+        self.assertEqual(out.get("memory_context"), "")
+
+    def test_mobile_context_option_uses_strict_topic_memory_retrieval(self):
+        history = [
+            {"role": "user", "content": "创业板期权怎么看"},
+            {"role": "assistant", "content": "可先看波动率和行权价分布。"},
+        ]
+        fake_mem = types.SimpleNamespace()
+        fake_mem.retrieve_relevant_memory = Mock(return_value="- [2026-04-12 09:00] 用户问: 期权策略\nAI回答: ...")
+
+        with patch.dict("sys.modules", {"memory_utils": fake_mem}):
+            out = mobile_api._build_mobile_context_payload(
+                prompt_text="创业板期权持仓怎么调？",
+                current_user="u1",
+                history=history,
+            )
+
+        fake_mem.retrieve_relevant_memory.assert_called_once()
+        kwargs = fake_mem.retrieve_relevant_memory.call_args.kwargs
+        self.assertEqual(kwargs.get("query_topic"), "option")
+        self.assertTrue(kwargs.get("strict_topic"))
+        self.assertIn("期权", out.get("memory_context", ""))
 
     def test_chat_submit_only_keeps_recent_four_history(self):
         fake_redis = _FakeRedis()
@@ -282,7 +319,9 @@ class TestMobileApiChatMemoryAsync(unittest.TestCase):
             ),
         )
 
-        with patch.object(mobile_api, "_redis", fake_redis):
+        with patch.object(mobile_api, "_redis", fake_redis), patch.object(
+            mobile_api.TaskManager, "get_user_pending_task", return_value={}
+        ):
             first = mobile_api.chat_pending(username="u1")
             second = mobile_api.chat_pending(username="u1")
 

@@ -1430,6 +1430,27 @@ FOLLOWUP_KEYWORDS = (
     "继续", "接着", "承接", "基于刚才", "刚聊到", "上一轮"
 )
 
+INTENT_OPTION_KEYWORDS = (
+    "期权", "认购", "认沽", "行权价", "牛市价差", "熊市价差", "跨式", "宽跨", "勒式",
+    "call", "put", "delta", "gamma", "vega", "theta", "iv", "波动率", "权利金",
+)
+
+INTENT_STOCK_PORTFOLIO_KEYWORDS = (
+    "持仓体检", "我的持仓", "我的股票", "股票持仓", "持仓分析", "仓位", "调仓", "加仓", "减仓",
+    "股票组合", "股票账户", "前3大持仓", "行业分布",
+)
+
+
+def _classify_intent_domain(text: str) -> str:
+    text_norm = str(text or "").strip().lower()
+    if not text_norm:
+        return "general"
+    if any(kw in text_norm for kw in INTENT_OPTION_KEYWORDS):
+        return "option"
+    if any(kw in text_norm for kw in INTENT_STOCK_PORTFOLIO_KEYWORDS):
+        return "stock_portfolio"
+    return "general"
+
 
 def _extract_similarity_tokens(text: str):
     """轻量语义相关度分词（中英文混合）"""
@@ -1477,6 +1498,38 @@ def _build_recent_context_text(recent_turns, max_chars: int = 1200) -> str:
     return "\n".join(lines)[:max_chars]
 
 
+def _get_latest_user_turn_content(recent_turns) -> str:
+    for turn in reversed(recent_turns):
+        if str(turn.get("role", "")).strip() == "user":
+            return str(turn.get("content", "")).strip()
+    return ""
+
+
+def _filter_memory_context_by_domain(memory_context: str, intent_domain: str, max_chars: int = 1500) -> str:
+    if not memory_context:
+        return ""
+    if intent_domain != "option":
+        return memory_context[:max_chars]
+
+    chunks = []
+    current = []
+    for line in str(memory_context).splitlines():
+        if line.startswith("- "):
+            if current:
+                chunks.append("\n".join(current))
+            current = [line]
+        elif current:
+            current.append(line)
+    if current:
+        chunks.append("\n".join(current))
+
+    if not chunks:
+        chunks = [str(memory_context)]
+
+    option_chunks = [chunk for chunk in chunks if _classify_intent_domain(chunk) == "option"]
+    return "\n".join(option_chunks)[:max_chars] if option_chunks else ""
+
+
 def _build_memory_record(ai_response: str, max_chars: int = 4000) -> str:
     """将回答压缩成结构化摘要+片段，提升后续召回稳定性"""
     if not ai_response:
@@ -1497,11 +1550,19 @@ def build_context_payload(prompt_text: str, current_user: str):
         {"role": msg.get("role", ""), "content": str(msg.get("content", ""))}
         for msg in all_messages[-4:]  # 最近两轮（user+ai）
     ]
+    intent_domain = _classify_intent_domain(prompt_text)
+    latest_user_content = _get_latest_user_turn_content(recent_turns)
+    recent_domain = _classify_intent_domain(latest_user_content)
     recent_context = _build_recent_context_text(recent_turns)
 
     is_followup = any(kw in prompt_text for kw in FOLLOWUP_KEYWORDS)
     semantic_related = _is_semantically_related(prompt_text, recent_turns)
-    should_load_long_memory = is_followup or semantic_related
+    is_same_domain = intent_domain == recent_domain
+    should_include_recent_context = is_followup or (semantic_related and is_same_domain)
+    should_load_long_memory = should_include_recent_context
+
+    if not should_include_recent_context:
+        recent_context = ""
 
     memory_context = ""
     if current_user != "访客" and should_load_long_memory:
@@ -1509,10 +1570,12 @@ def build_context_payload(prompt_text: str, current_user: str):
             found = mem.retrieve_relevant_memory(
                 user_id=current_user,
                 query=prompt_text,
-                k=2
+                k=2,
+                query_topic=intent_domain,
+                strict_topic=(intent_domain == "option"),
             )
             if found:
-                memory_context = found[:1500]
+                memory_context = _filter_memory_context_by_domain(found, intent_domain=intent_domain)
         except Exception as e:
             print(f"❌ 长期记忆检索失败: {e}")
 
@@ -1523,6 +1586,8 @@ def build_context_payload(prompt_text: str, current_user: str):
 
     return {
         "is_followup": bool(is_followup),
+        "intent_domain": intent_domain,
+        "recent_domain": recent_domain,
         "recent_turns": recent_turns,
         "recent_context": recent_context,
         "memory_context": memory_context,
@@ -2423,7 +2488,12 @@ if "pending_portfolio_task" in st.session_state and st.session_state.pending_por
                     retrieval_text = ""
                     if isinstance(result, dict):
                         retrieval_text = result.get("retrieval_summary", "")
-                    mem.save_interaction(current_user, "自动持仓体检", retrieval_text or summary)
+                    mem.save_interaction(
+                        current_user,
+                        "自动持仓体检",
+                        retrieval_text or summary,
+                        topic="stock_portfolio",
+                    )
                 except Exception as e:
                     print(f"持仓体检记忆写入失败: {e}")
 
@@ -2636,7 +2706,12 @@ if "pending_task" in st.session_state and st.session_state.pending_task:
                     if current_user != "访客":
                         try:
                             memory_record = _build_memory_record(final_response_md)
-                            mem.save_interaction(current_user, task_info["prompt"], memory_record)
+                            mem.save_interaction(
+                                current_user,
+                                task_info["prompt"],
+                                memory_record,
+                                topic=_classify_intent_domain(task_info.get("prompt", "")),
+                            )
                         except Exception as e:
                             print(f"记忆存储失败: {e}")
 

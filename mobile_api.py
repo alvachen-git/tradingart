@@ -1164,6 +1164,27 @@ _MOBILE_FOLLOWUP_KEYWORDS = (
     "继续", "接着", "承接", "基于刚才", "刚聊到", "上一轮",
 )
 
+_MOBILE_OPTION_KEYWORDS = (
+    "期权", "认购", "认沽", "行权价", "牛市价差", "熊市价差", "跨式", "宽跨", "勒式",
+    "call", "put", "delta", "gamma", "vega", "theta", "iv", "波动率", "权利金",
+)
+
+_MOBILE_STOCK_PORTFOLIO_KEYWORDS = (
+    "持仓体检", "我的持仓", "我的股票", "股票持仓", "持仓分析", "仓位", "调仓", "加仓", "减仓",
+    "股票组合", "股票账户", "前3大持仓", "行业分布",
+)
+
+
+def _classify_mobile_intent_domain(text: str) -> str:
+    text_norm = str(text or "").strip().lower()
+    if not text_norm:
+        return "general"
+    if any(kw in text_norm for kw in _MOBILE_OPTION_KEYWORDS):
+        return "option"
+    if any(kw in text_norm for kw in _MOBILE_STOCK_PORTFOLIO_KEYWORDS):
+        return "stock_portfolio"
+    return "general"
+
 
 def _extract_similarity_tokens(text: str) -> set[str]:
     if not text:
@@ -1221,12 +1242,52 @@ def _build_recent_context_text(recent_turns: List[dict], max_chars: int = 1200) 
     return "\n".join(lines)[:max_chars]
 
 
+def _get_latest_mobile_user_turn_content(recent_turns: List[dict]) -> str:
+    for turn in reversed(recent_turns):
+        if str(turn.get("role", "")).strip() == "user":
+            return str(turn.get("content", "")).strip()
+    return ""
+
+
+def _filter_mobile_memory_context_by_domain(memory_context: str, intent_domain: str, max_chars: int = 1500) -> str:
+    if not memory_context:
+        return ""
+    if intent_domain != "option":
+        return str(memory_context)[:max_chars]
+
+    chunks: List[str] = []
+    current: List[str] = []
+    for line in str(memory_context).splitlines():
+        if line.startswith("- "):
+            if current:
+                chunks.append("\n".join(current))
+            current = [line]
+        elif current:
+            current.append(line)
+    if current:
+        chunks.append("\n".join(current))
+
+    if not chunks:
+        chunks = [str(memory_context)]
+
+    option_chunks = [chunk for chunk in chunks if _classify_mobile_intent_domain(chunk) == "option"]
+    return "\n".join(option_chunks)[:max_chars] if option_chunks else ""
+
+
 def _build_mobile_context_payload(prompt_text: str, current_user: str, history: Optional[List[dict]]) -> dict:
     recent_turns = _normalize_mobile_history(history)
+    intent_domain = _classify_mobile_intent_domain(prompt_text)
+    latest_user_content = _get_latest_mobile_user_turn_content(recent_turns)
+    recent_domain = _classify_mobile_intent_domain(latest_user_content)
     recent_context = _build_recent_context_text(recent_turns)
     is_followup = any(kw in prompt_text for kw in _MOBILE_FOLLOWUP_KEYWORDS)
     semantic_related = _is_semantically_related(prompt_text, recent_turns)
-    should_load_long_memory = is_followup or semantic_related
+    is_same_domain = intent_domain == recent_domain
+    should_include_recent_context = is_followup or (semantic_related and is_same_domain)
+    should_load_long_memory = should_include_recent_context
+
+    if not should_include_recent_context:
+        recent_context = ""
 
     memory_context = ""
     if current_user and current_user != "访客" and should_load_long_memory:
@@ -1237,14 +1298,18 @@ def _build_mobile_context_payload(prompt_text: str, current_user: str, history: 
                 user_id=current_user,
                 query=prompt_text,
                 k=2,
+                query_topic=intent_domain,
+                strict_topic=(intent_domain == "option"),
             )
             if found:
-                memory_context = str(found)[:1500]
+                memory_context = _filter_mobile_memory_context_by_domain(found, intent_domain=intent_domain)
         except Exception as e:
             print(f"[mobile-chat] memory retrieval failed user={current_user} err={e}")
 
     return {
         "is_followup": bool(is_followup),
+        "intent_domain": intent_domain,
+        "recent_domain": recent_domain,
         "recent_turns": recent_turns,
         "recent_context": recent_context,
         "memory_context": memory_context,

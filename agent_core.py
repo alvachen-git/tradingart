@@ -1,4 +1,4 @@
-from typing import TypedDict, Annotated, List, Union, Literal
+from typing import TypedDict, Annotated, List, Union, Literal, Dict, Any
 from datetime import datetime
 import random
 import operator
@@ -43,6 +43,7 @@ from beta_tool import calculate_hedging_beta
 from knowledge_tools import search_investment_knowledge
 from stock_volume_tools import query_stock_volume, search_volume_anomalies
 from backtest_tools import run_option_strategy_backtest
+from option_delta_tools import compute_etf_option_delta_cash
 from portfolio_tools import (
     get_user_portfolio_summary,
     get_user_portfolio_details,
@@ -91,6 +92,9 @@ class AgentState(TypedDict):
     trading_style: str  # 交易风格
     portfolio_top_corr_index: str  # 最相关指数名称
     portfolio_top_corr_value: str  # 最相关指数的相关系数
+    option_delta_cash_report: str  # ETF期权Delta Cash预计算报告
+    option_delta_cash_meta: Dict[str, Any]  # ETF期权Delta Cash结构化结果
+    option_delta_cash_gap_note: str  # Delta无法计算时的数据缺口说明
 
 
 # 期权合约乘数表（每张期权对应的标的数量）
@@ -180,11 +184,134 @@ MARGIN_QUERY_KEYWORDS = [
 STRATEGY_QUERY_KEYWORDS = [
     "策略", "建议", "怎么做", "怎么操作", "开仓", "平仓", "做多", "做空", "对冲", "仓位",
 ]
+OPTION_QUERY_KEYWORDS = [
+    "期权", "认购", "认沽", "行权价", "波动率", "iv", "delta", "gamma", "vega", "theta",
+    "牛市价差", "熊市价差", "跨式", "宽跨", "勒式",
+]
+OPTION_ACTION_QUERY_KEYWORDS = [
+    "策略", "建议", "怎么做", "怎么调", "如何调", "如何做", "怎么操作", "调仓", "仓位", "对冲", "持仓",
+]
+EXPLICIT_STOCK_PORTFOLIO_COUPLING_KEYWORDS = [
+    "结合我的股票持仓", "结合我股票持仓", "结合我的持仓", "结合我持仓", "基于我的股票持仓", "基于我持仓",
+    "根据我的股票持仓", "根据我持仓", "按我持仓", "按我的股票组合", "结合我的组合", "对冲我的股票持仓",
+]
 
 
 def _contains_any(text: str, keywords: list) -> bool:
     text_value = str(text or "")
     return any(k in text_value for k in keywords)
+
+
+def _ensure_analyst_then_strategist(plan: List[str]) -> List[str]:
+    out = [p for p in plan if p not in {"analyst", "strategist"}]
+    insert_at = 0
+    out[insert_at:insert_at] = ["analyst", "strategist"]
+    return out
+
+
+def _enforce_option_portfolio_isolation(query: str, plan: List[str]) -> List[str]:
+    """
+    期权问题默认隔离股票持仓分析：
+    - 未显式要求“结合我的股票持仓/组合”时，移除 portfolio_analyst，避免串仓。
+    - 对“期权操作/调仓/建议”类问题，优先保障 analyst -> strategist 链路。
+    """
+    text = str(query or "")
+    if not _contains_any(text, OPTION_QUERY_KEYWORDS):
+        return plan
+
+    explicit_stock_portfolio_coupling = _contains_any(text, EXPLICIT_STOCK_PORTFOLIO_COUPLING_KEYWORDS)
+    filtered = list(plan)
+    if not explicit_stock_portfolio_coupling:
+        filtered = [p for p in filtered if p != "portfolio_analyst"]
+
+    if _contains_any(text, OPTION_ACTION_QUERY_KEYWORDS):
+        filtered = _ensure_analyst_then_strategist(filtered)
+
+    return filtered
+
+
+def _is_option_position_query(query: str) -> bool:
+    text = str(query or "")
+    if not _contains_any(text, OPTION_QUERY_KEYWORDS):
+        return False
+    return _contains_any(text, ["持仓", "仓位", "持有", "组合", "怎么调", "如何调", "调整"])
+
+
+def _strip_stock_portfolio_sections(text: str) -> str:
+    if not text:
+        return ""
+    return re.sub(r"【持仓分析】[\s\S]*?(?=(?:\n【|$))", "", text).strip()
+
+
+def _build_delta_cash_gap_note(reason: str, trend_signal: str, risk_preference: str) -> str:
+    from option_delta_tools import get_delta_target_band
+
+    band = get_delta_target_band(trend_signal=trend_signal, risk_preference=risk_preference)
+    return (
+        f"DeltaCash暂不输出：{reason}。"
+        f"当前技术面目标区间参考为 `[{band['low']:+.2f}, {band['high']:+.2f}]`，"
+        "请补齐IV与最新价后再计算。"
+    )
+
+
+def _ensure_option_position_structure(
+    text: str,
+    delta_cash_report: str,
+    delta_cash_gap_note: str,
+    trend_signal: str,
+    risk_preference: str,
+    key_levels: str,
+) -> str:
+    out = str(text or "").strip()
+    delta_block = str(delta_cash_report or "").strip()
+    if delta_block and "【DeltaCash】" not in out:
+        out = f"{delta_block}\n\n{out}".strip()
+
+    required_sections = [
+        "1. 持仓拆解表",
+        "2. 组合净暴露与到期错配",
+        "3. 关键触发位与三情景分支",
+        "4. 两套可执行调整方案",
+        "5. 风控阈值与失效条件",
+        "6. 当日执行清单",
+    ]
+    if all(sec in out for sec in required_sections):
+        return out
+
+    key_text = key_levels if key_levels else "关键位待确认（请结合最新K线支撑/压力位）"
+    skeleton = f"""
+---
+1. 持仓拆解表
+- {"已在【DeltaCash】区块展示核心腿信息；若单腿成本/已实现收益缺失，请补录后复算。" if delta_block else "本轮DeltaCash未输出，请先补齐缺失行情后再量化。"}
+
+2. 组合净暴露与到期错配
+- {"先依据 Total Delta Cash 与 Delta Ratio 判定净方向，再检查近月到期腿是否集中。" if delta_block else "先按方向腿结构与近月到期分布判定净风险，避免伪精确估算。"}
+- 近月到期腿优先降风险，避免时间价值快速衰减。
+
+3. 关键触发位与三情景分支
+- 技术面参考：{trend_signal}；关键位：{key_text}
+- 上涨分支：若突破关键压力位，按目标区间上沿控制Delta，避免过度追涨。
+- 震荡分支：若维持区间震荡，维持中性或轻方向暴露，减少无效Theta损耗。
+- 下跌分支：若跌破关键支撑位，按目标区间下沿收敛Delta，优先防极端波动风险。
+
+4. 两套可执行调整方案
+- 保守方案：先削减风险最大的短近月腿，目标是把Delta收敛至区间中轴附近。
+- 进攻方案：在趋势确认后再补方向腿，把Delta推进到区间同向一侧。
+
+5. 风控阈值与失效条件
+- 若Delta Ratio持续偏离目标区间，触发再平衡。
+- 若到期剩余天数快速下降且仓位集中，触发展期或减仓。
+- 若IV和价格方向同时不利，判定策略失效并降低总敞口。
+
+6. 当日执行清单
+- [ ] 核对每腿到期日与张数
+- [ ] {"复核DeltaCash与目标区间偏离" if delta_block else "记录DeltaCash数据缺口并补齐IV/最新价"}
+- [ ] 执行第一步减风险/调仓动作
+- [ ] 设定盘中与收盘复核点
+""".strip()
+    if delta_cash_gap_note and delta_cash_gap_note not in out:
+        out = f"{out}\n\n> ⚠️ **数据缺口**：{delta_cash_gap_note}".strip()
+    return f"{out}\n\n{skeleton}".strip()
 
 
 def _enforce_margin_monitor_routing(query: str, plan: List[str]) -> List[str]:
@@ -404,6 +531,7 @@ def supervisor_node(state: AgentState, llm):
         elif final_plan[0] not in ["generalist", "chatter"]:
             final_plan = ["generalist"] + [p for p in final_plan if p != "generalist"]
 
+    final_plan = _enforce_option_portfolio_isolation(query, final_plan)
     final_plan = _enforce_margin_monitor_routing(query, final_plan)
 
     # 去重并保持顺序，避免路由重复
@@ -894,6 +1022,64 @@ def strategist_node(state: AgentState, llm):
     tech_view = state.get("technical_summary", "")
     current_date = datetime.now().strftime("%Y年%m月%d日")
     key_level = state.get("key_levels", "")
+    option_position_mode = _is_option_position_query(user_q)
+    delta_cash_report = ""
+    delta_cash_meta: Dict[str, Any] = {}
+    delta_cash_gap_note = ""
+
+    # ETF期权持仓问题优先给出可复核的Delta Cash量化结果
+    if option_position_mode:
+        try:
+            delta_cash_meta = compute_etf_option_delta_cash(
+                user_query=user_q,
+                symbol_hint=symbol,
+                trend_signal=trend,
+                risk_preference=risk_pref,
+            ) or {}
+            raw_report = str(delta_cash_meta.get("report") or "").strip()
+            is_etf_for_delta = bool(delta_cash_meta.get("is_etf"))
+            metrics = delta_cash_meta.get("metrics") or {}
+            coverage_raw = metrics.get("coverage_ratio")
+            coverage = float(coverage_raw) if coverage_raw is not None else None
+            missing_notes = [str(x) for x in (delta_cash_meta.get("missing_notes") or []) if str(x).strip()]
+            blocking_notes = [
+                str(x) for x in (delta_cash_meta.get("blocking_missing_notes") or []) if str(x).strip()
+            ]
+            publishable_flag = delta_cash_meta.get("publishable")
+            if publishable_flag is None:
+                if blocking_notes:
+                    can_publish_delta = False
+                elif coverage is None:
+                    can_publish_delta = bool(raw_report and "【DeltaCash】" in raw_report)
+                else:
+                    can_publish_delta = bool(raw_report and "【DeltaCash】" in raw_report and coverage >= 1.0)
+            else:
+                can_publish_delta = bool(publishable_flag)
+
+            if is_etf_for_delta and can_publish_delta:
+                delta_cash_report = raw_report
+                delta_cash_gap_note = ""
+            elif is_etf_for_delta:
+                reason_candidates = blocking_notes or missing_notes
+                if not reason_candidates and coverage is not None and coverage < 1.0:
+                    reason_candidates = ["Delta覆盖率不足"]
+                if not reason_candidates:
+                    reason_candidates = ["Delta覆盖率不足或关键数据缺失"]
+                reason = "；".join(reason_candidates)
+                delta_cash_gap_note = _build_delta_cash_gap_note(
+                    reason=reason,
+                    trend_signal=trend,
+                    risk_preference=risk_pref,
+                )
+        except Exception as e:
+            print(f"⚠️ DeltaCash预计算失败: {e}")
+            delta_cash_meta = {}
+            delta_cash_report = ""
+            delta_cash_gap_note = _build_delta_cash_gap_note(
+                reason=f"Delta计算失败（{e}）",
+                trend_signal=trend,
+                risk_preference=risk_pref,
+            )
 
     # [新增] 获取合约乘数
     multiplier_str = get_option_multiplier(symbol)
@@ -911,6 +1097,31 @@ def strategist_node(state: AgentState, llm):
         if portfolio_summary:
             portfolio_context += f"\n        持仓概况：{portfolio_summary[:100]}"
 
+    delta_cash_prompt = ""
+    if delta_cash_report:
+        delta_cash_prompt = f"\n        【ETF期权Delta Cash预计算（优先采信）】\n{delta_cash_report}"
+    elif delta_cash_gap_note:
+        delta_cash_prompt = f"\n        【DeltaCash数据缺口说明】\n{delta_cash_gap_note}"
+
+    option_position_requirements = ""
+    if option_position_mode:
+        option_position_requirements = f"""
+        【期权持仓深度模板（强制）】
+        你必须严格按以下 6 个章节输出，章节名不可缺失：
+        1. **持仓拆解表**：按“到期月/行权价/方向(认购认沽)/张数/单腿成本或已实现收益”逐项列出；信息缺失项要标注“待确认”。
+        2. **组合净暴露与到期错配**：明确净方向（偏多/偏空/中性）与近月到期风险，说明哪一腿是主要风险来源。
+        3. **关键触发位与三情景分支**：给出上涨/震荡/下跌三种情景下的应对动作（减仓/移仓/展期/对冲）。
+        4. **两套可执行调整方案**：分别给“保守方案、进攻方案”，每套写清执行腿、目标、代价、适用条件。
+        5. **风控阈值与失效条件**：必须给出止损阈值、仓位上限和策略失效触发条件（价格/时间/波动率任一维度）。
+        6. **当日执行清单**：用 checklist 列出今天能执行的 3-5 个动作。
+
+        补充要求：
+        - 如果缺少关键行情数据，仍输出完整 6 章节，但要在对应章节明确“数据缺口”。
+        - 所有权利金或盈亏示例必须注明“已按合约乘数换算”。
+        - 关键位优先引用上游技术面传入信息：{key_level if key_level else "未提供关键位，需先用工具确认"}。
+        - 若已提供【ETF期权Delta Cash预计算】，必须在你的正文中保留其核心数字：Total Delta Cash、Delta Ratio、目标区间、建议调整量。
+        """
+
     # === 🔥 期权策略专用工具集 ===
     tools = build_strategist_tools()
 
@@ -924,7 +1135,7 @@ def strategist_node(state: AgentState, llm):
         【客户风险偏好】：{risk_pref}
         【客户历史记忆】：{mem_context}
         【市场资金面/保证金信息】：{fund}
-        【技术面参考】：{trend} 、 {tech_view}{portfolio_context}
+        【技术面参考】：{trend} 、 {tech_view}{portfolio_context}{delta_cash_prompt}
 
         【边界说明】
         - 基差/库存仓单/交割期转现类数据由上游 monitor 汇总后传入，不在本节点直接查询。
@@ -964,6 +1175,7 @@ def strategist_node(state: AgentState, llm):
         3. 解释为什么这个策略适合市场或客户，可以查知识库辅助`search_investment_knowledge`
         4. 给出止损/止盈建议
         5. 禁止自己编造假数据！
+        {option_position_requirements}
 
         """
 
@@ -980,19 +1192,47 @@ def strategist_node(state: AgentState, llm):
         )
 
         last_response = result["messages"][-1].content
+        if option_position_mode:
+            last_response = _ensure_option_position_structure(
+                text=last_response,
+                delta_cash_report=delta_cash_report,
+                delta_cash_gap_note=delta_cash_gap_note,
+                trend_signal=trend,
+                risk_preference=risk_pref,
+                key_levels=key_level,
+            )
+        elif delta_cash_report:
+            last_response = f"{delta_cash_report}\n\n{last_response}"
         partial_response = last_response
 
         return {
             "messages": [HumanMessage(content=f"【期权策略】\n{last_response}")],
-            "option_strategy": last_response
+            "option_strategy": last_response,
+            "option_delta_cash_report": delta_cash_report,
+            "option_delta_cash_meta": delta_cash_meta,
+            "option_delta_cash_gap_note": delta_cash_gap_note,
         }
 
     except GeneratorExit:
         # 流被中断时的优雅降级
         fallback_msg = partial_response if partial_response else f"期权策略分析已完成，关于{symbol}的建议请参考上文。"
+        if option_position_mode:
+            fallback_msg = _ensure_option_position_structure(
+                text=fallback_msg,
+                delta_cash_report=delta_cash_report,
+                delta_cash_gap_note=delta_cash_gap_note,
+                trend_signal=trend,
+                risk_preference=risk_pref,
+                key_levels=key_level,
+            )
+        elif delta_cash_report and "DeltaCash" not in fallback_msg:
+            fallback_msg = f"{delta_cash_report}\n\n{fallback_msg}"
         return {
             "messages": [HumanMessage(content=f"【期权策略】\n{fallback_msg}")],
-            "option_strategy": fallback_msg
+            "option_strategy": fallback_msg,
+            "option_delta_cash_report": delta_cash_report,
+            "option_delta_cash_meta": delta_cash_meta,
+            "option_delta_cash_gap_note": delta_cash_gap_note,
         }
 
     except Exception as e:
@@ -1001,7 +1241,10 @@ def strategist_node(state: AgentState, llm):
         print(f"⚠️ strategist_node 错误: {e}")
         return {
             "messages": [HumanMessage(content=f"【期权策略】\n{error_msg}")],
-            "option_strategy": ""
+            "option_strategy": "",
+            "option_delta_cash_report": delta_cash_report,
+            "option_delta_cash_meta": delta_cash_meta,
+            "option_delta_cash_gap_note": delta_cash_gap_note,
         }
 
 
@@ -1815,6 +2058,19 @@ def finalizer_node(state: AgentState, llm):
 
     # 拼接到一起用于输入
     context_text = "\n".join([f"{m.content}" for m in worker_msgs])
+    user_query = state.get("user_query", "")
+    is_option_query = _contains_any(user_query, OPTION_QUERY_KEYWORDS)
+    is_option_position_mode = _is_option_position_query(user_query)
+    option_delta_cash_report = str(state.get("option_delta_cash_report", "") or "").strip()
+    option_delta_cash_gap_note = str(state.get("option_delta_cash_gap_note", "") or "").strip()
+    explicit_stock_portfolio_coupling = _contains_any(user_query, EXPLICIT_STOCK_PORTFOLIO_COUPLING_KEYWORDS)
+    allow_stock_portfolio_blend = (not is_option_query) or explicit_stock_portfolio_coupling
+    if is_option_query and not explicit_stock_portfolio_coupling:
+        context_text = _strip_stock_portfolio_sections(context_text)
+    if option_delta_cash_report and "【DeltaCash】" not in context_text:
+        context_text = f"{context_text}\n\n{option_delta_cash_report}"
+    elif option_delta_cash_gap_note and option_delta_cash_gap_note not in context_text:
+        context_text = f"{context_text}\n\n> ⚠️ **Delta数据缺口**：{option_delta_cash_gap_note}"
     if "【精选股票】" in context_text:
         # 直接返回 PASS，不做任何 LLM 思考，毫秒级响应
         return {
@@ -1858,7 +2114,6 @@ def finalizer_node(state: AgentState, llm):
     risk_pref = state.get("risk_preference", "稳健型")
     is_single_source = len(worker_msgs) <= 1
     has_chart = "chart_" in context_text or "![" in context_text
-    user_query = state.get("user_query", "")
     complex_keywords = ["画", "图", "对比", "分析", "价差", "相关性", "走势"]
     is_complex_task = any(kw in user_query for kw in complex_keywords)
 
@@ -1944,9 +2199,6 @@ def finalizer_node(state: AgentState, llm):
         # === 模式 B：总编辑 (Editor Mode) ===
         # 目标：多源信息整合，但要根据用户问题类型调整输出风格
 
-        # 🔥 [新增] 获取用户原始问题，判断问题类型
-        user_query = state.get("user_query", "")
-
         # 判断是否为"纯数据查询"类问题
         data_query_keywords = ["持仓", "排名", "资金", "流入", "流出", "多少", "哪些", "哪个", "前几", "前3", "前三",
                                "前5", "前五", "top", "龙虎榜", "增仓", "减仓", "净持仓", "最多", "最大"]
@@ -1955,9 +2207,10 @@ def finalizer_node(state: AgentState, llm):
         # 判断是否为"综合分析"类问题
         analysis_keywords = ["分析", "怎么看", "怎么做", "策略", "建议", "操作", "行情", "走势", "如何","趋势", "全面"]
         is_analysis_query = any(kw in user_query for kw in analysis_keywords)
+        force_option_deep_mode = is_option_position_mode
 
         # 🎯 根据问题类型选择不同的 Prompt
-        if is_data_query and not is_analysis_query:
+        if is_data_query and not is_analysis_query and not force_option_deep_mode:
             # === 数据查询模式：简洁直接 ===
             cio_prompt = f"""
                 你是一位数据检查师。
@@ -1976,6 +2229,8 @@ def finalizer_node(state: AgentState, llm):
                 5. 不要写成投资报告，文字要简洁有力。
                 6. 如果发生数据缺失或语法错误，不要把错误写出来。
                 7. 数据是每天下午5点后更新。
+                8. {"当前是期权问题，只回答期权持仓/期权数据，不要展开股票持仓体检内容。" if (is_option_query and not allow_stock_portfolio_blend) else "按用户问题口径输出，不要扩展无关持仓模块。"}
+                9. {"如果团队报告中有【DeltaCash】区块，必须保留其中关键数值并输出目标区间与建议调整量。" if option_delta_cash_report else ("如果出现Delta数据缺口，只说明缺口，不要编造Delta数值。" if option_delta_cash_gap_note else "无额外量化模块要求。")}
 
 
                 【格式示例】：
@@ -1999,7 +2254,7 @@ def finalizer_node(state: AgentState, llm):
                 print(f"CIO知识库检索失败: {e}")
             # 🔥 [新增] 构建持仓上下文提示
             portfolio_context_prompt = ""
-            if portfolio_corr_index and portfolio_corr_value:
+            if allow_stock_portfolio_blend and portfolio_corr_index and portfolio_corr_value:
                 portfolio_context_prompt = f"""
                 【客户持仓关键信息】：
                 - 持仓组合与{portfolio_corr_index}指数相关度最高（相关系数{portfolio_corr_value}）
@@ -2008,6 +2263,26 @@ def finalizer_node(state: AgentState, llm):
                 ⚠️ **重要**：如果团队报告中既有【持仓分析】又有【期权策略】，你必须在整合时明确说明两者的逻辑关联！
                 例如："考虑到您的持仓与{portfolio_corr_index}高度相关，策略团队建议的{symbol}期权策略可以作为对冲/增强工具..."
                 """
+            option_focus_prompt = ""
+            if is_option_query and not allow_stock_portfolio_blend:
+                option_focus_prompt = """
+                【期权优先整合模式】：
+                - 当前问题属于期权域，禁止展开“股票持仓体检”段落。
+                - 只允许整合与期权持仓、期权策略、期权风险直接相关的信息。
+                - 若出现跨域冲突，以【期权策略】与【技术分析】中与期权相关内容为准。
+                """
+                if is_option_position_mode:
+                    option_focus_prompt += """
+                    - 回答必须包含：持仓拆解、净暴露/到期错配、三情景分支、两套调整方案、风控阈值、当日执行清单。
+                    """
+                    if option_delta_cash_report:
+                        option_focus_prompt += """
+                    - 必须保留并明确展示【DeltaCash】核心数值：Total Delta Cash、Delta Ratio、技术面目标区间、建议调整量（元）。
+                        """
+                    elif option_delta_cash_gap_note:
+                        option_focus_prompt += """
+                    - Delta数据缺口时只说明缺口与补数动作，不要输出伪精确DeltaCash数值。
+                        """
 
             cio_prompt = f"""
                 你是这家交易公司的**首席投资官 (CIO)**。
@@ -2023,6 +2298,7 @@ def finalizer_node(state: AgentState, llm):
                 【客户对话历史记忆】{mem_context}
 
                 {portfolio_context_prompt}
+                {option_focus_prompt}
 
                 【📚 内部知识库 (基于"{enhanced_query}"检索)】：
                 {kb_context}

@@ -1,5 +1,6 @@
 import os
 import warnings
+from typing import Optional
 from langchain_community.embeddings import DashScopeEmbeddings
 from langchain_core.documents import Document
 from datetime import datetime
@@ -37,6 +38,18 @@ embeddings = DashScopeEmbeddings(
 )
 
 PERSIST_DIRECTORY = "./chroma_memory_db"
+TOPIC_OPTION = "option"
+TOPIC_STOCK_PORTFOLIO = "stock_portfolio"
+TOPIC_GENERAL = "general"
+
+OPTION_TOPIC_KEYWORDS = (
+    "期权", "认购", "认沽", "行权价", "牛市价差", "熊市价差", "跨式", "宽跨", "勒式",
+    "call", "put", "delta", "gamma", "vega", "theta", "iv", "波动率", "权利金",
+)
+STOCK_PORTFOLIO_TOPIC_KEYWORDS = (
+    "持仓体检", "自动持仓体检", "我的持仓", "我的股票", "股票持仓", "持仓分析", "仓位", "调仓",
+    "加仓", "减仓", "股票组合", "股票账户", "前3大持仓", "行业分布",
+)
 
 
 def _needs_manual_persist() -> bool:
@@ -71,7 +84,26 @@ def get_vector_store():
     )
 
 
-def save_interaction(user_id: str, user_input: str, ai_response: str):
+def classify_memory_topic(text: str) -> str:
+    text_norm = str(text or "").strip().lower()
+    if not text_norm:
+        return TOPIC_GENERAL
+    if any(kw in text_norm for kw in OPTION_TOPIC_KEYWORDS):
+        return TOPIC_OPTION
+    if any(kw in text_norm for kw in STOCK_PORTFOLIO_TOPIC_KEYWORDS):
+        return TOPIC_STOCK_PORTFOLIO
+    return TOPIC_GENERAL
+
+
+def _normalize_topic(topic: str, fallback_text: str = "") -> str:
+    topic_norm = str(topic or "").strip().lower()
+    if topic_norm in {TOPIC_OPTION, TOPIC_STOCK_PORTFOLIO, TOPIC_GENERAL}:
+        return topic_norm
+    inferred = classify_memory_topic(fallback_text)
+    return inferred if inferred else TOPIC_GENERAL
+
+
+def save_interaction(user_id: str, user_input: str, ai_response: str, topic: str = "", source: str = ""):
     """
     [写入记忆] 带有显式持久化和错误检查
     """
@@ -84,10 +116,16 @@ def save_interaction(user_id: str, user_input: str, ai_response: str):
 
         timestamp = datetime.now().strftime('%Y-%m-%d %H:%M')
         content = f"[{timestamp}] 用户问: {user_input}\nAI回答: {ai_response}"
+        topic_norm = _normalize_topic(topic, fallback_text=f"{user_input}\n{ai_response}")
 
         doc = Document(
             page_content=content,
-            metadata={"user_id": str(user_id), "timestamp": timestamp}
+            metadata={
+                "user_id": str(user_id),
+                "timestamp": timestamp,
+                "topic": topic_norm,
+                "source": str(source or ""),
+            }
         )
 
         # 1. 添加文档
@@ -107,7 +145,14 @@ def save_interaction(user_id: str, user_input: str, ai_response: str):
         # 这里打印详细错误，方便我们在控制台看到原因
 
 
-def retrieve_relevant_memory(user_id: str, query: str, k=3, score_threshold=0.5) -> str:
+def retrieve_relevant_memory(
+    user_id: str,
+    query: str,
+    k: int = 3,
+    score_threshold: float = 0.5,
+    query_topic: str = "",
+    strict_topic: bool = False,
+) -> str:
     """
     [读取记忆]
     注意：切换到 Cosine 后，Score 的范围变了：
@@ -116,27 +161,45 @@ def retrieve_relevant_memory(user_id: str, query: str, k=3, score_threshold=0.5)
     - > 0.7: 不太相关
     建议阈值设为 0.5 或 0.6
     """
-    if not user_id: return ""
+    if not user_id:
+        return ""
 
     try:
         vector_store = get_vector_store()
+        query_topic_norm = _normalize_topic(query_topic, fallback_text=query)
+        should_topic_filter = query_topic_norm != TOPIC_GENERAL
 
         results_with_score = vector_store.similarity_search_with_score(
             query,
-            k=k,
+            k=max(int(k or 3), 3) * (3 if (strict_topic and should_topic_filter) else 1),
             filter={"user_id": str(user_id)}
         )
 
         valid_memories = []
-        print(f"🔍 [记忆检索] 用户问题: {query}")
+        print(f"🔍 [记忆检索] 用户问题: {query} | query_topic={query_topic_norm} | strict_topic={strict_topic}")
 
         for doc, score in results_with_score:
+            doc_topic = _normalize_topic(
+                str((doc.metadata or {}).get("topic", "")),
+                fallback_text=doc.page_content,
+            )
             # Cosine 距离：越小越相似
-            if score < score_threshold:
-                valid_memories.append(doc.page_content)
-                print(f"  ✅ 命中 (Dist: {score:.3f}): {doc.page_content[:30]}...")
-            else:
+            if score >= score_threshold:
                 print(f"  ❌ 忽略 (Dist: {score:.3f} > {score_threshold}): {doc.page_content[:30]}...")
+                continue
+
+            if should_topic_filter:
+                if strict_topic and doc_topic != query_topic_norm:
+                    print(f"  ❌ 主题不符 (doc_topic={doc_topic} != {query_topic_norm})")
+                    continue
+                if (not strict_topic) and doc_topic not in {query_topic_norm, TOPIC_GENERAL}:
+                    print(f"  ❌ 主题不符 (doc_topic={doc_topic})")
+                    continue
+
+            valid_memories.append(doc.page_content)
+            print(f"  ✅ 命中 (Dist: {score:.3f}, topic={doc_topic}): {doc.page_content[:30]}...")
+            if len(valid_memories) >= max(int(k or 3), 1):
+                break
 
         return "\n".join([f"- {m}" for m in valid_memories])
 

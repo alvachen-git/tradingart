@@ -513,7 +513,9 @@ def persist_mobile_chat_memory_task(
             spec.loader.exec_module(mem)
             print(f"[mobile-memory] fallback import loaded: {module_path}")
 
-        mem.save_interaction(uid, prompt, memory_record)
+        classify_topic = getattr(mem, "classify_memory_topic", None)
+        topic = classify_topic(f"{prompt}\n{response}") if callable(classify_topic) else "general"
+        mem.save_interaction(uid, prompt, memory_record, topic=topic, source=str(source or "mobile"))
         return {
             "status": "success",
             "source": source,
