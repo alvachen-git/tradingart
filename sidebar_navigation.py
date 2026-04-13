@@ -1,6 +1,7 @@
 ﻿"""共享侧边栏导航组件。"""
 
 from pathlib import Path
+import os
 
 import streamlit as st
 
@@ -12,6 +13,15 @@ def _safe_page_link(rel_path: str, label: str) -> None:
     """Render page link only when target file exists to avoid runtime page-not-found."""
     if (_APP_ROOT / rel_path).exists():
         st.page_link(rel_path, label=label)
+
+
+def _is_online_env() -> bool:
+    env_val = (
+        str(os.getenv("APP_ENV", "")).strip()
+        or str(os.getenv("ENV", "")).strip()
+        or str(os.getenv("DEPLOY_ENV", "")).strip()
+    ).lower()
+    return env_val in {"prod", "production", "online"}
 
 
 def show_navigation() -> None:
@@ -68,7 +78,8 @@ def show_navigation() -> None:
         _safe_page_link("pages/22_AI炒股2号.py", label="AI炒股2号")
 
     with st.expander("期权数据", expanded=False):
-        _safe_page_link("pages/期权学习.py", label="期权学习")
+        if not _is_online_env():
+            _safe_page_link("pages/期权学习.py", label="期权学习")
         _safe_page_link("pages/01_ETF期权.py", label="ETF期权")
         _safe_page_link("pages/02_商品期权.py", label="商品期权")
         _safe_page_link("pages/12_策略回测.py", label="策略回测")
