@@ -1274,7 +1274,12 @@ def _filter_mobile_memory_context_by_domain(memory_context: str, intent_domain: 
     return "\n".join(option_chunks)[:max_chars] if option_chunks else ""
 
 
-def _build_mobile_context_payload(prompt_text: str, current_user: str, history: Optional[List[dict]]) -> dict:
+def _build_mobile_context_payload(
+    prompt_text: str,
+    current_user: str,
+    history: Optional[List[dict]],
+    profile: Optional[dict] = None,
+) -> dict:
     recent_turns = _normalize_mobile_history(history)
     intent_domain = _classify_mobile_intent_domain(prompt_text)
     latest_user_content = _get_latest_mobile_user_turn_content(recent_turns)
@@ -1285,6 +1290,25 @@ def _build_mobile_context_payload(prompt_text: str, current_user: str, history: 
     is_same_domain = intent_domain == recent_domain
     should_include_recent_context = is_followup or (semantic_related and is_same_domain)
     should_load_long_memory = should_include_recent_context
+    account_total_capital = None
+
+    if current_user and current_user != "访客":
+        try:
+            parsed_capital = de.parse_account_total_capital(prompt_text)
+            if parsed_capital:
+                account_total_capital = float(parsed_capital)
+                de.upsert_user_account_total_capital(
+                    user_id=current_user,
+                    total_capital=account_total_capital,
+                    source_text=prompt_text,
+                )
+            else:
+                profile_capital = (profile or {}).get("account_total_capital")
+                normalized = de.normalize_account_total_capital(profile_capital)
+                if normalized:
+                    account_total_capital = float(normalized)
+        except Exception as e:
+            print(f"[mobile-chat] account capital profile read/update failed user={current_user} err={e}")
 
     if not should_include_recent_context:
         recent_context = ""
@@ -1315,6 +1339,7 @@ def _build_mobile_context_payload(prompt_text: str, current_user: str, history: 
         "memory_context": memory_context,
         "semantic_related": bool(semantic_related),
         "conversation_id": f"mobile-{current_user}-{uuid.uuid4()}",
+        "account_total_capital": account_total_capital,
     }
 
 
@@ -1752,6 +1777,7 @@ def chat_submit(
         prompt_text=normalized_prompt,
         current_user=username,
         history=history_for_task,
+        profile=profile,
     )
     has_portfolio = _detect_mobile_has_portfolio(username)
 

@@ -1562,6 +1562,26 @@ def build_context_payload(prompt_text: str, current_user: str):
     is_same_domain = intent_domain == recent_domain
     should_include_recent_context = is_followup or (semantic_related and is_same_domain)
     should_load_long_memory = should_include_recent_context
+    account_total_capital = None
+
+    if current_user != "访客":
+        try:
+            parsed_capital = de.parse_account_total_capital(prompt_text)
+            if parsed_capital:
+                account_total_capital = float(parsed_capital)
+                de.upsert_user_account_total_capital(
+                    user_id=current_user,
+                    total_capital=account_total_capital,
+                    source_text=prompt_text,
+                )
+            else:
+                profile = de.get_user_profile(current_user) or {}
+                profile_capital = profile.get("account_total_capital")
+                normalized = de.normalize_account_total_capital(profile_capital)
+                if normalized:
+                    account_total_capital = float(normalized)
+        except Exception as e:
+            print(f"⚠️ 账户总资金画像读取/更新失败: {e}")
 
     if not should_include_recent_context:
         recent_context = ""
@@ -1594,7 +1614,8 @@ def build_context_payload(prompt_text: str, current_user: str):
         "recent_context": recent_context,
         "memory_context": memory_context,
         "semantic_related": bool(semantic_related),
-        "conversation_id": conversation_id
+        "conversation_id": conversation_id,
+        "account_total_capital": account_total_capital,
     }
 
 

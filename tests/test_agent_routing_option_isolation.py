@@ -114,3 +114,40 @@ def test_strategist_node_data_gap_does_not_force_delta_cash_block(monkeypatch):
     assert "### 【DeltaCash】" not in content
     assert "数据缺口" in content
     assert "暂不输出" in content
+
+
+def test_strategist_node_fallback_extracts_account_capital_from_query(monkeypatch):
+    observed = {}
+    delta_report = "### 【DeltaCash】\n- Total Delta Cash: `123,000` 元"
+
+    class _DummyAgent:
+        def invoke(self, *_args, **_kwargs):
+            class _Msg:
+                content = "策略正文"
+            return {"messages": [_Msg()]}
+
+    def _fake_compute(**kwargs):
+        observed["account_total_capital"] = kwargs.get("account_total_capital")
+        return {"is_etf": True, "report": delta_report, "publishable": True}
+
+    monkeypatch.setattr(agent_core, "compute_etf_option_delta_cash", _fake_compute)
+    monkeypatch.setattr(agent_core, "create_react_agent", lambda *_args, **_kwargs: _DummyAgent())
+
+    state = {
+        "symbol": "510300",
+        "user_query": "我账户总资金100万，我有510300的4月4.6认购买方23张，怎么调？",
+        "risk_preference": "稳健型",
+        "fund_data": "无",
+        "trend_signal": "看涨",
+        "memory_context": "",
+        "technical_summary": "趋势偏强",
+        "key_levels": "",
+        "portfolio_top_corr_index": "",
+        "portfolio_top_corr_value": "",
+        "portfolio_summary": "",
+        "account_total_capital": None,
+    }
+    out = agent_core.strategist_node(state, llm=object())
+    content = out["messages"][0].content
+    assert "【DeltaCash】" in content
+    assert observed.get("account_total_capital") == 1000000.0
