@@ -524,6 +524,23 @@ def build_page_html() -> str:
       color:rgba(255,255,255,.58);
       text-decoration:none;
       z-index:3;
+      border:none;
+      outline:none;
+      cursor:pointer;
+      font-family:"Noto Sans SC",sans-serif;
+      background:transparent !important;
+      padding:0;
+      margin:0;
+      box-shadow:none;
+      appearance:none;
+      -webkit-appearance:none;
+    }}
+    .hero-scroll-cue:hover,
+    .hero-scroll-cue:focus,
+    .hero-scroll-cue:active {{
+      background:transparent !important;
+      box-shadow:none;
+      outline:none;
     }}
     .hero-scroll-cue span {{
       font-size:11px;
@@ -1330,10 +1347,10 @@ def build_page_html() -> str:
           </div>
         </div>
         </div>
-        <a class="hero-scroll-cue" href="#modules" aria-label="继续向下查看课程内容">
+        <button class="hero-scroll-cue" type="button" aria-label="继续向下查看课程内容" onclick="document.getElementById('modules')?.scrollIntoView({{behavior:'smooth', block:'start'}});">
           <span>SCROLL</span>
           <i>↓</i>
-        </a>
+        </button>
       </div>
     </section>
 
