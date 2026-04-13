@@ -340,6 +340,16 @@ def _normalize_iv(iv_value: Optional[float]) -> Optional[float]:
     return max(iv, 1e-4)
 
 
+def _coerce_positive_float(value: Any) -> Optional[float]:
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return None
+    if v <= 0:
+        return None
+    return v
+
+
 def _norm_date_str(dt: Optional[str] = None) -> str:
     if dt:
         return str(dt).replace("-", "")[:8]
@@ -420,13 +430,18 @@ def build_delta_adjustment(
     gross_notional: float,
     trend_signal: str,
     risk_preference: str,
+    ratio_base: Optional[float] = None,
+    ratio_basis: str = "gross_notional",
 ) -> Dict[str, Any]:
     band = get_delta_target_band(trend_signal=trend_signal, risk_preference=risk_preference)
-    current_ratio = float(total_delta_cash) / float(gross_notional) if gross_notional > 0 else 0.0
+    effective_base = _coerce_positive_float(ratio_base)
+    if effective_base is None:
+        effective_base = float(gross_notional)
+    current_ratio = float(total_delta_cash) / effective_base if effective_base > 0 else 0.0
     mid = band["mid"]
-    adjust_cash = (mid - current_ratio) * float(gross_notional) if gross_notional > 0 else 0.0
+    adjust_cash = (mid - current_ratio) * effective_base if effective_base > 0 else 0.0
     in_band = band["low"] <= current_ratio <= band["high"]
-    if gross_notional <= 0:
+    if effective_base <= 0:
         action = "名义敞口为0，无法计算调整量"
     elif adjust_cash > 0:
         action = "需提高 Delta Cash（减空/加多）"
@@ -441,6 +456,8 @@ def build_delta_adjustment(
         "adjust_cash": adjust_cash,
         "in_band": in_band,
         "action": action,
+        "ratio_base": effective_base,
+        "ratio_basis": str(ratio_basis or "gross_notional"),
     }
 
 
@@ -489,6 +506,7 @@ def _build_delta_report(
     metrics: Dict[str, float],
     adjustment: Dict[str, Any],
     missing_notes: List[str],
+    account_total_capital: Optional[float],
 ) -> str:
     lines = []
     lines.append("### 【DeltaCash】")
@@ -522,7 +540,15 @@ def _build_delta_report(
     lines.append("")
     lines.append(f"- Total Delta Cash: `{_fmt_money(metrics.get('total_delta_cash', 0.0))}` 元")
     lines.append(f"- Gross Notional: `{_fmt_money(metrics.get('gross_notional', 0.0))}` 元")
-    lines.append(f"- Delta Ratio: `{metrics.get('delta_ratio', 0.0):+.4f}`")
+    ratio_basis = str(metrics.get("effective_ratio_basis", "gross_notional"))
+    effective_ratio = float(metrics.get("effective_delta_ratio", metrics.get("delta_ratio", 0.0)))
+    if ratio_basis == "account_total_capital":
+        lines.append(f"- 账户总资金: `{_fmt_money(account_total_capital or 0.0)}` 元")
+        lines.append(f"- 执行口径 Delta Ratio(账户): `{effective_ratio:+.4f}`")
+        lines.append(f"- 参考口径 Delta Ratio(组合): `{metrics.get('delta_ratio', 0.0):+.4f}`")
+    else:
+        lines.append(f"- 执行口径 Delta Ratio(组合): `{effective_ratio:+.4f}`")
+        lines.append("- ⚠️ 未提供账户总资金：请补充账户净资产/总资金，以便给出更精确的账户级Delta建议。")
     lines.append(f"- 覆盖率: `{metrics.get('coverage_ratio', 0.0) * 100:.1f}%`")
 
     band = adjustment.get("band", {})
@@ -548,6 +574,7 @@ def compute_etf_option_delta_cash(
     as_of_date: Optional[str] = None,
     r: float = 0.015,
     q: float = 0.0,
+    account_total_capital: Optional[float] = None,
 ) -> Dict[str, Any]:
     as_of_yyyymmdd = _norm_date_str(as_of_date)
     underlying_code = detect_etf_underlying(user_query, symbol_hint=symbol_hint)
@@ -675,11 +702,24 @@ def compute_etf_option_delta_cash(
 
     spot_for_metrics = float(spot_info["close_price"]) if spot_info else 0.0
     metrics = compute_delta_cash_metrics(legs_out, underlying_price=spot_for_metrics, multiplier=ETF_MULTIPLIER)
+    account_capital = _coerce_positive_float(account_total_capital)
+    effective_base = account_capital if account_capital else float(metrics["gross_notional"])
+    effective_basis = "account_total_capital" if account_capital else "gross_notional"
+    effective_ratio = float(metrics["total_delta_cash"]) / effective_base if effective_base > 0 else 0.0
+    metrics["effective_ratio_base"] = effective_base
+    metrics["effective_ratio_basis"] = effective_basis
+    metrics["effective_delta_ratio"] = effective_ratio
+    if account_capital:
+        metrics["account_total_capital"] = account_capital
+        metrics["account_delta_ratio"] = effective_ratio
+
     adjustment = build_delta_adjustment(
         total_delta_cash=metrics["total_delta_cash"],
         gross_notional=metrics["gross_notional"],
         trend_signal=trend_signal,
         risk_preference=risk_preference,
+        ratio_base=effective_base,
+        ratio_basis=effective_basis,
     )
     report = _build_delta_report(
         underlying_code=underlying_code,
@@ -689,6 +729,7 @@ def compute_etf_option_delta_cash(
         metrics=metrics,
         adjustment=adjustment,
         missing_notes=missing_notes,
+        account_total_capital=account_capital,
     )
     if metrics.get("coverage_ratio", 0.0) < 1.0:
         blocking_notes.append("Delta覆盖率不足")

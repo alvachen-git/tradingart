@@ -4,6 +4,7 @@ from scipy import stats
 import re
 import json
 import logging
+import math
 from symbol_match import sql_prefix_condition
 import os
 import sys
@@ -80,6 +81,7 @@ def get_db_engine():
     return create_engine(db_url, pool_recycle=3600, pool_pre_ping=True)
 
 engine = get_db_engine()
+_USER_PROFILE_ACCOUNT_CAPITAL_COLUMN_READY = False
 
 _TOOL_STARTUP_SELF_CHECK_LOGGED = False
 
@@ -650,6 +652,171 @@ def get_user_profile(user_id='default_user'):
         return {}
     except:
         return {}
+
+
+def _normalize_capital_amount(value) -> float | None:
+    try:
+        amount = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(amount) or amount <= 0:
+        return None
+    return round(amount, 2)
+
+
+def normalize_account_total_capital(value) -> float | None:
+    """公开的金额归一化入口，便于上层安全读取 user_profile 字段。"""
+    return _normalize_capital_amount(value)
+
+
+def parse_account_total_capital(text: str) -> float | None:
+    """
+    从用户语句中提取“账户总资金/本金/净资产”等金额（单位：元）。
+    仅在资金关键词附近提取，避免把行权价等数值误当资金。
+    """
+    raw = str(text or "")
+    if not raw:
+        return None
+
+    normalized = raw.replace(",", "").replace("，", "")
+    keywords = (
+        "账户总资金", "账户资金", "总资金", "资金量", "总资产", "账户规模",
+        "本金", "净资产", "可用资金", "账户有", "资金有",
+    )
+    if not any(k in normalized for k in keywords):
+        return None
+
+    # 资金关键词在前：例如“账户总资金100万”
+    p1 = re.compile(
+        r"(账户总资金|账户资金|总资金|资金量|总资产|账户规模|本金|净资产|可用资金|账户有|资金有)"
+        r"[^0-9]{0,8}([0-9]+(?:\.[0-9]+)?)\s*(亿|万|w|W|千|k|K)?\s*(元|块)?"
+    )
+    # 数值在前：例如“100万的账户资金”
+    p2 = re.compile(
+        r"([0-9]+(?:\.[0-9]+)?)\s*(亿|万|w|W|千|k|K)?\s*(元|块)?[^0-9]{0,8}"
+        r"(账户总资金|账户资金|总资金|资金量|总资产|账户规模|本金|净资产|可用资金)"
+    )
+
+    matched = None
+    for pattern in (p1, p2):
+        m = pattern.search(normalized)
+        if m:
+            matched = m
+            break
+    if not matched:
+        return None
+
+    # 两个模式的数值/单位分组位置不同，这里统一提取
+    groups = matched.groups()
+    num_text = None
+    unit = None
+    for g in groups:
+        s = str(g or "").strip()
+        if not s:
+            continue
+        if re.fullmatch(r"[0-9]+(?:\.[0-9]+)?", s) and num_text is None:
+            num_text = s
+        elif s in {"亿", "万", "w", "W", "千", "k", "K"} and unit is None:
+            unit = s
+    if not num_text:
+        return None
+
+    try:
+        amount = float(num_text)
+    except ValueError:
+        return None
+
+    if unit in {"亿"}:
+        amount *= 100000000.0
+    elif unit in {"万", "w", "W"}:
+        amount *= 10000.0
+    elif unit in {"千", "k", "K"}:
+        amount *= 1000.0
+
+    return _normalize_capital_amount(amount)
+
+
+def _ensure_user_profile_account_capital_column() -> None:
+    global _USER_PROFILE_ACCOUNT_CAPITAL_COLUMN_READY
+    if _USER_PROFILE_ACCOUNT_CAPITAL_COLUMN_READY or engine is None:
+        return
+    try:
+        with engine.begin() as conn:
+            exists = conn.execute(
+                text(
+                    """
+                    SELECT 1
+                    FROM information_schema.COLUMNS
+                    WHERE TABLE_SCHEMA = DATABASE()
+                      AND TABLE_NAME = 'user_profile'
+                      AND COLUMN_NAME = 'account_total_capital'
+                    LIMIT 1
+                    """
+                )
+            ).fetchone()
+            if not exists:
+                conn.execute(
+                    text(
+                        """
+                        ALTER TABLE user_profile
+                        ADD COLUMN account_total_capital DECIMAL(18,2) NULL
+                        """
+                    )
+                )
+    except Exception as e:
+        print(f"⚠️ ensure account_total_capital column failed: {e}")
+    finally:
+        _USER_PROFILE_ACCOUNT_CAPITAL_COLUMN_READY = True
+
+
+def upsert_user_account_total_capital(user_id: str, total_capital, source_text: str = "") -> bool:
+    """
+    将用户账户总资金写入 user_profile.account_total_capital。
+    """
+    uid = str(user_id or "").strip()
+    if not uid:
+        return False
+    amount = _normalize_capital_amount(total_capital)
+    if amount is None:
+        return False
+    if engine is None:
+        return False
+
+    _ensure_user_profile_account_capital_column()
+
+    try:
+        with engine.begin() as conn:
+            exists = conn.execute(
+                text("SELECT 1 FROM user_profile WHERE user_id=:uid LIMIT 1"),
+                {"uid": uid},
+            ).fetchone()
+            if not exists:
+                conn.execute(
+                    text(
+                        """
+                        INSERT INTO user_profile (user_id, risk_preference, focus_assets, current_mood, account_total_capital)
+                        VALUES (:uid, '未知', '暂无', '平静', :capital)
+                        """
+                    ),
+                    {"uid": uid, "capital": amount},
+                )
+            else:
+                conn.execute(
+                    text(
+                        """
+                        UPDATE user_profile
+                        SET account_total_capital=:capital
+                        WHERE user_id=:uid
+                        """
+                    ),
+                    {"uid": uid, "capital": amount},
+                )
+        if source_text:
+            print(f"💾 用户资金画像已更新 user={uid} capital={amount:.2f} from={source_text[:60]}")
+        return True
+    except Exception as e:
+        print(f"⚠️ upsert_user_account_total_capital failed user={uid}: {e}")
+        return False
 
 
 def update_user_memory_async(user_id, user_input):

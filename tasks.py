@@ -691,6 +691,19 @@ def process_ai_query(
         input_messages.append(HumanMessage(content=final_prompt))
 
         context_payload = context_payload or {}
+        account_total_capital = context_payload.get("account_total_capital")
+        if account_total_capital is None:
+            try:
+                parsed_capital = de.parse_account_total_capital(prompt)
+                if parsed_capital:
+                    account_total_capital = float(parsed_capital)
+                    de.upsert_user_account_total_capital(
+                        user_id=str(user_id or ""),
+                        total_capital=account_total_capital,
+                        source_text=prompt,
+                    )
+            except Exception as e:
+                print(f"[task] parse/upsert account capital failed user={user_id} err={e}")
 
         inputs = {
             "user_query": final_prompt,
@@ -702,6 +715,7 @@ def process_ai_query(
             "conversation_id": str(context_payload.get("conversation_id", f"{user_id}-default")),
             "user_id": user_id,
             "has_portfolio": has_portfolio,
+            "account_total_capital": account_total_capital,
         }
 
         self.update_state(state='PROCESSING', meta={'progress': '团队正在协作分析...'})

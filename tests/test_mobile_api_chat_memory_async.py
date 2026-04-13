@@ -143,6 +143,29 @@ class TestMobileApiChatMemoryAsync(unittest.TestCase):
         self.assertTrue(kwargs.get("strict_topic"))
         self.assertIn("期权", out.get("memory_context", ""))
 
+    def test_mobile_context_extracts_account_total_capital_and_upserts_profile(self):
+        with patch.object(mobile_api.de, "parse_account_total_capital", return_value=1200000.0), patch.object(
+            mobile_api.de, "upsert_user_account_total_capital", return_value=True
+        ) as mocked_upsert:
+            out = mobile_api._build_mobile_context_payload(
+                prompt_text="我账户总资金120万，创业板期权持仓怎么调？",
+                current_user="u1",
+                history=[],
+                profile={},
+            )
+        self.assertEqual(out.get("account_total_capital"), 1200000.0)
+        mocked_upsert.assert_called_once()
+
+    def test_mobile_context_falls_back_to_profile_capital(self):
+        with patch.object(mobile_api.de, "parse_account_total_capital", return_value=None):
+            out = mobile_api._build_mobile_context_payload(
+                prompt_text="创业板期权持仓怎么调？",
+                current_user="u1",
+                history=[],
+                profile={"account_total_capital": 3000000},
+            )
+        self.assertEqual(out.get("account_total_capital"), 3000000.0)
+
     def test_chat_submit_only_keeps_recent_four_history(self):
         fake_redis = _FakeRedis()
         history = [

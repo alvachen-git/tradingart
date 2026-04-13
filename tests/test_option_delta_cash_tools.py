@@ -90,6 +90,19 @@ def test_build_delta_adjustment_direction_consistency():
     assert "提高 Delta Cash" in out["action"]
 
 
+def test_build_delta_adjustment_uses_account_ratio_base_when_provided():
+    out = odt.build_delta_adjustment(
+        total_delta_cash=200000,
+        gross_notional=1000000,
+        trend_signal="看涨",
+        risk_preference="稳健型",
+        ratio_base=5000000,
+        ratio_basis="account_total_capital",
+    )
+    assert out["ratio_basis"] == "account_total_capital"
+    assert abs(out["current_ratio"] - 0.04) < 1e-9
+
+
 def test_compute_etf_option_delta_cash_success_report_contains_required_blocks():
     text = "创业板4月3.2认购买方23张，还有3.3认购卖方50张，目前这个持仓怎么调比较好"
     out = odt.compute_etf_option_delta_cash(
@@ -107,6 +120,44 @@ def test_compute_etf_option_delta_cash_success_report_contains_required_blocks()
     assert "建议调整量" in out["report"]
     assert out["publishable"] is True
     assert out["metrics"]["coverage_ratio"] == 1.0
+    assert "未提供账户总资金" in out["report"]
+
+
+def test_compute_etf_option_delta_cash_with_account_capital_uses_account_ratio():
+    text = "创业板4月3.2认购买方23张，还有3.3认购卖方50张"
+    out = odt.compute_etf_option_delta_cash(
+        user_query=text,
+        symbol_hint="159915",
+        trend_signal="看涨",
+        risk_preference="稳健型",
+        loader=_FakeLoader(with_iv=True),
+        as_of_date="20260412",
+        account_total_capital=10000000,
+    )
+    assert out["is_etf"] is True
+    assert out["publishable"] is True
+    assert out["metrics"]["effective_ratio_basis"] == "account_total_capital"
+    assert out["metrics"]["account_total_capital"] == 10000000
+    assert "账户总资金" in out["report"]
+    assert "执行口径 Delta Ratio(账户)" in out["report"]
+
+
+def test_compute_etf_option_delta_cash_accepts_string_account_capital():
+    text = "创业板4月3.2认购买方23张，还有3.3认购卖方50张"
+    out = odt.compute_etf_option_delta_cash(
+        user_query=text,
+        symbol_hint="159915",
+        trend_signal="看涨",
+        risk_preference="稳健型",
+        loader=_FakeLoader(with_iv=True),
+        as_of_date="20260412",
+        account_total_capital="3000000",
+    )
+    assert out["is_etf"] is True
+    assert out["publishable"] is True
+    assert out["metrics"]["effective_ratio_basis"] == "account_total_capital"
+    assert abs(out["metrics"]["account_total_capital"] - 3000000.0) < 1e-9
+    assert "执行口径 Delta Ratio(账户)" in out["report"]
 
 
 def test_compute_etf_option_delta_cash_missing_iv_has_gap_message():

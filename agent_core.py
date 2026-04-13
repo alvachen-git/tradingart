@@ -37,6 +37,7 @@ from futures_structure_tools import (
 from volume_oi_tools import get_volume_oi, get_futures_oi_ranking, get_option_oi_ranking, get_option_volume_abnormal, get_option_oi_abnormal, analyze_etf_option_sentiment, get_etf_option_strikes
 from market_tools import get_market_snapshot, get_price_statistics,tool_query_specific_option,get_historical_price,get_recent_price_series,get_trending_hotspots,get_today_hotlist,analyze_keyword_trend,get_finance_related_trends,search_hotlist_history
 from data_engine import get_commodity_iv_info, check_option_expiry_status,search_broker_holdings_on_date,tool_analyze_position_change,tool_compare_stocks,get_stock_valuation,get_latest_data_date,tool_analyze_broker_positions
+from data_engine import parse_account_total_capital, normalize_account_total_capital
 from search_tools import search_web
 from market_correlation import tool_stock_hedging_analysis, tool_futures_correlation_check,tool_stock_correlation_check
 from beta_tool import calculate_hedging_beta
@@ -95,6 +96,7 @@ class AgentState(TypedDict):
     option_delta_cash_report: str  # ETF期权Delta Cash预计算报告
     option_delta_cash_meta: Dict[str, Any]  # ETF期权Delta Cash结构化结果
     option_delta_cash_gap_note: str  # Delta无法计算时的数据缺口说明
+    account_total_capital: float  # 用户账户总资金（元），用于账户口径Delta计算
 
 
 # 期权合约乘数表（每张期权对应的标的数量）
@@ -1023,6 +1025,13 @@ def strategist_node(state: AgentState, llm):
     current_date = datetime.now().strftime("%Y年%m月%d日")
     key_level = state.get("key_levels", "")
     option_position_mode = _is_option_position_query(user_q)
+    account_total_capital = normalize_account_total_capital(state.get("account_total_capital"))
+    # 兜底：避免上下文传递丢失时退回组合口径，直接从本轮问句再提取一次账户资金
+    if option_position_mode and not account_total_capital:
+        try:
+            account_total_capital = normalize_account_total_capital(parse_account_total_capital(user_q))
+        except Exception:
+            account_total_capital = None
     delta_cash_report = ""
     delta_cash_meta: Dict[str, Any] = {}
     delta_cash_gap_note = ""
@@ -1035,6 +1044,7 @@ def strategist_node(state: AgentState, llm):
                 symbol_hint=symbol,
                 trend_signal=trend,
                 risk_preference=risk_pref,
+                account_total_capital=account_total_capital,
             ) or {}
             raw_report = str(delta_cash_meta.get("report") or "").strip()
             is_etf_for_delta = bool(delta_cash_meta.get("is_etf"))
