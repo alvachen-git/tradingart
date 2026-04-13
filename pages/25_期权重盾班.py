@@ -385,7 +385,6 @@ def build_page_html() -> str:
         if page.get("problem_side_image")
         else ""
     )
-    chips_html = "".join(f"<span class='hero-chip'>{esc(chip)}</span>" for chip in page["hero_chips"])
     video_cover_style = ""
     if page.get("video_cover"):
         video_cover_style = (
@@ -473,7 +472,12 @@ def build_page_html() -> str:
       grid-template-columns:minmax(0,1.08fr) minmax(420px,.92fr);
       gap:56px;
       align-items:center;
-      padding:96px 0 88px;
+      padding:82px 0 72px;
+      position:relative;
+    }}
+    .hero-copy {{
+      align-self:center;
+      padding-top:0;
     }}
     .eyebrow {{
       display:inline-flex; align-items:center; gap:10px;
@@ -494,7 +498,7 @@ def build_page_html() -> str:
       margin:0; color:var(--amber); font-size:clamp(24px,2.3vw,34px); font-weight:700;
     }}
     .hero-summary {{
-      margin:24px 0 0; max-width:700px; color:var(--muted-2); font-size:20px; line-height:2;
+      display:none;
     }}
     .hero-notice {{
       margin:18px 0 0; max-width:720px; color:var(--muted); font-size:15px; line-height:1.9;
@@ -504,9 +508,44 @@ def build_page_html() -> str:
       padding-left:22px;
       border-left:2px solid rgba(240,179,93,.45);
       color:var(--muted-2);
-      font-size:22px;
-      line-height:1.8;
-      max-width:780px;
+      font-size:20px;
+      line-height:1.75;
+      max-width:680px;
+    }}
+    .hero-scroll-cue {{
+      position:absolute;
+      left:50%;
+      bottom:28px;
+      transform:translateX(-50%);
+      display:flex;
+      flex-direction:column;
+      align-items:center;
+      gap:8px;
+      color:rgba(255,255,255,.58);
+      text-decoration:none;
+      z-index:3;
+    }}
+    .hero-scroll-cue span {{
+      font-size:11px;
+      letter-spacing:.18em;
+      color:rgba(255,255,255,.34);
+    }}
+    .hero-scroll-cue i {{
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      width:30px;
+      height:30px;
+      border-radius:999px;
+      border:1px solid rgba(255,255,255,.08);
+      background:rgba(255,255,255,.02);
+      font-style:normal;
+      font-size:14px;
+      animation:heroArrowFloat 1.8s ease-in-out infinite;
+    }}
+    @keyframes heroArrowFloat {{
+      0%, 100% {{ transform:translateY(0); opacity:.42; }}
+      50% {{ transform:translateY(7px); opacity:.9; }}
     }}
     .hero-chip-row, .hero-actions, .hero-meta {{ display:flex; flex-wrap:wrap; }}
     .hero-chip-row {{ gap:14px; margin-top:30px; }}
@@ -1227,6 +1266,7 @@ def build_page_html() -> str:
       .hero {{ min-height:auto; }}
       .hero-visual {{ min-height:620px; }}
       .band {{ padding:0 28px; }}
+      .hero-copy {{ padding-top:0; }}
       .mentor-photo-shell {{ min-height:360px; }}
       .video-shell {{ inset:22px; }}
       .video-embed,
@@ -1247,7 +1287,7 @@ def build_page_html() -> str:
       .hero h1 {{ font-size:64px; }}
       .section h2 {{ font-size:42px; }}
       .problem-lead h3, .closing h3 {{ font-size:34px; }}
-      .hero-manifesto {{ font-size:18px; padding-left:16px; }}
+      .hero-manifesto {{ font-size:18px; padding-left:16px; max-width:100%; }}
       .video-embed,
       .video-link-cover {{ min-height:240px; padding:22px; }}
       .video-link-copy h4 {{ font-size:15px; }}
@@ -1261,10 +1301,8 @@ def build_page_html() -> str:
         <div class="eyebrow">高阶课程</div>
         <h1>{esc(page["title"])}</h1>
         <p class="hero-tagline">{esc(page["hero_tagline"])}</p>
-        <p class="hero-summary">{esc(page["hero_summary"])}</p>
-        <p class="hero-manifesto">大资金长期年化15%收益是如何做到的？</p>
+        <p class="hero-manifesto">大资金长期年化20%收益是如何做到的？</p>
         {hero_notice_html}
-        <div class="hero-chip-row">{chips_html}</div>
         </div>
         <div class="hero-visual">
         <div class="video-shell">
@@ -1292,6 +1330,10 @@ def build_page_html() -> str:
           </div>
         </div>
         </div>
+        <a class="hero-scroll-cue" href="#modules" aria-label="继续向下查看课程内容">
+          <span>SCROLL</span>
+          <i>↓</i>
+        </a>
       </div>
     </section>
 
