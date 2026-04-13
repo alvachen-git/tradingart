@@ -33,6 +33,30 @@ DEFAULT_NEW_USER_TRIAL_CHANNEL_CODES = [
     if item.strip()
 ]
 
+
+def _parse_trial_days_by_channel(raw: str) -> Dict[str, int]:
+    parsed: Dict[str, int] = {}
+    for item in str(raw or "").split(","):
+        token = str(item or "").strip()
+        if not token or ":" not in token:
+            continue
+        code_part, days_part = token.split(":", 1)
+        code = str(code_part or "").strip().lower()
+        if not code:
+            continue
+        try:
+            days = int(str(days_part or "").strip())
+        except Exception:
+            continue
+        if days > 0:
+            parsed[code] = days
+    return parsed
+
+
+DEFAULT_NEW_USER_TRIAL_DAYS_BY_CHANNEL = _parse_trial_days_by_channel(
+    os.getenv("NEW_USER_TRIAL_DAYS_BY_CHANNEL", "macro_risk_radar:30")
+)
+
 CHANNEL_NAME_OVERRIDES = {
     "macro_risk_radar": "宏观周报",
 }
@@ -682,7 +706,7 @@ def grant_new_user_trial_all_reports(
     campaign_code = f"new_user_all_reports_{grant_days}d_v1"
     marker_code = f"{campaign_code}:marker"
     operator = os.getenv("TRIAL_GRANT_OPERATOR", "system_register")
-    source_note = f"new_user_all_reports_trial:{grant_days}d"
+    campaign_source_note = f"new_user_all_reports_trial:{grant_days}d"
 
     try:
         with engine.begin() as conn:
@@ -725,12 +749,17 @@ def grant_new_user_trial_all_reports(
                     print(f"[subscription] trial_all_reports_skip_missing_channel code={code_norm}")
                     continue
 
+                channel_days = int(DEFAULT_NEW_USER_TRIAL_DAYS_BY_CHANNEL.get(code_norm, grant_days) or grant_days)
+                if channel_days <= 0:
+                    channel_days = grant_days
+
                 trial_code = f"{campaign_code}:{code_norm}"
+                source_note = f"new_user_all_reports_trial:{code_norm}:{channel_days}d"
                 ok, msg = _add_subscription_core(
                     conn=conn,
                     user_id=user_id,
                     channel_id=channel_id,
-                    days=grant_days,
+                    days=channel_days,
                     source_type="trial_all_reports",
                     source_ref=trial_code,
                     source_note=source_note,
@@ -751,7 +780,7 @@ def grant_new_user_trial_all_reports(
                         "uid": user_id,
                         "trial_code": trial_code,
                         "channel_id": channel_id,
-                        "days": grant_days,
+                        "days": channel_days,
                         "source_note": source_note,
                         "operator": operator,
                     },
@@ -773,7 +802,7 @@ def grant_new_user_trial_all_reports(
                     "uid": user_id,
                     "trial_code": marker_code,
                     "days": grant_days,
-                    "source_note": source_note,
+                    "source_note": campaign_source_note,
                     "operator": operator,
                 },
             )

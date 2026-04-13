@@ -11,6 +11,7 @@ Examples:
   python scripts/grant_legacy_reports_until_date.py --apply
   python scripts/grant_legacy_reports_until_date.py --apply --expire-at "2026-04-05 23:59:59"
   python scripts/grant_legacy_reports_until_date.py --apply --legacy-user-before "2026-03-24 00:00:00"
+  python scripts/grant_legacy_reports_until_date.py --apply --channel-codes "macro_risk_radar" --expire-at "2026-06-30 23:59:59"
 """
 
 from __future__ import annotations
@@ -71,6 +72,18 @@ def _build_codes_sql(codes: Tuple[str, ...]) -> str:
     return ",".join([f"'{code}'" for code in codes])
 
 
+def _parse_channel_codes(raw: str) -> Tuple[str, ...]:
+    seen = set()
+    out: List[str] = []
+    for item in str(raw or "").split(","):
+        code = str(item or "").strip().lower()
+        if not code or code in seen:
+            continue
+        seen.add(code)
+        out.append(code)
+    return tuple(out)
+
+
 def _collect_preview(
     conn,
     legacy_user_before: datetime,
@@ -129,10 +142,15 @@ def run(
     apply: bool,
     target_expire_at: datetime,
     legacy_user_before: datetime,
+    target_channel_codes: Tuple[str, ...],
     operator: str,
     source_note: str,
 ) -> int:
-    codes_sql = _build_codes_sql(TARGET_CHANNEL_CODES)
+    if not target_channel_codes:
+        print("[legacy-grant] target_channel_codes is empty")
+        return 1
+
+    codes_sql = _build_codes_sql(target_channel_codes)
     source_ref = f"legacy_grant_until_{target_expire_at.strftime('%Y%m%d')}"
 
     with engine.begin() as conn:
@@ -149,14 +167,14 @@ def run(
         )
 
         present_codes = {row[0] for row in plan_rows}
-        missing_codes = [code for code in TARGET_CHANNEL_CODES if code not in present_codes]
+        missing_codes = [code for code in target_channel_codes if code not in present_codes]
         total_to_insert = sum(row[1] for row in plan_rows)
         total_to_update = sum(row[2] for row in plan_rows)
 
         print("[legacy-grant] mode=", "apply" if apply else "dry-run")
         print("[legacy-grant] legacy_user_before=", legacy_user_before.strftime("%Y-%m-%d %H:%M:%S"))
         print("[legacy-grant] target_expire_at=", target_expire_at.strftime("%Y-%m-%d %H:%M:%S"))
-        print("[legacy-grant] target_channel_codes=", ",".join(TARGET_CHANNEL_CODES))
+        print("[legacy-grant] target_channel_codes=", ",".join(target_channel_codes))
         print("[legacy-grant] legacy_user_count=", legacy_user_count)
         print("[legacy-grant] preview_to_insert=", total_to_insert)
         print("[legacy-grant] preview_to_update=", total_to_update)
@@ -300,7 +318,7 @@ def run(
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Grant legacy users four report channels until a fixed date.")
+    parser = argparse.ArgumentParser(description="Grant legacy users selected report channels until a fixed date.")
     parser.add_argument("--apply", action="store_true", help="Apply DB changes.")
     parser.add_argument("--dry-run", action="store_true", help="Preview only (default).")
     parser.add_argument(
@@ -319,6 +337,11 @@ if __name__ == "__main__":
         help="Operator name for audit fields.",
     )
     parser.add_argument(
+        "--channel-codes",
+        default=",".join(TARGET_CHANNEL_CODES),
+        help="Comma-separated channel codes to grant. e.g. macro_risk_radar",
+    )
+    parser.add_argument(
         "--source-note",
         default="legacy_user_report_access_backfill",
         help="Source note for audit fields.",
@@ -328,12 +351,14 @@ if __name__ == "__main__":
     apply_mode = bool(args.apply) and not bool(args.dry_run)
     expire_at_dt = _parse_dt(args.expire_at)
     legacy_before_dt = _parse_dt(args.legacy_user_before)
+    channel_codes = _parse_channel_codes(args.channel_codes)
 
     raise SystemExit(
         run(
             apply=apply_mode,
             target_expire_at=expire_at_dt,
             legacy_user_before=legacy_before_dt,
+            target_channel_codes=channel_codes,
             operator=str(args.operator or "").strip() or "ops_manual",
             source_note=str(args.source_note or "").strip() or "legacy_user_report_access_backfill",
         )

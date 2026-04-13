@@ -63,7 +63,8 @@ class TestSubscriptionTrial(unittest.TestCase):
                     (1, 'daily_report', '复盘晚报', 1, 1),
                     (2, 'expiry_option_radar', '末日期权晚报', 1, 1),
                     (3, 'broker_position_report', '持仓密报', 1, 1),
-                    (4, 'fund_flow_report', '资金流晚报', 1, 1)
+                    (4, 'fund_flow_report', '资金流晚报', 1, 1),
+                    (5, 'macro_risk_radar', '宏观周报', 1, 1)
                     """
                 )
             )
@@ -113,9 +114,20 @@ class TestSubscriptionTrial(unittest.TestCase):
                 text(
                     """
                     SELECT COUNT(*) FROM user_subscriptions
-                    WHERE user_id='new_user_all' AND channel_id IN (1,2,3,4)
+                    WHERE user_id='new_user_all' AND channel_id IN (1,2,3,4,5)
                     """
                 )
+            ).scalar_one()
+            macro_trial_days = conn.execute(
+                text(
+                    """
+                    SELECT days FROM user_trial_grants
+                    WHERE user_id='new_user_all'
+                      AND trial_code=:trial_code
+                    LIMIT 1
+                    """
+                ),
+                {"trial_code": f"new_user_all_reports_{sub.DEFAULT_NEW_USER_TRIAL_DAYS}d_v1:macro_risk_radar"},
             ).scalar_one()
             expected_marker = f"new_user_all_reports_{sub.DEFAULT_NEW_USER_TRIAL_DAYS}d_v1:marker"
             cnt_marker = conn.execute(
@@ -137,9 +149,10 @@ class TestSubscriptionTrial(unittest.TestCase):
                 )
             ).scalar_one()
 
-        self.assertEqual(int(cnt_sub), 4)
+        self.assertEqual(int(cnt_sub), 5)
+        self.assertEqual(int(macro_trial_days), 30)
         self.assertEqual(int(cnt_marker), 1)
-        self.assertEqual(int(cnt_trial_rows), 5)
+        self.assertEqual(int(cnt_trial_rows), 6)
 
 
 if __name__ == "__main__":
