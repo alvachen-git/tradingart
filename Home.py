@@ -2038,10 +2038,10 @@ def show_welcome_screen():
          )
 
     with col3:
-        st.button("哪些期货商在农产品加仓？",
+        st.button("创业板期权做什么策略？",
                      use_container_width=True,
                      on_click=set_prompt_callback,
-                     args=("最近哪些期货商在农产品加仓",)
+                     args=("创业板期权做什么策略好",)
          )
 
 # ==========================================
