@@ -37,8 +37,6 @@ from data_engine import (
 )
 from kline_tools import analyze_kline_pattern
 from plot_tools import draw_chart_tool
-from news_tools import get_financial_news
-from search_tools import search_web
 import subscription_service as sub_svc
 
 try:
@@ -1231,8 +1229,6 @@ def collect_broker_position_data():
         tool_analyze_position_change,
         analyze_kline_pattern,
         draw_chart_tool,
-        get_financial_news,
-        search_web,
         # 新增：价格和资金计算工具
         get_futures_price_and_value,
         batch_calculate_position_value,
@@ -1249,6 +1245,9 @@ def collect_broker_position_data():
     contra_brokers_db = [get_db_broker_name(b) for b in BROKER_CONFIG["反指标"]]
 
     system_prompt = f"""
+IMPORTANT:
+- Do not use web search or news lookup.
+- Use only database-backed tools in this workflow.
 你是一位**期货商持仓分析专家**，为《爱波塔-期货商持仓晚报》采集数据。
 当前日期：{today_str}
 
