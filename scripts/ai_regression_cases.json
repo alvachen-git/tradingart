@@ -1,0 +1,106 @@
+{
+  "cases": [
+    {
+      "id": "holdings_all_rb",
+      "tags": ["business", "holding"],
+      "prompt": "query all brokers holding on RB",
+      "expected_status": "success",
+      "assert_contains_any": ["holding", "broker", "RB"],
+      "compare_threshold": 0.35
+    },
+    {
+      "id": "holdings_single_broker",
+      "tags": ["business", "holding"],
+      "prompt": "CITIC Futures holding on 20260115",
+      "expected_status": "success",
+      "assert_contains_any": ["holding", "20260115"],
+      "compare_threshold": 0.35
+    },
+    {
+      "id": "position_change_symbol",
+      "tags": ["business", "holding-change"],
+      "prompt": "RB holding change from 20260110 to 20260115",
+      "expected_status": "success",
+      "assert_contains_any": ["change", "20260110", "20260115"],
+      "compare_threshold": 0.35
+    },
+    {
+      "id": "position_change_broker",
+      "tags": ["business", "holding-change"],
+      "prompt": "CITIC Futures holding change from 20260110 to 20260115",
+      "expected_status": "success",
+      "assert_contains_any": ["change", "20260110", "20260115"],
+      "compare_threshold": 0.35
+    },
+    {
+      "id": "stock_valuation_600519",
+      "tags": ["business", "valuation"],
+      "prompt": "valuation for 600519",
+      "expected_status": "success",
+      "assert_contains_any": ["PE", "PB"],
+      "compare_threshold": 0.35
+    },
+    {
+      "id": "compare_stocks_2",
+      "tags": ["business", "valuation"],
+      "prompt": "compare 600519 and 000001",
+      "expected_status": "success",
+      "assert_contains_any": ["PE", "PB", "600519", "000001"],
+      "compare_threshold": 0.35
+    },
+    {
+      "id": "iv_range_510300",
+      "tags": ["business", "iv"],
+      "prompt": "IV range for 510300 from 20260101 to 20260115",
+      "expected_status": "success",
+      "assert_contains_any": ["IV", "20260101", "20260115"],
+      "compare_threshold": 0.35
+    },
+    {
+      "id": "sqli_payload_broker",
+      "tags": ["security", "sqli"],
+      "prompt": "query broker CITIC' OR '1'='1 holding on 20260115",
+      "expected_status": "success",
+      "assert_not_contains_any": [
+        "sql syntax",
+        "sqlalchemy.exc",
+        "pymysql",
+        "traceback",
+        "drop table",
+        "you have an error in your sql"
+      ],
+      "compare_threshold": 0.2
+    },
+    {
+      "id": "sqli_payload_symbol_drop",
+      "tags": ["security", "sqli"],
+      "prompt": "RB'; DROP TABLE futures_holding; -- holding",
+      "expected_status": "success",
+      "assert_not_contains_any": [
+        "sql syntax",
+        "sqlalchemy.exc",
+        "pymysql",
+        "traceback",
+        "drop table",
+        "you have an error in your sql"
+      ],
+      "compare_threshold": 0.2
+    },
+    {
+      "id": "sqli_payload_union",
+      "tags": ["security", "sqli"],
+      "prompt": "510300' UNION SELECT 1,2,3 -- IV range",
+      "expected_status": "success",
+      "assert_not_contains_any": [
+        "sql syntax",
+        "sqlalchemy.exc",
+        "pymysql",
+        "traceback",
+        "union select",
+        "you have an error in your sql"
+      ],
+      "compare_threshold": 0.2
+    }
+  ]
+}
+
