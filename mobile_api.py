@@ -2744,6 +2744,7 @@ def market_contracts(product: str, username: str = Depends(get_current_user)):
     try:
         import pandas as pd
         import datetime as dt
+        from sqlalchemy import text as _text
 
         prod = product.strip().lower()
         option_product_codes = _get_option_product_codes()
@@ -2751,28 +2752,41 @@ def market_contracts(product: str, username: str = Depends(get_current_user)):
         pattern = f'^{prod}[0-9]'  # 匹配 m2605 / m2609 等
 
         # ── 最近两个交易日（按该品种自身日历）──
-        dates_df = pd.read_sql(
-            f"SELECT DISTINCT REPLACE(trade_date,'-','') as td FROM futures_price "
-            f"WHERE ts_code REGEXP '{pattern}' AND ts_code NOT LIKE '%%TAS%%' "
-            f"ORDER BY td DESC LIMIT 2",
-            de.engine
+        dates_sql = _text(
+            "SELECT DISTINCT REPLACE(trade_date,'-','') as td FROM futures_price "
+            "WHERE ts_code REGEXP :pattern AND ts_code NOT LIKE '%%TAS%%' "
+            "ORDER BY td DESC LIMIT 2"
         )
+        dates_df = pd.read_sql(dates_sql, de.engine, params={"pattern": pattern})
         if dates_df.empty:
             return {"items": []}
         latest_date = str(dates_df.iloc[0]['td'])
         prev_date   = str(dates_df.iloc[1]['td']) if len(dates_df) > 1 else ""
 
         # ── 最新日 + 前一日价格（一次取，用于计算涨跌）──
-        price_sql = f"""
-            SELECT ts_code, close_price, oi,
-                   REPLACE(trade_date,'-','') as trade_date
-            FROM futures_price
-            WHERE REPLACE(trade_date,'-','') IN ('{latest_date}'{(",'" + prev_date + "'") if prev_date else ""})
-              AND ts_code REGEXP '{pattern}'
-              AND ts_code NOT LIKE '%%TAS%%'
-              AND oi > 0
-        """
-        df_price_all = pd.read_sql(price_sql, de.engine)
+        if prev_date:
+            price_sql = _text(
+                "SELECT ts_code, close_price, oi, "
+                "       REPLACE(trade_date,'-','') as trade_date "
+                "FROM futures_price "
+                "WHERE REPLACE(trade_date,'-','') IN (:latest_date, :prev_date) "
+                "  AND ts_code REGEXP :pattern "
+                "  AND ts_code NOT LIKE '%%TAS%%' "
+                "  AND oi > 0"
+            )
+            price_params = {"latest_date": latest_date, "prev_date": prev_date, "pattern": pattern}
+        else:
+            price_sql = _text(
+                "SELECT ts_code, close_price, oi, "
+                "       REPLACE(trade_date,'-','') as trade_date "
+                "FROM futures_price "
+                "WHERE REPLACE(trade_date,'-','') = :latest_date "
+                "  AND ts_code REGEXP :pattern "
+                "  AND ts_code NOT LIKE '%%TAS%%' "
+                "  AND oi > 0"
+            )
+            price_params = {"latest_date": latest_date, "pattern": pattern}
+        df_price_all = pd.read_sql(price_sql, de.engine, params=price_params)
         df_price = df_price_all[df_price_all['trade_date'] == latest_date].copy()
         df_price_prev = df_price_all[df_price_all['trade_date'] == prev_date].copy() if prev_date else pd.DataFrame()
         if df_price.empty:
@@ -2785,24 +2799,34 @@ def market_contracts(product: str, username: str = Depends(get_current_user)):
             prev_close_map = dict(zip(df_price_prev['ts_code'], df_price_prev['close_price']))
 
         # ── IV：取 commodity_iv_history 最近两个日期（各自的日历）──
-        iv_dates_df = pd.read_sql(
-            f"SELECT DISTINCT REPLACE(trade_date,'-','') as td FROM commodity_iv_history "
-            f"WHERE ts_code REGEXP '{pattern}' ORDER BY td DESC LIMIT 2",
-            de.engine
+        iv_dates_sql = _text(
+            "SELECT DISTINCT REPLACE(trade_date,'-','') as td FROM commodity_iv_history "
+            "WHERE ts_code REGEXP :pattern ORDER BY td DESC LIMIT 2"
         )
+        iv_dates_df = pd.read_sql(iv_dates_sql, de.engine, params={"pattern": pattern})
         iv_latest_date = str(iv_dates_df.iloc[0]['td']) if not iv_dates_df.empty else ""
         iv_prev_date   = str(iv_dates_df.iloc[1]['td']) if len(iv_dates_df) > 1 else ""
 
         iv_map: dict = {}
         iv_prev_map: dict = {}
         if iv_latest_date:
-            iv_sql = f"""
-                SELECT ts_code, iv, REPLACE(trade_date,'-','') as td
-                FROM commodity_iv_history
-                WHERE ts_code REGEXP '{pattern}'
-                  AND REPLACE(trade_date,'-','') IN ('{iv_latest_date}'{(",'" + iv_prev_date + "'") if iv_prev_date else ""})
-            """
-            df_iv = pd.read_sql(iv_sql, de.engine)
+            if iv_prev_date:
+                iv_sql = _text("""
+                    SELECT ts_code, iv, REPLACE(trade_date,'-','') as td
+                    FROM commodity_iv_history
+                    WHERE ts_code REGEXP :pattern
+                      AND REPLACE(trade_date,'-','') IN (:iv_latest_date, :iv_prev_date)
+                """)
+                iv_params = {"pattern": pattern, "iv_latest_date": iv_latest_date, "iv_prev_date": iv_prev_date}
+            else:
+                iv_sql = _text("""
+                    SELECT ts_code, iv, REPLACE(trade_date,'-','') as td
+                    FROM commodity_iv_history
+                    WHERE ts_code REGEXP :pattern
+                      AND REPLACE(trade_date,'-','') = :iv_latest_date
+                """)
+                iv_params = {"pattern": pattern, "iv_latest_date": iv_latest_date}
+            df_iv = pd.read_sql(iv_sql, de.engine, params=iv_params)
             iv_map      = dict(zip(df_iv[df_iv['td'] == iv_latest_date]['ts_code'],
                                    df_iv[df_iv['td'] == iv_latest_date]['iv']))
             if iv_prev_date:
@@ -2811,13 +2835,13 @@ def market_contracts(product: str, username: str = Depends(get_current_user)):
 
         # ── 1年 IV 历史（计算 IV Rank）──
         date_1y = (dt.datetime.now() - dt.timedelta(days=365)).strftime('%Y%m%d')
-        iv_hist_sql = f"""
+        iv_hist_sql = _text("""
             SELECT ts_code, iv FROM commodity_iv_history
-            WHERE REPLACE(trade_date,'-','') >= '{date_1y}'
-              AND ts_code REGEXP '{pattern}'
+            WHERE REPLACE(trade_date,'-','') >= :date_1y
+              AND ts_code REGEXP :pattern
               AND iv > 0
-        """
-        df_iv_hist = pd.read_sql(iv_hist_sql, de.engine)
+        """)
+        df_iv_hist = pd.read_sql(iv_hist_sql, de.engine, params={"date_1y": date_1y, "pattern": pattern})
         if not df_iv_hist.empty:
             df_iv_hist["product"] = (
                 df_iv_hist["ts_code"]
@@ -3038,31 +3062,31 @@ def market_chart(
             main_contract = selected_contract
         else:
             # 用品种代码前缀 REGEXP 匹配，取最新日期持仓量最大的合约（当前主力）
-            main_sql = f"""
+            main_sql = _text("""
                 SELECT ts_code FROM futures_price
-                WHERE ts_code REGEXP '{pattern}'
+                WHERE ts_code REGEXP :pattern
                   AND ts_code NOT LIKE '%%TAS%%'
                   AND REPLACE(trade_date,'-','') = (
                       SELECT MAX(REPLACE(trade_date,'-','')) FROM futures_price
-                      WHERE ts_code REGEXP '{pattern}'
+                      WHERE ts_code REGEXP :pattern
                         AND ts_code NOT LIKE '%%TAS%%'
                   )
                 ORDER BY oi DESC LIMIT 1
-            """
-            main_df = _pd.read_sql(main_sql, eng)
+            """)
+            main_df = _pd.read_sql(main_sql, eng, params={"pattern": pattern})
             if main_df.empty:
-                main_sql2 = f"""
+                main_sql2 = _text("""
                     SELECT ts_code FROM futures_price
-                    WHERE ts_code REGEXP '{pattern2}'
+                    WHERE ts_code REGEXP :pattern2
                       AND ts_code NOT LIKE '%%TAS%%'
                       AND REPLACE(trade_date,'-','') = (
                           SELECT MAX(REPLACE(trade_date,'-','')) FROM futures_price
-                          WHERE ts_code REGEXP '{pattern2}'
+                          WHERE ts_code REGEXP :pattern2
                             AND ts_code NOT LIKE '%%TAS%%'
                       )
                     ORDER BY oi DESC LIMIT 1
-                """
-                main_df = _pd.read_sql(main_sql2, eng)
+                """)
+                main_df = _pd.read_sql(main_sql2, eng, params={"pattern2": pattern2})
 
             if main_df.empty:
                 empty_payload = {
@@ -3082,7 +3106,7 @@ def market_chart(
             main_contract = str(main_df.iloc[0]["ts_code"]).upper()
 
         # ── 2. 拉取 OHLC 数据（近1年K线）────────────────────────
-        ohlc_sql = f"""
+        ohlc_sql = _text("""
             SELECT
                 REPLACE(trade_date,'-','') as dt,
                 open_price  as o,
@@ -3092,12 +3116,12 @@ def market_chart(
                 pct_chg,
                 oi
             FROM futures_price
-            WHERE UPPER(ts_code) = '{main_contract}'
-              AND REPLACE(trade_date,'-','') >= '{since}'
+            WHERE UPPER(ts_code) = :main_contract
+              AND REPLACE(trade_date,'-','') >= :since
             ORDER BY trade_date ASC
             LIMIT 300
-        """
-        ohlc_df = _pd.read_sql(ohlc_sql, eng)
+        """)
+        ohlc_df = _pd.read_sql(ohlc_sql, eng, params={"main_contract": main_contract, "since": since})
         if not ohlc_df.empty:
             ohlc_df["dt"] = ohlc_df["dt"].astype(str)
         db_cur_price = round(float(ohlc_df.iloc[-1]["c"]), 2) if not ohlc_df.empty else None
@@ -3177,33 +3201,33 @@ def market_chart(
 
         # ── 3. 拉取 IV 历史（与价格数据时间范围对齐）────────────
         if selected_contract:
-            iv_sql = f"""
+            iv_sql = _text("""
                 SELECT REPLACE(trade_date,'-','') as dt, iv
                 FROM commodity_iv_history
-                WHERE UPPER(ts_code) = '{main_contract}'
-                  AND REPLACE(trade_date,'-','') >= '{since}'
+                WHERE UPPER(ts_code) = :main_contract
+                  AND REPLACE(trade_date,'-','') >= :since
                 ORDER BY trade_date ASC
-            """
-            iv_df = _pd.read_sql(iv_sql, eng)
+            """)
+            iv_df = _pd.read_sql(iv_sql, eng, params={"main_contract": main_contract, "since": since})
         else:
-            iv_sql = f"""
+            iv_sql = _text("""
                 SELECT REPLACE(trade_date,'-','') as dt, iv
                 FROM commodity_iv_history
-                WHERE ts_code REGEXP '{pattern}'
-                  AND REPLACE(trade_date,'-','') >= '{since}'
+                WHERE ts_code REGEXP :pattern
+                  AND REPLACE(trade_date,'-','') >= :since
                 ORDER BY trade_date ASC
-            """
-            iv_df = _pd.read_sql(iv_sql, eng)
+            """)
+            iv_df = _pd.read_sql(iv_sql, eng, params={"pattern": pattern, "since": since})
             if iv_df.empty:
                 # 尝试小写
-                iv_sql2 = f"""
+                iv_sql2 = _text("""
                     SELECT REPLACE(trade_date,'-','') as dt, iv
                     FROM commodity_iv_history
-                    WHERE ts_code REGEXP '{pattern2}'
-                      AND REPLACE(trade_date,'-','') >= '{since}'
+                    WHERE ts_code REGEXP :pattern2
+                      AND REPLACE(trade_date,'-','') >= :since
                     ORDER BY trade_date ASC
-                """
-                iv_df = _pd.read_sql(iv_sql2, eng)
+                """)
+                iv_df = _pd.read_sql(iv_sql2, eng, params={"pattern2": pattern2, "since": since})
 
         # 不指定合约时，IV按全品种日均；指定合约时按该合约原值。
         if not iv_df.empty and not selected_contract:
@@ -3217,15 +3241,15 @@ def market_chart(
 
         hold_df = _pd.DataFrame()
         try:
-            hold_sql = f"""
+            hold_sql = _text("""
                 SELECT REPLACE(trade_date,'-','') as dt, broker,
                        long_vol, short_vol
                 FROM futures_holding
-                WHERE ts_code = '{hold_product}'
-                  AND REPLACE(trade_date,'-','') >= '{since}'
+                WHERE ts_code = :hold_product
+                  AND REPLACE(trade_date,'-','') >= :since
                 ORDER BY trade_date ASC
-            """
-            hold_df = _pd.read_sql(hold_sql, eng)
+            """)
+            hold_df = _pd.read_sql(hold_sql, eng, params={"hold_product": hold_product, "since": since})
         except Exception:
             pass
 

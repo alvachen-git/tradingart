@@ -67,15 +67,20 @@ with st.container(border=True):
             with engine.connect() as conn:
                 # 1. 先删旧的
                 del_sql = text(
-                    f"DELETE FROM market_sentiment WHERE trade_date='{date_str}' AND ts_code='{ts_code}'")
-                conn.execute(del_sql)
+                    "DELETE FROM market_sentiment WHERE trade_date=:trade_date AND ts_code=:ts_code")
+                conn.execute(del_sql, {"trade_date": date_str, "ts_code": ts_code})
 
                 # 2. 插入新的 (使用 final_reason)
-                insert_sql = text(f"""
+                insert_sql = text("""
                     INSERT INTO market_sentiment (trade_date, ts_code, score, reason)
-                    VALUES ('{date_str}', '{ts_code}', {score_val}, '{final_reason}')
+                    VALUES (:trade_date, :ts_code, :score, :reason)
                 """)
-                conn.execute(insert_sql)
+                conn.execute(insert_sql, {
+                    "trade_date": date_str,
+                    "ts_code": ts_code,
+                    "score": score_val,
+                    "reason": final_reason
+                })
                 conn.commit()
 
             st.success(f"成功保存！{date_str} {ts_code} -> {score_map[score_val]}")
