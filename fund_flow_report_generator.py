@@ -1,10 +1,12 @@
 import pandas as pd
 import os
+import html as html_lib
+import re
 import time
 from datetime import datetime
-from sqlalchemy import create_engine, text
+from sqlalchemy import bindparam, create_engine, text
 from dotenv import load_dotenv
-from langchain_community.chat_models import ChatTongyi
+from llm_compat import ChatTongyiCompat as ChatTongyi
 from langchain_core.messages import HumanMessage
 from langgraph.prebuilt import create_react_agent
 
@@ -28,6 +30,207 @@ engine = create_engine(db_url)
 
 # 初始化 LLM
 llm = ChatTongyi(model="qwen-plus", api_key=os.getenv("DASHSCOPE_API_KEY"))
+
+
+STOCK_CODE_RE = re.compile(r"(?<!\d)(\d{6})(?:\.(SH|SZ|BJ|HK))?(?!\d)", re.IGNORECASE)
+POSITIVE_FORBIDDEN_TERMS = (
+    "个股跌",
+    "个股下跌",
+    "逆市下跌",
+    "今日下跌",
+    "当日下跌",
+    "收跌",
+    "阴跌",
+    "走跌",
+)
+CONDITIONAL_FALL_MARKERS = ("若", "如果", "一旦", "警惕", "防止", "可能", "概率", "明日", "次日")
+
+
+def _infer_a_share_suffix(code: str) -> str:
+    if code.startswith(("60", "68", "90")):
+        return "SH"
+    if code.startswith(("00", "30", "20")):
+        return "SZ"
+    if code.startswith(("43", "83", "87", "92")):
+        return "BJ"
+    return "SH"
+
+
+def _normalize_stock_code(code: str, suffix: str = "") -> str:
+    code = str(code or "").strip()
+    suffix = str(suffix or "").strip().upper()
+    if not code:
+        return ""
+    if suffix:
+        return f"{code}.{suffix}"
+    return f"{code}.{_infer_a_share_suffix(code)}"
+
+
+def _extract_stock_codes(text_value: str) -> set[str]:
+    text_value = str(text_value or "")
+    codes: set[str] = set()
+    for match in STOCK_CODE_RE.finditer(text_value):
+        code = _normalize_stock_code(match.group(1), match.group(2) or "")
+        if code:
+            codes.add(code)
+    return codes
+
+
+def _fetch_latest_stock_moves(stock_codes) -> dict[str, dict]:
+    codes = sorted({str(code or "").strip().upper() for code in stock_codes if str(code or "").strip()})
+    if not codes:
+        return {}
+
+    sql = (
+        text("""
+            SELECT trade_date, ts_code, name, close_price, pct_chg
+            FROM stock_price
+            WHERE ts_code IN :codes
+            ORDER BY trade_date DESC
+        """)
+        .bindparams(bindparam("codes", expanding=True))
+    )
+    moves: dict[str, dict] = {}
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(sql, {"codes": codes}).fetchall()
+    except Exception as exc:
+        print(f"⚠️ [方向校验] 查询 stock_price 失败: {exc}")
+        return {}
+
+    for row in rows:
+        ts_code = str(row[1] or "").strip().upper()
+        if not ts_code or ts_code in moves:
+            continue
+        try:
+            pct_chg = float(row[4])
+        except Exception:
+            pct_chg = None
+        moves[ts_code] = {
+            "trade_date": str(row[0] or ""),
+            "ts_code": ts_code,
+            "name": str(row[2] or "").strip(),
+            "close_price": row[3],
+            "pct_chg": pct_chg,
+        }
+    return moves
+
+
+def _build_stock_direction_guardrails(raw_material: str) -> tuple[str, dict[str, dict]]:
+    codes = _extract_stock_codes(raw_material)
+    moves = _fetch_latest_stock_moves(codes)
+    if not moves:
+        return "暂无可核验的个股当日涨跌数据。", {}
+
+    lines = [
+        "【当日个股方向核验清单】",
+        "以下数据来自 stock_price 最新交易日；写个股涨跌时必须以此为准。",
+    ]
+    for code, move in sorted(moves.items()):
+        pct_chg = move.get("pct_chg")
+        if pct_chg is None:
+            continue
+        name = move.get("name") or code
+        date_value = move.get("trade_date") or "-"
+        direction = "上涨" if pct_chg > 0 else "下跌" if pct_chg < 0 else "平盘"
+        rule = ""
+        if pct_chg > 0:
+            rule = "；该股当日上涨，严禁写成下跌、阴跌、收跌、逆市下跌或个股跌。"
+        elif pct_chg < 0:
+            rule = "；该股当日下跌，严禁写成上涨或收涨。"
+        lines.append(f"- {name}({code})：{date_value} 涨跌幅 {pct_chg:+.2f}%，当日{direction}{rule}")
+
+    return "\n".join(lines), moves
+
+
+def _html_to_plain_text(html_content: str) -> str:
+    text_value = re.sub(r"<style[\s\S]*?</style>", " ", str(html_content or ""), flags=re.IGNORECASE)
+    text_value = re.sub(r"<script[\s\S]*?</script>", " ", text_value, flags=re.IGNORECASE)
+    text_value = re.sub(r"<[^>]+>", " ", text_value)
+    text_value = html_lib.unescape(text_value)
+    return re.sub(r"\s+", " ", text_value).strip()
+
+
+def _extract_risk_section_text(html_content: str) -> str:
+    plain_text = _html_to_plain_text(html_content)
+    start = plain_text.find("风险预警")
+    if start < 0:
+        return ""
+    end_candidates = [
+        idx for marker in ("明日作战计划", "底部", "本报告仅供参考")
+        if (idx := plain_text.find(marker, start + 1)) > start
+    ]
+    end = min(end_candidates) if end_candidates else len(plain_text)
+    return plain_text[start:end]
+
+
+def _extract_code_context(text_value: str, code: str, name: str = "") -> str:
+    naked_code = code.split(".")[0]
+    candidates = [naked_code]
+    if name:
+        candidates.append(name)
+
+    positions = [idx for token in candidates if token and (idx := text_value.find(token)) >= 0]
+    if not positions:
+        return ""
+    pos = min(positions)
+    prev_item = text_value.rfind("▸", 0, pos)
+    next_item = text_value.find("▸", pos + 1)
+    start = prev_item if prev_item >= 0 else max(0, pos - 120)
+    end = next_item if next_item > pos else min(len(text_value), pos + 260)
+    return text_value[start:end]
+
+
+def _find_positive_direction_conflicts(context: str) -> list[str]:
+    hits: list[str] = []
+    for term in POSITIVE_FORBIDDEN_TERMS:
+        if term in context:
+            hits.append(term)
+
+    for match in re.finditer(r"(?:跌幅|下跌|跌)\s*[-−]?\d+(?:\.\d+)?%", context):
+        hits.append(match.group(0))
+
+    for match in re.finditer("跌破", context):
+        nearby = context[max(0, match.start() - 10): min(len(context), match.end() + 10)]
+        if not any(marker in nearby for marker in CONDITIONAL_FALL_MARKERS):
+            hits.append("跌破")
+
+    return hits
+
+
+def validate_fund_flow_report_direction(html_content: str, stock_moves: dict[str, dict] | None = None) -> list[str]:
+    risk_text = _extract_risk_section_text(html_content)
+    if not risk_text:
+        return []
+
+    risk_codes = _extract_stock_codes(risk_text)
+    moves = dict(stock_moves or {})
+    missing_codes = risk_codes - set(moves)
+    if missing_codes:
+        moves.update(_fetch_latest_stock_moves(missing_codes))
+
+    violations: list[str] = []
+    for code in sorted(risk_codes):
+        move = moves.get(code)
+        if not move:
+            continue
+        pct_chg = move.get("pct_chg")
+        if pct_chg is None or pct_chg <= 0:
+            continue
+        context = _extract_code_context(risk_text, code, move.get("name") or "")
+        conflicts = _find_positive_direction_conflicts(context)
+        if conflicts:
+            name = move.get("name") or code
+            violations.append(
+                f"{name}({code}) 当日涨跌幅 {pct_chg:+.2f}%，但风险预警出现下跌表述: "
+                f"{'、'.join(sorted(set(conflicts)))}"
+            )
+    return violations
+
+
+def _invoke_editor(prompt: str) -> str:
+    res = llm.invoke([HumanMessage(content=prompt)])
+    return res.content.replace("```html", "").replace("```", "").strip()
 
 
 # ==========================================
@@ -152,12 +355,21 @@ def draft_fund_flow_report(raw_material):
 
     today = datetime.now().strftime("%Y年%m月%d日")
     weekday = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"][datetime.now().weekday()]
+    direction_guardrails, stock_moves = _build_stock_direction_guardrails(raw_material)
 
     prompt = f"""
 你是【爱波塔资金流研究中心】主编，正在撰写《爱波塔-资金流晚报》。
 
 【记者提交的素材】：
 {raw_material}
+
+【硬性事实核验 - 必须遵守】：
+{direction_guardrails}
+
+【风险预警方向规则】：
+1. 若核验清单显示某个股当日上涨，风险可以写“上涨中缩量”“高位滞涨”“量能不足”“资金分歧”，但不得写“下跌/阴跌/收跌/逆市下跌/个股跌/跌幅为负”。
+2. 只有当核验清单中该股 `pct_chg < 0`，才允许把该股描述为当日下跌。
+3. 如果素材与核验清单冲突，以核验清单为准；不确定时写“需观察承接”，不要编造涨跌方向。
 
 【写作要求】：
 
@@ -411,8 +623,27 @@ def draft_fund_flow_report(raw_material):
 只返回完整的HTML代码，不要有任何 ```html 标记或多余说明。
 """
 
-    res = llm.invoke([HumanMessage(content=prompt)])
-    html = res.content.replace("```html", "").replace("```", "").strip()
+    html = _invoke_editor(prompt)
+    violations = validate_fund_flow_report_direction(html, stock_moves)
+    if violations:
+        print("⚠️ [方向校验] 初稿存在个股涨跌方向冲突，准备重写：")
+        for item in violations:
+            print(f"  - {item}")
+
+        retry_prompt = f"""
+{prompt}
+
+【发布前校验失败，必须重写完整 HTML】：
+{chr(10).join(f"- {item}" for item in violations)}
+
+请保留原模板和可用事实，但修正风险预警中所有与当日涨跌幅相反的表述。
+对于当日上涨个股，只能描述量能、资金分歧、冲高回落风险，不得写成下跌。
+"""
+        html = _invoke_editor(retry_prompt)
+        violations = validate_fund_flow_report_direction(html, stock_moves)
+        if violations:
+            raise ValueError("资金流晚报方向校验失败，已阻断发布：" + "；".join(violations))
+
     return html
 
 
