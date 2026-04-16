@@ -1,8 +1,11 @@
 import unittest
 import json
 import types
+import io
+import asyncio
 from datetime import datetime, timedelta
 from unittest.mock import patch, Mock
+from fastapi import UploadFile
 
 
 _IMPORT_ERROR = None
@@ -372,6 +375,58 @@ class TestMobileApiChatMemoryAsync(unittest.TestCase):
         self.assertEqual(state.get("status"), "canceled")
         self.assertIsNone(fake_redis.get(mobile_api._mobile_chat_last_task_key("u1")))
         mocked_clear.assert_called_once_with("u1")
+
+    def test_position_upload_routes_option_to_chat_task(self):
+        upload = UploadFile(filename="position.png", file=io.BytesIO(b"fake-bytes"))
+        vision = {
+            "ok": True,
+            "domain": "option",
+            "stock_positions": [],
+            "option_legs": [
+                {"underlying_hint": "510300.SH", "month": 4, "strike": 4.6, "cp": "call", "side": "long", "qty": 23}
+            ],
+            "raw_text": "{}",
+        }
+        with patch.object(mobile_api, "analyze_position_image", return_value=vision), patch.object(
+            mobile_api.de, "get_user_profile", return_value={"risk_preference": "稳健型", "account_total_capital": 1000000}
+        ), patch.object(
+            mobile_api, "_build_mobile_context_payload", return_value={"is_followup": False}
+        ) as mocked_ctx, patch.object(
+            mobile_api, "_detect_mobile_has_portfolio", return_value=False
+        ) as mocked_has_portfolio, patch.object(
+            mobile_api.TaskManager, "create_task", return_value="chat-task"
+        ) as mocked_create_task, patch.object(
+            mobile_api.TaskManager, "create_portfolio_task"
+        ) as mocked_portfolio_task:
+            out = asyncio.run(mobile_api.position_upload(file=upload, username="u1"))
+
+        self.assertEqual(out["task_kind"], "chat")
+        self.assertEqual(out["task_id"], "chat-task")
+        mocked_ctx.assert_called_once()
+        mocked_has_portfolio.assert_called_once_with("u1")
+        self.assertIn("context_payload", mocked_create_task.call_args.kwargs)
+        mocked_portfolio_task.assert_not_called()
+
+    def test_position_upload_routes_stock_to_portfolio_task(self):
+        upload = UploadFile(filename="position.png", file=io.BytesIO(b"fake-bytes"))
+        vision = {
+            "ok": True,
+            "domain": "stock",
+            "stock_positions": [{"symbol": "600519.SH", "quantity": 100, "market_value": 123000}],
+            "option_legs": [],
+            "raw_text": "{}",
+        }
+        with patch.object(mobile_api, "analyze_position_image", return_value=vision), patch.object(
+            mobile_api.TaskManager, "create_portfolio_task", return_value="portfolio-task"
+        ) as mocked_portfolio_task, patch.object(
+            mobile_api.TaskManager, "create_task"
+        ) as mocked_chat_task:
+            out = asyncio.run(mobile_api.position_upload(file=upload, username="u1"))
+
+        self.assertEqual(out["task_kind"], "portfolio")
+        self.assertEqual(out["task_id"], "portfolio-task")
+        mocked_portfolio_task.assert_called_once()
+        mocked_chat_task.assert_not_called()
 
 
 if __name__ == "__main__":

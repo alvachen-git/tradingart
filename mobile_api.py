@@ -37,7 +37,8 @@ mobile_api.py — 爱波塔手机端专用 FastAPI 后端
 
   GET    /api/market/snapshot           综合行情快照
 
-  POST   /api/portfolio/upload          上传持仓截图 → 识别 → 提交分析
+  POST   /api/position/upload           上传持仓截图 → 自动分流(股票体检/期权分析)
+  POST   /api/portfolio/upload          上传股票持仓截图 → 识别 → 提交体检
   GET    /api/portfolio/status/{id}     轮询持仓分析进度
   GET    /api/portfolio/result          获取最新持仓体检结果
 
@@ -82,7 +83,7 @@ from ai_simulation_service import (
     get_review_dates as ai_get_review_dates,
     get_trades as ai_get_trades,
 )
-from vision_tools import analyze_portfolio_image
+from vision_tools import analyze_portfolio_image, analyze_position_image
 from mobile_trading_day import enrich_prices_payload_with_trading_day
 
 # ── Redis ─────────────────────────────────────────────────────
@@ -1340,6 +1341,8 @@ def _build_mobile_context_payload(
         "semantic_related": bool(semantic_related),
         "conversation_id": f"mobile-{current_user}-{uuid.uuid4()}",
         "account_total_capital": account_total_capital,
+        "vision_position_payload": None,
+        "vision_position_domain": "",
     }
 
 
@@ -3386,6 +3389,109 @@ def market_prices(username: str = Depends(get_current_user)):
 class _BytesFileWrapper(io.BytesIO):
     """让 BytesIO 兼容 vision_tools.analyze_portfolio_image 的 seek/read 接口。"""
     pass
+
+
+def _render_mobile_option_leg(leg: Dict[str, Any]) -> str:
+    month = leg.get("month")
+    month_text = f"{int(month)}月" if isinstance(month, (int, float)) else ""
+    strike = leg.get("strike")
+    strike_text = f"{float(strike):.3f}".rstrip("0").rstrip(".") if isinstance(strike, (int, float)) else "待确认"
+    cp = "认购" if str(leg.get("cp", "")).lower() == "call" else "认沽"
+    side = "买方" if str(leg.get("side", "")).lower() == "long" else "卖方"
+    qty = int(leg.get("qty") or abs(int(leg.get("signed_qty", 0))) or 0)
+    return f"{month_text}{strike_text}{cp}{side}{qty}张"
+
+
+def _build_mobile_upload_option_prompt(vision_result: Dict[str, Any]) -> str:
+    domain = str(vision_result.get("domain", "")).strip().lower()
+    option_legs = vision_result.get("option_legs") or []
+    legs_text = "；".join(_render_mobile_option_leg(leg) for leg in option_legs[:6] if isinstance(leg, dict))
+    underlying_hint = ""
+    if option_legs:
+        underlying_hint = str((option_legs[0] or {}).get("underlying_hint") or "").strip().upper()
+    prefix = f"我上传了{underlying_hint}期权持仓截图。" if underlying_hint else "我上传了期权持仓截图。"
+    mixed_hint = "已识别到股票持仓，本轮未展开股票体检。" if domain == "mixed" else ""
+    return (
+        f"{prefix}{mixed_hint}识别到的期权腿：{legs_text or '待确认'}。"
+        "请按期权持仓深度模板输出，重点给出DeltaCash、Delta Ratio、目标区间、偏离与建议调整量。"
+    )
+
+
+@app.post("/api/position/upload", tags=["持仓体检"])
+async def position_upload(
+    file: UploadFile = File(..., description="持仓截图，支持 jpg/png，不超过 10MB"),
+    username: str = Depends(get_current_user),
+):
+    """上传持仓截图后自动分流：股票->体检任务，期权/混合->聊天分析任务。"""
+    image_bytes = await file.read()
+    if len(image_bytes) > 10 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="图片不能超过 10MB")
+    if not image_bytes:
+        raise HTTPException(status_code=400, detail="图片内容为空")
+
+    screenshot_hash = hashlib.md5(image_bytes).hexdigest()
+    file_wrapper = _BytesFileWrapper(image_bytes)
+    vision_result = analyze_position_image(file_wrapper)
+    if not vision_result.get("ok"):
+        raise HTTPException(
+            status_code=422,
+            detail=vision_result.get("error") or "无法识别持仓截图，请上传清晰的持仓页截图",
+        )
+
+    domain = str(vision_result.get("domain", "unknown")).strip().lower()
+    stock_positions = vision_result.get("stock_positions") or []
+    option_legs = vision_result.get("option_legs") or []
+
+    if domain == "stock":
+        if not stock_positions:
+            raise HTTPException(status_code=422, detail="未从截图中识别到股票持仓，请确认截图内容")
+        task_id = TaskManager.create_portfolio_task(
+            user_id=username,
+            positions=stock_positions,
+            screenshot_hash=screenshot_hash,
+            source_text=vision_result.get("raw_text", ""),
+        )
+        return {
+            "task_id": task_id,
+            "task_kind": "portfolio",
+            "recognized_count": len(stock_positions),
+            "domain": domain,
+            "message": f"已识别 {len(stock_positions)} 只股票持仓，正在生成体检报告...",
+        }
+
+    if domain in {"option", "mixed"}:
+        if not option_legs:
+            raise HTTPException(status_code=422, detail="识别到期权域，但未提取到有效期权持仓腿")
+        profile = de.get_user_profile(username) or {}
+        risk = str(profile.get("risk_preference") or "稳健型")
+        prompt = _build_mobile_upload_option_prompt(vision_result)
+        context_payload = _build_mobile_context_payload(
+            prompt_text=prompt,
+            current_user=username,
+            history=[],
+            profile=profile,
+        )
+        context_payload["vision_position_payload"] = vision_result
+        context_payload["vision_position_domain"] = domain
+        has_portfolio = _detect_mobile_has_portfolio(username)
+        task_id = TaskManager.create_task(
+            user_id=username,
+            prompt=prompt,
+            image_context="",
+            risk_preference=risk,
+            history_messages=[],
+            context_payload=context_payload,
+            has_portfolio=has_portfolio,
+        )
+        return {
+            "task_id": task_id,
+            "task_kind": "chat",
+            "recognized_count": len(option_legs),
+            "domain": domain,
+            "message": "已识别期权持仓，正在生成Delta与调仓建议...",
+        }
+
+    raise HTTPException(status_code=422, detail="未识别到股票或期权持仓，请上传更清晰截图")
 
 
 @app.post("/api/portfolio/upload", tags=["持仓体检"])

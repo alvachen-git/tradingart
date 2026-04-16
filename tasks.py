@@ -716,6 +716,12 @@ def process_ai_query(
             "user_id": user_id,
             "has_portfolio": has_portfolio,
             "account_total_capital": account_total_capital,
+            "vision_position_payload": (
+                context_payload.get("vision_position_payload")
+                if isinstance(context_payload.get("vision_position_payload"), dict)
+                else {}
+            ),
+            "vision_position_domain": str(context_payload.get("vision_position_domain", "")),
         }
 
         self.update_state(state='PROCESSING', meta={'progress': '团队正在协作分析...'})

@@ -44,7 +44,11 @@ from beta_tool import calculate_hedging_beta
 from knowledge_tools import search_investment_knowledge
 from stock_volume_tools import query_stock_volume, search_volume_anomalies
 from backtest_tools import run_option_strategy_backtest
-from option_delta_tools import compute_etf_option_delta_cash
+from option_delta_tools import (
+    compute_option_delta_cash,
+    fetch_underlying_spot_map,
+    DELTA_EXECUTION_COVERAGE_THRESHOLD,
+)
 from portfolio_tools import (
     get_user_portfolio_summary,
     get_user_portfolio_details,
@@ -97,6 +101,22 @@ class AgentState(TypedDict):
     option_delta_cash_meta: Dict[str, Any]  # ETF期权Delta Cash结构化结果
     option_delta_cash_gap_note: str  # Delta无法计算时的数据缺口说明
     account_total_capital: float  # 用户账户总资金（元），用于账户口径Delta计算
+    vision_position_payload: Dict[str, Any]  # 上传截图识别后的结构化持仓（仅会话内）
+    vision_position_domain: str  # stock|option|mixed|unknown
+    canonical_option_legs_block: str  # 识别持仓锁定表（防止方向被改写）
+    option_direction_conflict_count: int  # 报告方向术语/事实冲突次数
+    authoritative_underlying_quotes: Dict[str, Any]  # 多标的权威现价（代码/价格/日期/来源）
+    authoritative_quote_block: str  # 权威现价固定展示块
+    price_conflict_count: int  # 报告现价冲突次数（与权威行情相比）
+    option_delta_cash_per_underlying: Dict[str, Any]  # DeltaCash 分标的结果
+    option_delta_cash_portfolio_summary: Dict[str, Any]  # DeltaCash 组合汇总
+    option_rebalance_priority_queue: List[Dict[str, Any]]  # 调仓优先队列（P1/P2/P3）
+    option_delta_displayable: bool  # Delta 是否可展示（部分可算也为True）
+    option_delta_execution_ready: bool  # Delta 是否可给金额级动作
+    option_delta_coverage_ratio: float  # Delta 覆盖率
+
+
+AUTHORITATIVE_PRICE_CONFLICT_THRESHOLD = 0.01
 
 
 # 期权合约乘数表（每张期权对应的标的数量）
@@ -256,6 +276,756 @@ def _build_delta_cash_gap_note(reason: str, trend_signal: str, risk_preference: 
     )
 
 
+def _coerce_float(value: Any) -> float | None:
+    try:
+        if value is None:
+            return None
+        return float(value)
+    except Exception:
+        return None
+
+
+def _derive_option_cn_labels_from_leg(leg: Dict[str, Any]) -> Dict[str, str]:
+    cp_raw = str(
+        leg.get("cp")
+        or leg.get("option_flag")
+        or leg.get("call_put")
+        or leg.get("cp_cn")
+        or leg.get("cp_text")
+        or ""
+    ).strip().lower()
+    direction_raw = str(leg.get("direction_cn") or "").strip()
+    if "认购" in direction_raw:
+        cp_cn = "认购"
+    elif "认沽" in direction_raw:
+        cp_cn = "认沽"
+    elif cp_raw in {"call", "c", "认购"}:
+        cp_cn = "认购"
+    elif cp_raw in {"put", "p", "认沽"}:
+        cp_cn = "认沽"
+    else:
+        cp_cn = "待确认"
+
+    side_raw = str(leg.get("side") or leg.get("side_text") or leg.get("side_cn") or "").strip().lower()
+    if "买" in direction_raw:
+        side_cn = "买方"
+    elif "卖" in direction_raw:
+        side_cn = "卖方"
+    elif side_raw in {"long", "买方", "买入"}:
+        side_cn = "买方"
+    elif side_raw in {"short", "卖方", "卖出"}:
+        side_cn = "卖方"
+    else:
+        signed_qty = _coerce_float(leg.get("signed_qty"))
+        if signed_qty is None:
+            side_cn = "待确认"
+        else:
+            side_cn = "买方" if signed_qty >= 0 else "卖方"
+
+    if cp_cn == "待确认" or side_cn == "待确认":
+        direction_cn = "待确认"
+    else:
+        direction_cn = ("买" if side_cn == "买方" else "卖") + cp_cn
+    return {"cp_cn": cp_cn, "side_cn": side_cn, "direction_cn": direction_cn}
+
+
+def _build_canonical_option_legs(vision_option_legs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    for leg in vision_option_legs or []:
+        if not isinstance(leg, dict):
+            continue
+        row = dict(leg)
+        labels = _derive_option_cn_labels_from_leg(row)
+        row.update(labels)
+        signed_qty = _coerce_float(row.get("signed_qty"))
+        qty_val = _coerce_float(row.get("qty"))
+        if qty_val is None:
+            qty_val = abs(signed_qty) if signed_qty is not None else None
+        qty = int(abs(qty_val)) if qty_val is not None else 0
+        if qty <= 0:
+            continue
+        if signed_qty is None:
+            signed_qty = float(qty) if row["side_cn"] == "买方" else -float(qty)
+        month_raw = row.get("month")
+        month = None
+        if month_raw not in (None, ""):
+            try:
+                month = int(float(month_raw))
+            except Exception:
+                month = None
+        strike = _coerce_float(row.get("strike") or row.get("exercise_price") or row.get("行权价"))
+        contract_code = str(row.get("contract_code") or row.get("ts_code") or "").strip().upper()
+        underlying = str(row.get("underlying_hint") or row.get("underlying") or "").strip().upper() or "待确认"
+        out.append(
+            {
+                "underlying_hint": underlying,
+                "contract_code": contract_code or "待确认",
+                "month": month,
+                "strike": strike,
+                "qty": qty,
+                "signed_qty": int(round(float(signed_qty))),
+                "cp_cn": row["cp_cn"],
+                "side_cn": row["side_cn"],
+                "direction_cn": row["direction_cn"],
+            }
+        )
+    return out
+
+
+def _build_canonical_option_legs_block(canonical_legs: List[Dict[str, Any]]) -> str:
+    legs = [x for x in (canonical_legs or []) if isinstance(x, dict)]
+    if not legs:
+        return ""
+    lines = [
+        "1. 持仓拆解表",
+        "- 以下持仓已按截图结构化识别结果锁定（方向不可改写）。",
+        "",
+        "| 序号 | 标的 | 合约代码 | 到期月 | 行权价 | 方向 | 张数 |",
+        "|---:|---|---|---|---:|---|---:|",
+    ]
+    for i, leg in enumerate(legs, start=1):
+        month_val = leg.get("month")
+        month_text = f"{int(month_val)}月" if isinstance(month_val, int) else "待确认"
+        strike_val = _coerce_float(leg.get("strike"))
+        strike_text = f"{strike_val:.3f}" if strike_val is not None else "待确认"
+        lines.append(
+            f"| {i} | {leg.get('underlying_hint') or '待确认'} | {leg.get('contract_code') or '待确认'} | "
+            f"{month_text} | {strike_text} | {leg.get('direction_cn') or '待确认'} | {int(leg.get('qty') or 0)} |"
+        )
+    return "\n".join(lines)
+
+
+OPTION_SECTION_ORDER = [
+    "summary",
+    "quotes",
+    "holdings",
+    "delta",
+    "exposure",
+    "scenarios",
+    "plans",
+    "risk",
+    "checklist",
+]
+
+OPTION_SECTION_WHITELIST = set(OPTION_SECTION_ORDER)
+
+
+def _normalize_option_section_id(title: str) -> str:
+    raw = str(title or "").strip()
+    if not raw:
+        return ""
+    stripped = re.sub(r"^[#>\-\s]+", "", raw)
+    stripped = re.sub(r"^[0-9一二三四五六七八九十]+[、\.\)]\s*", "", stripped)
+    compact = re.sub(r"[\s`*_:\-\[\]【】()（）]", "", stripped).lower()
+    raw_no_space = re.sub(r"\s+", "", stripped)
+
+    if any(x in raw_no_space for x in ["情报与舆情", "财经热点", "市场背景补充", "今日财经热点", "市场情绪"]):
+        return "ignore"
+    if "deltacash" in compact or ("delta" in compact and "cash" in compact):
+        return "delta"
+    if any(x in raw_no_space for x in ["持仓拆解", "持仓拆解表", "持仓结构"]) or "holdingsbreakdown" in compact:
+        return "holdings"
+    if any(x in raw_no_space for x in ["标的现价", "权威数据", "权威现价", "现价（权威数据）"]):
+        return "quotes"
+    if any(x in raw_no_space for x in ["组合净暴露", "净暴露", "到期错配", "市场深度解析", "市场深度", "技术分析", "市场分析"]):
+        return "exposure"
+    if any(x in raw_no_space for x in ["三情景", "情景分支", "关键触发位"]):
+        return "scenarios"
+    if any(x in raw_no_space for x in ["两套可执行调整方案", "交易策略部署", "保守方案", "进攻方案", "调整方案"]):
+        return "plans"
+    if any(x in raw_no_space for x in ["风控阈值", "失效条件", "风险提示", "风控与对冲", "风控"]):
+        return "risk"
+    if any(x in raw_no_space for x in ["当日执行清单", "执行清单"]):
+        return "checklist"
+    if any(x in raw_no_space for x in ["核心结论", "综合研判", "执行摘要"]) or "executivesummary" in compact:
+        return "summary"
+    if "核心指标建议" in raw_no_space or "核心指标" in raw_no_space:
+        return "delta"
+    return ""
+
+
+def _split_markdown_sections(text: str) -> Dict[str, Any]:
+    body = str(text or "").strip()
+    if not body:
+        return {"preamble": "", "sections": []}
+
+    lines = body.splitlines()
+    preamble: List[str] = []
+    sections: List[Dict[str, str]] = []
+    current_title = ""
+    current_lines: List[str] = []
+
+    def _flush_current() -> None:
+        nonlocal current_title, current_lines, sections
+        if not current_lines:
+            return
+        content = "\n".join(current_lines).strip()
+        if content:
+            sections.append(
+                {
+                    "title": current_title,
+                    "section_id": _normalize_option_section_id(current_title),
+                    "content": content,
+                }
+            )
+        current_title = ""
+        current_lines = []
+
+    def _extract_heading_title(line: str) -> str:
+        line_stripped = str(line or "").strip()
+        if not line_stripped:
+            return ""
+        m_md = re.match(r"^#{1,6}\s+(.+)$", line_stripped)
+        if m_md:
+            return str(m_md.group(1) or "").strip()
+        m_num = re.match(r"^(?:[0-9]+|[一二三四五六七八九十]+)[、\.]\s*(.+)$", line_stripped)
+        if m_num:
+            return str(m_num.group(1) or "").strip()
+        if re.match(r"^(?:【?\s*Delta\s*Cash\s*】?|【?\s*DeltaCash\s*】?)$", line_stripped, flags=re.IGNORECASE):
+            return "DeltaCash"
+        return ""
+
+    for line in lines:
+        heading = _extract_heading_title(line)
+        if heading:
+            _flush_current()
+            current_title = heading
+            current_lines = [line]
+            continue
+        if current_lines:
+            current_lines.append(line)
+        else:
+            preamble.append(line)
+    _flush_current()
+
+    return {"preamble": "\n".join(preamble).strip(), "sections": sections}
+
+
+def _render_markdown_sections(preamble: str, sections: List[str]) -> str:
+    blocks = [str(x or "").strip() for x in sections if str(x or "").strip()]
+    pre = str(preamble or "").strip()
+    if pre and blocks:
+        return f"{pre}\n\n" + "\n\n".join(blocks)
+    if pre:
+        return pre
+    return "\n\n".join(blocks).strip()
+
+
+def _collect_option_section_ids(text: str) -> set[str]:
+    parsed = _split_markdown_sections(text)
+    ids = set()
+    for sec in parsed.get("sections", []):
+        sid = str(sec.get("section_id") or "")
+        if sid:
+            ids.add(sid)
+    return ids
+
+
+def _compose_option_sections(
+    text: str,
+    structured_sections: Dict[str, str] | None = None,
+    keep_only_whitelist: bool = True,
+) -> str:
+    parsed = _split_markdown_sections(text)
+    sections = parsed.get("sections", [])
+    preamble = str(parsed.get("preamble") or "").strip()
+    structured = structured_sections or {}
+
+    if not sections:
+        blocks = [str(structured.get(sid) or "").strip() for sid in OPTION_SECTION_ORDER if str(structured.get(sid) or "").strip()]
+        if blocks:
+            return _render_markdown_sections(preamble=str(text or "").strip(), sections=blocks).strip()
+        return str(text or "").strip()
+
+    first_by_id: Dict[str, str] = {}
+    passthrough: List[str] = []
+    for sec in sections:
+        sid = str(sec.get("section_id") or "").strip()
+        content = str(sec.get("content") or "").strip()
+        if not content:
+            continue
+        if sid == "ignore":
+            continue
+        if sid and ((not keep_only_whitelist) or sid in OPTION_SECTION_WHITELIST):
+            first_by_id.setdefault(sid, content)
+            continue
+        if not keep_only_whitelist:
+            passthrough.append(content)
+
+    for sid, block in structured.items():
+        block_text = str(block or "").strip()
+        if not block_text:
+            continue
+        if sid in OPTION_SECTION_WHITELIST:
+            first_by_id[sid] = block_text
+
+    ordered: List[str] = []
+    for sid in OPTION_SECTION_ORDER:
+        if sid in first_by_id:
+            ordered.append(first_by_id[sid])
+    if not keep_only_whitelist:
+        ordered.extend(passthrough)
+    if not ordered:
+        return str(text or "").strip()
+    return _render_markdown_sections(preamble=preamble, sections=ordered).strip()
+
+
+def _sanitize_option_direction_terms(text: str) -> str:
+    out = str(text or "")
+    replacements = [
+        (r"(?i)\bshort\s*call\b", "卖认购"),
+        (r"(?i)\blong\s*call\b", "买认购"),
+        (r"(?i)\bshort\s*put\b", "卖认沽"),
+        (r"(?i)\blong\s*put\b", "买认沽"),
+        (r"(?i)\bshortcall\b", "卖认购"),
+        (r"(?i)\blongcall\b", "买认购"),
+        (r"(?i)\bshortput\b", "卖认沽"),
+        (r"(?i)\blongput\b", "买认沽"),
+        (r"长\s*call", "买认购"),
+        (r"短\s*call", "卖认购"),
+        (r"长\s*put", "买认沽"),
+        (r"短\s*put", "卖认沽"),
+    ]
+    for pattern, repl in replacements:
+        out = re.sub(pattern, repl, out)
+    return out
+
+
+def _validate_option_direction_consistency(final_text: str, canonical_legs: List[Dict[str, Any]]) -> Dict[str, Any]:
+    text = str(final_text or "")
+    reasons: List[str] = []
+    term_hits = re.findall(
+        r"(?i)\b(?:long|short)\s*(?:call|put)\b|长\s*call|短\s*call|长\s*put|短\s*put",
+        text,
+    )
+    if term_hits:
+        reasons.append("发现Long/Short方向术语")
+
+    direction_tokens = set(re.findall(r"(买认购|卖认购|买认沽|卖认沽)", text))
+    canonical_dirs = {str(leg.get("direction_cn") or "") for leg in (canonical_legs or []) if str(leg.get("direction_cn") or "")}
+    extra_dirs = sorted([d for d in direction_tokens if d and d not in canonical_dirs])
+    if extra_dirs:
+        reasons.append(f"存在非识别持仓方向术语: {','.join(extra_dirs)}")
+
+    contract_conflicts = 0
+    all_dirs = {"买认购", "卖认购", "买认沽", "卖认沽"}
+    for leg in canonical_legs or []:
+        contract_code = str(leg.get("contract_code") or "").strip()
+        if not contract_code or contract_code == "待确认":
+            continue
+        expected = str(leg.get("direction_cn") or "").strip()
+        if not expected or expected == "待确认":
+            continue
+        for m in re.finditer(re.escape(contract_code), text):
+            segment = text[max(0, m.start() - 24): min(len(text), m.end() + 24)]
+            found = set(re.findall(r"(买认购|卖认购|买认沽|卖认沽)", segment))
+            if any(x in found for x in (all_dirs - {expected})):
+                contract_conflicts += 1
+                break
+    if contract_conflicts:
+        reasons.append(f"合约方向邻域冲突 {contract_conflicts} 处")
+
+    return {"conflict_count": len(term_hits) + len(extra_dirs) + contract_conflicts, "reasons": reasons}
+
+
+def _replace_option_legs_section(text: str, canonical_block: str) -> str:
+    body = str(text or "").strip()
+    if not canonical_block:
+        return body
+    section_ids = _collect_option_section_ids(body)
+    has_holdings_heading = "holdings" in section_ids
+    patterns = [
+        re.compile(
+            r"(?:^|\n)(?:#{1,6}\s*)?1[\.、]\s*持仓拆解表[\s\S]*?(?=\n(?:#{1,6}\s*)?[2２][\.、]\s*组合净暴露与到期错配|\Z)",
+            flags=re.MULTILINE,
+        ),
+        re.compile(
+            r"(?:^|\n)(?:#{1,6}\s*)?[^\n]*持仓拆解(?:表)?[^\n]*\n[\s\S]*?(?=\n#{1,6}\s|\Z)",
+            flags=re.MULTILINE,
+        ),
+    ]
+    for pattern in patterns:
+        if pattern.search(body):
+            return pattern.sub("\n" + canonical_block + "\n", body, count=1).strip()
+    if has_holdings_heading:
+        # 已存在“持仓拆解表”但未命中替换规则时，不再额外前置，避免重复章节。
+        return body
+    # 未发现可替换章节时不强制前置，避免将锁定表插到报告最顶部造成冗长。
+    return body
+
+
+def _apply_option_fact_lock(
+    text: str,
+    canonical_legs: List[Dict[str, Any]],
+    strict_cover: bool = True,
+) -> Dict[str, Any]:
+    sanitized = _sanitize_option_direction_terms(text)
+    canonical_block = _build_canonical_option_legs_block(canonical_legs)
+    validation = _validate_option_direction_consistency(sanitized, canonical_legs)
+    conflict_count = int(validation.get("conflict_count") or 0)
+    out = sanitized
+    if strict_cover and canonical_block:
+        out = _replace_option_legs_section(out, canonical_block)
+        if conflict_count > 0 and "已按识别持仓自动纠偏" not in out:
+            out = (
+                "> ⚠️ **已按识别持仓自动纠偏，避免方向误判。**\n\n"
+                + out
+            ).strip()
+    return {
+        "text": out,
+        "canonical_option_legs_block": canonical_block,
+        "option_direction_conflict_count": conflict_count,
+    }
+
+
+def _normalize_underlying_code_for_quote(value: Any) -> str:
+    raw = str(value or "").strip().upper()
+    if not raw:
+        return ""
+    mapping = {
+        "IO": "000300.SH",
+        "HO": "000016.SH",
+        "MO": "000852.SH",
+        "000300": "000300.SH",
+        "000016": "000016.SH",
+        "000852": "000852.SH",
+    }
+    if raw in mapping:
+        return mapping[raw]
+    if re.fullmatch(r"\d{6}", raw):
+        return f"{raw}.SZ" if raw.startswith("159") else f"{raw}.SH"
+    if re.fullmatch(r"\d{6}\.(SH|SZ)", raw):
+        return raw
+    return ""
+
+
+def _collect_quote_underlyings_from_canonical_legs(canonical_legs: List[Dict[str, Any]], symbol_hint: str = "") -> List[str]:
+    codes: List[str] = []
+    for leg in canonical_legs or []:
+        code = _normalize_underlying_code_for_quote(leg.get("underlying_hint"))
+        if code and code not in codes:
+            codes.append(code)
+    hint_code = _normalize_underlying_code_for_quote(symbol_hint)
+    if hint_code and hint_code not in codes:
+        codes.append(hint_code)
+    return codes
+
+
+def _build_authoritative_quote_block(authoritative_quotes: Dict[str, Any]) -> str:
+    quote_map = authoritative_quotes or {}
+    if not quote_map:
+        return ""
+    lines = [
+        "### 标的现价（权威数据）",
+        "",
+        "| 标的 | 收盘价 | 交易日 | 来源 |",
+        "|---|---:|---|---|",
+    ]
+    for code, payload in quote_map.items():
+        row = payload if isinstance(payload, dict) else {}
+        is_missing = bool(row.get("missing"))
+        price_raw = row.get("close_price")
+        trade_date = str(row.get("trade_date") or "缺失")
+        source = str(row.get("source") or "unknown")
+        if is_missing or price_raw in (None, ""):
+            price_text = "缺失"
+        else:
+            try:
+                price_text = f"{float(price_raw):.3f}"
+            except Exception:
+                price_text = "缺失"
+        lines.append(f"| {code} | {price_text} | {trade_date} | {source} |")
+    return "\n".join(lines)
+
+
+def _build_underlying_trend_map(
+    technical_summary: str,
+    underlyings: List[str],
+    default_trend: str,
+) -> Dict[str, str]:
+    text = str(technical_summary or "")
+    out: Dict[str, str] = {}
+    for code in underlyings or []:
+        base = str(code or "").strip().upper()
+        if not base:
+            continue
+        aliases = {base, base.split(".")[0]}
+        if base.startswith("510500"):
+            aliases.update({"中证500", "500ETF"})
+        elif base.startswith("159915"):
+            aliases.update({"创业板", "创业板ETF"})
+        elif base.startswith("588000"):
+            aliases.update({"科创50", "科创50ETF"})
+        trend = ""
+        for alias in aliases:
+            m = re.search(rf"{re.escape(alias)}[^\n，。；]*?(看涨|看跌|震荡)", text)
+            if m:
+                trend = str(m.group(1))
+                break
+        out[base] = trend or str(default_trend or "震荡")
+    return out
+
+
+def _replace_delta_cash_section(text: str, delta_report: str) -> str:
+    body = str(text or "").strip()
+    delta_block = str(delta_report or "").strip()
+    if not delta_block:
+        return body
+    parsed = _split_markdown_sections(body)
+    sections = parsed.get("sections", [])
+    if not sections:
+        return body
+    replaced = False
+    rendered_sections: List[str] = []
+    for sec in sections:
+        sid = str(sec.get("section_id") or "")
+        if sid == "delta":
+            if not replaced:
+                rendered_sections.append(delta_block)
+                replaced = True
+            continue
+        content = str(sec.get("content") or "").strip()
+        if content:
+            rendered_sections.append(content)
+    if replaced:
+        return _render_markdown_sections(
+            preamble=str(parsed.get("preamble") or ""),
+            sections=rendered_sections,
+        ).strip()
+    # 缺失时不强制前置，避免Delta块与正文中的Delta章节重复。
+    return body
+
+
+def _extract_delta_cash_block(text: str) -> str:
+    body = str(text or "").strip()
+    if not body:
+        return ""
+    parsed = _split_markdown_sections(body)
+    for sec in parsed.get("sections", []):
+        if str(sec.get("section_id") or "") == "delta":
+            return str(sec.get("content") or "").strip()
+    pattern = re.compile(
+        r"(?:^|\n)###\s*【DeltaCash】[\s\S]*?(?=\n(?:###\s|[1-6][\.、]\s)|\Z)",
+        flags=re.MULTILINE,
+    )
+    m = pattern.search(body)
+    if not m:
+        return ""
+    return str(m.group(0)).strip()
+
+
+def _build_min_delta_block_from_meta(delta_meta: Dict[str, Any]) -> str:
+    meta = delta_meta if isinstance(delta_meta, dict) else {}
+    portfolio = meta.get("portfolio_summary") or meta.get("metrics") or {}
+    adjustment = portfolio.get("adjustment") or meta.get("adjustment") or {}
+    ratio = portfolio.get("effective_delta_ratio", portfolio.get("delta_ratio", 0.0))
+    lines = [
+        "### 【DeltaCash】",
+        f"- 组合 Total Delta Cash: `{float(portfolio.get('total_delta_cash', 0.0)):,.0f}` 元",
+        f"- 组合执行口径 Delta Ratio: `{float(ratio):+.4f}`",
+    ]
+    band = adjustment.get("band") if isinstance(adjustment, dict) else {}
+    if isinstance(band, dict) and {"low", "high"} <= set(band.keys()):
+        lines.append(
+            f"- 技术面目标区间: `[{float(band.get('low', 0.0)):+.2f}, {float(band.get('high', 0.0)):+.2f}]`"
+        )
+    if isinstance(adjustment, dict) and adjustment.get("action"):
+        lines.append(f"- 建议方向: `{str(adjustment.get('action'))}`")
+    return "\n".join(lines)
+
+
+def _ensure_delta_section_from_meta(
+    text: str,
+    delta_report: str,
+    delta_meta: Dict[str, Any],
+    delta_gap_note: str,
+    displayable: bool,
+) -> str:
+    out = str(text or "").strip()
+    if "delta" in _collect_option_section_ids(out):
+        return out
+    block = _extract_delta_cash_block(delta_report)
+    if not block:
+        block = _extract_delta_cash_block(str((delta_meta or {}).get("report") or ""))
+    if not block and displayable and isinstance(delta_meta, dict):
+        block = _build_min_delta_block_from_meta(delta_meta)
+    if not block and delta_gap_note:
+        block = f"### 【DeltaCash】\n- 数据缺口: {delta_gap_note}"
+    if not block:
+        return out
+    return f"{block}\n\n{out}".strip()
+
+
+def _dedupe_option_position_sections(text: str) -> str:
+    out = str(text or "").strip()
+    if not out:
+        return out
+    parsed = _split_markdown_sections(out)
+    sections = parsed.get("sections", [])
+    if not sections:
+        return out
+    seen: set[str] = set()
+    rendered_sections: List[str] = []
+    for sec in sections:
+        sid = str(sec.get("section_id") or "")
+        content = str(sec.get("content") or "").strip()
+        if not content:
+            continue
+        if sid == "ignore":
+            continue
+        if sid and sid in OPTION_SECTION_WHITELIST:
+            if sid in seen:
+                continue
+            seen.add(sid)
+        rendered_sections.append(content)
+    deduped = _render_markdown_sections(
+        preamble=str(parsed.get("preamble") or ""),
+        sections=rendered_sections,
+    )
+    return re.sub(r"\n{3,}", "\n\n", deduped).strip()
+
+
+def _replace_authoritative_quote_section(text: str, quote_block: str) -> str:
+    body = str(text or "").strip()
+    block = str(quote_block or "").strip()
+    if not block:
+        return body
+    pattern = re.compile(
+        r"(?:^|\n)###\s*标的现价（权威数据）[\s\S]*?(?=\n###\s|\Z)",
+        flags=re.MULTILINE,
+    )
+    if pattern.search(body):
+        return pattern.sub("\n" + block + "\n", body, count=1).strip()
+    # 缺失时不强制前置，避免权威现价块被插在【最终决策】前方。
+    return body
+
+
+def _extract_price_mentions_for_symbol(text: str, symbol: str) -> List[float]:
+    values: List[float] = []
+    symbol_u = str(symbol or "").strip().upper()
+    if not symbol_u:
+        return values
+    aliases = {symbol_u}
+    if "." in symbol_u:
+        aliases.add(symbol_u.split(".")[0])
+    alias_pattern = "|".join(re.escape(x) for x in sorted(aliases, key=len, reverse=True))
+    if not alias_pattern:
+        return values
+    patterns = [
+        re.compile(
+            rf"(?:{alias_pattern})[^\n]{{0,20}}(?:现价|收盘价|价格|close)[^\d\-]{{0,8}}(\d+(?:\.\d+)?)",
+            flags=re.IGNORECASE,
+        ),
+        re.compile(rf"(?:{alias_pattern})\s*[:：=]\s*(\d+(?:\.\d+)?)(?:\s*元)?", flags=re.IGNORECASE),
+    ]
+    for pattern in patterns:
+        for match in pattern.finditer(text):
+            try:
+                values.append(float(match.group(1)))
+            except Exception:
+                continue
+    return values
+
+
+def _validate_authoritative_price_consistency(
+    final_text: str,
+    authoritative_quotes: Dict[str, Any],
+    threshold: float = AUTHORITATIVE_PRICE_CONFLICT_THRESHOLD,
+) -> Dict[str, Any]:
+    text = str(final_text or "")
+    conflicts: List[Dict[str, Any]] = []
+    for ts_code, payload in (authoritative_quotes or {}).items():
+        row = payload if isinstance(payload, dict) else {}
+        if bool(row.get("missing")):
+            continue
+        try:
+            auth_price = float(row.get("close_price"))
+        except Exception:
+            continue
+        if auth_price <= 0:
+            continue
+        mentions = _extract_price_mentions_for_symbol(text, ts_code)
+        if not mentions:
+            continue
+        max_diff = 0.0
+        observed = None
+        for value in mentions:
+            diff = abs(value - auth_price) / auth_price
+            if diff > max_diff:
+                max_diff = diff
+                observed = value
+        if observed is not None and max_diff > float(threshold):
+            conflicts.append(
+                {
+                    "ts_code": ts_code,
+                    "observed_price": float(observed),
+                    "authoritative_price": float(auth_price),
+                    "diff_ratio": float(max_diff),
+                }
+            )
+    return {"conflict_count": len(conflicts), "conflicts": conflicts}
+
+
+def _replace_symbol_price_mentions(text: str, ts_code: str, authoritative_price: float) -> str:
+    out = str(text or "")
+    symbol = str(ts_code or "").strip().upper()
+    if not symbol:
+        return out
+    aliases = {symbol}
+    if "." in symbol:
+        aliases.add(symbol.split(".")[0])
+    alias_pattern = "|".join(re.escape(x) for x in sorted(aliases, key=len, reverse=True))
+    if not alias_pattern:
+        return out
+    price_text = f"{float(authoritative_price):.3f}"
+    patterns = [
+        re.compile(
+            rf"((?:{alias_pattern})[^\n]{{0,20}}(?:现价|收盘价|价格|close)[^\d\-]{{0,8}})(\d+(?:\.\d+)?)",
+            flags=re.IGNORECASE,
+        ),
+        re.compile(
+            rf"((?:{alias_pattern})\s*[:：=]\s*)(\d+(?:\.\d+)?)(\s*元)?",
+            flags=re.IGNORECASE,
+        ),
+    ]
+    for pattern in patterns:
+        out = pattern.sub(lambda m: f"{m.group(1)}{price_text}{m.group(3) if m.lastindex and m.lastindex >= 3 and m.group(3) else ''}", out)
+    return out
+
+
+def _apply_authoritative_quote_lock(
+    text: str,
+    authoritative_quotes: Dict[str, Any],
+    authoritative_quote_block: str = "",
+    strict_cover: bool = True,
+    threshold: float = AUTHORITATIVE_PRICE_CONFLICT_THRESHOLD,
+) -> Dict[str, Any]:
+    out = str(text or "").strip()
+    quotes = authoritative_quotes or {}
+    block = authoritative_quote_block or _build_authoritative_quote_block(quotes)
+    if strict_cover and block:
+        out = _replace_authoritative_quote_section(out, block)
+    validation = _validate_authoritative_price_consistency(out, quotes, threshold=threshold)
+    conflicts = validation.get("conflicts") or []
+    for item in conflicts:
+        ts_code = str(item.get("ts_code") or "")
+        auth_price = item.get("authoritative_price")
+        try:
+            out = _replace_symbol_price_mentions(out, ts_code=ts_code, authoritative_price=float(auth_price))
+        except Exception:
+            continue
+    if conflicts and "已按权威行情自动纠偏" not in out:
+        out = (
+            "> ⚠️ **已按权威行情自动纠偏（代码、价格、日期已锁定）。**\n\n"
+            + out
+        ).strip()
+    return {
+        "text": out,
+        "authoritative_quote_block": block,
+        "price_conflict_count": int(validation.get("conflict_count") or 0),
+    }
+
+
 def _ensure_option_position_structure(
     text: str,
     delta_cash_report: str,
@@ -266,54 +1036,63 @@ def _ensure_option_position_structure(
 ) -> str:
     out = str(text or "").strip()
     delta_block = str(delta_cash_report or "").strip()
-    if delta_block and "【DeltaCash】" not in out:
+    current_ids = _collect_option_section_ids(out)
+    if delta_block and "delta" not in current_ids:
         out = f"{delta_block}\n\n{out}".strip()
+        current_ids = _collect_option_section_ids(out)
 
-    required_sections = [
-        "1. 持仓拆解表",
-        "2. 组合净暴露与到期错配",
-        "3. 关键触发位与三情景分支",
-        "4. 两套可执行调整方案",
-        "5. 风控阈值与失效条件",
-        "6. 当日执行清单",
-    ]
-    if all(sec in out for sec in required_sections):
+    section_titles = {
+        1: "1. 持仓拆解表",
+        2: "2. 组合净暴露与到期错配",
+        3: "3. 关键触发位与三情景分支",
+        4: "4. 两套可执行调整方案",
+        5: "5. 风控阈值与失效条件",
+        6: "6. 当日执行清单",
+    }
+    section_id_map = {
+        1: "holdings",
+        2: "exposure",
+        3: "scenarios",
+        4: "plans",
+        5: "risk",
+        6: "checklist",
+    }
+    has_section = {idx: (section_id_map[idx] in current_ids) for idx in section_id_map}
+    if all(has_section.values()):
         return out
 
     key_text = key_levels if key_levels else "关键位待确认（请结合最新K线支撑/压力位）"
-    skeleton = f"""
----
-1. 持仓拆解表
-- {"已在【DeltaCash】区块展示核心腿信息；若单腿成本/已实现收益缺失，请补录后复算。" if delta_block else "本轮DeltaCash未输出，请先补齐缺失行情后再量化。"}
-
-2. 组合净暴露与到期错配
+    section_bodies = {
+        1: f"""{section_titles[1]}
+- {"已在【DeltaCash】区块展示核心腿信息；若单腿成本/已实现收益缺失，请补录后复算。" if delta_block else "本轮DeltaCash未输出，请先补齐缺失行情后再量化。"}""",
+        2: f"""{section_titles[2]}
 - {"先依据 Total Delta Cash 与 Delta Ratio 判定净方向，再检查近月到期腿是否集中。" if delta_block else "先按方向腿结构与近月到期分布判定净风险，避免伪精确估算。"}
-- 近月到期腿优先降风险，避免时间价值快速衰减。
-
-3. 关键触发位与三情景分支
+- 近月到期腿优先降风险，避免时间价值快速衰减。""",
+        3: f"""{section_titles[3]}
 - 技术面参考：{trend_signal}；关键位：{key_text}
 - 上涨分支：若突破关键压力位，按目标区间上沿控制Delta，避免过度追涨。
 - 震荡分支：若维持区间震荡，维持中性或轻方向暴露，减少无效Theta损耗。
-- 下跌分支：若跌破关键支撑位，按目标区间下沿收敛Delta，优先防极端波动风险。
-
-4. 两套可执行调整方案
+- 下跌分支：若跌破关键支撑位，按目标区间下沿收敛Delta，优先防极端波动风险。""",
+        4: f"""{section_titles[4]}
 - 保守方案：先削减风险最大的短近月腿，目标是把Delta收敛至区间中轴附近。
-- 进攻方案：在趋势确认后再补方向腿，把Delta推进到区间同向一侧。
-
-5. 风控阈值与失效条件
+- 进攻方案：在趋势确认后再补方向腿，把Delta推进到区间同向一侧。""",
+        5: f"""{section_titles[5]}
 - 若Delta Ratio持续偏离目标区间，触发再平衡。
 - 若到期剩余天数快速下降且仓位集中，触发展期或减仓。
-- 若IV和价格方向同时不利，判定策略失效并降低总敞口。
-
-6. 当日执行清单
+- 若IV和价格方向同时不利，判定策略失效并降低总敞口。""",
+        6: f"""{section_titles[6]}
 - [ ] 核对每腿到期日与张数
 - [ ] {"复核DeltaCash与目标区间偏离" if delta_block else "记录DeltaCash数据缺口并补齐IV/最新价"}
 - [ ] 执行第一步减风险/调仓动作
-- [ ] 设定盘中与收盘复核点
-""".strip()
+- [ ] 设定盘中与收盘复核点""",
+    }
+    missing_sections = [idx for idx in section_titles if not has_section.get(idx)]
+    if missing_sections:
+        skeleton = "\n\n---\n\n" + "\n\n".join(section_bodies[idx] for idx in missing_sections)
+        out = f"{out}{skeleton}".strip()
     if delta_cash_gap_note and delta_cash_gap_note not in out:
         out = f"{out}\n\n> ⚠️ **数据缺口**：{delta_cash_gap_note}".strip()
-    return f"{out}\n\n{skeleton}".strip()
+    return out
 
 
 def _enforce_margin_monitor_routing(query: str, plan: List[str]) -> List[str]:
@@ -1024,7 +1803,41 @@ def strategist_node(state: AgentState, llm):
     tech_view = state.get("technical_summary", "")
     current_date = datetime.now().strftime("%Y年%m月%d日")
     key_level = state.get("key_levels", "")
-    option_position_mode = _is_option_position_query(user_q)
+    vision_position_domain = str(state.get("vision_position_domain", "") or "").strip().lower()
+    vision_position_payload = state.get("vision_position_payload") or {}
+    vision_option_legs: List[Dict[str, Any]] = []
+    if isinstance(vision_position_payload, dict):
+        raw_legs = vision_position_payload.get("option_legs") or []
+        if isinstance(raw_legs, list):
+            vision_option_legs = [x for x in raw_legs if isinstance(x, dict)]
+    canonical_option_legs = _build_canonical_option_legs(vision_option_legs)
+    canonical_option_legs_block = _build_canonical_option_legs_block(canonical_option_legs)
+    option_position_mode = _is_option_position_query(user_q) or vision_position_domain in {"option", "mixed"}
+    authoritative_underlying_quotes: Dict[str, Any] = {}
+    authoritative_quote_block = ""
+    quote_underlyings: List[str] = []
+    underlying_trend_map: Dict[str, str] = {}
+    if option_position_mode:
+        quote_underlyings = _collect_quote_underlyings_from_canonical_legs(
+            canonical_legs=canonical_option_legs,
+            symbol_hint=symbol,
+        )
+        if quote_underlyings:
+            try:
+                authoritative_underlying_quotes = fetch_underlying_spot_map(underlyings=quote_underlyings)
+            except Exception as e:
+                print(f"⚠️ 权威现价加载失败: {e}")
+                authoritative_underlying_quotes = {}
+        state_trend_map = state.get("underlying_trend_map") or {}
+        if isinstance(state_trend_map, dict) and state_trend_map:
+            underlying_trend_map = {str(k).upper(): str(v) for k, v in state_trend_map.items() if str(k).strip()}
+        else:
+            underlying_trend_map = _build_underlying_trend_map(
+                technical_summary=tech_view,
+                underlyings=quote_underlyings,
+                default_trend=str(trend or "震荡"),
+            )
+        authoritative_quote_block = _build_authoritative_quote_block(authoritative_underlying_quotes)
     account_total_capital = normalize_account_total_capital(state.get("account_total_capital"))
     # 兜底：避免上下文传递丢失时退回组合口径，直接从本轮问句再提取一次账户资金
     if option_position_mode and not account_total_capital:
@@ -1035,44 +1848,84 @@ def strategist_node(state: AgentState, llm):
     delta_cash_report = ""
     delta_cash_meta: Dict[str, Any] = {}
     delta_cash_gap_note = ""
+    delta_cash_per_underlying: Dict[str, Any] = {}
+    delta_cash_portfolio_summary: Dict[str, Any] = {}
+    option_rebalance_priority_queue: List[Dict[str, Any]] = []
+    option_delta_displayable = False
+    option_delta_execution_ready = False
+    option_delta_coverage_ratio = 0.0
 
-    # ETF期权持仓问题优先给出可复核的Delta Cash量化结果
+    # 期权持仓问题优先给出可复核的Delta Cash量化结果
     if option_position_mode:
         try:
-            delta_cash_meta = compute_etf_option_delta_cash(
+            symbol_hint_for_delta = symbol
+            if vision_option_legs:
+                first_hint = str((vision_option_legs[0] or {}).get("underlying_hint") or "").strip()
+                if first_hint:
+                    symbol_hint_for_delta = first_hint
+            delta_cash_meta = compute_option_delta_cash(
                 user_query=user_q,
-                symbol_hint=symbol,
+                symbol_hint=symbol_hint_for_delta,
+                vision_legs=vision_option_legs or None,
+                vision_domain=vision_position_domain,
                 trend_signal=trend,
+                trend_map=underlying_trend_map or None,
                 risk_preference=risk_pref,
                 account_total_capital=account_total_capital,
             ) or {}
             raw_report = str(delta_cash_meta.get("report") or "").strip()
-            is_etf_for_delta = bool(delta_cash_meta.get("is_etf"))
+            delta_cash_per_underlying = delta_cash_meta.get("per_underlying") or {}
+            delta_cash_portfolio_summary = delta_cash_meta.get("portfolio_summary") or {}
+            option_rebalance_priority_queue = delta_cash_meta.get("risk_contribution_ranking") or []
+            delta_asset_class = str(delta_cash_meta.get("asset_class") or "").strip().lower()
+            supports_delta = bool(delta_asset_class in {"etf", "index", "multi"} or delta_cash_meta.get("is_etf"))
             metrics = delta_cash_meta.get("metrics") or {}
+            portfolio_summary = delta_cash_meta.get("portfolio_summary") or {}
             coverage_raw = metrics.get("coverage_ratio")
+            if coverage_raw is None:
+                coverage_raw = portfolio_summary.get("coverage_ratio")
             coverage = float(coverage_raw) if coverage_raw is not None else None
             missing_notes = [str(x) for x in (delta_cash_meta.get("missing_notes") or []) if str(x).strip()]
             blocking_notes = [
                 str(x) for x in (delta_cash_meta.get("blocking_missing_notes") or []) if str(x).strip()
             ]
-            publishable_flag = delta_cash_meta.get("publishable")
-            if publishable_flag is None:
-                if blocking_notes:
-                    can_publish_delta = False
-                elif coverage is None:
-                    can_publish_delta = bool(raw_report and "【DeltaCash】" in raw_report)
+            displayable_flag = delta_cash_meta.get("displayable")
+            if displayable_flag is None:
+                displayable_flag = portfolio_summary.get("displayable")
+            if displayable_flag is None:
+                if coverage is not None:
+                    displayable_flag = bool(coverage > 0.0)
                 else:
-                    can_publish_delta = bool(raw_report and "【DeltaCash】" in raw_report and coverage >= 1.0)
-            else:
-                can_publish_delta = bool(publishable_flag)
+                    displayable_flag = bool(raw_report and "【DeltaCash】" in raw_report)
 
-            if is_etf_for_delta and can_publish_delta:
+            execution_ready_flag = delta_cash_meta.get("execution_ready")
+            if execution_ready_flag is None:
+                execution_ready_flag = portfolio_summary.get("execution_ready")
+            if execution_ready_flag is None:
+                publishable_flag = delta_cash_meta.get("publishable")
+                if publishable_flag is not None:
+                    execution_ready_flag = bool(publishable_flag)
+                elif coverage is not None:
+                    execution_ready_flag = bool(coverage >= float(DELTA_EXECUTION_COVERAGE_THRESHOLD))
+                else:
+                    execution_ready_flag = False
+
+            option_delta_displayable = bool(displayable_flag)
+            option_delta_execution_ready = bool(execution_ready_flag)
+            option_delta_coverage_ratio = float(coverage) if coverage is not None else 0.0
+
+            if supports_delta and option_delta_displayable:
                 delta_cash_report = raw_report
                 delta_cash_gap_note = ""
-            elif is_etf_for_delta:
+            elif supports_delta:
                 reason_candidates = blocking_notes or missing_notes
-                if not reason_candidates and coverage is not None and coverage < 1.0:
-                    reason_candidates = ["Delta覆盖率不足"]
+                if not reason_candidates and coverage is not None:
+                    if coverage <= 0:
+                        reason_candidates = ["Delta覆盖率为0，暂无可展示结果"]
+                    elif coverage < float(DELTA_EXECUTION_COVERAGE_THRESHOLD):
+                        reason_candidates = [
+                            f"Delta覆盖率仅{coverage * 100:.1f}%，低于执行阈值{int(DELTA_EXECUTION_COVERAGE_THRESHOLD * 100)}%"
+                        ]
                 if not reason_candidates:
                     reason_candidates = ["Delta覆盖率不足或关键数据缺失"]
                 reason = "；".join(reason_candidates)
@@ -1081,10 +1934,22 @@ def strategist_node(state: AgentState, llm):
                     trend_signal=trend,
                     risk_preference=risk_pref,
                 )
+            if option_position_mode and not authoritative_underlying_quotes:
+                fallback_underlying = str(delta_cash_meta.get("underlying_code") or "").strip().upper()
+                fallback_code = _normalize_underlying_code_for_quote(fallback_underlying)
+                if fallback_code:
+                    authoritative_underlying_quotes = fetch_underlying_spot_map(underlyings=[fallback_code])
+                    authoritative_quote_block = _build_authoritative_quote_block(authoritative_underlying_quotes)
         except Exception as e:
             print(f"⚠️ DeltaCash预计算失败: {e}")
             delta_cash_meta = {}
             delta_cash_report = ""
+            delta_cash_per_underlying = {}
+            delta_cash_portfolio_summary = {}
+            option_rebalance_priority_queue = []
+            option_delta_displayable = False
+            option_delta_execution_ready = False
+            option_delta_coverage_ratio = 0.0
             delta_cash_gap_note = _build_delta_cash_gap_note(
                 reason=f"Delta计算失败（{e}）",
                 trend_signal=trend,
@@ -1109,12 +1974,21 @@ def strategist_node(state: AgentState, llm):
 
     delta_cash_prompt = ""
     if delta_cash_report:
-        delta_cash_prompt = f"\n        【ETF期权Delta Cash预计算（优先采信）】\n{delta_cash_report}"
+        delta_cash_prompt = f"\n        【Delta Cash预计算（优先采信）】\n{delta_cash_report}"
     elif delta_cash_gap_note:
         delta_cash_prompt = f"\n        【DeltaCash数据缺口说明】\n{delta_cash_gap_note}"
+    authoritative_quote_prompt = ""
+    if authoritative_quote_block:
+        authoritative_quote_prompt = f"\n        【标的现价（权威数据，仅可引用以下数值）】\n{authoritative_quote_block}"
 
     option_position_requirements = ""
     if option_position_mode:
+        locked_fact_requirement = ""
+        if canonical_option_legs_block:
+            locked_fact_requirement = (
+                "- 本轮已识别到结构化持仓，持仓拆解表必须逐行沿用以下锁定事实（不可改写）：\n"
+                f"{canonical_option_legs_block}"
+            )
         option_position_requirements = f"""
         【期权持仓深度模板（强制）】
         你必须严格按以下 6 个章节输出，章节名不可缺失：
@@ -1129,7 +2003,13 @@ def strategist_node(state: AgentState, llm):
         - 如果缺少关键行情数据，仍输出完整 6 章节，但要在对应章节明确“数据缺口”。
         - 所有权利金或盈亏示例必须注明“已按合约乘数换算”。
         - 关键位优先引用上游技术面传入信息：{key_level if key_level else "未提供关键位，需先用工具确认"}。
-        - 若已提供【ETF期权Delta Cash预计算】，必须在你的正文中保留其核心数字：Total Delta Cash、Delta Ratio、目标区间、建议调整量。
+        - 若已提供【Delta Cash预计算】，必须在你的正文中保留其核心数字：Total Delta Cash、Delta Ratio、目标区间。
+        - {"当前覆盖率达标，必须给出建议调整量（元）并对应执行方向。" if option_delta_execution_ready else f"当前覆盖率未达{int(DELTA_EXECUTION_COVERAGE_THRESHOLD * 100)}%，只允许给方向性动作与补数清单，不得输出金额级调仓量。"}
+        - 若【DeltaCash】区块包含“调仓优先队列（P1/P2/P3）”，执行建议必须按该优先顺序展开，不得反向。
+        - 市场现价只能引用【标的现价（权威数据）】区块，禁止从行权价推导/缩放现价。
+        - 禁止输出“9.000视为3.000档”这类口径修正语句。
+        - 方向术语只允许使用：买认购/卖认购/买认沽/卖认沽。禁止出现 Long/Short Call/Put、长Put、短Call 等写法。
+        {locked_fact_requirement}
         """
 
     # === 🔥 期权策略专用工具集 ===
@@ -1145,7 +2025,8 @@ def strategist_node(state: AgentState, llm):
         【客户风险偏好】：{risk_pref}
         【客户历史记忆】：{mem_context}
         【市场资金面/保证金信息】：{fund}
-        【技术面参考】：{trend} 、 {tech_view}{portfolio_context}{delta_cash_prompt}
+        【技术面参考】：{trend} 、 {tech_view}{portfolio_context}{delta_cash_prompt}{authoritative_quote_prompt}
+        {"【上传截图识别】：本轮来自混合持仓截图，已自动切换到期权主线，股票体检不展开。" if vision_position_domain == "mixed" else ""}
 
         【边界说明】
         - 基差/库存仓单/交割期转现类数据由上游 monitor 汇总后传入，不在本节点直接查询。
@@ -1185,6 +2066,7 @@ def strategist_node(state: AgentState, llm):
         3. 解释为什么这个策略适合市场或客户，可以查知识库辅助`search_investment_knowledge`
         4. 给出止损/止盈建议
         5. 禁止自己编造假数据！
+        6. 禁止使用 Long/Short Call/Put 术语，统一使用中文交易口径：买认购/卖认购/买认沽/卖认沽。
         {option_position_requirements}
 
         """
@@ -1211,8 +2093,30 @@ def strategist_node(state: AgentState, llm):
                 risk_preference=risk_pref,
                 key_levels=key_level,
             )
+            lock_result = _apply_option_fact_lock(
+                text=last_response,
+                canonical_legs=canonical_option_legs,
+                strict_cover=True,
+            )
+            last_response = str(lock_result.get("text") or last_response)
+            canonical_option_legs_block = str(lock_result.get("canonical_option_legs_block") or canonical_option_legs_block)
+            option_direction_conflict_count = int(lock_result.get("option_direction_conflict_count") or 0)
+            quote_lock_result = _apply_authoritative_quote_lock(
+                text=last_response,
+                authoritative_quotes=authoritative_underlying_quotes,
+                authoritative_quote_block=authoritative_quote_block,
+                strict_cover=bool(authoritative_underlying_quotes),
+            )
+            last_response = str(quote_lock_result.get("text") or last_response)
+            authoritative_quote_block = str(quote_lock_result.get("authoritative_quote_block") or authoritative_quote_block)
+            price_conflict_count = int(quote_lock_result.get("price_conflict_count") or 0)
         elif delta_cash_report:
             last_response = f"{delta_cash_report}\n\n{last_response}"
+            option_direction_conflict_count = 0
+            price_conflict_count = 0
+        else:
+            option_direction_conflict_count = 0
+            price_conflict_count = 0
         partial_response = last_response
 
         return {
@@ -1221,6 +2125,17 @@ def strategist_node(state: AgentState, llm):
             "option_delta_cash_report": delta_cash_report,
             "option_delta_cash_meta": delta_cash_meta,
             "option_delta_cash_gap_note": delta_cash_gap_note,
+            "option_delta_cash_per_underlying": delta_cash_per_underlying,
+            "option_delta_cash_portfolio_summary": delta_cash_portfolio_summary,
+            "option_rebalance_priority_queue": option_rebalance_priority_queue,
+            "option_delta_displayable": option_delta_displayable,
+            "option_delta_execution_ready": option_delta_execution_ready,
+            "option_delta_coverage_ratio": option_delta_coverage_ratio,
+            "canonical_option_legs_block": canonical_option_legs_block,
+            "option_direction_conflict_count": option_direction_conflict_count,
+            "authoritative_underlying_quotes": authoritative_underlying_quotes,
+            "authoritative_quote_block": authoritative_quote_block,
+            "price_conflict_count": price_conflict_count,
         }
 
     except GeneratorExit:
@@ -1235,14 +2150,47 @@ def strategist_node(state: AgentState, llm):
                 risk_preference=risk_pref,
                 key_levels=key_level,
             )
+            lock_result = _apply_option_fact_lock(
+                text=fallback_msg,
+                canonical_legs=canonical_option_legs,
+                strict_cover=True,
+            )
+            fallback_msg = str(lock_result.get("text") or fallback_msg)
+            canonical_option_legs_block = str(lock_result.get("canonical_option_legs_block") or canonical_option_legs_block)
+            option_direction_conflict_count = int(lock_result.get("option_direction_conflict_count") or 0)
+            quote_lock_result = _apply_authoritative_quote_lock(
+                text=fallback_msg,
+                authoritative_quotes=authoritative_underlying_quotes,
+                authoritative_quote_block=authoritative_quote_block,
+                strict_cover=bool(authoritative_underlying_quotes),
+            )
+            fallback_msg = str(quote_lock_result.get("text") or fallback_msg)
+            authoritative_quote_block = str(quote_lock_result.get("authoritative_quote_block") or authoritative_quote_block)
+            price_conflict_count = int(quote_lock_result.get("price_conflict_count") or 0)
         elif delta_cash_report and "DeltaCash" not in fallback_msg:
             fallback_msg = f"{delta_cash_report}\n\n{fallback_msg}"
+            option_direction_conflict_count = 0
+            price_conflict_count = 0
+        else:
+            option_direction_conflict_count = 0
+            price_conflict_count = 0
         return {
             "messages": [HumanMessage(content=f"【期权策略】\n{fallback_msg}")],
             "option_strategy": fallback_msg,
             "option_delta_cash_report": delta_cash_report,
             "option_delta_cash_meta": delta_cash_meta,
             "option_delta_cash_gap_note": delta_cash_gap_note,
+            "option_delta_cash_per_underlying": delta_cash_per_underlying,
+            "option_delta_cash_portfolio_summary": delta_cash_portfolio_summary,
+            "option_rebalance_priority_queue": option_rebalance_priority_queue,
+            "option_delta_displayable": option_delta_displayable,
+            "option_delta_execution_ready": option_delta_execution_ready,
+            "option_delta_coverage_ratio": option_delta_coverage_ratio,
+            "canonical_option_legs_block": canonical_option_legs_block,
+            "option_direction_conflict_count": option_direction_conflict_count,
+            "authoritative_underlying_quotes": authoritative_underlying_quotes,
+            "authoritative_quote_block": authoritative_quote_block,
+            "price_conflict_count": price_conflict_count,
         }
 
     except Exception as e:
@@ -1255,6 +2203,17 @@ def strategist_node(state: AgentState, llm):
             "option_delta_cash_report": delta_cash_report,
             "option_delta_cash_meta": delta_cash_meta,
             "option_delta_cash_gap_note": delta_cash_gap_note,
+            "option_delta_cash_per_underlying": delta_cash_per_underlying,
+            "option_delta_cash_portfolio_summary": delta_cash_portfolio_summary,
+            "option_rebalance_priority_queue": option_rebalance_priority_queue,
+            "option_delta_displayable": option_delta_displayable,
+            "option_delta_execution_ready": option_delta_execution_ready,
+            "option_delta_coverage_ratio": option_delta_coverage_ratio,
+            "canonical_option_legs_block": canonical_option_legs_block,
+            "option_direction_conflict_count": 0,
+            "authoritative_underlying_quotes": authoritative_underlying_quotes,
+            "authoritative_quote_block": authoritative_quote_block,
+            "price_conflict_count": 0,
         }
 
 
@@ -2069,15 +3028,164 @@ def finalizer_node(state: AgentState, llm):
     # 拼接到一起用于输入
     context_text = "\n".join([f"{m.content}" for m in worker_msgs])
     user_query = state.get("user_query", "")
-    is_option_query = _contains_any(user_query, OPTION_QUERY_KEYWORDS)
-    is_option_position_mode = _is_option_position_query(user_query)
+    vision_position_domain = str(state.get("vision_position_domain", "") or "").strip().lower()
+    vision_position_payload = state.get("vision_position_payload") or {}
+    vision_option_legs: List[Dict[str, Any]] = []
+    if isinstance(vision_position_payload, dict):
+        raw_legs = vision_position_payload.get("option_legs") or []
+        if isinstance(raw_legs, list):
+            vision_option_legs = [x for x in raw_legs if isinstance(x, dict)]
+    canonical_option_legs = _build_canonical_option_legs(vision_option_legs)
+    canonical_option_legs_block = _build_canonical_option_legs_block(canonical_option_legs)
+    is_vision_option_mode = vision_position_domain in {"option", "mixed"}
+    is_option_query = _contains_any(user_query, OPTION_QUERY_KEYWORDS) or is_vision_option_mode
+    is_option_position_mode = _is_option_position_query(user_query) or is_vision_option_mode
     option_delta_cash_report = str(state.get("option_delta_cash_report", "") or "").strip()
+    option_delta_cash_meta = state.get("option_delta_cash_meta") or {}
     option_delta_cash_gap_note = str(state.get("option_delta_cash_gap_note", "") or "").strip()
+    option_delta_displayable = bool(state.get("option_delta_displayable", False))
+    option_delta_execution_ready = bool(state.get("option_delta_execution_ready", False))
+    option_delta_coverage_ratio = float(state.get("option_delta_coverage_ratio", 0.0) or 0.0)
+    authoritative_underlying_quotes = state.get("authoritative_underlying_quotes") or {}
+    authoritative_quote_block = str(state.get("authoritative_quote_block", "") or "")
+    if is_option_position_mode and not authoritative_underlying_quotes:
+        fallback_underlyings = _collect_quote_underlyings_from_canonical_legs(
+            canonical_legs=canonical_option_legs,
+            symbol_hint=state.get("symbol", ""),
+        )
+        if fallback_underlyings:
+            try:
+                authoritative_underlying_quotes = fetch_underlying_spot_map(underlyings=fallback_underlyings)
+            except Exception as e:
+                print(f"⚠️ finalizer 权威现价加载失败: {e}")
+                authoritative_underlying_quotes = {}
+    if not authoritative_quote_block and authoritative_underlying_quotes:
+        authoritative_quote_block = _build_authoritative_quote_block(authoritative_underlying_quotes)
+
+    def _lock_option_and_price(text: str) -> Dict[str, Any]:
+        working_text = str(text or "")
+        if is_option_position_mode:
+            # finalizer 可能压缩掉结构化章节，这里只补缺失章节，避免“去重后缺章”。
+            working_text = _ensure_option_position_structure(
+                text=working_text,
+                delta_cash_report=option_delta_cash_report,
+                delta_cash_gap_note=option_delta_cash_gap_note,
+                trend_signal=str(state.get("trend_signal", "")),
+                risk_preference=str(state.get("risk_preference", "稳健型")),
+                key_levels=str(state.get("key_levels", "")),
+            )
+        working_text = _ensure_delta_section_from_meta(
+            text=working_text,
+            delta_report=option_delta_cash_report,
+            delta_meta=option_delta_cash_meta,
+            delta_gap_note=option_delta_cash_gap_note,
+            displayable=option_delta_displayable,
+        )
+        locked_delta_text = _replace_delta_cash_section(text=working_text, delta_report=option_delta_cash_report)
+        lock_result = _apply_option_fact_lock(
+            text=locked_delta_text,
+            canonical_legs=canonical_option_legs,
+            strict_cover=is_option_position_mode and bool(canonical_option_legs),
+        )
+        locked_text = str(lock_result.get("text") or locked_delta_text)
+        quote_lock_result = _apply_authoritative_quote_lock(
+            text=locked_text,
+            authoritative_quotes=authoritative_underlying_quotes,
+            authoritative_quote_block=authoritative_quote_block,
+            strict_cover=is_option_position_mode and bool(authoritative_underlying_quotes),
+        )
+        locked_canonical_block = str(lock_result.get("canonical_option_legs_block") or canonical_option_legs_block)
+        direction_conflict_count = int(lock_result.get("option_direction_conflict_count") or 0)
+        final_quote_block = str(quote_lock_result.get("authoritative_quote_block") or authoritative_quote_block)
+        price_conflict_count = int(quote_lock_result.get("price_conflict_count") or 0)
+        locked_text = _dedupe_option_position_sections(str(quote_lock_result.get("text") or locked_text))
+        if is_option_position_mode:
+            delta_block_for_compose = ""
+            if option_delta_displayable:
+                delta_block_for_compose = (
+                    _extract_delta_cash_block(option_delta_cash_report)
+                    or _extract_delta_cash_block(locked_text)
+                    or _extract_delta_cash_block(str((option_delta_cash_meta or {}).get("report") or ""))
+                )
+                if not delta_block_for_compose and isinstance(option_delta_cash_meta, dict):
+                    delta_block_for_compose = _build_min_delta_block_from_meta(option_delta_cash_meta)
+            elif option_delta_cash_gap_note:
+                delta_block_for_compose = f"### 【DeltaCash】\n- 数据缺口: {option_delta_cash_gap_note}"
+            structured_sections = {
+                "holdings": locked_canonical_block if canonical_option_legs else "",
+                "quotes": final_quote_block if authoritative_underlying_quotes else "",
+                "delta": delta_block_for_compose,
+            }
+            locked_text = _compose_option_sections(
+                text=locked_text,
+                structured_sections=structured_sections,
+                keep_only_whitelist=True,
+            )
+        # 期权持仓模式且Delta可展示时，强制保证最终正文含有唯一的Delta区块
+        if is_option_position_mode and option_delta_displayable and "delta" not in _collect_option_section_ids(locked_text):
+            fallback_structured = _ensure_option_position_structure(
+                text=str(text or ""),
+                delta_cash_report=option_delta_cash_report,
+                delta_cash_gap_note=option_delta_cash_gap_note,
+                trend_signal=str(state.get("trend_signal", "")),
+                risk_preference=str(state.get("risk_preference", "稳健型")),
+                key_levels=str(state.get("key_levels", "")),
+            )
+            fallback_structured = _ensure_delta_section_from_meta(
+                text=fallback_structured,
+                delta_report=option_delta_cash_report,
+                delta_meta=option_delta_cash_meta,
+                delta_gap_note=option_delta_cash_gap_note,
+                displayable=True,
+            )
+            fallback_locked = _apply_option_fact_lock(
+                text=fallback_structured,
+                canonical_legs=canonical_option_legs,
+                strict_cover=bool(canonical_option_legs),
+            )
+            fallback_quote_locked = _apply_authoritative_quote_lock(
+                text=str(fallback_locked.get("text") or fallback_structured),
+                authoritative_quotes=authoritative_underlying_quotes,
+                authoritative_quote_block=authoritative_quote_block,
+                strict_cover=bool(authoritative_underlying_quotes),
+            )
+            locked_text = _dedupe_option_position_sections(
+                str(fallback_quote_locked.get("text") or fallback_structured)
+            )
+            locked_text = _compose_option_sections(
+                text=locked_text,
+                structured_sections={
+                    "holdings": locked_canonical_block if canonical_option_legs else "",
+                    "quotes": final_quote_block if authoritative_underlying_quotes else "",
+                    "delta": _extract_delta_cash_block(option_delta_cash_report)
+                    or _extract_delta_cash_block(str((option_delta_cash_meta or {}).get("report") or "")),
+                },
+                keep_only_whitelist=True,
+            )
+            locked_canonical_block = str(
+                fallback_locked.get("canonical_option_legs_block") or locked_canonical_block
+            )
+            direction_conflict_count = int(
+                fallback_locked.get("option_direction_conflict_count") or direction_conflict_count
+            )
+            final_quote_block = str(
+                fallback_quote_locked.get("authoritative_quote_block") or final_quote_block
+            )
+            price_conflict_count = int(
+                fallback_quote_locked.get("price_conflict_count") or price_conflict_count
+            )
+        return {
+            "text": locked_text,
+            "canonical_option_legs_block": locked_canonical_block,
+            "option_direction_conflict_count": direction_conflict_count,
+            "authoritative_quote_block": final_quote_block,
+            "price_conflict_count": price_conflict_count,
+        }
     explicit_stock_portfolio_coupling = _contains_any(user_query, EXPLICIT_STOCK_PORTFOLIO_COUPLING_KEYWORDS)
     allow_stock_portfolio_blend = (not is_option_query) or explicit_stock_portfolio_coupling
     if is_option_query and not explicit_stock_portfolio_coupling:
         context_text = _strip_stock_portfolio_sections(context_text)
-    if option_delta_cash_report and "【DeltaCash】" not in context_text:
+    if option_delta_cash_report and "DeltaCash" not in context_text:
         context_text = f"{context_text}\n\n{option_delta_cash_report}"
     elif option_delta_cash_gap_note and option_delta_cash_gap_note not in context_text:
         context_text = f"{context_text}\n\n> ⚠️ **Delta数据缺口**：{option_delta_cash_gap_note}"
@@ -2154,7 +3262,7 @@ def finalizer_node(state: AgentState, llm):
     # (由于 state plan 被 pop 了，我们用简单的长度判断通常够用，或者看 context)
 
 
-    if is_single_source and not has_chart and not is_complex_task:
+    if is_single_source and not has_chart and not is_complex_task and not is_option_position_mode:
         # === 模式 A：质检员 (Audit Mode) ===
         # 目标：保留原汁原味的排版，只查错
         symbol_aliases = _build_symbol_aliases(symbol)
@@ -2187,8 +3295,14 @@ def finalizer_node(state: AgentState, llm):
 
         # 如果 LLM 觉得没问题，返回特定标记
         if "DIRECT_PASS" in response.content:
+            lock_result = _lock_option_and_price(context_text)
             return {
-                "messages": [HumanMessage(content=context_text)]
+                "messages": [HumanMessage(content=str(lock_result.get("text") or context_text))],
+                "canonical_option_legs_block": str(lock_result.get("canonical_option_legs_block") or canonical_option_legs_block),
+                "option_direction_conflict_count": int(lock_result.get("option_direction_conflict_count") or 0),
+                "authoritative_underlying_quotes": authoritative_underlying_quotes,
+                "authoritative_quote_block": str(lock_result.get("authoritative_quote_block") or authoritative_quote_block),
+                "price_conflict_count": int(lock_result.get("price_conflict_count") or 0),
             }
         else:
             revised_text = response.content or ""
@@ -2197,12 +3311,24 @@ def finalizer_node(state: AgentState, llm):
                 keep_symbol = any(alias in revised_norm for alias in symbol_aliases)
                 if not keep_symbol:
                     print(f"⚠️ finalizer 审校疑似串标，回退原报告。locked={symbol_aliases}")
+                    lock_result = _lock_option_and_price(context_text)
                     return {
-                        "messages": [HumanMessage(content=context_text)]
+                        "messages": [HumanMessage(content=str(lock_result.get("text") or context_text))],
+                        "canonical_option_legs_block": str(lock_result.get("canonical_option_legs_block") or canonical_option_legs_block),
+                        "option_direction_conflict_count": int(lock_result.get("option_direction_conflict_count") or 0),
+                        "authoritative_underlying_quotes": authoritative_underlying_quotes,
+                        "authoritative_quote_block": str(lock_result.get("authoritative_quote_block") or authoritative_quote_block),
+                        "price_conflict_count": int(lock_result.get("price_conflict_count") or 0),
                     }
+            lock_result = _lock_option_and_price(f"【风控修正】\n{revised_text}")
             # 如果有错被重写了，就返回重写的内容
             return {
-                "messages": [HumanMessage(content=f"【风控修正】\n{revised_text}")]
+                "messages": [HumanMessage(content=str(lock_result.get("text") or revised_text))],
+                "canonical_option_legs_block": str(lock_result.get("canonical_option_legs_block") or canonical_option_legs_block),
+                "option_direction_conflict_count": int(lock_result.get("option_direction_conflict_count") or 0),
+                "authoritative_underlying_quotes": authoritative_underlying_quotes,
+                "authoritative_quote_block": str(lock_result.get("authoritative_quote_block") or authoritative_quote_block),
+                "price_conflict_count": int(lock_result.get("price_conflict_count") or 0),
             }
 
     else:
@@ -2240,7 +3366,7 @@ def finalizer_node(state: AgentState, llm):
                 6. 如果发生数据缺失或语法错误，不要把错误写出来。
                 7. 数据是每天下午5点后更新。
                 8. {"当前是期权问题，只回答期权持仓/期权数据，不要展开股票持仓体检内容。" if (is_option_query and not allow_stock_portfolio_blend) else "按用户问题口径输出，不要扩展无关持仓模块。"}
-                9. {"如果团队报告中有【DeltaCash】区块，必须保留其中关键数值并输出目标区间与建议调整量。" if option_delta_cash_report else ("如果出现Delta数据缺口，只说明缺口，不要编造Delta数值。" if option_delta_cash_gap_note else "无额外量化模块要求。")}
+                9. {"如果团队报告中有【DeltaCash】区块，必须保留其中关键数值并输出目标区间与建议调整量。" if (option_delta_cash_report and option_delta_execution_ready) else ("如果团队报告中有【DeltaCash】区块，但覆盖率不足，请只给方向性建议与补数清单，不要输出金额级调整量。" if option_delta_cash_report else ("如果出现Delta数据缺口，只说明缺口，不要编造Delta数值。" if option_delta_cash_gap_note else "无额外量化模块要求。"))}
 
 
                 【格式示例】：
@@ -2280,15 +3406,40 @@ def finalizer_node(state: AgentState, llm):
                 - 当前问题属于期权域，禁止展开“股票持仓体检”段落。
                 - 只允许整合与期权持仓、期权策略、期权风险直接相关的信息。
                 - 若出现跨域冲突，以【期权策略】与【技术分析】中与期权相关内容为准。
+                - 方向术语必须统一为：买认购/卖认购/买认沽/卖认沽。禁止输出 Long/Short Call/Put。
                 """
+                if vision_position_domain == "mixed":
+                    option_focus_prompt += """
+                - 已识别到混合持仓截图，必须用一句话提示“股票持仓已识别，本轮未展开股票体检”。
+                    """
                 if is_option_position_mode:
                     option_focus_prompt += """
                     - 回答必须包含：持仓拆解、净暴露/到期错配、三情景分支、两套调整方案、风控阈值、当日执行清单。
+                    - “标的现价”只能引用系统给定的权威现价表，禁止从行权价推导/缩放现价。
                     """
+                    if canonical_option_legs_block:
+                        option_focus_prompt += f"""
+                    - “1. 持仓拆解表”必须逐行使用以下识别锁定事实（不得改写方向/购沽）：
+{canonical_option_legs_block}
+                        """
+                    if authoritative_quote_block:
+                        option_focus_prompt += f"""
+                    - 标的现价（权威数据）必须按下表引用：
+{authoritative_quote_block}
+                        """
                     if option_delta_cash_report:
                         option_focus_prompt += """
-                    - 必须保留并明确展示【DeltaCash】核心数值：Total Delta Cash、Delta Ratio、技术面目标区间、建议调整量（元）。
+                    - 必须保留并明确展示【DeltaCash】核心数值：Total Delta Cash、Delta Ratio、技术面目标区间。
+                    - 若【DeltaCash】包含“调仓优先队列”，必须沿用该顺序，不得自由改写优先级。
                         """
+                        if option_delta_execution_ready:
+                            option_focus_prompt += """
+                    - 覆盖率达标时，必须输出金额级建议调整量（元）并匹配执行方向。
+                            """
+                        else:
+                            option_focus_prompt += f"""
+                    - 覆盖率仅 {option_delta_coverage_ratio * 100:.1f}%（阈值 {int(DELTA_EXECUTION_COVERAGE_THRESHOLD * 100)}%），只允许给方向性建议和补数清单，不得给金额级执行量。
+                            """
                     elif option_delta_cash_gap_note:
                         option_focus_prompt += """
                     - Delta数据缺口时只说明缺口与补数动作，不要输出伪精确DeltaCash数值。
@@ -2385,9 +3536,16 @@ def finalizer_node(state: AgentState, llm):
                 chart_img = chart_matches[-1]
                 print(f"📊 finalizer 从报告中提取到图表: {chart_img}")
 
+        final_text = f"【最终决策】\n{final_verdict.content}"
+        lock_result = _lock_option_and_price(final_text)
         return {
-            "messages": [HumanMessage(content=f"【最终决策】\n{final_verdict.content}")],
-            "chart_img": chart_img  # 🔥 返回图表路径
+            "messages": [HumanMessage(content=str(lock_result.get("text") or final_text))],
+            "chart_img": chart_img,  # 🔥 返回图表路径
+            "canonical_option_legs_block": str(lock_result.get("canonical_option_legs_block") or canonical_option_legs_block),
+            "option_direction_conflict_count": int(lock_result.get("option_direction_conflict_count") or 0),
+            "authoritative_underlying_quotes": authoritative_underlying_quotes,
+            "authoritative_quote_block": str(lock_result.get("authoritative_quote_block") or authoritative_quote_block),
+            "price_conflict_count": int(lock_result.get("price_conflict_count") or 0),
         }
 
 
