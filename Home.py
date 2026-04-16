@@ -12,13 +12,14 @@ import json
 import random
 import markdown
 import sys
+from typing import Optional, Dict, Any
 import auth_utils as auth
 import memory_utils as mem
 import threading
 from datetime import datetime, timedelta
 from auth_ui import show_auth_dialog, sidebar_user_menu
 from agent_core import build_trading_graph
-from vision_tools import analyze_financial_image, analyze_portfolio_image
+from vision_tools import analyze_financial_image, analyze_position_image
 from data_engine import get_commodity_iv_info
 import time
 import extra_streamlit_components as stx
@@ -1545,7 +1546,12 @@ def _build_memory_record(ai_response: str, max_chars: int = 4000) -> str:
     return f"【结构化摘要】{summary}\n【回答片段】{snippet}"
 
 
-def build_context_payload(prompt_text: str, current_user: str):
+def build_context_payload(
+    prompt_text: str,
+    current_user: str,
+    vision_position_payload: Optional[Dict[str, Any]] = None,
+    vision_position_domain: str = "",
+):
     """构建连续对话上下文载荷（会话+长期记忆）"""
     all_messages = list(st.session_state.get("messages", []))
     recent_turns = [
@@ -1616,6 +1622,8 @@ def build_context_payload(prompt_text: str, current_user: str):
         "semantic_related": bool(semantic_related),
         "conversation_id": conversation_id,
         "account_total_capital": account_total_capital,
+        "vision_position_payload": vision_position_payload if isinstance(vision_position_payload, dict) else None,
+        "vision_position_domain": str(vision_position_domain or ""),
     }
 
 
@@ -1635,8 +1643,67 @@ def _hash_uploaded_file(uploaded_file) -> str:
             return ""
 
 
-def auto_submit_portfolio_task(uploaded_img):
-    """上传截图后自动触发持仓分析任务（仅登录用户）。"""
+def _render_option_leg_text(leg: Dict[str, Any]) -> str:
+    underlying = str(leg.get("underlying_hint") or "").strip().upper()
+    month = leg.get("month")
+    month_text = f"{int(month)}月" if isinstance(month, (int, float)) else ""
+    strike = leg.get("strike")
+    strike_text = f"{float(strike):.3f}".rstrip("0").rstrip(".") if isinstance(strike, (int, float)) else ""
+    cp_raw = str(leg.get("cp") or "").lower()
+    if cp_raw == "call":
+        cp = "认购"
+    elif cp_raw == "put":
+        cp = "认沽"
+    else:
+        cp = ""
+    side_raw = str(leg.get("side") or "").lower()
+    if side_raw == "long":
+        side = "买方"
+    elif side_raw == "short":
+        side = "卖方"
+    else:
+        side = ""
+    qty = int(leg.get("qty") or abs(int(leg.get("signed_qty", 0))) or 0)
+    contract_code = str(leg.get("contract_code") or "").strip().upper()
+    core_text = ""
+    if not (month_text or strike_text or cp or side):
+        core_text = f"{contract_code or '期权合约'}{qty}张"
+    else:
+        core_text = f"{month_text}{strike_text}{cp}{side}{qty}张"
+    if contract_code and contract_code not in core_text:
+        core_text = f"{core_text}({contract_code})"
+    if underlying:
+        return f"[{underlying}] {core_text}"
+    return core_text
+
+
+def _build_upload_option_prompt(vision_struct: Dict[str, Any]) -> str:
+    domain = str(vision_struct.get("domain", "")).strip().lower()
+    legs = vision_struct.get("option_legs") or []
+    legs_text = "；".join(_render_option_leg_text(leg) for leg in legs[:12] if isinstance(leg, dict))
+    unique_underlyings = []
+    for leg in legs:
+        if not isinstance(leg, dict):
+            continue
+        hint = str(leg.get("underlying_hint") or "").strip().upper()
+        if hint and hint not in unique_underlyings:
+            unique_underlyings.append(hint)
+    if len(unique_underlyings) > 1:
+        prefix = f"我上传了多标的期权持仓截图（{', '.join(unique_underlyings)}）。"
+    elif len(unique_underlyings) == 1:
+        prefix = f"我上传了{unique_underlyings[0]}期权持仓截图。"
+    else:
+        prefix = "我上传了期权持仓截图。"
+    mixed_hint = "已识别到股票持仓，本轮未展开股票体检。" if domain == "mixed" else ""
+    return (
+        f"{prefix}{mixed_hint}识别到的期权腿：{legs_text or '待确认'}。"
+        "请按期权持仓深度模板输出：持仓拆解、净暴露与到期错配、三情景分支、保守/进攻两套方案、风控阈值、当日执行清单；"
+        "并给出DeltaCash、Delta Ratio、目标区间、偏离与建议调整量。"
+    )
+
+
+def auto_submit_position_task(uploaded_img):
+    """上传截图后自动触发股票体检或期权深度分析（仅登录用户）。"""
     current_user = st.session_state.get("user_id", "访客")
     if current_user == "访客":
         return
@@ -1652,48 +1719,89 @@ def auto_submit_portfolio_task(uploaded_img):
         return
 
     st.session_state.portfolio_last_attempt_hash = image_hash
+    st.session_state["position_upload_last_error"] = ""
+    st.session_state["position_upload_last_warnings"] = []
 
-    with st.status("📊 正在识别持仓截图并自动启动体检...", expanded=True) as status:
-        vision_struct = analyze_portfolio_image(uploaded_img)
+    with st.status("📊 正在识别持仓截图并自动启动分析...", expanded=True) as status:
+        vision_struct = analyze_position_image(uploaded_img)
         if not vision_struct.get("ok"):
             status.update(label="❌ 持仓识别失败", state="error", expanded=False)
             err_msg = vision_struct.get("error", "未识别到有效持仓")
+            warn_list = list(vision_struct.get("warnings") or [])
+            st.session_state["position_upload_last_error"] = str(err_msg or "")
+            st.session_state["position_upload_last_warnings"] = warn_list
             st.warning(f"持仓识别失败：{err_msg}")
             return
 
-        positions = vision_struct.get("positions", [])
-        if not positions:
-            status.update(label="❌ 未识别到有效持仓", state="error", expanded=False)
-            st.warning("未识别到有效持仓数据，请换一张更清晰的截图后重试。")
+        domain = str(vision_struct.get("domain", "unknown")).strip().lower()
+        stock_positions = vision_struct.get("stock_positions") or []
+        option_legs = vision_struct.get("option_legs") or []
+
+        if domain == "stock":
+            if not stock_positions:
+                status.update(label="❌ 未识别到有效持仓", state="error", expanded=False)
+                st.warning("未识别到有效持仓数据，请换一张更清晰的截图后重试。")
+                return
+            task_manager = TaskManager()
+            try:
+                task_id = task_manager.create_portfolio_task(
+                    user_id=current_user,
+                    positions=stock_positions,
+                    screenshot_hash=image_hash,
+                    source_text=vision_struct.get("raw_text", ""),
+                )
+            except Exception as e:
+                status.update(label="❌ 任务创建失败", state="error", expanded=False)
+                st.error(f"持仓体检任务创建失败：{e}")
+                return
+            st.session_state.pending_portfolio_task = {
+                "task_id": task_id,
+                "start_time": time.time(),
+                "screenshot_hash": image_hash,
+                "positions_count": len(stock_positions),
+            }
+            st.session_state["position_upload_last_error"] = ""
+            st.session_state["position_upload_last_warnings"] = []
+            status.update(label="✅ 已自动提交股票持仓体检任务", state="complete", expanded=False)
+            st.toast(f"持仓体检任务已启动（识别到 {len(stock_positions)} 只股票）")
+            st.rerun()
             return
 
-        task_manager = TaskManager()
-        try:
-            task_id = task_manager.create_portfolio_task(
-                user_id=current_user,
-                positions=positions,
-                screenshot_hash=image_hash,
-                source_text=vision_struct.get("raw_text", ""),
+        if domain in {"option", "mixed"}:
+            if not option_legs:
+                status.update(label="❌ 未识别到有效期权持仓", state="error", expanded=False)
+                st.warning("识别到期权域，但未提取到有效期权腿，请上传更清晰截图。")
+                return
+            option_prompt = _build_upload_option_prompt(vision_struct)
+            st.session_state["position_upload_last_error"] = ""
+            st.session_state["position_upload_last_warnings"] = []
+            status.update(label="✅ 已自动提交期权持仓深度分析", state="complete", expanded=False)
+            process_user_input(
+                option_prompt,
+                deep_mode=bool(st.session_state.get("deep_mode_enabled", False)),
+                vision_position_payload=vision_struct,
+                vision_position_domain=domain,
+                analysis_mode_label="option_position_upload",
             )
-        except Exception as e:
-            status.update(label="❌ 任务创建失败", state="error", expanded=False)
-            st.error(f"持仓体检任务创建失败：{e}")
+            st.rerun()
             return
-        st.session_state.pending_portfolio_task = {
-            "task_id": task_id,
-            "start_time": time.time(),
-            "screenshot_hash": image_hash,
-            "positions_count": len(positions),
-        }
-        status.update(label="✅ 已自动提交持仓体检任务", state="complete", expanded=False)
-        st.toast(f"持仓体检任务已启动（识别到 {len(positions)} 只股票）")
-        st.rerun()
+
+        status.update(label="❌ 暂无法判定持仓类型", state="error", expanded=False)
+        st.session_state["position_upload_last_error"] = "未识别到股票或期权持仓，请上传更清晰的持仓截图后重试。"
+        st.session_state["position_upload_last_warnings"] = list(vision_struct.get("warnings") or [])
+        st.warning("未识别到股票或期权持仓，请上传更清晰的持仓截图后重试。")
 
 
 # ==========================================
 #  5. 核心逻辑处理函数 [修改点：封装成函数以便复用]
 # ==========================================
-def process_user_input(prompt_text, deep_mode=False):
+def process_user_input(
+    prompt_text,
+    deep_mode=False,
+    vision_position_payload: Optional[Dict[str, Any]] = None,
+    vision_position_domain: str = "",
+    analysis_mode_label: str = "",
+):
     """处理用户输入（无论是来自输入框还是快捷卡片）"""
     deep_mode = bool(deep_mode and ENABLE_DEEP_MODE and DeepTaskManager is not None)
     current_user = st.session_state.get('user_id', "访客")
@@ -1710,8 +1818,9 @@ def process_user_input(prompt_text, deep_mode=False):
     image_context = ""
     current_uploader_key = f"portfolio_uploader_{st.session_state.uploader_key}"
     uploaded_image = st.session_state.get(current_uploader_key)
+    has_structured_upload = isinstance(vision_position_payload, dict) and bool(vision_position_payload)
 
-    if uploaded_image:
+    if uploaded_image and not has_structured_upload:
         with st.status("📸 正在识别持仓截图...", expanded=True) as status:
             st.write("AI 正在观察图片...")
             vision_result = analyze_financial_image(uploaded_image)
@@ -1719,9 +1828,17 @@ def process_user_input(prompt_text, deep_mode=False):
             image_context = f"\n\n【用户上传图信息】：\n{vision_result}\n----------------\n"
             with st.chat_message("ai"):
                 st.caption(f"已识别图片内容：\n{vision_result[:100]}...")
+    elif uploaded_image and has_structured_upload:
+        with st.chat_message("ai"):
+            st.caption("已识别上传持仓截图，并注入结构化持仓数据。")
 
     # 在追加当前问题前构造上下文，避免本轮内容混进历史
-    context_payload = build_context_payload(prompt_text=prompt_text, current_user=current_user)
+    context_payload = build_context_payload(
+        prompt_text=prompt_text,
+        current_user=current_user,
+        vision_position_payload=vision_position_payload,
+        vision_position_domain=vision_position_domain,
+    )
 
     # --- 2. 显示用户提问 (保留) ---
     st.session_state.messages.append({"role": "user", "content": prompt_text})
@@ -1868,7 +1985,8 @@ def process_user_input(prompt_text, deep_mode=False):
         "mode": "deep" if deep_mode else "normal",
         "risk": "balanced" if deep_mode else risk,
         "context_payload": context_payload,
-        "start_time": time.time()
+        "start_time": time.time(),
+        "analysis_mode_label": str(analysis_mode_label or ""),
     }
 
 
@@ -2570,12 +2688,23 @@ if "pending_task" in st.session_state and st.session_state.pending_task:
             if current_status in ["pending", "processing"]:
                 progress_msg = task_status.get("progress", "正在处理...")
                 elapsed_sec = int(max(0, time.time() - task_start))
-                phase_steps = [
-                    ("🛰️ 正在检索市场数据", "读取行情、新闻与历史上下文"),
-                    ("🧠 正在进行策略推理", "多模型协作评估方向与风险"),
-                    ("🧪 正在校验关键结论", "交叉检查数据一致性与边界条件"),
-                    ("📝 正在整理最终回答", "生成结构化结论与可执行建议"),
-                ]
+                analysis_mode_label = str(task_info.get("analysis_mode_label", "") or "")
+                if analysis_mode_label == "option_position_upload":
+                    card_title = "⚙️ 期权持仓分析中"
+                    phase_steps = [
+                        ("📥 正在解析期权持仓截图", "识别合约腿与方向"),
+                        ("📐 正在计算 Delta 与暴露", "核对标的、IV 与合约参数"),
+                        ("🧭 正在生成调仓方案", "输出目标区间与建议调整量"),
+                        ("📝 正在整理期权结论", "生成结构化执行清单"),
+                    ]
+                else:
+                    card_title = "🚀 团队正在协作分析"
+                    phase_steps = [
+                        ("🛰️ 正在检索市场数据", "读取行情、新闻与历史上下文"),
+                        ("🧠 正在进行策略推理", "多模型协作评估方向与风险"),
+                        ("🧪 正在校验关键结论", "交叉检查数据一致性与边界条件"),
+                        ("📝 正在整理最终回答", "生成结构化结论与可执行建议"),
+                    ]
                 phase_idx = (elapsed_sec // 6) % len(phase_steps)
                 phase_title, phase_desc = phase_steps[phase_idx]
                 status_placeholder.markdown(f"""
@@ -2633,7 +2762,7 @@ if "pending_task" in st.session_state and st.session_state.pending_task:
                 </style>
                 <div class="thinking-wrap">
                     <div class="thinking-title">
-                        🚀 团队正在协作分析
+                        {card_title}
                         <span class="thinking-dots">
                             <span class="thinking-dot"></span>
                             <span class="thinking-dot"></span>
@@ -2837,12 +2966,22 @@ with st.container():
                                 line-height: 1.5;
                             ">
                                 <strong style="color: #FFD700;">✅ 图片已就绪</strong><br>
-                                系统将自动识别持仓并启动体检任务，完成后可在“持仓体检”页面查看图像化结果。
+                                系统将自动识别股票/期权持仓并启动对应分析任务。
                             </div>
                             """, unsafe_allow_html=True)
-                auto_submit_portfolio_task(uploaded_img)
+                auto_submit_position_task(uploaded_img)
+                last_err = str(st.session_state.get("position_upload_last_error", "") or "").strip()
+                last_warn = list(st.session_state.get("position_upload_last_warnings") or [])
+                if last_err:
+                    st.error(f"识别失败详情：{last_err}")
+                if last_warn:
+                    with st.expander("查看识别诊断信息", expanded=False):
+                        for w in last_warn[:8]:
+                            st.write(f"- {w}")
         else:
             st.session_state.portfolio_last_attempt_hash = None
+            st.session_state["position_upload_last_error"] = ""
+            st.session_state["position_upload_last_warnings"] = []
 
 # 侧栏按钮样式最终兜底（只命中左上角侧栏开关，不影响右上角菜单）
 st.markdown("""

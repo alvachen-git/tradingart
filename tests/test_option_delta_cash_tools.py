@@ -1,4 +1,6 @@
 import option_delta_tools as odt
+import pandas as pd
+from unittest.mock import patch
 
 
 class _FakeLoader:
@@ -49,6 +51,58 @@ class _FakeLoader:
         return None
 
 
+class _FakeIndexLoader:
+    def __init__(self, with_iv=True):
+        self.with_iv = with_iv
+
+    def get_underlying_spot(self, underlying_code):
+        return {
+            "ts_code": underlying_code,
+            "trade_date": "20260412",
+            "close_price": 4020.0,
+        }
+
+    def get_latest_iv(self, underlying_code):
+        if not self.with_iv:
+            return None
+        return {
+            "etf_code": underlying_code,
+            "trade_date": "20260412",
+            "iv": 18.0,
+        }
+
+    def find_option_contract(self, underlying_code, option_flag, strike, month, as_of_yyyymmdd):
+        if option_flag == "c":
+            return {
+                "status": "ok",
+                "ts_code": "IO2404-C-4000",
+                "delist_date": "20260424",
+                "exercise_price": 4000.0,
+                "is_exact_strike": True,
+                "trade_date": "20260412",
+                "close": 120.0,
+                "vol": 1800,
+                "oi": 32000,
+            }
+        return None
+
+    def get_contract_by_ts_code(self, ts_code, as_of_yyyymmdd):
+        if ts_code == "IO2404-C-4000":
+            return {
+                "status": "ok",
+                "ts_code": ts_code,
+                "underlying": "000300.SH",
+                "call_put": "C",
+                "exercise_price": 4000.0,
+                "delist_date": "20260424",
+                "trade_date": "20260412",
+                "close": 120.0,
+                "vol": 1800,
+                "oi": 32000,
+            }
+        return {"status": "missing_contract", "missing_reason": "not found", "ts_code": ts_code}
+
+
 def test_parse_etf_option_legs_buy_and_sell():
     text = "我有创业板4月3.2认购买方23张，还有3.3认购卖方50张"
     legs = odt.parse_etf_option_legs(text)
@@ -58,6 +112,20 @@ def test_parse_etf_option_legs_buy_and_sell():
     assert by_strike[3.3]["signed_qty"] == -50
     assert by_strike[3.2]["option_flag"] == "c"
     assert by_strike[3.3]["option_flag"] == "c"
+    assert by_strike[3.2]["direction_cn"] == "买认购"
+    assert by_strike[3.3]["direction_cn"] == "卖认购"
+
+
+def test_normalize_structured_option_legs_adds_cn_direction_labels():
+    legs = odt._normalize_structured_option_legs(  # noqa: SLF001 - 测试内部标准化行为
+        [
+            {"cp": "call", "side": "short", "qty": 2, "strike": 3.2, "month": 4, "underlying_hint": "159915.SZ"},
+            {"cp": "put", "side": "long", "qty": 1, "strike": 3.1, "month": 4, "underlying_hint": "159915.SZ"},
+        ]
+    )
+    assert len(legs) == 2
+    assert legs[0]["direction_cn"] == "卖认购"
+    assert legs[1]["direction_cn"] == "买认沽"
 
 
 def test_compute_delta_cash_metrics_sign_direction():
@@ -118,7 +186,10 @@ def test_compute_etf_option_delta_cash_success_report_contains_required_blocks()
     assert "Total Delta Cash" in out["report"]
     assert "技术面目标区间" in out["report"]
     assert "建议调整量" in out["report"]
+    assert out["displayable"] is True
+    assert out["execution_ready"] is True
     assert out["publishable"] is True
+    assert out["coverage_tier"] == "full"
     assert out["metrics"]["coverage_ratio"] == 1.0
     assert "未提供账户总资金" in out["report"]
 
@@ -135,6 +206,8 @@ def test_compute_etf_option_delta_cash_with_account_capital_uses_account_ratio()
         account_total_capital=10000000,
     )
     assert out["is_etf"] is True
+    assert out["displayable"] is True
+    assert out["execution_ready"] is True
     assert out["publishable"] is True
     assert out["metrics"]["effective_ratio_basis"] == "account_total_capital"
     assert out["metrics"]["account_total_capital"] == 10000000
@@ -154,6 +227,8 @@ def test_compute_etf_option_delta_cash_accepts_string_account_capital():
         account_total_capital="3000000",
     )
     assert out["is_etf"] is True
+    assert out["displayable"] is True
+    assert out["execution_ready"] is True
     assert out["publishable"] is True
     assert out["metrics"]["effective_ratio_basis"] == "account_total_capital"
     assert abs(out["metrics"]["account_total_capital"] - 3000000.0) < 1e-9
@@ -173,7 +248,10 @@ def test_compute_etf_option_delta_cash_missing_iv_has_gap_message():
     assert out["is_etf"] is True
     assert "数据缺口" in out["report"]
     assert any("缺现价或IV" in str(x.get("missing_reason", "")) for x in out["legs"])
+    assert out["displayable"] is False
+    assert out["execution_ready"] is False
     assert out["publishable"] is False
+    assert out["coverage_tier"] == "gap"
     assert any("IV" in x for x in out["blocking_missing_notes"])
 
 
@@ -224,3 +302,374 @@ def test_compute_etf_option_delta_cash_missing_option_latest_price_not_publishab
     assert out["is_etf"] is True
     assert out["publishable"] is False
     assert any("最新收盘数据" in x for x in out["blocking_missing_notes"])
+
+
+def test_compute_option_delta_cash_supports_index_option():
+    out = odt.compute_option_delta_cash(
+        user_query="IO 4月4000认购买方2张，怎么调？",
+        symbol_hint="IO",
+        trend_signal="看涨",
+        risk_preference="稳健型",
+        loader=_FakeIndexLoader(with_iv=True),
+        as_of_date="20260412",
+    )
+    assert out["asset_class"] == "index"
+    assert out["displayable"] is True
+    assert out["execution_ready"] is True
+    assert out["publishable"] is True
+    assert out["metrics"]["coverage_ratio"] == 1.0
+    assert out["legs"][0]["multiplier"] == 100.0
+    assert "标的类别: `index`" in out["report"]
+
+
+def test_compute_option_delta_cash_from_structured_legs():
+    out = odt.compute_option_delta_cash_from_legs(
+        legs=[
+            {"underlying_hint": "159915.SZ", "month": 4, "strike": 3.2, "cp": "call", "side": "long", "qty": 23},
+            {"underlying_hint": "159915.SZ", "month": 4, "strike": 3.3, "cp": "call", "side": "short", "qty": 50},
+        ],
+        trend_signal="看涨",
+        risk_preference="稳健型",
+        loader=_FakeLoader(with_iv=True),
+        as_of_date="20260412",
+    )
+    assert out["is_etf"] is True
+    assert len(out["legs"]) == 2
+    assert out["displayable"] is True
+    assert out["execution_ready"] is True
+    assert out["publishable"] is True
+    assert "Total Delta Cash" in out["report"]
+
+
+def test_compute_option_delta_cash_index_missing_iv_not_publishable():
+    out = odt.compute_option_delta_cash(
+        user_query="IO 4月4000认购买方2张，怎么调？",
+        symbol_hint="IO",
+        trend_signal="震荡",
+        risk_preference="稳健型",
+        loader=_FakeIndexLoader(with_iv=False),
+        as_of_date="20260412",
+    )
+    assert out["asset_class"] == "index"
+    assert out["displayable"] is False
+    assert out["execution_ready"] is False
+    assert out["publishable"] is False
+    assert any("IV" in x for x in out["blocking_missing_notes"])
+
+
+def test_compute_option_delta_cash_supports_contract_code_only_leg():
+    out = odt.compute_option_delta_cash(
+        user_query="请分析我上传的期权持仓",
+        symbol_hint="",
+        vision_legs=[
+            {"contract_code": "IO2404-C-4000", "qty": 2, "side": "long"},
+        ],
+        vision_domain="option",
+        trend_signal="看涨",
+        risk_preference="稳健型",
+        loader=_FakeIndexLoader(with_iv=True),
+        as_of_date="20260412",
+    )
+    assert out["asset_class"] == "index"
+    assert out["displayable"] is True
+    assert out["execution_ready"] is True
+    assert out["publishable"] is True
+    assert len(out["legs"]) == 1
+    assert out["legs"][0]["ts_code"] == "IO2404-C-4000"
+
+
+def test_get_contract_by_ts_code_uses_matched_suffix_for_price_query():
+    loader = odt.ETFOptionMarketLoader(engine=object())
+    seen_params = []
+
+    def _fake_read_sql(sql, engine, params=None):
+        params = params or {}
+        seen_params.append(dict(params))
+        sql_text = str(sql)
+        if "FROM option_basic" in sql_text:
+            if params.get("ts_code") == "90007162.SH":
+                return pd.DataFrame(
+                    [
+                        {
+                            "ts_code": "90007162.SH",
+                            "underlying": "159915.SZ",
+                            "call_put": "C",
+                            "exercise_price": 3.4,
+                            "delist_date": "20260424",
+                        }
+                    ]
+                )
+            return pd.DataFrame()
+        if "FROM option_daily" in sql_text:
+            if params.get("ts_code") == "90007162.SH":
+                return pd.DataFrame([{"trade_date": "20260412", "close": 0.12, "vol": 100, "oi": 1000}])
+            return pd.DataFrame()
+        return pd.DataFrame()
+
+    with patch.object(odt.pd, "read_sql", side_effect=_fake_read_sql):
+        out = loader.get_contract_by_ts_code("90007162", as_of_yyyymmdd="20260412")
+
+    assert out["status"] == "ok"
+    assert out["ts_code"] == "90007162.SH"
+    # 关键断言：价格查询使用了补全后的后缀代码，而不是原始裸码。
+    assert any(p.get("ts_code") == "90007162.SH" for p in seen_params)
+
+
+def test_compute_option_delta_cash_multi_underlying_returns_per_underlying_and_portfolio():
+    class _MultiLoader:
+        def get_underlying_spot(self, underlying_code):
+            if underlying_code == "510050.SH":
+                return {"ts_code": underlying_code, "trade_date": "20260412", "close_price": 3.02}
+            if underlying_code == "159915.SZ":
+                return {"ts_code": underlying_code, "trade_date": "20260412", "close_price": 3.437}
+            return None
+
+        def get_latest_iv(self, underlying_code):
+            if underlying_code == "510050.SH":
+                return {"etf_code": underlying_code, "trade_date": "20260412", "iv": 18.0}
+            if underlying_code == "159915.SZ":
+                return {"etf_code": underlying_code, "trade_date": "20260412", "iv": 22.0}
+            return None
+
+        def find_option_contract(self, underlying_code, option_flag, strike, month, as_of_yyyymmdd):
+            if underlying_code == "510050.SH":
+                return {
+                    "status": "ok",
+                    "ts_code": "10000001.SH",
+                    "delist_date": "20260424",
+                    "exercise_price": float(strike),
+                    "is_exact_strike": True,
+                    "trade_date": "20260412",
+                    "close": 0.130,
+                    "vol": 1500,
+                    "oi": 16000,
+                }
+            if underlying_code == "159915.SZ":
+                return {
+                    "status": "ok",
+                    "ts_code": "90007162.SH",
+                    "delist_date": "20260424",
+                    "exercise_price": float(strike),
+                    "is_exact_strike": True,
+                    "trade_date": "20260412",
+                    "close": 0.1228,
+                    "vol": 1200,
+                    "oi": 18000,
+                }
+            return None
+
+    out = odt.compute_option_delta_cash(
+        user_query="请分析上传截图",
+        symbol_hint="",
+        vision_legs=[
+            {"underlying_hint": "510050.SH", "month": 4, "strike": 3.0, "cp": "call", "side": "long", "qty": 2},
+            {"underlying_hint": "159915.SZ", "month": 4, "strike": 3.4, "cp": "call", "side": "short", "qty": 10},
+        ],
+        trend_signal="看涨",
+        trend_map={"510050.SH": "震荡", "159915.SZ": "看涨"},
+        risk_preference="稳健型",
+        loader=_MultiLoader(),
+        as_of_date="20260412",
+    )
+    assert out["displayable"] is True
+    assert out["execution_ready"] is True
+    assert out["publishable"] is True
+    assert out["asset_class"] == "multi"
+    assert set((out.get("per_underlying") or {}).keys()) == {"510050.SH", "159915.SZ"}
+    assert "portfolio_summary" in out
+    assert "risk_contribution_ranking" in out
+    assert "#### 调仓优先队列（风险贡献最大腿优先）" in out["report"]
+    assert "组合 Total Delta Cash" in out["report"]
+
+
+def test_compute_option_delta_cash_multi_underlying_partial_gap_displayable_but_not_execution_ready():
+    class _PartialGapLoader:
+        def get_underlying_spot(self, underlying_code):
+            mapping = {
+                "510050.SH": {"ts_code": "510050.SH", "trade_date": "20260412", "close_price": 3.02},
+                "159915.SZ": {"ts_code": "159915.SZ", "trade_date": "20260412", "close_price": 3.437},
+            }
+            return mapping.get(underlying_code)
+
+        def get_latest_iv(self, underlying_code):
+            if underlying_code == "510050.SH":
+                return {"etf_code": "510050.SH", "trade_date": "20260412", "iv": 18.0}
+            if underlying_code == "159915.SZ":
+                return None
+            return None
+
+        def find_option_contract(self, underlying_code, option_flag, strike, month, as_of_yyyymmdd):
+            return {
+                "status": "ok",
+                "ts_code": f"{underlying_code}-C",
+                "delist_date": "20260424",
+                "exercise_price": float(strike),
+                "is_exact_strike": True,
+                "trade_date": "20260412",
+                "close": 0.100,
+                "vol": 1500,
+                "oi": 16000,
+            }
+
+    out = odt.compute_option_delta_cash(
+        user_query="请分析上传截图",
+        symbol_hint="",
+        vision_legs=[
+            {"underlying_hint": "510050.SH", "month": 4, "strike": 3.0, "cp": "call", "side": "long", "qty": 2},
+            {"underlying_hint": "159915.SZ", "month": 4, "strike": 3.4, "cp": "call", "side": "short", "qty": 10},
+        ],
+        trend_signal="看涨",
+        risk_preference="稳健型",
+        loader=_PartialGapLoader(),
+        as_of_date="20260412",
+    )
+    assert out["displayable"] is True
+    assert out["execution_ready"] is False
+    assert out["publishable"] is False
+    assert out["coverage_tier"] == "partial"
+    assert any("159915.SZ" in x for x in out["missing_notes"])
+    assert "覆盖层级: `partial`" in out["report"]
+    assert "暂不输出金额级调整量" in out["report"]
+
+
+def test_compute_option_delta_cash_multi_risk_contribution_priority_not_bias_small_leg():
+    class _RankLoader:
+        def get_underlying_spot(self, underlying_code):
+            mapping = {
+                "510500.SH": {"ts_code": "510500.SH", "trade_date": "20260412", "close_price": 8.0},
+                "159915.SZ": {"ts_code": "159915.SZ", "trade_date": "20260412", "close_price": 3.4},
+            }
+            return mapping.get(underlying_code)
+
+        def get_latest_iv(self, underlying_code):
+            return {"etf_code": underlying_code, "trade_date": "20260412", "iv": 20.0}
+
+        def find_option_contract(self, underlying_code, option_flag, strike, month, as_of_yyyymmdd):
+            return {
+                "status": "ok",
+                "ts_code": f"{underlying_code}-{option_flag}",
+                "delist_date": "20260424",
+                "exercise_price": float(strike),
+                "is_exact_strike": True,
+                "trade_date": "20260412",
+                "close": 0.1,
+                "vol": 2000,
+                "oi": 20000,
+            }
+
+    out = odt.compute_option_delta_cash(
+        user_query="请分析上传截图",
+        symbol_hint="",
+        vision_legs=[
+            {"underlying_hint": "510500.SH", "month": 4, "strike": 8.0, "cp": "call", "side": "short", "qty": 50},
+            {"underlying_hint": "159915.SZ", "month": 4, "strike": 3.4, "cp": "call", "side": "short", "qty": 2},
+        ],
+        trend_signal="看涨",
+        trend_map={"510500.SH": "看涨", "159915.SZ": "震荡"},
+        risk_preference="稳健型",
+        loader=_RankLoader(),
+        as_of_date="20260412",
+    )
+    ranking = out.get("risk_contribution_ranking") or []
+    assert ranking
+    assert ranking[0]["underlying_code"] == "510500.SH"
+
+
+def test_compute_option_delta_cash_normalizes_contract_code_ss_suffix():
+    class _CodeNormLoader(_FakeIndexLoader):
+        def get_contract_by_ts_code(self, ts_code, as_of_yyyymmdd):
+            assert ts_code == "90007162.SH"
+            return {
+                "status": "ok",
+                "ts_code": "90007162.SH",
+                "underlying": "159915.SZ",
+                "call_put": "C",
+                "exercise_price": 3.4,
+                "delist_date": "20260424",
+                "trade_date": "20260412",
+                "close": 0.1228,
+                "vol": 100,
+                "oi": 1000,
+            }
+
+        def get_underlying_spot(self, underlying_code):
+            return {"ts_code": underlying_code, "trade_date": "20260412", "close_price": 3.437}
+
+        def get_latest_iv(self, underlying_code):
+            return {"etf_code": underlying_code, "trade_date": "20260412", "iv": 22.0}
+
+        def find_option_contract(self, underlying_code, option_flag, strike, month, as_of_yyyymmdd):
+            return {
+                "status": "ok",
+                "ts_code": "90007162.SH",
+                "delist_date": "20260424",
+                "exercise_price": 3.4,
+                "is_exact_strike": True,
+                "trade_date": "20260412",
+                "close": 0.1228,
+                "vol": 100,
+                "oi": 1000,
+            }
+
+    out = odt.compute_option_delta_cash(
+        user_query="请分析上传期权持仓",
+        symbol_hint="",
+        vision_legs=[{"contract_code": "90007162.SS", "qty": 10, "side": "short", "cp": "call", "strike": 3.4, "month": 4, "underlying_hint": "159915.SZ"}],
+        vision_domain="option",
+        trend_signal="看涨",
+        risk_preference="稳健型",
+        loader=_CodeNormLoader(with_iv=True),
+        as_of_date="20260412",
+    )
+    assert out["displayable"] is True
+    assert out["execution_ready"] is True
+    assert out["publishable"] is True
+    assert len(out["legs"]) == 1
+    assert out["legs"][0]["ts_code"] == "90007162.SH"
+
+
+def test_classify_delta_coverage_tiers():
+    gap = odt._classify_delta_coverage(coverage_ratio=0.0, has_legs=True)  # noqa: SLF001
+    partial = odt._classify_delta_coverage(coverage_ratio=0.59, has_legs=True)  # noqa: SLF001
+    full = odt._classify_delta_coverage(coverage_ratio=0.60, has_legs=True)  # noqa: SLF001
+    assert gap == {"coverage_tier": "gap", "displayable": False, "execution_ready": False}
+    assert partial == {"coverage_tier": "partial", "displayable": True, "execution_ready": False}
+    assert full == {"coverage_tier": "full", "displayable": True, "execution_ready": True}
+
+
+def test_fetch_underlying_spot_map_returns_multi_underlying_quotes():
+    class _SpotLoader:
+        def get_underlying_spot(self, underlying_code):
+            mapping = {
+                "510500.SH": {"ts_code": "510500.SH", "trade_date": "20260415", "close_price": 8.111},
+                "159915.SZ": {"ts_code": "159915.SZ", "trade_date": "20260415", "close_price": 3.542},
+                "000300.SH": {"ts_code": "000300.SH", "trade_date": "20260415", "close_price": 4012.20},
+            }
+            return mapping.get(underlying_code)
+
+    out = odt.fetch_underlying_spot_map(
+        underlyings=["510500", "159915.SZ", "IO"],
+        loader=_SpotLoader(),
+    )
+    assert set(out.keys()) == {"510500.SH", "159915.SZ", "000300.SH"}
+    assert out["510500.SH"]["close_price"] == 8.111
+    assert out["159915.SZ"]["trade_date"] == "20260415"
+    assert out["000300.SH"]["source"] == "index_price"
+    assert out["000300.SH"]["missing"] is False
+
+
+def test_fetch_underlying_spot_map_marks_missing_without_guess():
+    class _SpotLoader:
+        def get_underlying_spot(self, underlying_code):
+            if underlying_code == "510500.SH":
+                return {"ts_code": "510500.SH", "trade_date": "20260415", "close_price": 8.111}
+            return None
+
+    out = odt.fetch_underlying_spot_map(
+        underlyings=["510500.SH", "159915.SZ"],
+        loader=_SpotLoader(),
+    )
+    assert out["510500.SH"]["missing"] is False
+    assert out["159915.SZ"]["missing"] is True
+    assert out["159915.SZ"]["close_price"] is None
+    assert "missing_reason" in out["159915.SZ"]
