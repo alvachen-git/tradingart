@@ -195,7 +195,7 @@ def render_sidebar_footer_menu(
             position: sticky;
             bottom: 0;
             margin-top: 8px;
-            padding-top: 6px;
+            padding: 6px 0 0;
             z-index: 40;
             background: linear-gradient(180deg, rgba(7, 15, 30, 0.0) 0%, rgba(7, 15, 30, 0.78) 40%);
         }
@@ -234,7 +234,23 @@ def render_sidebar_footer_menu(
             padding-bottom: 2px;
         }
 
+        @keyframes footerMenuFadeUpIn {
+            from {
+                opacity: 0;
+                translate: 0 8px;
+            }
+            to {
+                opacity: 1;
+                translate: 0 0;
+            }
+        }
+
         div[data-baseweb="popover"]:has(.footer-menu-anchor) {
+            --footer-menu-row-height: 44px;
+            --footer-menu-row-radius: 8px;
+            --footer-menu-row-px: 10px;
+            --footer-menu-font-size: 16px;
+            --footer-menu-font-weight: 600;
             min-width: 232px !important;
             max-width: 232px !important;
             border: 1px solid rgba(188, 204, 230, 0.88) !important;
@@ -242,30 +258,37 @@ def render_sidebar_footer_menu(
             box-shadow: 0 10px 20px rgba(2, 8, 20, 0.2), inset 0 1px 0 rgba(255, 255, 255, 0.9) !important;
             border-radius: 14px !important;
             padding: 8px !important;
+            animation: footerMenuFadeUpIn 200ms cubic-bezier(0.22, 1, 0.36, 1) both;
+            will-change: translate, opacity;
+            overflow: visible !important;
         }
         div[data-baseweb="popover"]:has(.footer-menu-anchor) .element-container {
             margin: 0 !important;
             padding: 0 !important;
+            overflow: visible !important;
         }
         div[data-baseweb="popover"]:has(.footer-menu-anchor) .stButton > button,
         div[data-baseweb="popover"]:has(.footer-menu-anchor) button,
         div[data-baseweb="popover"]:has(.footer-menu-anchor) a,
         div[data-baseweb="popover"]:has(.footer-menu-anchor) a * {
-            min-height: 36px !important;
+            min-height: var(--footer-menu-row-height) !important;
+            height: var(--footer-menu-row-height) !important;
             line-height: 1 !important;
             border: none !important;
-            border-radius: 8px !important;
+            border-radius: var(--footer-menu-row-radius) !important;
             background: transparent !important;
             color: #12335f !important;
-            font-size: 16px !important;
-            font-weight: 600 !important;
+            font-size: var(--footer-menu-font-size) !important;
+            font-weight: var(--footer-menu-font-weight) !important;
             justify-content: flex-start !important;
-            padding: 0 8px !important;
+            align-items: center !important;
+            padding: 0 var(--footer-menu-row-px) !important;
             box-shadow: none !important;
             transform: none !important;
             opacity: 1 !important;
             -webkit-text-fill-color: #12335f !important;
             text-decoration: none !important;
+            letter-spacing: 0 !important;
         }
         div[data-baseweb="popover"]:has(.footer-menu-anchor) .stButton > button:hover,
         div[data-baseweb="popover"]:has(.footer-menu-anchor) .stButton > button:focus,
@@ -278,23 +301,103 @@ def render_sidebar_footer_menu(
             outline: none !important;
             transform: none !important;
         }
+        div[data-baseweb="popover"]:has(.footer-menu-anchor) .stButton > button > div,
+        div[data-baseweb="popover"]:has(.footer-menu-anchor) .stButton > button span {
+            font-size: var(--footer-menu-font-size) !important;
+            font-weight: var(--footer-menu-font-weight) !important;
+            letter-spacing: 0 !important;
+            line-height: 1 !important;
+            display: flex !important;
+            align-items: center !important;
+        }
+        div[data-baseweb="popover"]:has(.footer-menu-anchor) .stButton > button p,
+        div[data-baseweb="popover"]:has(.footer-menu-anchor) .stButton > button div[data-testid="stMarkdownContainer"] p {
+            margin: 0 !important;
+            padding: 0 !important;
+            font-size: var(--footer-menu-font-size) !important;
+            font-weight: var(--footer-menu-font-weight) !important;
+            line-height: 1 !important;
+        }
         div[data-baseweb="popover"]:has(.footer-menu-anchor) .footer-menu-divider {
             height: 1px;
             margin: 0;
             background: rgba(145, 168, 205, 0.34);
         }
-        div[data-baseweb="popover"]:has(.footer-menu-anchor) .footer-contact-box {
-            padding: 8px;
-            border-radius: 8px;
-            font-size: 13px;
-            font-weight: 600;
-            line-height: 1.6;
-            color: #0f3f8a;
-            background: rgba(108, 144, 202, 0.2);
-            margin: 4px 0;
+        div[data-baseweb="popover"]:has(.footer-menu-anchor) .footer-contact-hover-wrap,
+        div[data-baseweb="popover"]:has(.footer-menu-anchor) .footer-miniapp-hover-wrap {
+            position: relative;
+            overflow: visible;
         }
-        div[data-baseweb="popover"]:has(.footer-menu-anchor) .footer-logout-row + div .stButton > button {
-            color: #7f2d3f !important;
+        div[data-baseweb="popover"]:has(.footer-menu-anchor) .footer-contact-trigger,
+        div[data-baseweb="popover"]:has(.footer-menu-anchor) .footer-miniapp-trigger {
+            box-sizing: border-box;
+            min-height: var(--footer-menu-row-height);
+            height: var(--footer-menu-row-height);
+            border-radius: var(--footer-menu-row-radius);
+            display: flex;
+            align-items: center;
+            justify-content: flex-start;
+            padding: 0 var(--footer-menu-row-px);
+            color: #12335f;
+            font-size: var(--footer-menu-font-size);
+            font-weight: var(--footer-menu-font-weight);
+            line-height: 1;
+            letter-spacing: 0;
+            user-select: none;
+            cursor: default;
+        }
+        div[data-baseweb="popover"]:has(.footer-menu-anchor) .footer-contact-hover-wrap:hover .footer-contact-trigger,
+        div[data-baseweb="popover"]:has(.footer-menu-anchor) .footer-miniapp-hover-wrap:hover .footer-miniapp-trigger {
+            background: rgba(74, 126, 207, 0.12);
+            color: #0f3f8a;
+        }
+        div[data-baseweb="popover"]:has(.footer-menu-anchor) .footer-contact-flyout,
+        div[data-baseweb="popover"]:has(.footer-menu-anchor) .footer-miniapp-flyout {
+            position: absolute;
+            left: calc(100% + 10px);
+            top: -10px;
+            width: 210px;
+            border: 1px solid rgba(188, 204, 230, 0.88);
+            border-radius: 12px;
+            background: linear-gradient(165deg, rgba(246, 250, 255, 0.99), rgba(236, 244, 255, 0.98));
+            box-shadow: 0 12px 24px rgba(2, 8, 20, 0.22);
+            padding: 10px;
+            opacity: 0;
+            visibility: hidden;
+            pointer-events: none;
+            translate: 6px 0;
+            transition: opacity 140ms ease, translate 200ms ease, visibility 0s linear 140ms;
+            z-index: 9999;
+        }
+        div[data-baseweb="popover"]:has(.footer-menu-anchor) .footer-contact-hover-wrap:hover .footer-contact-flyout,
+        div[data-baseweb="popover"]:has(.footer-menu-anchor) .footer-contact-hover-wrap:focus-within .footer-contact-flyout,
+        div[data-baseweb="popover"]:has(.footer-menu-anchor) .footer-miniapp-hover-wrap:hover .footer-miniapp-flyout,
+        div[data-baseweb="popover"]:has(.footer-menu-anchor) .footer-miniapp-hover-wrap:focus-within .footer-miniapp-flyout {
+            opacity: 1;
+            visibility: visible;
+            pointer-events: auto;
+            translate: 0 0;
+            transition-delay: 0s;
+        }
+        div[data-baseweb="popover"]:has(.footer-menu-anchor) .footer-contact-title {
+            color: #12335f;
+            font-size: 14px;
+            font-weight: 700;
+            margin-bottom: 6px;
+        }
+        div[data-baseweb="popover"]:has(.footer-menu-anchor) .footer-contact-line {
+            color: #355781;
+            font-size: 13px;
+            line-height: 1.5;
+        }
+        div[data-baseweb="popover"]:has(.footer-menu-anchor) .footer-contact-qr {
+            width: 132px;
+            height: 132px;
+            object-fit: cover;
+            display: block;
+            margin: 8px auto 2px;
+            border-radius: 8px;
+            border: 1px solid rgba(145, 168, 205, 0.45);
         }
         </style>
         """,
@@ -314,18 +417,42 @@ def render_sidebar_footer_menu(
             if st.button("充值中心", key=f"btn_footer_recharge_{page_key}", use_container_width=True):
                 _safe_switch_page("pages/17_充值中心.py")
             st.markdown('<div class="footer-menu-divider"></div>', unsafe_allow_html=True)
-            with st.popover("联系客服", use_container_width=True):
-                st.markdown(
-                    """
-                    <div class="footer-contact-box">
-                        微信：trader-sec<br>
-                        电话：17521591756
+            st.markdown(
+                """
+                <div class="footer-contact-hover-wrap">
+                    <div class="footer-contact-trigger">联系客服</div>
+                    <div class="footer-contact-flyout">
+                        <div class="footer-contact-title">客服联系方式</div>
+                        <div class="footer-contact-line">微信：trader-sec</div>
+                        <div class="footer-contact-line">电话：17521591756</div>
+                        <img
+                            class="footer-contact-qr"
+                            src="https://aiprota-img.oss-cn-beijing.aliyuncs.com/QQ%E6%88%AA%E5%9B%BE20231211171619.png"
+                            alt="客服二维码"
+                        />
                     </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
             st.markdown('<div class="footer-menu-divider"></div>', unsafe_allow_html=True)
-            st.markdown('<div class="footer-logout-row"></div>', unsafe_allow_html=True)
+            st.markdown(
+                """
+                <div class="footer-miniapp-hover-wrap">
+                    <div class="footer-miniapp-trigger">小程序</div>
+                    <div class="footer-miniapp-flyout">
+                        <div class="footer-contact-title">爱波塔小程序</div>
+                        <img
+                            class="footer-contact-qr"
+                            src="https://aiprota-img.oss-cn-beijing.aliyuncs.com/4768.JPG"
+                            alt="爱波塔小程序二维码"
+                        />
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+            st.markdown('<div class="footer-menu-divider"></div>', unsafe_allow_html=True)
             if st.button("登出", key=f"btn_footer_logout_{page_key}", use_container_width=True):
                 if callable(on_logout):
                     on_logout()
@@ -335,7 +462,7 @@ def render_sidebar_footer_menu(
                     st.session_state["token"] = None
                     st.rerun()
 
-        st.markdown('<div class="sidebar-filing-text">备案：沪ICP备2021018087号-2</div>', unsafe_allow_html=True)
+        st.markdown('<div class="sidebar-filing-text">沪ICP备2021018087号-2</div>', unsafe_allow_html=True)
 
     if st.session_state.get(invite_open_key, False):
         st.session_state[invite_open_key] = False
