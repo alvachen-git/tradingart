@@ -27,6 +27,7 @@ import uuid #用于生成唯一ID
 import base64
 from market_tools import get_market_snapshot,tool_query_specific_option
 from ui_components import inject_sidebar_toggle_style
+from sidebar_footer_menu import render_sidebar_footer_menu
 from sqlalchemy import text
 from dotenv import load_dotenv
 from pathlib import Path
@@ -46,6 +47,11 @@ try:
     from deep_task_manager import DeepTaskManager
 except Exception:
     DeepTaskManager = None
+
+try:
+    import invite_service as invite_svc
+except Exception:
+    invite_svc = None
 
 ENABLE_DEEP_MODE = False  # deep 模块开发中，首页先回退为普通模式
 
@@ -963,6 +969,17 @@ if "home_masked_email_user" not in st.session_state:
     st.session_state.home_masked_email_user = ""
 if "home_masked_email_value" not in st.session_state:
     st.session_state.home_masked_email_value = ""
+if "home_invite_code" not in st.session_state:
+    st.session_state.home_invite_code = ""
+try:
+    qp_invite = st.query_params.get("invite", "")
+    if isinstance(qp_invite, list):
+        qp_invite = qp_invite[0] if qp_invite else ""
+    qp_invite = "".join(ch for ch in str(qp_invite or "").strip() if ch.isalnum())[:64]
+    if qp_invite:
+        st.session_state.home_invite_code = qp_invite
+except Exception:
+    pass
 
 
 def _restore_login_with_cookie_state(cookies: dict):
@@ -1049,6 +1066,38 @@ def _ensure_auth_verified_for_protected_action() -> bool:
         pass
     st.warning("登录状态已过期，请重新登录。")
     return False
+
+
+def _extract_client_ip_and_device_fingerprint() -> tuple[str, str]:
+    ip = ""
+    device = ""
+    try:
+        headers = dict(st.context.headers or {})
+    except Exception:
+        headers = {}
+    try:
+        ip = str(getattr(st.context, "ip_address", "") or "").strip()
+    except Exception:
+        ip = ""
+    if not ip:
+        xff = str(headers.get("X-Forwarded-For") or headers.get("x-forwarded-for") or "").strip()
+        if xff:
+            ip = xff.split(",")[0].strip()
+    device = str(headers.get("User-Agent") or headers.get("user-agent") or "").strip()
+    return ip, device
+
+
+def _resolve_base_url_from_request() -> str:
+    try:
+        headers = dict(st.context.headers or {})
+    except Exception:
+        headers = {}
+    proto = str(headers.get("X-Forwarded-Proto") or headers.get("x-forwarded-proto") or "https").strip()
+    host = str(headers.get("Host") or headers.get("host") or "").strip()
+    if host:
+        return f"{proto}://{host}"
+    return "https://www.aiprota.com"
+
 
 # 🔥 [关键修复] 在任何 rerun 之前，先读取公告状态并保存到 session_state
 # 这样即使后面触发 rerun，公告状态也不会丢失
@@ -2202,10 +2251,14 @@ with st.sidebar:
                         final_username = st.session_state.get("reg_step1_username", "")
                         final_password = st.session_state.get("reg_step1_password", "")
                         final_phone = st.session_state.get("reg_verified_phone", "")
+                        register_ip, device_fingerprint = _extract_client_ip_and_device_fingerprint()
                         success, msg = auth.register_with_username_phone(
                             final_username,
                             final_password,
                             final_phone,
+                            invite_code=st.session_state.get("home_invite_code", ""),
+                            register_ip=register_ip,
+                            device_fingerprint=device_fingerprint,
                         )
                         if success:
                             st.success(msg if msg else "注册成功")
@@ -2288,15 +2341,6 @@ with st.sidebar:
     else:
         # --- B. 已登录状态 ---
         user = st.session_state['user_id']
-        st.success(f"👤 欢迎回来，{user}")
-
-        # 显示邮箱绑定状态
-        if user != "访客":
-            masked_email = _get_cached_masked_email(user)
-            if masked_email:
-                st.caption(f"📧 {masked_email}")
-            else:
-                st.caption("📧 未绑定邮箱 [去个人资料绑定]")
 
 
         # 🔥 登出回调函数
@@ -2342,63 +2386,38 @@ with st.sidebar:
             if 'token' in st.session_state:
                 del st.session_state['token']
 
-
-        # 登出按钮
-        st.button("🚪 登出", type="primary", use_container_width=True, on_click=do_logout)
-
-        # 清空对话历史（使用 popover 防误触）
+        # 清空对话历史：放在用户菜单上方，避免沉到最底部
         with st.popover("🗑️ 清空对话历史", use_container_width=True):
             st.markdown("⚠️ **确定要删除所有聊天记录吗？**\n\n此操作无法撤销。")
             if st.button("🚨 确认删除", type="primary", use_container_width=True, key="btn_clear_chat"):
                 st.session_state.messages = []
                 st.session_state.conversation_id = str(uuid.uuid4())
-                # 🔥 [修改] 清空上传的图片，通过增加 key 计数器实现
                 st.session_state.uploader_key += 1
                 st.rerun()
 
-    # 客服卡片 CSS 样式
-    st.markdown("""
-        <style>
-            .contact-card {
-                background-color: #1E2329;
-                border: 1px solid #31333F;
-                border-radius: 8px;
-                padding: 15px;
-                margin-top: 10px;
-                text-align: center;
-            }
-            .contact-title {
-                font-size: 14px;
-                font-weight: bold;
-                color: #e6e6e6;
-                margin-bottom: 8px;
-            }
-            .contact-item {
-                font-size: 13px;
-                color: #8b949e;
-                margin-bottom: 4px;
-            }
-            .wechat-highlight {
-                color: #00e676; /* 微信绿 */
-                font-weight: bold;
-            }
-        </style>
+        invite_code = ""
+        invite_stats = {"invited_count": 0, "rewarded_points": 0}
+        invite_preview_mode = True
+        if invite_svc is not None and user != "访客":
+            try:
+                invite_code = invite_svc.get_or_create_invite_code(user)
+                invite_stats = invite_svc.get_invite_stats(user)
+                invite_preview_mode = False
+            except Exception as e:
+                print(f"[invite] sidebar fetch failed: {e}")
 
-        <div class="contact-card">
-            <div class="contact-title">🤝 客服联系</div>
-            <div class="contact-item">微信：<span class="wechat-highlight">trader-sec</span></div>
-            <div class="contact-item">电话：<span class="wechat-highlight">17521591756</span></div>
-            <div class="contact-item" style="font-size: 12px; margin-top: 8px;">
-                沪ICP备2021018087号-2
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
-    st.markdown("---")
-    st.caption("""
-        AI期权策略建议 | 股票K线形态选股 | 
-        期权波动率分析 | 持仓对冲建议 |
-        期权知识学习
-        """)
+        render_sidebar_footer_menu(
+            page="home",
+            user_id=user,
+            is_logged_in=True,
+            on_logout=do_logout,
+            show_invite_entry=False,
+            base_url=_resolve_base_url_from_request(),
+            invite_code=invite_code,
+            invite_stats=invite_stats,
+            invite_preview_mode=invite_preview_mode,
+            reward_points=300,
+        )
 # 只在用户登录后显示公告
 if st.session_state.get('is_logged_in', False) and ENABLE_HOME_ANNOUNCEMENT:
     check_and_show_announcement()

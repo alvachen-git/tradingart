@@ -1,11 +1,19 @@
 ﻿from datetime import datetime
 
 import streamlit as st
+import extra_streamlit_components as stx
 
+import auth_utils as auth
 import payment_service as pay_svc
 import subscription_service as sub_svc
 from sidebar_navigation import show_navigation
+from sidebar_footer_menu import render_sidebar_footer_menu
 from ui_components import inject_sidebar_toggle_style
+
+try:
+    import invite_service as invite_svc
+except Exception:
+    invite_svc = None
 
 
 st.set_page_config(page_title="爱波塔-充值中心", page_icon="💳", layout="wide")
@@ -22,56 +30,52 @@ if not user_id:
     st.page_link("Home.py", label="返回首页登录")
     st.stop()
 
+
 with st.sidebar:
     show_navigation()
-    st.markdown("---")
-    st.markdown(
-        """
-        <style>
-            .contact-card {
-                background-color: #1E2329;
-                border: 1px solid #31333F;
-                border-radius: 8px;
-                padding: 15px;
-                margin-top: 10px;
-                text-align: center;
-            }
-            .contact-title {
-                font-size: 14px;
-                font-weight: bold;
-                color: #e6e6e6;
-                margin-bottom: 8px;
-            }
-            .contact-item {
-                font-size: 13px;
-                color: #8b949e;
-                margin-bottom: 4px;
-            }
-            .wechat-highlight {
-                color: #00e676;
-                font-weight: bold;
-            }
-            .contact-qr {
-                width: 120px;
-                max-width: 100%;
-                border-radius: 10px;
-                margin: 12px auto 8px;
-                display: block;
-            }
-        </style>
+    cookie_manager = stx.CookieManager(key="recharge_cookie_manager")
 
-        <div class="contact-card">
-            <div class="contact-title">🤝 客服联系</div>
-            <div class="contact-item">微信：<span class="wechat-highlight">trader-sec</span></div>
-            <div class="contact-item">电话：<span class="wechat-highlight">17521591756</span></div>
-            <img src="https://aiprota-img.oss-cn-beijing.aliyuncs.com/jim.png" class="contact-qr">
-            <div class="contact-item">扫码添加客服</div>
-            <div class="contact-item" style="font-size: 12px; margin-top: 8px;">
-                沪ICP备2021018087号-2
-            </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
+    def _logout_from_recharge():
+        current_user = str(st.session_state.get("user_id") or "").strip()
+        current_token = str(st.session_state.get("token") or "").strip()
+        if current_user and current_user != "访客":
+            try:
+                auth.logout_user(current_user, current_token)
+            except Exception as e:
+                print(f"[recharge] logout_user failed: {e}")
+        try:
+            cookie_manager.delete("username", key="recharge_logout_del_user")
+            cookie_manager.delete("token", key="recharge_logout_del_token")
+        except Exception as e:
+            print(f"[recharge] clear cookie failed: {e}")
+
+        st.session_state["is_logged_in"] = False
+        st.session_state["user_id"] = None
+        st.session_state["token"] = None
+        st.session_state["just_logged_out"] = True
+        st.rerun()
+
+    invite_code = ""
+    invite_stats = {"invited_count": 0, "rewarded_points": 0}
+    invite_preview_mode = True
+    if invite_svc is not None and user_id != "访客":
+        try:
+            invite_code = invite_svc.get_or_create_invite_code(user_id)
+            invite_stats = invite_svc.get_invite_stats(user_id)
+            invite_preview_mode = False
+        except Exception as e:
+            print(f"[recharge][invite] fallback preview mode err={e}")
+
+    render_sidebar_footer_menu(
+        page="recharge",
+        user_id=user_id,
+        is_logged_in=True,
+        on_logout=_logout_from_recharge,
+        show_invite_entry=False,
+        invite_code=invite_code,
+        invite_stats=invite_stats,
+        invite_preview_mode=invite_preview_mode,
+        reward_points=300,
     )
 inject_sidebar_toggle_style(mode="high_contrast")
 

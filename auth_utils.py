@@ -336,7 +336,14 @@ def register_with_phone(phone: str, sms_code: str, username: str):
         return False, "注册失败，请稍后重试"
 
 
-def register_with_phone_password(phone: str, password: str, username: str):
+def register_with_phone_password(
+    phone: str,
+    password: str,
+    username: str,
+    invite_code: str | None = None,
+    register_ip: str | None = None,
+    device_fingerprint: str | None = None,
+):
     """Register by phone + password + username."""
     username = str(username or "").strip()
     password = str(password or "")
@@ -390,15 +397,50 @@ def register_with_phone_password(phone: str, password: str, username: str):
                 f"[auth][trial_grant] register_with_phone_password user={registered_username} "
                 f"status=failed reason={trial_msg}"
             )
+
+        # 邀请奖励为附加流程：失败不影响注册主链路。
+        try:
+            from invite_service import apply_invite_on_register
+
+            invite_result = apply_invite_on_register(
+                invitee_user_id=registered_username,
+                invite_code=invite_code,
+                register_ip=register_ip,
+                device_fingerprint=device_fingerprint,
+            )
+            if invite_result.get("applied") and invite_result.get("rewarded"):
+                print(
+                    f"[auth][invite] register user={registered_username} inviter={invite_result.get('inviter_user_id')} "
+                    f"reward={invite_result.get('reward_points')}"
+                )
+            elif invite_result.get("reason") not in {"missing_invite_code", "invalid_invite_code"}:
+                print(f"[auth][invite] register user={registered_username} result={invite_result}")
+        except Exception as invite_err:
+            print(f"[auth][invite] register user={registered_username} err={invite_err}")
+
         return True, f"注册成功，欢迎你：{registered_username}"
     except Exception as e:
         print(f"register_with_phone_password failed: {e}")
         return False, "注册失败，请稍后重试"
 
 
-def register_with_username_phone(username: str, password: str, phone: str):
+def register_with_username_phone(
+    username: str,
+    password: str,
+    phone: str,
+    invite_code: str | None = None,
+    register_ip: str | None = None,
+    device_fingerprint: str | None = None,
+):
     """Final step registration: username + password + verified phone."""
-    return register_with_phone_password(phone=phone, password=password, username=username)
+    return register_with_phone_password(
+        phone=phone,
+        password=password,
+        username=username,
+        invite_code=invite_code,
+        register_ip=register_ip,
+        device_fingerprint=device_fingerprint,
+    )
 
 
 def register_user(username, password):
