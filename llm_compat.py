@@ -7,25 +7,26 @@ from langchain_community.chat_models import ChatTongyi
 from langchain_core.messages import BaseMessage
 
 
-def is_qwen35_family(model_name: str | None) -> bool:
-    """Return True for qwen3.5 models that need multimodal endpoint routing."""
+def is_qwen_multimodal_family(model_name: str | None) -> bool:
+    """Return True for qwen3.5/qwen3.6 models that need multimodal endpoint routing."""
     if not model_name:
         return False
     m = str(model_name).lower()
-    return m.startswith("qwen3.5-")
+    return m.startswith("qwen3.5-") or m.startswith("qwen3.6-")
 
 
 class ChatTongyiCompat(ChatTongyi):
     """
-    Project-local compatibility adapter for qwen3.5-* models.
+    Project-local compatibility adapter for qwen3.5-* and qwen3.6-* models.
 
     Why:
     - Current langchain_community.ChatTongyi routes unknown qwen models to
       dashscope.Generation (text-generation endpoint).
-    - qwen3.5-plus works on dashscope.MultiModalConversation in the current SDK.
+    - qwen3.5-plus / qwen3.6-plus work on dashscope.MultiModalConversation in
+      the current SDK.
 
     This adapter:
-    1) Forces qwen3.5-* models to use MultiModalConversation client.
+    1) Forces qwen3.5-* and qwen3.6-* models to use MultiModalConversation client.
     2) Converts message content strings to multimodal text blocks.
     3) Normalizes multimodal list content in responses back to plain text for
        LangChain message objects.
@@ -33,7 +34,7 @@ class ChatTongyiCompat(ChatTongyi):
 
     def model_post_init(self, __context: Any) -> None:
         super().model_post_init(__context)
-        if is_qwen35_family(self.model_name):
+        if is_qwen_multimodal_family(self.model_name):
             try:
                 import dashscope
 
@@ -43,7 +44,7 @@ class ChatTongyiCompat(ChatTongyi):
                 )
             except Exception as e:
                 print(
-                    f"[LLMCompat] Failed to switch qwen3.5 client to MultiModalConversation: {e}"
+                    f"[LLMCompat] Failed to switch multimodal qwen client to MultiModalConversation: {e}"
                 )
 
     @property
@@ -51,7 +52,7 @@ class ChatTongyiCompat(ChatTongyi):
         params = dict(super()._default_params)
         # MultiModalConversation works without this; removing avoids endpoint-specific
         # parameter incompatibilities on some SDK versions.
-        if is_qwen35_family(self.model_name):
+        if is_qwen_multimodal_family(self.model_name):
             params.pop("result_format", None)
         return params
 
@@ -59,7 +60,7 @@ class ChatTongyiCompat(ChatTongyi):
         self, messages: List[BaseMessage], stop: Any, **kwargs: Any
     ) -> Dict[str, Any]:
         params = super()._invocation_params(messages=messages, stop=stop, **kwargs)
-        if not is_qwen35_family(self.model_name):
+        if not is_qwen_multimodal_family(self.model_name):
             return params
 
         params["messages"] = self._to_multimodal_messages(params.get("messages", []))
@@ -67,12 +68,12 @@ class ChatTongyiCompat(ChatTongyi):
 
     def completion_with_retry(self, **kwargs: Any) -> Any:
         resp = super().completion_with_retry(**kwargs)
-        if is_qwen35_family(self.model_name):
+        if is_qwen_multimodal_family(self.model_name):
             resp = self._normalize_multimodal_response(resp)
         return resp
 
     def stream_completion_with_retry(self, **kwargs: Any) -> Any:
-        if not is_qwen35_family(self.model_name):
+        if not is_qwen_multimodal_family(self.model_name):
             yield from super().stream_completion_with_retry(**kwargs)
             return
 

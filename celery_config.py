@@ -5,6 +5,27 @@ from dotenv import load_dotenv
 
 load_dotenv(override=True)
 
+
+def _configure_langsmith_tracing() -> None:
+    """
+    Default to disable LangSmith tracing for the main Celery worker.
+    Set ENABLE_LANGSMITH_TRACING=1 to opt in explicitly.
+    """
+    enabled = str(os.getenv("ENABLE_LANGSMITH_TRACING", "0")).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    if enabled:
+        return
+    os.environ["LANGCHAIN_TRACING_V2"] = "false"
+    os.environ["LANGSMITH_TRACING"] = "false"
+    os.environ["LANGCHAIN_CALLBACKS_BACKGROUND"] = "false"
+
+
+_configure_langsmith_tracing()
+
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 
 celery_app = Celery(

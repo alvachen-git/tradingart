@@ -670,8 +670,8 @@ def process_ai_query(
 
         # 初始化 LLM
         fast_llm = ChatTongyi(model="qwen-turbo", streaming=False, temperature=0.1)
-        mid_llm = ChatTongyi(model="qwen3.5-plus", streaming=False, temperature=0.2)
-        smart_llm = ChatTongyi(model="qwen-max", streaming=False, temperature=0.4)
+        mid_llm = ChatTongyi(model="qwen3.6-plus", streaming=False, temperature=0.2)
+        smart_llm = ChatTongyi(model="qwen3-max", streaming=False, temperature=0.4)
 
         self.update_state(state='PROCESSING', meta={'progress': '正在构建分析团队...'})
 

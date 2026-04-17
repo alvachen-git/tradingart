@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Probe whether the current environment supports qwen3.5-plus via:
+Probe whether the current environment supports qwen3.6-plus via:
 1) dashscope.Generation (text-generation endpoint)
 2) dashscope.MultiModalConversation (multimodal-generation endpoint)
 3) langchain_community ChatTongyi
@@ -86,7 +86,7 @@ def _read_text(path: str) -> str:
 
 
 def _print_header(args: argparse.Namespace) -> None:
-    print("=== Qwen3.5 Support Probe ===")
+    print("=== Qwen3.6 Support Probe ===")
     print(f"Python: {sys.executable}")
     print(f"CWD: {os.getcwd()}")
     print(f"Dotenv path: {LOADED_DOTENV_PATH}")
@@ -275,8 +275,8 @@ def print_results(results: list[ProbeResult]) -> int:
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Probe qwen3.5-plus support in dashscope / ChatTongyi")
-    p.add_argument("--model", default="qwen3.5-plus", help="Target model to probe")
+    p = argparse.ArgumentParser(description="Probe qwen3.6-plus support in dashscope / ChatTongyi")
+    p.add_argument("--model", default="qwen3.6-plus", help="Target model to probe")
     p.add_argument("--baseline-model", default="qwen-plus", help="Baseline model for comparison")
     p.add_argument("--include-baseline", action="store_true", help="Also probe baseline model online")
     p.add_argument("--online", action="store_true", help="Run real API calls (requires DASHSCOPE_API_KEY)")

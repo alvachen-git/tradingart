@@ -31,7 +31,7 @@ DEFAULT_LOT_SIZE = 100
 
 DEFAULT_CONFIG: Dict[str, Any] = {
     "portfolio_id": OFFICIAL_PORTFOLIO_ID,
-    "model_name": "qwen3.5-plus",
+    "model_name": "qwen3.6-plus",
     "tool_scope": "all",
     "execution_mode": "close_t0",
     "cost_model": "off",

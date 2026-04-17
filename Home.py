@@ -1289,14 +1289,14 @@ def get_agent(current_user="访客", user_query=""):
 
     # 2. ⚖️ 专才 (Plus): 性价比高、能力均衡 -> 用于技术分析、数据总结
     llm_plus = ChatTongyi(
-        model="qwen3.5-plus",
+        model="qwen3.6-plus",
         temperature=0.2,  # 稍微增加一点创造性
         api_key=api_key
     )
 
     # 3. 🧠 大脑 (Max): 最贵、逻辑最强 -> 用于期权策略、王牌分析、CIO总结
     llm_max = ChatTongyi(
-        model="qwen-max",
+        model="qwen3-max",
         temperature=0.4,
         api_key=api_key,
         request_timeout=300  # 复杂任务给多点时间
