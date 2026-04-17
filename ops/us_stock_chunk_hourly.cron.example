@@ -1,0 +1,5 @@
+# US stock chunk update (Asia/Shanghai): every 60 minutes from 09:10 to 23:10
+# Ensure TZ on server is Asia/Shanghai or set CRON_TZ accordingly.
+CRON_TZ=Asia/Shanghai
+10 9-23 * * 1-5 /bin/bash /root/finance_app/future-app/run_us_stock_chunk.sh
+
