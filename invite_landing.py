@@ -187,6 +187,27 @@ def render_invite_register_landing(invite_context: Dict[str, Any], render_regist
             color: #72829c;
             line-height: 1.7;
         }
+        .invite-support-row {
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+            flex-wrap: wrap;
+            margin-top: 1rem;
+            padding-top: 0.95rem;
+            border-top: 1px solid rgba(148, 163, 184, 0.18);
+        }
+        .invite-support-title {
+            color: #1f334d;
+            font-size: 0.86rem;
+            font-weight: 700;
+            white-space: nowrap;
+        }
+        .invite-support-line {
+            color: #60708a;
+            font-size: 0.88rem;
+            line-height: 1.6;
+            white-space: nowrap;
+        }
         .invite-panel-footer a {
             color: #34538b;
             text-decoration: none;
@@ -264,6 +285,11 @@ def render_invite_register_landing(invite_context: Dict[str, Any], render_regist
                             alt="AI 期权交易员"
                         />
                         <div class="invite-hero-overlay"></div>
+                    </div>
+                    <div class="invite-support-row">
+                        <div class="invite-support-title">客服联系方式</div>
+                        <div class="invite-support-line">微信：trader-sec</div>
+                        <div class="invite-support-line">电话：17521591756</div>
                     </div>
                     """,
                     unsafe_allow_html=True,
