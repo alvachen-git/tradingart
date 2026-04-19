@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import secrets
 from datetime import datetime, timedelta
 from typing import Any, Dict, Optional
@@ -80,6 +81,30 @@ def _ensure_invite_tables(conn) -> None:
                 "CREATE INDEX IF NOT EXISTS idx_inv_rel_ip_device ON user_invite_relations(register_ip_hash, device_hash)"
             )
         )
+        conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS invite_landing_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    invite_code TEXT NOT NULL,
+                    inviter_user_id TEXT,
+                    event_type TEXT NOT NULL,
+                    session_id TEXT,
+                    invitee_user_id TEXT,
+                    register_ip_hash TEXT,
+                    device_hash TEXT,
+                    extra_json TEXT,
+                    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS idx_inv_evt_code_type_created "
+                "ON invite_landing_events(invite_code, event_type, created_at)"
+            )
+        )
         return
 
     conn.execute(
@@ -116,6 +141,27 @@ def _ensure_invite_tables(conn) -> None:
                 KEY idx_inviter_status (inviter_user_id, status),
                 KEY idx_created_at (created_at),
                 KEY idx_ip_device (register_ip_hash, device_hash)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            """
+        )
+    )
+    conn.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS invite_landing_events (
+                id BIGINT NOT NULL AUTO_INCREMENT,
+                invite_code VARCHAR(64) NOT NULL,
+                inviter_user_id VARCHAR(100) NULL,
+                event_type VARCHAR(32) NOT NULL,
+                session_id VARCHAR(120) NULL,
+                invitee_user_id VARCHAR(100) NULL,
+                register_ip_hash VARCHAR(128) NULL,
+                device_hash VARCHAR(128) NULL,
+                extra_json TEXT NULL,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (id),
+                KEY idx_code_type_created (invite_code, event_type, created_at),
+                KEY idx_session_created (session_id, created_at)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
             """
         )
@@ -159,6 +205,39 @@ def get_or_create_invite_code(user_id: str) -> str:
                 continue
 
     return ""
+
+
+def get_invite_context(invite_code: str) -> Dict[str, Any]:
+    code = _normalize_invite_code(invite_code)
+    if not code:
+        return {
+            "invite_code": "",
+            "is_valid": False,
+            "inviter_user_id": "",
+            "reward_points": DEFAULT_INVITE_REWARD_POINTS,
+        }
+
+    try:
+        with engine.begin() as conn:
+            _ensure_invite_tables(conn)
+            row = conn.execute(
+                text("SELECT user_id FROM user_invite_codes WHERE invite_code = :code LIMIT 1"),
+                {"code": code},
+            ).fetchone()
+        return {
+            "invite_code": code,
+            "is_valid": bool(row and row[0]),
+            "inviter_user_id": str((row[0] if row else "") or ""),
+            "reward_points": DEFAULT_INVITE_REWARD_POINTS,
+        }
+    except Exception as e:
+        print(f"[invite][context] code={code} err={e}")
+        return {
+            "invite_code": code,
+            "is_valid": False,
+            "inviter_user_id": "",
+            "reward_points": DEFAULT_INVITE_REWARD_POINTS,
+        }
 
 
 def get_invite_stats(user_id: str) -> Dict[str, int]:
@@ -207,6 +286,61 @@ def get_invite_stats(user_id: str) -> Dict[str, int]:
     except Exception as e:
         print(f"[invite][stats] user={user} err={e}")
         return {"invited_count": 0, "rewarded_points": 0, "pending_count": 0}
+
+
+def track_invite_event(
+    invite_code: str,
+    event_type: str,
+    *,
+    session_id: str = "",
+    invitee_user_id: str = "",
+    register_ip: str | None = None,
+    device_fingerprint: str | None = None,
+    metadata: Optional[Dict[str, Any]] = None,
+) -> bool:
+    code = _normalize_invite_code(invite_code)
+    event = str(event_type or "").strip().lower()
+    if not code or not event:
+        return False
+
+    context = get_invite_context(code)
+    extra_json = ""
+    if metadata:
+        try:
+            extra_json = json.dumps(metadata, ensure_ascii=False, sort_keys=True)
+        except Exception:
+            extra_json = ""
+
+    try:
+        with engine.begin() as conn:
+            _ensure_invite_tables(conn)
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO invite_landing_events (
+                        invite_code, inviter_user_id, event_type, session_id,
+                        invitee_user_id, register_ip_hash, device_hash, extra_json
+                    ) VALUES (
+                        :invite_code, :inviter_user_id, :event_type, :session_id,
+                        :invitee_user_id, :register_ip_hash, :device_hash, :extra_json
+                    )
+                    """
+                ),
+                {
+                    "invite_code": code,
+                    "inviter_user_id": str(context.get("inviter_user_id") or "") or None,
+                    "event_type": event,
+                    "session_id": str(session_id or "").strip() or None,
+                    "invitee_user_id": str(invitee_user_id or "").strip() or None,
+                    "register_ip_hash": _hash_value(register_ip) or None,
+                    "device_hash": _hash_value(device_fingerprint) or None,
+                    "extra_json": extra_json or None,
+                },
+            )
+        return True
+    except Exception as e:
+        print(f"[invite][event] code={code} event={event} err={e}")
+        return False
 
 
 def _count_recent_valid_by_ip_or_device(conn, ip_hash: str, device_hash: str, hours: int = 24) -> int:

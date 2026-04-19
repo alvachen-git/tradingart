@@ -30,3 +30,19 @@ CREATE TABLE IF NOT EXISTS user_invite_relations (
     KEY idx_ip_device (register_ip_hash, device_hash)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='邀请关系与奖励状态';
 
+
+CREATE TABLE IF NOT EXISTS invite_landing_events (
+    id               BIGINT       NOT NULL AUTO_INCREMENT,
+    invite_code      VARCHAR(64)  NOT NULL,
+    inviter_user_id  VARCHAR(100) DEFAULT NULL,
+    event_type       VARCHAR(32)  NOT NULL,
+    session_id       VARCHAR(120) DEFAULT NULL,
+    invitee_user_id  VARCHAR(100) DEFAULT NULL,
+    register_ip_hash VARCHAR(128) DEFAULT NULL,
+    device_hash      VARCHAR(128) DEFAULT NULL,
+    extra_json       TEXT         DEFAULT NULL,
+    created_at       DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    KEY idx_code_type_created (invite_code, event_type, created_at),
+    KEY idx_session_created (session_id, created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='邀请落地页漏斗事件';

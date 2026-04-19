@@ -1,3 +1,22 @@
+import os
+import sys
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+
+def _bootstrap_env() -> None:
+    current_file = Path(__file__).resolve()
+    for parent in [current_file.parent, *current_file.parents]:
+        env_path = parent / ".env"
+        if env_path.exists():
+            load_dotenv(dotenv_path=env_path, override=True)
+            return
+    load_dotenv(override=True)
+
+
+_bootstrap_env()
+
 import streamlit as st
 import hashlib
 from task_manager import TaskManager
@@ -7,11 +26,9 @@ import data_engine as de
 import subscription_service as sub_svc
 import re
 import plotly.io as pio
-import os
 import json
 import random
 import markdown
-import sys
 from typing import Optional, Dict, Any
 import auth_utils as auth
 import memory_utils as mem
@@ -28,10 +45,9 @@ import uuid #用于生成唯一ID
 import base64
 from market_tools import get_market_snapshot,tool_query_specific_option
 from ui_components import inject_sidebar_toggle_style
-from sidebar_footer_menu import render_sidebar_footer_menu
+from sidebar_footer_menu import render_sidebar_footer_menu, _resolve_scheme
+from invite_landing import render_invite_register_landing
 from sqlalchemy import text
-from dotenv import load_dotenv
-from pathlib import Path
 from zoneinfo import ZoneInfo
 import requests
 from langchain_core.callbacks import BaseCallbackHandler
@@ -55,16 +71,6 @@ except Exception:
     invite_svc = None
 
 ENABLE_DEEP_MODE = False  # deep 模块开发中，首页先回退为普通模式
-
-
-
-# 1. 初始化环境
-_CURRENT_DIR = Path(__file__).resolve().parent
-_ROOT_ENV = _CURRENT_DIR.parent / ".env"
-if _ROOT_ENV.exists():
-    load_dotenv(dotenv_path=_ROOT_ENV, override=True)
-else:
-    load_dotenv(override=True)
 
 # --- 系统代理清理 ---
 for key in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"]:
@@ -972,6 +978,10 @@ if "home_masked_email_value" not in st.session_state:
     st.session_state.home_masked_email_value = ""
 if "home_invite_code" not in st.session_state:
     st.session_state.home_invite_code = ""
+if "home_invite_landing_active" not in st.session_state:
+    st.session_state.home_invite_landing_active = False
+if "home_invite_landing_session_id" not in st.session_state:
+    st.session_state.home_invite_landing_session_id = ""
 try:
     qp_invite = st.query_params.get("invite", "")
     if isinstance(qp_invite, list):
@@ -979,6 +989,9 @@ try:
     qp_invite = "".join(ch for ch in str(qp_invite or "").strip() if ch.isalnum())[:64]
     if qp_invite:
         st.session_state.home_invite_code = qp_invite
+        st.session_state.home_invite_landing_active = True
+    else:
+        st.session_state.home_invite_landing_active = False
 except Exception:
     pass
 
@@ -1093,11 +1106,315 @@ def _resolve_base_url_from_request() -> str:
         headers = dict(st.context.headers or {})
     except Exception:
         headers = {}
-    proto = str(headers.get("X-Forwarded-Proto") or headers.get("x-forwarded-proto") or "https").strip()
+    proto = str(headers.get("X-Forwarded-Proto") or headers.get("x-forwarded-proto") or "").strip()
     host = str(headers.get("Host") or headers.get("host") or "").strip()
     if host:
-        return f"{proto}://{host}"
+        return f"{_resolve_scheme(host, proto)}://{host}"
     return "https://www.aiprota.com"
+
+
+def _clear_invite_query_state():
+    st.session_state.home_invite_code = ""
+    st.session_state.home_invite_landing_active = False
+    try:
+        if "invite" in st.query_params:
+            del st.query_params["invite"]
+    except Exception:
+        try:
+            st.query_params.clear()
+        except Exception:
+            pass
+
+
+def _complete_logged_in_session(username: str, token: str, *, cookie_key_prefix: str, clear_invite_query: bool = False):
+    st.session_state['is_logged_in'] = True
+    st.session_state['user_id'] = username
+    st.session_state['token'] = token
+    st.session_state['just_manual_logged_in'] = True
+    _mark_auth_verified(username, token)
+    st.session_state.home_post_login_restore_needed = True
+    st.session_state.home_post_login_restore_done = False
+    st.session_state.home_masked_email_user = ""
+    st.session_state.home_masked_email_value = ""
+
+    expires = datetime.now() + timedelta(days=30)
+    cookie_manager.set("username", username, expires_at=expires, key=f"{cookie_key_prefix}_user_cookie")
+    cookie_manager.set("token", token, expires_at=expires, key=f"{cookie_key_prefix}_token_cookie")
+
+    if clear_invite_query:
+        _clear_invite_query_state()
+
+
+def _clear_register_flow_state(prefix: str):
+    for suffix in [
+        "step1_ok",
+        "step1_username",
+        "step1_password",
+        "verified_phone",
+        "phone",
+        "sms_code",
+        "step1_username_input",
+        "step1_password_input",
+        "step1_password2_input",
+        "view_tracked_code",
+    ]:
+        st.session_state.pop(f"{prefix}_{suffix}", None)
+
+
+def _get_invite_landing_session_id() -> str:
+    current = str(st.session_state.get("home_invite_landing_session_id") or "").strip()
+    if current:
+        return current
+    current = str(uuid.uuid4())
+    st.session_state.home_invite_landing_session_id = current
+    return current
+
+
+def _track_invite_event_safe(event_type: str, invite_code: str, *, invitee_user_id: str = "", metadata: Optional[Dict[str, Any]] = None):
+    if invite_svc is None:
+        return
+    register_ip, device_fingerprint = _extract_client_ip_and_device_fingerprint()
+    try:
+        invite_svc.track_invite_event(
+            invite_code,
+            event_type,
+            session_id=_get_invite_landing_session_id(),
+            invitee_user_id=invitee_user_id,
+            register_ip=register_ip,
+            device_fingerprint=device_fingerprint,
+            metadata=metadata or {},
+        )
+    except Exception as e:
+        print(f"[invite][event] type={event_type} code={invite_code} err={e}")
+
+
+def _render_invite_register_form(invite_context: Dict[str, Any]):
+    prefix = "invite_reg"
+    step1_ok = st.session_state.get(f"{prefix}_step1_ok", False)
+    verified_phone = st.session_state.get(f"{prefix}_verified_phone", "")
+    invite_code = str(invite_context.get("invite_code") or "").strip()
+    invite_is_valid = bool(invite_context.get("is_valid"))
+
+    st.caption("步骤 1：先设置账号与密码")
+    if step1_ok:
+        step1_user = st.session_state.get(f"{prefix}_step1_username", "")
+        st.success(f"账号已就绪：{step1_user}")
+        if st.button("修改账号信息", key=f"{prefix}_btn_reset_step1", use_container_width=True):
+            _clear_register_flow_state(prefix)
+            st.rerun()
+    else:
+        with st.form(key=f"{prefix}_form_step1", clear_on_submit=False):
+            reg_username = st.text_input(
+                "账号",
+                key=f"{prefix}_step1_username_input",
+                placeholder="至少 3 个字符",
+            )
+            reg_password = st.text_input(
+                "密码",
+                type="password",
+                key=f"{prefix}_step1_password_input",
+                placeholder="至少 6 位",
+            )
+            reg_password2 = st.text_input(
+                "确认密码",
+                type="password",
+                key=f"{prefix}_step1_password2_input",
+                placeholder="再次输入密码",
+            )
+            submitted_step1 = st.form_submit_button("继续设置手机号", type="primary", use_container_width=True)
+        if submitted_step1:
+            ok, msg, normalized_username = auth.validate_register_step1(reg_username, reg_password, reg_password2)
+            if ok:
+                st.session_state[f"{prefix}_step1_ok"] = True
+                st.session_state[f"{prefix}_step1_username"] = normalized_username
+                st.session_state[f"{prefix}_step1_password"] = reg_password
+                st.success("账号信息已通过校验，请继续绑定手机号。")
+                st.rerun()
+            else:
+                st.error(msg)
+
+    if not st.session_state.get(f"{prefix}_step1_ok"):
+        return
+
+    st.caption("步骤 2：绑定手机号并验证")
+    if verified_phone:
+        st.success(f"手机号已验证：{verified_phone}")
+        if st.button("更换手机号", key=f"{prefix}_btn_reset_phone", use_container_width=True):
+            st.session_state.pop(f"{prefix}_verified_phone", None)
+            st.session_state.pop(f"{prefix}_phone", None)
+            st.session_state.pop(f"{prefix}_sms_code", None)
+            st.rerun()
+    else:
+        reg_phone = st.text_input(
+            "手机号（仅 +86）",
+            key=f"{prefix}_phone",
+            placeholder="例如 13800138000",
+        )
+        reg_sms_code = st.text_input(
+            "短信验证码",
+            key=f"{prefix}_sms_code",
+            max_chars=6,
+            placeholder="输入 6 位验证码",
+        )
+        send_col, verify_col = st.columns(2)
+        with send_col:
+            if st.button("发送验证码", use_container_width=True, key=f"{prefix}_btn_send_code"):
+                if not reg_phone:
+                    st.warning("请先输入手机号")
+                else:
+                    ok, msg = auth.send_register_phone_code(reg_phone)
+                    if ok:
+                        st.success(msg or "验证码已发送，请注意查收")
+                    else:
+                        st.error(msg)
+        with verify_col:
+            if st.button("验证手机号", use_container_width=True, key=f"{prefix}_btn_verify_code"):
+                if not reg_phone:
+                    st.warning("请先输入手机号")
+                elif not reg_sms_code:
+                    st.warning("请输入短信验证码")
+                else:
+                    ok, msg, normalized_phone = auth.verify_register_phone_code(reg_phone, reg_sms_code)
+                    if ok:
+                        st.session_state[f"{prefix}_verified_phone"] = normalized_phone
+                        st.success("手机号验证通过，可直接完成注册。")
+                        st.rerun()
+                    else:
+                        st.error(msg)
+
+    if not st.session_state.get(f"{prefix}_verified_phone"):
+        return
+
+    if invite_is_valid:
+        st.info("邀请码已锁定，注册成功后将自动计入邀请活动。")
+    else:
+        st.warning("当前邀请码无效，本次注册可继续，但不会计入邀请奖励。")
+
+    if st.button("完成注册并登录", type="primary", use_container_width=True, key=f"{prefix}_btn_finish"):
+        final_username = st.session_state.get(f"{prefix}_step1_username", "")
+        final_password = st.session_state.get(f"{prefix}_step1_password", "")
+        final_phone = st.session_state.get(f"{prefix}_verified_phone", "")
+        register_ip, device_fingerprint = _extract_client_ip_and_device_fingerprint()
+
+        _track_invite_event_safe(
+            "register_submit",
+            invite_code,
+            invitee_user_id=final_username,
+            metadata={"invite_valid": invite_is_valid},
+        )
+
+        success, msg = auth.register_with_username_phone(
+            final_username,
+            final_password,
+            final_phone,
+            invite_code=invite_code if invite_is_valid else "",
+            register_ip=register_ip,
+            device_fingerprint=device_fingerprint,
+        )
+        if not success:
+            st.error(msg)
+            return
+
+        _track_invite_event_safe(
+            "register_success",
+            invite_code,
+            invitee_user_id=final_username,
+            metadata={"invite_valid": invite_is_valid},
+        )
+        st.success(msg if msg else "注册成功")
+        st.balloons()
+
+        sess_ok, sess_msg, token = auth.create_user_session(final_username)
+        if sess_ok:
+            _complete_logged_in_session(
+                final_username,
+                token,
+                cookie_key_prefix=f"{prefix}_login",
+                clear_invite_query=True,
+            )
+            _clear_register_flow_state(prefix)
+            time.sleep(0.25)
+            st.rerun()
+        else:
+            st.warning(sess_msg if sess_msg else "注册成功，请登录")
+
+
+def _render_logged_in_invite_panel():
+    current_user = str(st.session_state.get("user_id") or "").strip()
+    st.warning(f"当前浏览器已登录为 {current_user or '当前账号'}，邀请注册页不会直接覆盖已有登录态。")
+    st.caption("如果你是帮朋友测试或准备注册新账号，请先退出当前账号，再继续使用这个邀请码注册。")
+
+    action_col1, action_col2 = st.columns(2)
+    with action_col1:
+        if st.button("退出当前账号并继续注册", type="primary", use_container_width=True, key="invite_logout_then_register"):
+            logout_user = str(st.session_state.get("user_id") or "").strip()
+            logout_token = str(st.session_state.get("token") or "").strip()
+            logout_sig = _auth_signature(logout_user, logout_token)
+
+            if logout_user and logout_user != "访客":
+                try:
+                    auth.logout_user(logout_user, logout_token)
+                except Exception as e:
+                    print(f"[invite][logout] user={logout_user} err={e}")
+
+            try:
+                cookie_manager.delete("username", key="invite_logout_del_user")
+                cookie_manager.delete("token", key="invite_logout_del_token")
+            except Exception as e:
+                print(f"[invite][logout] cookie delete err={e}")
+
+            st.session_state['is_logged_in'] = False
+            st.session_state['user_id'] = None
+            st.session_state['token'] = None
+            st.session_state['just_logged_out'] = False
+            st.session_state.home_post_login_restore_needed = False
+            st.session_state.home_post_login_restore_done = False
+            st.session_state.home_auto_login_toast_token = ""
+            st.session_state.home_auth_verify_needed = False
+            st.session_state.home_auth_verified_sig = ""
+            st.session_state.home_invalid_token_signature = logout_sig
+            st.session_state.home_masked_email_user = ""
+            st.session_state.home_masked_email_value = ""
+            st.success("已退出当前账号，正在切换到邀请注册页。")
+            time.sleep(0.2)
+            st.rerun()
+    with action_col2:
+        if st.button("继续进入首页", use_container_width=True, key="invite_go_home_logged_in"):
+            _clear_invite_query_state()
+            st.rerun()
+
+
+def _render_invite_register_page_if_needed() -> bool:
+    invite_code = str(st.session_state.get("home_invite_code") or "").strip()
+    if not st.session_state.get("home_invite_landing_active", False) or not invite_code:
+        return False
+
+    invite_context = {
+        "invite_code": invite_code,
+        "is_valid": False,
+        "inviter_user_id": "",
+        "reward_points": 300,
+    }
+    if invite_svc is not None:
+        try:
+            invite_context = invite_svc.get_invite_context(invite_code)
+        except Exception as e:
+            print(f"[invite][landing] context failed: {e}")
+
+    tracked_code = str(st.session_state.get("invite_reg_view_tracked_code") or "").strip()
+    if tracked_code != invite_code:
+        _track_invite_event_safe(
+            "landing_view",
+            invite_code,
+            metadata={"invite_valid": bool(invite_context.get("is_valid"))},
+        )
+        st.session_state["invite_reg_view_tracked_code"] = invite_code
+
+    if st.session_state.get("is_logged_in"):
+        render_invite_register_landing(invite_context, _render_logged_in_invite_panel)
+    else:
+        render_invite_register_landing(invite_context, lambda: _render_invite_register_form(invite_context))
+    return True
 
 
 # 🔥 [关键修复] 在任何 rerun 之前，先读取公告状态并保存到 session_state
@@ -2215,6 +2532,9 @@ def show_welcome_screen():
 #  7. 主程序入口
 # ==========================================
 
+if _render_invite_register_page_if_needed():
+    st.stop()
+
 # A. 侧边栏：登录/设置 (折叠起来保持清爽)
 with st.sidebar:
     # 🔥 [新增] 统一的分组导航菜单
@@ -2346,7 +2666,7 @@ with st.sidebar:
                             else:
                                 ok, msg = auth.send_register_phone_code(reg_phone)
                                 if ok:
-                                    st.success("验证码已发送，请注意查收")
+                                    st.success(msg or "验证码已发送，请注意查收")
                                 else:
                                     st.error(msg)
                     with verify_col:
@@ -2529,7 +2849,7 @@ with st.sidebar:
             user_id=user,
             is_logged_in=True,
             on_logout=do_logout,
-            show_invite_entry=False,
+            show_invite_entry=True,
             base_url=_resolve_base_url_from_request(),
             invite_code=invite_code,
             invite_stats=invite_stats,
@@ -3031,8 +3351,32 @@ button[data-testid="stExpandSidebarButton"] *,
     fill: #ffffff !important;
     stroke: #ffffff !important;
     opacity: 1 !important;
-    font-weight: 800 !important;
     text-shadow: 0 1px 2px rgba(0,0,0,0.55) !important;
+}
+
+button[data-testid="stExpandSidebarButton"],
+[data-testid="stSidebarHeader"] button[data-testid="stBaseButton-headerNoPadding"] {
+    font-size: 0 !important;
+    color: transparent !important;
+}
+
+button[data-testid="stExpandSidebarButton"] span,
+[data-testid="stSidebarHeader"] button[data-testid="stBaseButton-headerNoPadding"] span,
+button[data-testid="stExpandSidebarButton"] i,
+[data-testid="stSidebarHeader"] button[data-testid="stBaseButton-headerNoPadding"] i {
+    font-family: "Material Symbols Rounded", "Material Symbols Outlined", "Material Icons", sans-serif !important;
+    font-size: 20px !important;
+    line-height: 20px !important;
+    font-weight: 800 !important;
+    letter-spacing: normal !important;
+    text-transform: none !important;
+    white-space: nowrap !important;
+}
+
+button[data-testid="stExpandSidebarButton"] svg,
+[data-testid="stSidebarHeader"] button[data-testid="stBaseButton-headerNoPadding"] svg {
+    width: 20px !important;
+    height: 20px !important;
 }
 </style>
 """, unsafe_allow_html=True)
