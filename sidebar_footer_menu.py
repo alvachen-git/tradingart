@@ -72,6 +72,14 @@ def _invite_dialog(payload: dict):
     st.markdown(
         """
         <style>
+        div[data-testid="stDialog"] [data-testid="stDialogHeader"] h1,
+        div[data-testid="stDialog"] [data-testid="stDialogHeader"] h2,
+        div[data-testid="stDialog"] [data-testid="stDialogHeader"] p {
+            color: #111827 !important;
+            -webkit-text-fill-color: #111827 !important;
+            text-shadow: none !important;
+            opacity: 1 !important;
+        }
         div[data-testid="stDialog"] [data-testid="stMarkdownContainer"] p {
             line-height: 1.6;
         }
@@ -157,7 +165,9 @@ def _invite_dialog(payload: dict):
             line-height: 1.04;
             font-weight: 800;
             letter-spacing: -0.04em;
-            color: #111827;
+            color: #111827 !important;
+            -webkit-text-fill-color: #111827 !important;
+            text-shadow: none !important;
             margin: 0;
         }
         .invite-subtitle {
@@ -333,20 +343,78 @@ def _invite_dialog(payload: dict):
         unsafe_allow_html=True,
     )
 
-    if st.button("复制链接", type="primary", use_container_width=True, key=f"invite_copy_link_{user_id}"):
-        payload_js = json.dumps(invite_link, ensure_ascii=False)
-        components.html(
-            f"""
-            <script>
-            (async function () {{
-                try {{ await navigator.clipboard.writeText({payload_js}); }}
-                catch (e) {{ console.warn('copy_failed', e); }}
-            }})();
-            </script>
-            """,
-            height=0,
-        )
-        st.success("已尝试复制邀请链接；若浏览器拦截，请手动复制下方链接。")
+    payload_js = json.dumps(invite_link, ensure_ascii=False)
+    components.html(
+        f"""
+        <div style="width:100%; margin:0 0 6px 0;">
+            <button
+                id="invite-copy-btn"
+                type="button"
+                style="
+                    width:100%;
+                    min-height:50px;
+                    border:none;
+                    border-radius:16px;
+                    background:linear-gradient(180deg, #18202f 0%, #0f1725 100%);
+                    color:#f8fbff;
+                    font-size:16px;
+                    font-weight:700;
+                    cursor:pointer;
+                    box-shadow:0 12px 30px rgba(15, 23, 42, 0.18);
+                "
+            >复制链接</button>
+            <div
+                id="invite-copy-status"
+                style="
+                    min-height:20px;
+                    margin-top:8px;
+                    text-align:center;
+                    font-size:12px;
+                    color:#64748b;
+                "
+            ></div>
+        </div>
+        <script>
+        (function () {{
+            const text = {payload_js};
+            const btn = document.getElementById("invite-copy-btn");
+            const status = document.getElementById("invite-copy-status");
+            if (!btn || !status) return;
+
+            const setStatus = (msg, color) => {{
+                status.textContent = msg;
+                status.style.color = color || "#64748b";
+            }};
+
+            btn.addEventListener("click", async () => {{
+                try {{
+                    if (navigator.clipboard && window.isSecureContext) {{
+                        await navigator.clipboard.writeText(text);
+                    }} else {{
+                        const area = document.createElement("textarea");
+                        area.value = text;
+                        area.setAttribute("readonly", "");
+                        area.style.position = "fixed";
+                        area.style.opacity = "0";
+                        area.style.pointerEvents = "none";
+                        document.body.appendChild(area);
+                        area.focus();
+                        area.select();
+                        const ok = document.execCommand("copy");
+                        document.body.removeChild(area);
+                        if (!ok) throw new Error("execCommand copy failed");
+                    }}
+                    setStatus("已复制邀请链接", "#15803d");
+                }} catch (err) {{
+                    console.warn("invite_copy_failed", err);
+                    setStatus("复制失败，请手动复制下方链接", "#b45309");
+                }}
+            }});
+        }})();
+        </script>
+        """,
+        height=84,
+    )
 
     st.markdown(
         '<div class="invite-link-label">邀请链接</div>',
