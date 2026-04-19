@@ -224,36 +224,28 @@ def inject_sidebar_toggle_style(mode: str = "high_contrast") -> None:
             box-shadow: 0 0 0 4px rgba(96, 165, 250, 0.55), 0 10px 24px rgba(2, 6, 23, 0.6) !important;
         }
 
+        button[data-testid="stExpandSidebarButton"],
+        [data-testid="stSidebarHeader"] button[data-testid="stBaseButton-headerNoPadding"],
+        button[data-testid="collapsedControl"],
+        button[data-testid="stSidebarCollapsedControl"],
+        [data-testid="stSidebarCollapsedControl"],
+        [data-testid="stSidebarCollapsedControl"] > button {
+            font-size: 0 !important;
+            color: transparent !important;
+        }
+
         button[data-testid="stExpandSidebarButton"] span,
-        button[data-testid="stExpandSidebarButton"] p,
-        button[data-testid="stExpandSidebarButton"] svg,
         button[data-testid="stExpandSidebarButton"] i,
         [data-testid="stSidebarHeader"] button[data-testid="stBaseButton-headerNoPadding"] span,
-        [data-testid="stSidebarHeader"] button[data-testid="stBaseButton-headerNoPadding"] p,
-        [data-testid="stSidebarHeader"] button[data-testid="stBaseButton-headerNoPadding"] svg,
         [data-testid="stSidebarHeader"] button[data-testid="stBaseButton-headerNoPadding"] i,
         button[data-testid="collapsedControl"] span,
         button[data-testid="stSidebarCollapsedControl"] span,
         [data-testid="stSidebarCollapsedControl"] span,
-        button[data-testid="collapsedControl"] p,
-        button[data-testid="stSidebarCollapsedControl"] p,
-        [data-testid="stSidebarCollapsedControl"] p,
-        button[data-testid="collapsedControl"] svg,
-        button[data-testid="stSidebarCollapsedControl"] svg,
-        [data-testid="stSidebarCollapsedControl"] svg,
         button[data-testid="collapsedControl"] i,
         button[data-testid="stSidebarCollapsedControl"] i,
         [data-testid="stSidebarCollapsedControl"] i,
         [data-testid="stSidebarCollapsedControl"] > button span,
-        [data-testid="stSidebarCollapsedControl"] > button p,
-        [data-testid="stSidebarCollapsedControl"] > button svg,
-        [data-testid="stSidebarCollapsedControl"] > button i,
-        button[data-testid="stExpandSidebarButton"] *,
-        [data-testid="stSidebarHeader"] button[data-testid="stBaseButton-headerNoPadding"] *,
-        button[data-testid="collapsedControl"] * ,
-        button[data-testid="stSidebarCollapsedControl"] *,
-        [data-testid="stSidebarCollapsedControl"] > button *,
-        [data-testid="stSidebarCollapsedControl"] * {
+        [data-testid="stSidebarCollapsedControl"] > button i {
             fill: #ffffff !important;
             color: #ffffff !important;
             stroke: #ffffff !important;
@@ -262,6 +254,26 @@ def inject_sidebar_toggle_style(mode: str = "high_contrast") -> None:
             opacity: 1 !important;
             font-weight: 800 !important;
             text-shadow: 0 1px 2px rgba(0, 0, 0, 0.45) !important;
+            font-family: "Material Symbols Rounded", "Material Symbols Outlined", "Material Icons", sans-serif !important;
+            font-size: 20px !important;
+            line-height: 20px !important;
+            letter-spacing: normal !important;
+            text-transform: none !important;
+            white-space: nowrap !important;
+        }
+
+        button[data-testid="stExpandSidebarButton"] svg,
+        [data-testid="stSidebarHeader"] button[data-testid="stBaseButton-headerNoPadding"] svg,
+        button[data-testid="collapsedControl"] svg,
+        button[data-testid="stSidebarCollapsedControl"] svg,
+        [data-testid="stSidebarCollapsedControl"] svg,
+        [data-testid="stSidebarCollapsedControl"] > button svg {
+            fill: #ffffff !important;
+            color: #ffffff !important;
+            stroke: #ffffff !important;
+            width: 20px !important;
+            height: 20px !important;
+            opacity: 1 !important;
         }
 
         @media (max-width: 768px) {

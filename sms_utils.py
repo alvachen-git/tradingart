@@ -13,6 +13,7 @@ import os
 import random
 import re
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Tuple
 
 from sqlalchemy import text
@@ -36,8 +37,29 @@ def _env_bool(name: str, default: bool = False) -> bool:
     return str(val).strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _should_force_local_mock_mode() -> bool:
+    current_path = str(Path(__file__).resolve())
+    in_worktree = "/.worktrees/" in current_path
+    no_sms_toggle = os.getenv("SMS_ENABLED") is None and os.getenv("SMS_MOCK_MODE") is None
+    no_aliyun_sms = not any(
+        os.getenv(name)
+        for name in [
+            "ALIYUN_SMS_ACCESS_KEY_ID",
+            "ALIYUN_SMS_ACCESS_KEY_SECRET",
+            "ALIYUN_SMS_SIGN_NAME",
+            "ALIYUN_SMS_TEMPLATE_CODE_REGISTER",
+            "ALIYUN_SMS_TEMPLATE_CODE_LOGIN",
+        ]
+    )
+    return in_worktree and no_sms_toggle and no_aliyun_sms
+
+
 SMS_ENABLED = _env_bool("SMS_ENABLED", False)
 SMS_MOCK_MODE = _env_bool("SMS_MOCK_MODE", False)
+if _should_force_local_mock_mode():
+    SMS_ENABLED = True
+    SMS_MOCK_MODE = True
+    print("[sms] local worktree detected without SMS config; fallback to mock mode")
 
 
 def normalize_cn_phone(phone: str) -> Tuple[bool, str, str]:
@@ -234,6 +256,8 @@ def _send_code(phone: str, purpose: str, client_ip: str | None = None) -> Tuple[
             f"[sms] send_ok purpose={purpose} phone={normalized_phone} "
             f"ip={client_ip or '-'} mode={'mock' if SMS_MOCK_MODE else 'aliyun'}"
         )
+        if SMS_MOCK_MODE:
+            return True, f"开发环境验证码：{code}"
         return True, "验证码已发送"
 
     print(

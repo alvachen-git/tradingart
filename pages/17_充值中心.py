@@ -71,7 +71,7 @@ with st.sidebar:
         user_id=user_id,
         is_logged_in=True,
         on_logout=_logout_from_recharge,
-        show_invite_entry=False,
+        show_invite_entry=True,
         invite_code=invite_code,
         invite_stats=invite_stats,
         invite_preview_mode=invite_preview_mode,

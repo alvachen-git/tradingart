@@ -150,6 +150,27 @@ class TestInviteService(unittest.TestCase):
         wallet = pay_svc.get_user_points("inviter_d")
         self.assertEqual(int(wallet["balance"]), 300)
 
+    def test_apply_invite_rate_limit_by_device(self):
+        code = invite_svc.get_or_create_invite_code("inviter_d2")
+        out1 = invite_svc.apply_invite_on_register(
+            invitee_user_id="invitee_d3",
+            invite_code=code,
+            register_ip="6.6.6.6",
+            device_fingerprint="same-device",
+        )
+        out2 = invite_svc.apply_invite_on_register(
+            invitee_user_id="invitee_d4",
+            invite_code=code,
+            register_ip="7.7.7.7",
+            device_fingerprint="same-device",
+        )
+        self.assertTrue(out1["rewarded"])
+        self.assertFalse(out2["rewarded"])
+        self.assertEqual(out2["reason"], "ip_or_device_rate_limited")
+
+        wallet = pay_svc.get_user_points("inviter_d2")
+        self.assertEqual(int(wallet["balance"]), 300)
+
     def test_get_invite_stats(self):
         code = invite_svc.get_or_create_invite_code("inviter_e")
         invite_svc.apply_invite_on_register(
@@ -161,6 +182,49 @@ class TestInviteService(unittest.TestCase):
         stats = invite_svc.get_invite_stats("inviter_e")
         self.assertEqual(int(stats["invited_count"]), 1)
         self.assertEqual(int(stats["rewarded_points"]), 300)
+
+    def test_get_invite_context(self):
+        code = invite_svc.get_or_create_invite_code("inviter_ctx")
+        ctx = invite_svc.get_invite_context(code)
+        self.assertTrue(ctx["is_valid"])
+        self.assertEqual(ctx["inviter_user_id"], "inviter_ctx")
+
+        invalid = invite_svc.get_invite_context("bad-code")
+        self.assertFalse(invalid["is_valid"])
+
+    def test_track_invite_event_records_context(self):
+        code = invite_svc.get_or_create_invite_code("inviter_evt")
+        ok = invite_svc.track_invite_event(
+            code,
+            "landing_view",
+            session_id="sess-1",
+            register_ip="8.8.8.8",
+            device_fingerprint="device-evt",
+            metadata={"source": "landing"},
+        )
+        self.assertTrue(ok)
+
+        with self.engine.connect() as conn:
+            row = conn.execute(
+                text(
+                    """
+                    SELECT invite_code, inviter_user_id, event_type, session_id, register_ip_hash, device_hash, extra_json
+                    FROM invite_landing_events
+                    WHERE invite_code = :code
+                    LIMIT 1
+                    """
+                ),
+                {"code": code},
+            ).fetchone()
+
+        self.assertIsNotNone(row)
+        self.assertEqual(str(row[0]), code)
+        self.assertEqual(str(row[1]), "inviter_evt")
+        self.assertEqual(str(row[2]), "landing_view")
+        self.assertEqual(str(row[3]), "sess-1")
+        self.assertTrue(str(row[4]))
+        self.assertTrue(str(row[5]))
+        self.assertIn("landing", str(row[6]))
 
 
 if __name__ == "__main__":
