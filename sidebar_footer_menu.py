@@ -59,7 +59,7 @@ def _build_invite_link(base_url: str, invite_code: str, user_id: str, preview_mo
     return f"{base.rstrip('/')}/?{query}"
 
 
-@st.dialog("邀请好友，领积分", width="large")
+@st.dialog(" ", width="large")
 def _invite_dialog(payload: dict):
     user_id = str(payload.get("user_id") or "").strip()
     invite_link = str(payload.get("invite_link") or "").strip()
@@ -75,10 +75,12 @@ def _invite_dialog(payload: dict):
         div[data-testid="stDialog"] [data-testid="stDialogHeader"] h1,
         div[data-testid="stDialog"] [data-testid="stDialogHeader"] h2,
         div[data-testid="stDialog"] [data-testid="stDialogHeader"] p {
-            color: #111827 !important;
-            -webkit-text-fill-color: #111827 !important;
-            text-shadow: none !important;
-            opacity: 1 !important;
+            display: none !important;
+        }
+        div[data-testid="stDialog"] [data-testid="stDialogHeader"] {
+            min-height: 0 !important;
+            padding-top: 0.4rem !important;
+            padding-bottom: 0.1rem !important;
         }
         div[data-testid="stDialog"] [data-testid="stMarkdownContainer"] p {
             line-height: 1.6;
@@ -319,7 +321,7 @@ def _invite_dialog(payload: dict):
             <div class="invite-hero-grid">
                 <div class="invite-hero-copy">
                     <div class="invite-eyebrow">{mode_text}</div>
-                    <h2 class="invite-title">邀请好友，领积分</h2>
+                    <h2 class="invite-title">邀请好友，领点数</h2>
                     <div class="invite-subtitle">
                         把你的专属注册链接发给朋友，对方完成注册后，奖励会自动记入你的通用点数余额。
                     </div>
@@ -433,7 +435,7 @@ def _invite_dialog(payload: dict):
     steps = [
         ("STEP 01", "发给好友", "复制专属链接，发给准备注册的新朋友。"),
         ("STEP 02", "完成注册", "好友通过链接注册成功，系统自动完成归因。"),
-        ("STEP 03", "奖励到账", f"每位有效邀请奖励 {reward_points} 点，可直接用于订阅购买。"),
+        ("STEP 03", "奖励到账", f"每位有效邀请奖励 {reward_points} 点，可在充值中心购买服务。"),
     ]
     for col, (idx, title, desc) in zip(step_cols, steps):
         with col:
@@ -455,7 +457,7 @@ def _invite_dialog(payload: dict):
         st.markdown(
             f"""
             <div class="invite-metric">
-                <div class="invite-metric-label">累计获得积分</div>
+                <div class="invite-metric-label">累计获得点数</div>
                 <div class="invite-metric-value">{rewarded_points}</div>
                 <div class="invite-metric-foot">奖励直接进入通用点数余额</div>
             </div>
@@ -732,7 +734,7 @@ def render_sidebar_footer_menu(
 
     with st.container(key="sidebar_footer_shell"):
         if show_invite_entry:
-            if st.button("邀请好友 领积分", key=f"btn_invite_entry_{page_key}", use_container_width=True):
+            if st.button("🔥 邀请好友领点数", key=f"btn_invite_entry_{page_key}", use_container_width=True):
                 st.session_state[invite_open_key] = True
 
         with st.popover(f"👤 {_truncate_user(user, 16)}", use_container_width=True):
