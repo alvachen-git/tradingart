@@ -2,6 +2,7 @@
 
 import json
 import math
+import os
 import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -1102,7 +1103,8 @@ def fetch_polymarket_events(limit: int = 250, timeout: int = 12) -> List[Dict[st
     seen_ids: set[str] = set()
     pages_scanned = 0
     session = requests.Session()
-    session.trust_env = False
+    use_env_proxy = str(os.getenv("POLYMARKET_USE_ENV_PROXY", "0")).strip().lower() in {"1", "true", "yes", "on"}
+    session.trust_env = use_env_proxy
 
     def _append_event(event: Dict[str, Any], bucket: List[Dict[str, Any]]) -> bool:
         event_id = _safe_text(event.get("id") or event.get("slug") or event.get("ticker"))

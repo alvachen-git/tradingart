@@ -8,7 +8,7 @@ BEIJING_TZ = timezone(timedelta(hours=8))
 
 
 class TestRiskIndexService(unittest.TestCase):
-    def test_fetch_polymarket_events_disables_env_proxy_in_session(self):
+    def test_fetch_polymarket_events_disables_env_proxy_in_session_by_default(self):
         class _DummyResponse:
             def raise_for_status(self):
                 return None
@@ -35,6 +35,37 @@ class TestRiskIndexService(unittest.TestCase):
 
         self.assertEqual(events, [])
         self.assertFalse(dummy_session.trust_env)
+        self.assertEqual(len(dummy_session.calls), 1)
+        self.assertTrue(dummy_session.closed)
+
+    def test_fetch_polymarket_events_can_enable_env_proxy_via_flag(self):
+        class _DummyResponse:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return []
+
+        class _DummySession:
+            def __init__(self):
+                self.trust_env = False
+                self.calls = []
+                self.closed = False
+
+            def get(self, *args, **kwargs):
+                self.calls.append((args, kwargs))
+                return _DummyResponse()
+
+            def close(self):
+                self.closed = True
+
+        dummy_session = _DummySession()
+        with patch.dict(svc.os.environ, {"POLYMARKET_USE_ENV_PROXY": "1"}, clear=False):
+            with patch.object(svc.requests, "Session", return_value=dummy_session):
+                events = svc.fetch_polymarket_events(limit=20, timeout=7)
+
+        self.assertEqual(events, [])
+        self.assertTrue(dummy_session.trust_env)
         self.assertEqual(len(dummy_session.calls), 1)
         self.assertTrue(dummy_session.closed)
 
