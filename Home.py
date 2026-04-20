@@ -82,6 +82,11 @@ ENABLE_HOME_ANNOUNCEMENT = False  # 临时关闭首页公告
 # Fast router is disabled by default to avoid false positives on
 # historical/list queries (for example: "最近两周每天价格").
 FAST_ROUTER_ENABLED = os.getenv("AIBOTA_FAST_ROUTER_ENABLED", "0").strip().lower() in {"1", "true", "yes", "on"}
+HOME_PROMO_BANNER = {
+    "enabled": True,
+    "text": "【5月培训】机构是如何卖期权",
+    "target_page": "pages/25_期权重盾班.py",
+}
 
 ANNOUNCEMENT_CONTENT = {
     "title": "📡 情报站内容升级",
@@ -2481,12 +2486,126 @@ def show_welcome_screen():
             opacity: 1;
             right: 15px;
         }
+
+        div[data-testid="stVerticalBlock"]:has(.home-hero-copy) {
+            position: relative;
+            padding: 20px 0 6px;
+            max-width: 58rem;
+            margin: 0 auto;
+        }
+
+        .home-hero-copy {
+            padding: 20px 0 0;
+        }
+
+        .home-promo-shell {
+            width: 1px;
+            height: 1px;
+        }
+
+        div[data-testid="stVerticalBlock"]:has(.home-hero-copy) > div:has(.home-promo-shell) {
+            display: none;
+        }
+
+        div[data-testid="stVerticalBlock"]:has(.home-hero-copy) > div:has([data-testid="stPageLink"]) {
+            position: absolute;
+            top: 0;
+            right: 0;
+            width: auto;
+            max-width: 18rem;
+        }
+
+        div[data-testid="stVerticalBlock"]:has(.home-hero-copy) > div:has([data-testid="stPageLink"]) a {
+            min-height: 0 !important;
+            padding: 9px 14px !important;
+            background: rgba(252, 211, 77, 0.12) !important;
+            border: 1px solid rgba(252, 211, 77, 0.68) !important;
+            border-radius: 999px !important;
+            box-shadow: 0 8px 20px rgba(15, 23, 42, 0.18) !important;
+            font-size: 13px !important;
+            font-weight: 700 !important;
+            line-height: 1.2 !important;
+            color: #fde68a !important;
+            text-align: center !important;
+            display: inline-flex !important;
+            align-items: center !important;
+            justify-content: center !important;
+            gap: 8px !important;
+            white-space: nowrap !important;
+            text-decoration: none !important;
+            transition: transform 0.2s ease, box-shadow 0.2s ease, background 0.2s ease !important;
+        }
+
+        div[data-testid="stVerticalBlock"]:has(.home-hero-copy) > div:has([data-testid="stPageLink"]) a:hover {
+            transform: translateY(-1px) !important;
+            background: rgba(252, 211, 77, 0.18) !important;
+            box-shadow: 0 12px 24px rgba(15, 23, 42, 0.24) !important;
+        }
+
+        div[data-testid="stVerticalBlock"]:has(.home-hero-copy) > div:has([data-testid="stPageLink"]) a::before {
+            content: "";
+            width: 8px;
+            height: 8px;
+            border-radius: 999px;
+            background: #fb923c;
+            box-shadow: 0 0 0 3px rgba(251, 146, 60, 0.16);
+            flex: 0 0 auto;
+        }
+
+        div[data-testid="stVerticalBlock"]:has(.home-hero-copy) > div:has([data-testid="stPageLink"]) a p {
+            margin: 0 !important;
+            color: #fde68a !important;
+            font-size: 13px !important;
+            font-weight: 700 !important;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        @media (max-width: 1100px) {
+            div[data-testid="stVerticalBlock"]:has(.home-hero-copy) {
+                max-width: 52rem;
+                padding-top: 64px;
+            }
+
+            div[data-testid="stVerticalBlock"]:has(.home-hero-copy) > div:has([data-testid="stPageLink"]) {
+                top: 0;
+            }
+        }
+
+        @media (max-width: 768px) {
+            div[data-testid="stVerticalBlock"]:has(.home-hero-copy) {
+                padding-top: 0;
+            }
+
+            div[data-testid="stVerticalBlock"]:has(.home-hero-copy) > div:has([data-testid="stPageLink"]) {
+                position: static;
+                width: 100%;
+                max-width: none;
+            }
+
+            div[data-testid="stVerticalBlock"]:has(.home-hero-copy) > div:has([data-testid="stPageLink"]) a {
+                margin: 0 auto 16px !important;
+                width: fit-content !important;
+                max-width: 100% !important;
+                white-space: normal !important;
+                text-align: center !important;
+                padding: 10px 14px !important;
+            }
+        }
         </style>
     """, unsafe_allow_html=True)
 
-    # --- 2. 渲染标题 ---
+    # --- 2. 渲染标题 + 右上角轻提示 ---
+    if HOME_PROMO_BANNER.get("enabled"):
+        st.markdown('<div class="home-promo-shell"></div>', unsafe_allow_html=True)
+        st.page_link(
+            str(HOME_PROMO_BANNER["target_page"]),
+            label=str(HOME_PROMO_BANNER["text"]),
+            use_container_width=False,
+        )
+
     st.markdown("""
-            <div style="padding: 20px 0;">
+            <div class="home-hero-copy">
                 <div class="hero-title">
                     ⚡ 嗨，我是爱波塔
                 </div>
