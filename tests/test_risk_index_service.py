@@ -1,5 +1,6 @@
 ﻿from datetime import datetime, timedelta, timezone
 import unittest
+from unittest.mock import patch
 
 import risk_index_service as svc
 
@@ -7,6 +8,36 @@ BEIJING_TZ = timezone(timedelta(hours=8))
 
 
 class TestRiskIndexService(unittest.TestCase):
+    def test_fetch_polymarket_events_disables_env_proxy_in_session(self):
+        class _DummyResponse:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return []
+
+        class _DummySession:
+            def __init__(self):
+                self.trust_env = True
+                self.calls = []
+                self.closed = False
+
+            def get(self, *args, **kwargs):
+                self.calls.append((args, kwargs))
+                return _DummyResponse()
+
+            def close(self):
+                self.closed = True
+
+        dummy_session = _DummySession()
+        with patch.object(svc.requests, "Session", return_value=dummy_session):
+            events = svc.fetch_polymarket_events(limit=20, timeout=7)
+
+        self.assertEqual(events, [])
+        self.assertFalse(dummy_session.trust_env)
+        self.assertEqual(len(dummy_session.calls), 1)
+        self.assertTrue(dummy_session.closed)
+
     def test_normalize_probability_supports_percent_and_decimal(self):
         self.assertAlmostEqual(svc.normalize_probability(57), 0.57, places=6)
         self.assertAlmostEqual(svc.normalize_probability(0.57), 0.57, places=6)

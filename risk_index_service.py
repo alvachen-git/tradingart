@@ -1101,6 +1101,8 @@ def fetch_polymarket_events(limit: int = 250, timeout: int = 12) -> List[Dict[st
     supplemental_events: List[Dict[str, Any]] = []
     seen_ids: set[str] = set()
     pages_scanned = 0
+    session = requests.Session()
+    session.trust_env = False
 
     def _append_event(event: Dict[str, Any], bucket: List[Dict[str, Any]]) -> bool:
         event_id = _safe_text(event.get("id") or event.get("slug") or event.get("ticker"))
@@ -1116,78 +1118,81 @@ def fetch_polymarket_events(limit: int = 250, timeout: int = 12) -> List[Dict[st
         bucket.append(event_copy)
         return True
 
-    for page_idx in range(max_pages):
-        params = {
-            "limit": page_size,
-            "offset": page_idx * page_size,
-            "active": "true",
-            "closed": "false",
-            "archived": "false",
-            "order": "volume24hr",
-            "ascending": "false",
+    try:
+        for page_idx in range(max_pages):
+            params = {
+                "limit": page_size,
+                "offset": page_idx * page_size,
+                "active": "true",
+                "closed": "false",
+                "archived": "false",
+                "order": "volume24hr",
+                "ascending": "false",
+            }
+            resp = session.get(POLYMARKET_EVENTS_API, params=params, headers=headers, timeout=timeout)
+            resp.raise_for_status()
+            data = resp.json()
+            batch = data if isinstance(data, list) else []
+            if not batch:
+                break
+            pages_scanned = page_idx + 1
+
+            for event in batch:
+                _append_event(event, events)
+
+            if len(events) >= target:
+                break
+            if len(batch) < page_size:
+                break
+
+        pending_watch_keys = {
+            _safe_text(item.get("watch_key"))
+            for item in _watchlist_configs()
+            if _safe_text(item.get("watch_key"))
         }
-        resp = requests.get(POLYMARKET_EVENTS_API, params=params, headers=headers, timeout=timeout)
-        resp.raise_for_status()
-        data = resp.json()
-        batch = data if isinstance(data, list) else []
-        if not batch:
-            break
-        pages_scanned = page_idx + 1
-
-        for event in batch:
-            _append_event(event, events)
-
-        if len(events) >= target:
-            break
-        if len(batch) < page_size:
-            break
-
-    pending_watch_keys = {
-        _safe_text(item.get("watch_key"))
-        for item in _watchlist_configs()
-        if _safe_text(item.get("watch_key"))
-    }
-    found_watch_keys = {
-        hit
-        for event in events
-        for hit in (event.get("_watch_hits") or [])
-        if _safe_text(hit)
-    }
-    missing_watch_keys = pending_watch_keys - found_watch_keys
-
-    for page_offset in range(supplemental_max_pages):
-        if not missing_watch_keys:
-            break
-        page_idx = pages_scanned + page_offset
-        params = {
-            "limit": page_size,
-            "offset": page_idx * page_size,
-            "active": "true",
-            "closed": "false",
-            "archived": "false",
-            "order": "volume24hr",
-            "ascending": "false",
+        found_watch_keys = {
+            hit
+            for event in events
+            for hit in (event.get("_watch_hits") or [])
+            if _safe_text(hit)
         }
-        resp = requests.get(POLYMARKET_EVENTS_API, params=params, headers=headers, timeout=timeout)
-        resp.raise_for_status()
-        data = resp.json()
-        batch = data if isinstance(data, list) else []
-        if not batch:
-            break
+        missing_watch_keys = pending_watch_keys - found_watch_keys
 
-        for event in batch:
-            watch_hits = _event_watch_hits(event)
-            if not watch_hits or not (set(watch_hits) & missing_watch_keys):
-                event_id = _safe_text(event.get("id") or event.get("slug") or event.get("ticker"))
-                if event_id and event_id not in seen_ids:
-                    seen_ids.add(event_id)
-                continue
-            appended = _append_event(event, supplemental_events)
-            if appended:
-                missing_watch_keys -= set(watch_hits)
+        for page_offset in range(supplemental_max_pages):
+            if not missing_watch_keys:
+                break
+            page_idx = pages_scanned + page_offset
+            params = {
+                "limit": page_size,
+                "offset": page_idx * page_size,
+                "active": "true",
+                "closed": "false",
+                "archived": "false",
+                "order": "volume24hr",
+                "ascending": "false",
+            }
+            resp = session.get(POLYMARKET_EVENTS_API, params=params, headers=headers, timeout=timeout)
+            resp.raise_for_status()
+            data = resp.json()
+            batch = data if isinstance(data, list) else []
+            if not batch:
+                break
 
-        if len(batch) < page_size:
-            break
+            for event in batch:
+                watch_hits = _event_watch_hits(event)
+                if not watch_hits or not (set(watch_hits) & missing_watch_keys):
+                    event_id = _safe_text(event.get("id") or event.get("slug") or event.get("ticker"))
+                    if event_id and event_id not in seen_ids:
+                        seen_ids.add(event_id)
+                    continue
+                appended = _append_event(event, supplemental_events)
+                if appended:
+                    missing_watch_keys -= set(watch_hits)
+
+            if len(batch) < page_size:
+                break
+    finally:
+        session.close()
 
     events.sort(key=_event_priority_tuple, reverse=True)
     supplemental_events.sort(key=_event_priority_tuple, reverse=True)
