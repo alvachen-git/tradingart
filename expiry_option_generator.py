@@ -1194,6 +1194,8 @@ def _build_canonical_symbol_name_map(sections: list[dict]) -> dict[str, str]:
         v = str(name or "").strip()
         if k and v:
             symbol_map[k] = v
+            symbol_map[f"{k}.SH"] = v
+            symbol_map[f"{k}.SZ"] = v
 
     for section in sections or []:
         code = str(section.get("underlying") or "").strip().upper()
@@ -1201,11 +1203,23 @@ def _build_canonical_symbol_name_map(sections: list[dict]) -> dict[str, str]:
         if not code or not name:
             continue
         symbol_map[code] = name
-        if re.fullmatch(r"\d{6}", code):
-            symbol_map[f"{code}.SH"] = name
-            symbol_map[f"{code}.SZ"] = name
+        base_code = normalize_etf_code(code)
+        if re.fullmatch(r"\d{6}", base_code):
+            symbol_map[base_code] = name
+            symbol_map[f"{base_code}.SH"] = name
+            symbol_map[f"{base_code}.SZ"] = name
 
     return symbol_map
+
+
+def _canonical_symbol_prefix_re(code: str) -> str:
+    """
+    Avoid treating exchange suffixes in ETF ts_codes as commodity symbols.
+    Example: `510050.SH` must not match commodity `SH` (烧碱).
+    """
+    if re.fullmatch(r"[A-Z]{1,3}", str(code or "").strip().upper()):
+        return r"(?<![A-Za-z0-9.])"
+    return r"(?<![A-Za-z0-9])"
 
 
 def enforce_symbol_label_consistency(html: str, sections: list[dict]) -> str:
@@ -1218,8 +1232,9 @@ def enforce_symbol_label_consistency(html: str, sections: list[dict]) -> str:
     for code, canonical_name in symbol_map.items():
         if not code or not canonical_name:
             continue
+        prefix = _canonical_symbol_prefix_re(code)
         pattern = re.compile(
-            rf"(?<![A-Za-z0-9])({re.escape(code)})\s*[（(][^）)<]{{1,30}}[）)]",
+            rf"{prefix}({re.escape(code)})\s*[（(][^）)<]{{1,30}}[）)]",
             flags=re.IGNORECASE,
         )
         fixed = pattern.sub(lambda m, c=code, n=canonical_name: f"{c}（{n}）", fixed)
@@ -1241,9 +1256,10 @@ def enforce_section_title_symbol_order(html: str, sections: list[dict]) -> str:
         for code, canonical_name in symbol_map.items():
             if not code or not canonical_name:
                 continue
+            prefix = _canonical_symbol_prefix_re(code)
             # code(name) -> name(code)
             block = re.sub(
-                rf"(?<![A-Za-z0-9]){re.escape(code)}\s*[（(][^）)<]{{1,30}}[）)]",
+                rf"{prefix}{re.escape(code)}\s*[（(][^）)<]{{1,30}}[）)]",
                 f"{canonical_name}（{code}）",
                 block,
                 flags=re.IGNORECASE,
