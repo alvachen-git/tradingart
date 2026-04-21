@@ -92,6 +92,7 @@ def show_navigation() -> None:
         _safe_page_link("pages/24_世界混乱指数.py", label="世界混乱指数")
         _safe_page_link("pages/06_相关分析.py", label="相关分析")
         _safe_page_link("pages/07_对冲分析.py", label="对冲分析")
+        _safe_page_link("pages/17_时序预测实验.py", label="价格区间预测")
         _safe_page_link("pages/08_股票资金.py", label="股票资金")
         _safe_page_link("pages/21_产业链图谱.py", label="产业链图谱")
 
