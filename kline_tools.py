@@ -325,10 +325,30 @@ def analyze_kline_pattern(query: str, trade_date: str = None):
         lower_shadow = min(close, open_p) - low
         total_range = high - low if high != low else 0.01
 
-        body_pct = body_size / total_range
-        upper_pct = upper_shadow / body_size
-        lower_pct = lower_shadow / body_size
-        uplo_pct = upper_shadow / lower_shadow
+        def _safe_div(numerator, denominator, default=0.0):
+            try:
+                denominator = float(denominator)
+                if abs(denominator) < 1e-12:
+                    return default
+                return float(numerator) / denominator
+            except Exception:
+                return default
+
+        body_pct = _safe_div(body_size, total_range)
+        upper_pct = _safe_div(upper_shadow, body_size, default=0.0)
+        lower_pct = _safe_div(lower_shadow, body_size, default=0.0)
+        uplo_pct = _safe_div(upper_shadow, lower_shadow, default=float("inf"))
+        upper_range_pct = _safe_div(upper_shadow, total_range)
+        lower_range_pct = _safe_div(lower_shadow, total_range)
+
+        if lower_shadow > upper_shadow * 2 and lower_range_pct >= 0.4:
+            dominant_shadow = "下影显著长于上影"
+        elif upper_shadow > lower_shadow * 2 and upper_range_pct >= 0.4:
+            dominant_shadow = "上影显著长于下影"
+        elif body_pct < 0.1 and 0.5 < uplo_pct < 1.5:
+            dominant_shadow = "上下影接近，十字星特征"
+        else:
+            dominant_shadow = "影线结构不极端"
 
         # 今日涨跌幅
         chg_pct = (close - prev_close) / prev_close
@@ -585,13 +605,13 @@ def analyze_kline_pattern(query: str, trade_date: str = None):
         # 4. 长下影
         if lower_pct > 2.0 and upper_pct < 1.0 and body_pct < 0.3 and body_pct > 0.01:
             if close < curr['MA5']:
-                patterns.append("【锤子】(多头抵抗)")
+                patterns.append("【锤子线】(长下影小实体，多头抵抗)")
             elif curr['MA5'] > curr['MA20']:
-                patterns.append("【吊人线】(高位抛压预警)")
+                patterns.append("【吊人线】(长下影小实体，高位反转预警)")
 
         # 5. 长上影
         if upper_pct > 2.0 and lower_pct < 1.0 and body_pct < 0.3 and body_pct > 0.01 and curr['MA5'] > curr['MA20']:
-            patterns.append("【倒状锤子】(卖压沉重)")
+            patterns.append("【射击之星】(长上影小实体，高位卖压沉重)")
 
         # 6. 十字星
         if body_pct < 0.1 and 0.5 < uplo_pct < 1.5:
@@ -777,17 +797,22 @@ def analyze_kline_pattern(query: str, trade_date: str = None):
 **一、今日形态信号**
 {' 🔥 '.join(patterns) if patterns else '普通震荡K线，无明显形态。'}
 
-**二、近5日K线概览**
+**二、今日K线事实**
+- OHLC：开 {open_p:.3f} / 高 {high:.3f} / 低 {low:.3f} / 收 {close:.3f}
+- 实体占全日振幅 {body_pct * 100:.1f}%，上影 {upper_shadow:.3f}（{upper_range_pct * 100:.1f}%），下影 {lower_shadow:.3f}（{lower_range_pct * 100:.1f}%）
+- 主导影线：{dominant_shadow}
+
+**三、近5日K线概览**
 {' → '.join(recent_klines)}
 
-**三、多日组合形态**
+**四、多日组合形态**
 {' | '.join(combo_patterns) if combo_patterns else '暂无明显组合形态。'}
 
-**四、趋势研判**
+**五、趋势研判**
 - 均线位置：{'，'.join(trends)}
 - 多日趋势：{multi_day_trend}
 
-**五、价格数据**
+**六、价格数据**
 - 今日收盘：{close} (涨跌 {chg_pct * 100:+.2f}%)
 - MA5: {curr['MA5']:.2f} | MA10: {curr['MA10']:.2f} | MA20: {curr['MA20']:.2f}
         """
