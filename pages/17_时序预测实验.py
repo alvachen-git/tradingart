@@ -1,4 +1,5 @@
 import html
+import os
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -385,6 +386,13 @@ def _format_price(value: object) -> str:
         return f"{float(value):,.2f}"
     except (TypeError, ValueError):
         return "-"
+
+
+def _request_timeout_seconds() -> float:
+    try:
+        return max(10.0, float(os.getenv("KRONOS_POC_REQUEST_TIMEOUT", "180")))
+    except ValueError:
+        return 180.0
 
 
 def _build_chart(resp: dict) -> go.Figure:
@@ -785,8 +793,11 @@ else:
                 horizon=3,
                 quantiles=[0.1, 0.5, 0.9],
                 force_refresh=bool(force_refresh),
-                timeout=25.0,
+                timeout=_request_timeout_seconds(),
             )
+        except requests.exceptions.Timeout:
+            st.error("本次预测计算时间较长，页面等待已超时。请稍后重试，或取消“重新计算”使用今日缓存结果。")
+            resp = None
         except requests.exceptions.RequestException:
             st.error("预测服务暂不可用，请先启动本地服务或稍后重试。")
             resp = None
