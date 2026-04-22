@@ -52,6 +52,14 @@ from zoneinfo import ZoneInfo
 import requests
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.outputs import LLMResult
+from chat_feedback_service import (
+    CHAT_FEEDBACK_REASON_CODES,
+    generate_chat_answer_id,
+    generate_chat_trace_id,
+    get_user_feedback_for_answer,
+    save_chat_answer_event,
+    submit_chat_feedback,
+)
 # --- AI 相关导入 ---
 from llm_compat import ChatTongyiCompat as ChatTongyi
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
@@ -258,6 +266,211 @@ def check_and_show_announcement():
         if st.session_state.get("announcement_acknowledged_date") != today:
             st.session_state.announcement_acknowledged_date = today
             show_announcement()
+
+_HOME_CHAT_FEEDBACK_REASON_LABELS = {
+    "not_personalized": "不够贴合我的情况",
+    "too_generic": "太泛了，不够具体",
+    "wrong_fact": "有事实错误",
+    "not_actionable": "没有给出可执行建议",
+}
+
+
+def _get_home_feedback_engine():
+    return getattr(de, "engine", None)
+
+
+def _get_home_feedback_reason_options():
+    ordered_keys = [
+        "not_personalized",
+        "too_generic",
+        "wrong_fact",
+        "not_actionable",
+    ]
+    return [(key, _HOME_CHAT_FEEDBACK_REASON_LABELS[key]) for key in ordered_keys if key in CHAT_FEEDBACK_REASON_CODES]
+
+
+def _get_home_feedback_cache() -> Dict[str, Dict[str, Any]]:
+    cache = st.session_state.get("chat_feedback_submissions")
+    if not isinstance(cache, dict):
+        cache = {}
+        st.session_state["chat_feedback_submissions"] = cache
+    return cache
+
+
+def _inject_home_feedback_styles():
+    css_version = "home_feedback_scoped_20260421"
+    if st.session_state.get("_home_feedback_css_version") == css_version:
+        return
+    st.markdown(
+        """
+        <style>
+        div[data-testid="stExpander"] details {
+            background: rgba(15, 23, 42, 0.45) !important;
+            border: 1px solid rgba(148, 163, 184, 0.18) !important;
+            border-radius: 12px !important;
+        }
+        div[data-testid="stExpander"] summary {
+            color: #f8fafc !important;
+        }
+        div[data-testid="stExpander"] div[data-baseweb="select"] > div {
+            background: rgba(15, 23, 42, 0.92) !important;
+            color: #f8fafc !important;
+            border: 1px solid rgba(148, 163, 184, 0.32) !important;
+        }
+        div[data-testid="stExpander"] div[data-baseweb="select"] span {
+            color: #f8fafc !important;
+        }
+        div[data-testid="stExpander"] div[data-baseweb="select"] input {
+            color: #f8fafc !important;
+            -webkit-text-fill-color: #f8fafc !important;
+        }
+        div[role="listbox"] {
+            background: #0f172a !important;
+            color: #f8fafc !important;
+            border: 1px solid rgba(148, 163, 184, 0.28) !important;
+        }
+        div[role="option"] {
+            background: #0f172a !important;
+            color: #f8fafc !important;
+        }
+        div[role="option"][aria-selected="true"] {
+            background: #1d4ed8 !important;
+            color: #f8fafc !important;
+        }
+        div[data-testid="stExpander"] textarea {
+            background: rgba(15, 23, 42, 0.92) !important;
+            color: #f8fafc !important;
+        }
+        div[data-testid="stExpander"] textarea::placeholder {
+            color: #94a3b8 !important;
+            opacity: 1 !important;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.session_state["_home_feedback_css_version"] = css_version
+
+
+def _submit_home_chat_feedback(
+    *,
+    answer_id: str,
+    trace_id: str,
+    feedback_type: str,
+    reason_code: str = "",
+    feedback_text: str = "",
+) -> Dict[str, Any]:
+    current_user = str(st.session_state.get("user_id") or "").strip()
+    if not current_user or current_user == "访客":
+        return {"ok": False, "message": "请先登录后再提交反馈"}
+
+    result = submit_chat_feedback(
+        _get_home_feedback_engine(),
+        answer_id=answer_id,
+        trace_id=trace_id,
+        user_id=current_user,
+        feedback_type=feedback_type,
+        reason_code=reason_code,
+        feedback_text=feedback_text,
+    )
+    code = str(result.get("code") or "")
+    if code in {"ok", "already_submitted"}:
+        return {"ok": True, "message": "反馈已记录，后续会用于优化回答"}
+    if code == "invalid_reason_code":
+        return {"ok": False, "message": "请选择一个有效的差评原因"}
+    if code == "answer_not_found":
+        return {"ok": False, "message": "这条回答暂时还没有可反馈记录，请稍后再试"}
+    if code == "forbidden":
+        return {"ok": False, "message": "这条回答不属于当前登录用户"}
+    if code == "trace_mismatch":
+        return {"ok": False, "message": "反馈标识已失效，请重新提问后再试"}
+    if code == "unsupported_feedback_type":
+        return {"ok": False, "message": "暂不支持这种反馈类型"}
+    return {"ok": False, "message": "反馈保存失败，请稍后重试"}
+
+
+def _render_chat_feedback_controls(msg: Dict[str, Any], index: int):
+    answer_id = str(msg.get("answer_id") or "").strip()
+    trace_id = str(msg.get("trace_id") or "").strip()
+    if not answer_id or not trace_id or not bool(msg.get("feedback_allowed")):
+        return
+
+    _inject_home_feedback_styles()
+    cache = _get_home_feedback_cache()
+    existing = cache.get(answer_id)
+    if not isinstance(existing, dict):
+        current_user = str(st.session_state.get("user_id") or "").strip()
+        if current_user and current_user != "访客":
+            existing = get_user_feedback_for_answer(
+                _get_home_feedback_engine(),
+                answer_id=answer_id,
+                user_id=current_user,
+            )
+            if isinstance(existing, dict) and existing:
+                cache[answer_id] = existing
+    if isinstance(existing, dict) and existing:
+        feedback_type = str(existing.get("feedback_type") or "").strip()
+        if feedback_type == "up":
+            st.caption("你已标记这条回答“有帮助”")
+            return
+        reason_label = _HOME_CHAT_FEEDBACK_REASON_LABELS.get(
+            str(existing.get("reason_code") or "").strip(),
+            "已提交反馈",
+        )
+        st.caption(f"你已提交反馈：{reason_label}")
+        return
+
+    st.caption("这条回答对你有帮助吗？")
+    col_up, col_down = st.columns([0.9, 4.6], gap="small")
+    with col_up:
+        if st.button("有帮助", key=f"feedback_up_{answer_id}", type="secondary", use_container_width=True):
+            submit_result = _submit_home_chat_feedback(
+                answer_id=answer_id,
+                trace_id=trace_id,
+                feedback_type="up",
+            )
+            if submit_result.get("ok"):
+                cache[answer_id] = {"feedback_type": "up"}
+                st.toast(str(submit_result.get("message") or "反馈已提交"))
+                st.rerun()
+            st.warning(str(submit_result.get("message") or "反馈提交失败"))
+
+    with col_down:
+        with st.expander("没帮助，告诉我哪里不对", expanded=False):
+            options = [("", "请选择一个原因"), *_get_home_feedback_reason_options()]
+            labels = [label for _, label in options]
+            selected_label = st.selectbox(
+                "差评原因",
+                options=labels,
+                key=f"feedback_reason_{answer_id}",
+            )
+            reason_code = ""
+            for code, label in options:
+                if label == selected_label:
+                    reason_code = code
+                    break
+            feedback_text = st.text_area(
+                "补充说明（可选）",
+                key=f"feedback_text_{answer_id}",
+                placeholder="例如：希望明确到仓位比例、止损线，或者指出哪句不对",
+                height=80,
+            )
+            if st.button("提交反馈", key=f"feedback_down_{answer_id}", type="secondary"):
+                submit_result = _submit_home_chat_feedback(
+                    answer_id=answer_id,
+                    trace_id=trace_id,
+                    feedback_type="down",
+                    reason_code=reason_code,
+                    feedback_text=str(feedback_text or "").strip(),
+                )
+                if submit_result.get("ok"):
+                    cache[answer_id] = {
+                        "feedback_type": "down",
+                        "reason_code": reason_code,
+                    }
+                    st.toast(str(submit_result.get("message") or "反馈已提交"))
+                    st.rerun()
+                st.warning(str(submit_result.get("message") or "反馈提交失败"))
 
 # ==========================================
 #  1. 页面配置 (必须在第一行) [修改点：改为 centered 布局]
@@ -1548,10 +1761,14 @@ def _restore_pending_tasks_after_auto_login_once():
         st.session_state.pending_task = {
             "task_id": pending_task_data["task_id"],
             "prompt": pending_task_data["prompt"],
+            "raw_prompt": pending_task_data["prompt"],
             "image_context": pending_task_data.get("image_context", ""),
             "mode": pending_task_data.get("mode", "normal"),
             "risk": pending_task_data.get("risk_preference", "稳健型"),
             "start_time": pending_task_data["start_time"],
+            "trace_id": generate_chat_trace_id(),
+            "answer_id": generate_chat_answer_id(),
+            "intent_domain": "general",
         }
         if not st.session_state.get("messages"):
             st.session_state.messages = [{"role": "user", "content": pending_task_data["prompt"]}]
@@ -2267,6 +2484,10 @@ def process_user_input(
     history_for_task = [{"role": msg["role"], "content": msg["content"]} for msg in recent_history]
 
     # 提交后台任务
+    trace_id = generate_chat_trace_id()
+    answer_id = generate_chat_answer_id()
+    intent_domain = str(context_payload.get("intent_domain") or "general")
+
     if deep_mode:
         deep_risk = "balanced"
         task_id = task_manager.create_task(
@@ -2352,12 +2573,16 @@ def process_user_input(
     st.session_state.pending_task = {
         "task_id": task_id,
         "prompt": final_prompt,
+        "raw_prompt": prompt_text,
         "image_context": image_context,
         "mode": "deep" if deep_mode else "normal",
         "risk": "balanced" if deep_mode else risk,
         "context_payload": context_payload,
         "start_time": time.time(),
         "analysis_mode_label": str(analysis_mode_label or ""),
+        "trace_id": trace_id,
+        "answer_id": answer_id,
+        "intent_domain": intent_domain,
     }
 
 
@@ -3019,6 +3244,8 @@ else:
                 render_knowledge_attachments(msg_attachments, exclude_indices=inline_state["used_indices"])
 
             # [关键修改]
+            if msg["role"] in ["assistant", "ai"]:
+                _render_chat_feedback_controls(msg, i)
             if msg["role"] == "ai":
                 # 尝试获取上一条消息作为“提问”
                 user_question = "（上下文关联提问）"
@@ -3307,11 +3534,32 @@ if "pending_task" in st.session_state and st.session_state.pending_task:
                             render_knowledge_attachments(attachments, exclude_indices=inline_state["used_indices"])
 
                     # 存入历史
+                    trace_id = str(task_info.get("trace_id") or generate_chat_trace_id()).strip()
+                    answer_id = str(task_info.get("answer_id") or generate_chat_answer_id()).strip()
+                    intent_domain = str(task_info.get("intent_domain") or "general").strip() or "general"
+                    feedback_allowed = False
+                    if current_user != "访客" and final_response_md:
+                        feedback_allowed = save_chat_answer_event(
+                            _get_home_feedback_engine(),
+                            task_id=task_id,
+                            user_id=current_user,
+                            trace_id=trace_id,
+                            answer_id=answer_id,
+                            prompt_text=str(task_info.get("raw_prompt") or task_info.get("prompt") or "").strip(),
+                            response_text=final_response_md,
+                            intent_domain=intent_domain,
+                            feedback_allowed=True,
+                        )
+
                     message_data = {
                         "role": "ai",
                         "content": final_response_md,
                         "chart": final_img_path,
                         "attachments": attachments,
+                        "trace_id": trace_id,
+                        "answer_id": answer_id,
+                        "feedback_allowed": feedback_allowed,
+                        "intent_domain": intent_domain,
                     }
                     st.session_state.messages.append(message_data)
 

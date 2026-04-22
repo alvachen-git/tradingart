@@ -83,6 +83,24 @@ from ai_simulation_service import (
     get_review_dates as ai_get_review_dates,
     get_trades as ai_get_trades,
 )
+from chat_feedback_service import (
+    CHAT_FEEDBACK_ALLOWED_TYPES as _CHAT_FEEDBACK_ALLOWED_TYPES,
+    CHAT_FEEDBACK_REASON_CODES as _CHAT_FEEDBACK_REASON_CODES,
+    CHAT_FEEDBACK_SAMPLE_OPTIMIZATION_TYPES as _CHAT_FEEDBACK_SAMPLE_OPTIMIZATION_TYPES,
+    CHAT_FEEDBACK_SAMPLE_STATUSES as _CHAT_FEEDBACK_SAMPLE_STATUSES,
+    ensure_chat_feedback_tables,
+    get_chat_feedback_sample,
+    generate_chat_answer_id,
+    generate_chat_trace_id,
+    get_chat_answer_event,
+    list_chat_feedback_events,
+    list_chat_feedback_failure_candidates,
+    list_chat_feedback_samples,
+    save_chat_answer_event,
+    submit_chat_feedback,
+    update_chat_feedback_sample,
+    upsert_chat_feedback_sample,
+)
 from vision_tools import analyze_portfolio_image, analyze_position_image
 from mobile_trading_day import enrich_prices_payload_with_trading_day
 
@@ -98,6 +116,14 @@ _MOBILE_CHAT_RESULT_KEY_PREFIX = "mobile:chat:result:"
 _MOBILE_CHAT_LAST_TASK_KEY_PREFIX = "mobile:user:last_task:"
 _MOBILE_CHAT_RESULT_TTL_SECONDS = int(str(os.getenv("MOBILE_CHAT_RESULT_TTL_SECONDS", "86400")).strip() or 86400)
 _MOBILE_CHAT_MAX_PENDING_SECONDS = int(str(os.getenv("MOBILE_CHAT_MAX_PENDING_SECONDS", "400")).strip() or 400)
+_CHAT_FEEDBACK_SCHEMA_LOCK = threading.Lock()
+_CHAT_FEEDBACK_SCHEMA_READY = False
+_CHAT_FEEDBACK_SCHEMA_ENGINE_ID = ""
+_CHAT_FEEDBACK_DEFAULT_ADMIN_USERS = {"mike0919"}
+_CHAT_FEEDBACK_ENV_ADMIN_USERS = {
+    item.strip() for item in str(os.getenv("AI_FEEDBACK_ADMIN_USERS", "")).split(",") if item.strip()
+}
+_CHAT_FEEDBACK_ADMIN_USERS = _CHAT_FEEDBACK_DEFAULT_ADMIN_USERS | _CHAT_FEEDBACK_ENV_ADMIN_USERS
 
 # ════════════════════════════════════════════════════════════
 #  实时行情后台刷新 — 直连新浪行情接口（绕过 akshare 封装层）
@@ -1150,6 +1176,36 @@ class ChatCancelRequest(BaseModel):
     reason: Optional[str] = "manual"  # clear | timeout | manual
 
 
+class ChatFeedbackRequest(BaseModel):
+    trace_id: str
+    answer_id: str
+    feedback_type: str
+    reason_code: Optional[str] = None
+    feedback_text: Optional[str] = ""
+
+
+class ChatFeedbackSampleCreateRequest(BaseModel):
+    prompt_text: str
+    reason_code: str
+    intent_domain: Optional[str] = "general"
+    occurrence_count: Optional[int] = 1
+    latest_feedback_at: Optional[str] = ""
+    latest_feedback_text: Optional[str] = ""
+    sample_answer_id: Optional[str] = ""
+    sample_trace_id: Optional[str] = ""
+    sample_response_text: Optional[str] = ""
+    sample_status: Optional[str] = "new"
+    optimization_type: Optional[str] = ""
+    review_notes: Optional[str] = ""
+
+
+class ChatFeedbackSampleUpdateRequest(BaseModel):
+    sample_key: str
+    sample_status: Optional[str] = None
+    optimization_type: Optional[str] = None
+    review_notes: Optional[str] = None
+
+
 class SubscribeRequest(BaseModel):
     channel_code: str
 
@@ -1485,6 +1541,7 @@ def _write_mobile_chat_state(
     status: str,
     error: str = "",
     finished: bool = False,
+    extra_fields: Optional[Dict[str, Any]] = None,
 ):
     existing = _read_mobile_chat_state(task_id)
     now_iso = datetime.now().isoformat()
@@ -1497,6 +1554,11 @@ def _write_mobile_chat_state(
         "updated_at": now_iso,
         "finished_at": now_iso if finished else str(existing.get("finished_at") or ""),
     }
+    if isinstance(extra_fields, dict):
+        for key, value in extra_fields.items():
+            if value is None:
+                continue
+            payload[str(key)] = value
     try:
         _redis.setex(
             _mobile_chat_state_key(task_id),
@@ -1554,13 +1616,22 @@ def _clear_mobile_chat_last_task_if_matches(username: str, task_id: str):
         pass
 
 
-def _build_mobile_chat_success_response(result_payload: dict) -> dict:
-    return {
+def _build_mobile_chat_success_response(result_payload: dict, state: Optional[dict] = None) -> dict:
+    payload = {
         "status": "success",
         "progress": "已完成",
         "result": result_payload if isinstance(result_payload, dict) else {},
         "error": None,
     }
+    state = state if isinstance(state, dict) else {}
+    trace_id = str(state.get("trace_id") or "").strip()
+    answer_id = str(state.get("answer_id") or "").strip()
+    if trace_id:
+        payload["trace_id"] = trace_id
+    if answer_id:
+        payload["answer_id"] = answer_id
+    payload["feedback_allowed"] = bool(state.get("feedback_allowed", bool(answer_id)))
+    return payload
 
 
 def _build_mobile_chat_error_response(err_msg: str, code: str = "") -> dict:
@@ -1575,6 +1646,173 @@ def _build_mobile_chat_error_response(err_msg: str, code: str = "") -> dict:
     return payload
 
 
+def _generate_chat_trace_id() -> str:
+    return generate_chat_trace_id()
+
+
+def _generate_chat_answer_id() -> str:
+    return generate_chat_answer_id()
+
+
+def _get_chat_feedback_engine():
+    return getattr(de, "engine", None)
+
+
+def _ensure_chat_feedback_tables() -> bool:
+    return ensure_chat_feedback_tables(_get_chat_feedback_engine())
+
+
+def _ensure_chat_feedback_admin(username: str):
+    if str(username or "").strip() not in _CHAT_FEEDBACK_ADMIN_USERS:
+        raise HTTPException(status_code=403, detail="no permission to view feedback pool")
+
+
+def _save_chat_answer_event(
+    *,
+    task_id: str,
+    user_id: str,
+    trace_id: str,
+    answer_id: str,
+    prompt_text: str,
+    response_text: str,
+    intent_domain: str = "general",
+    feedback_allowed: bool = True,
+) -> bool:
+    return save_chat_answer_event(
+        _get_chat_feedback_engine(),
+        task_id=task_id,
+        user_id=user_id,
+        trace_id=trace_id,
+        answer_id=answer_id,
+        prompt_text=prompt_text,
+        response_text=response_text,
+        intent_domain=intent_domain,
+        feedback_allowed=feedback_allowed,
+    )
+
+
+def _get_chat_answer_event(answer_id: str) -> dict:
+    return get_chat_answer_event(_get_chat_feedback_engine(), answer_id)
+
+
+def _list_chat_feedback_failure_candidates(
+    limit: int = 20,
+    *,
+    intent_domain: str = "",
+    reason_code: str = "",
+    keyword: str = "",
+    start_at: str = "",
+    end_at: str = "",
+    min_occurrence: int = 1,
+) -> List[dict]:
+    return list_chat_feedback_failure_candidates(
+        _get_chat_feedback_engine(),
+        limit=limit,
+        intent_domain=intent_domain,
+        reason_code=reason_code,
+        keyword=keyword,
+        start_at=start_at,
+        end_at=end_at,
+        min_occurrence=min_occurrence,
+    )
+
+
+def _list_chat_feedback_events(
+    limit: int = 100,
+    feedback_type: str = "",
+    answer_id: str = "",
+    user_id: str = "",
+    intent_domain: str = "",
+    reason_code: str = "",
+    keyword: str = "",
+    start_at: str = "",
+    end_at: str = "",
+) -> List[dict]:
+    return list_chat_feedback_events(
+        _get_chat_feedback_engine(),
+        limit=limit,
+        feedback_type=feedback_type,
+        answer_id=answer_id,
+        user_id=user_id,
+        intent_domain=intent_domain,
+        reason_code=reason_code,
+        keyword=keyword,
+        start_at=start_at,
+        end_at=end_at,
+    )
+
+
+def _list_chat_feedback_samples(
+    limit: int = 100,
+    sample_status: str = "",
+    optimization_type: str = "",
+    intent_domain: str = "",
+    reason_code: str = "",
+    keyword: str = "",
+) -> List[dict]:
+    return list_chat_feedback_samples(
+        _get_chat_feedback_engine(),
+        limit=limit,
+        sample_status=sample_status,
+        optimization_type=optimization_type,
+        intent_domain=intent_domain,
+        reason_code=reason_code,
+        keyword=keyword,
+    )
+
+
+def _upsert_chat_feedback_sample(
+    *,
+    prompt_text: str,
+    reason_code: str,
+    intent_domain: str = "general",
+    occurrence_count: int = 1,
+    latest_feedback_at: str = "",
+    latest_feedback_text: str = "",
+    sample_answer_id: str = "",
+    sample_trace_id: str = "",
+    sample_response_text: str = "",
+    created_by: str = "",
+    sample_status: str = "new",
+    optimization_type: str = "",
+    review_notes: str = "",
+) -> dict:
+    return upsert_chat_feedback_sample(
+        _get_chat_feedback_engine(),
+        prompt_text=prompt_text,
+        reason_code=reason_code,
+        intent_domain=intent_domain,
+        occurrence_count=occurrence_count,
+        latest_feedback_at=latest_feedback_at,
+        latest_feedback_text=latest_feedback_text,
+        sample_answer_id=sample_answer_id,
+        sample_trace_id=sample_trace_id,
+        sample_response_text=sample_response_text,
+        created_by=created_by,
+        sample_status=sample_status,
+        optimization_type=optimization_type,
+        review_notes=review_notes,
+    )
+
+
+def _update_chat_feedback_sample(
+    *,
+    sample_key: str,
+    sample_status: Optional[str] = None,
+    optimization_type: Optional[str] = None,
+    review_notes: Optional[str] = None,
+    reviewed_by: str = "",
+) -> dict:
+    return update_chat_feedback_sample(
+        _get_chat_feedback_engine(),
+        sample_key=sample_key,
+        sample_status=sample_status,
+        optimization_type=optimization_type,
+        review_notes=review_notes,
+        reviewed_by=reviewed_by,
+    )
+
+
 def _build_mobile_chat_runtime_snapshot(task_id: str, username: str) -> dict:
     state = _read_mobile_chat_state(task_id)
     if state and state.get("user_id") and str(state.get("user_id")) != str(username):
@@ -1585,7 +1823,22 @@ def _build_mobile_chat_runtime_snapshot(task_id: str, username: str) -> dict:
 
     status_name = str(state.get("status") or "").strip().lower()
     if status_name == "success" and isinstance(result_payload, dict):
-        return _build_mobile_chat_success_response(result_payload)
+        trace_id = str(state.get("trace_id") or "").strip()
+        answer_id = str(state.get("answer_id") or "").strip()
+        prompt_text = str(state.get("prompt_text") or "").strip()
+        response_text = str((result_payload or {}).get("response") or "").strip()
+        if trace_id and answer_id and response_text:
+            _save_chat_answer_event(
+                task_id=task_id,
+                user_id=str(state.get("user_id") or username),
+                trace_id=trace_id,
+                answer_id=answer_id,
+                prompt_text=prompt_text,
+                response_text=response_text,
+                intent_domain=str(state.get("intent_domain") or "general"),
+                feedback_allowed=bool(state.get("feedback_allowed", True)),
+            )
+        return _build_mobile_chat_success_response(result_payload, state=state)
 
     if status_name in {"error", "canceled", "timeout"}:
         msg = str(state.get("error") or "").strip()
@@ -1783,6 +2036,9 @@ def chat_submit(
         profile=profile,
     )
     has_portfolio = _detect_mobile_has_portfolio(username)
+    trace_id = _generate_chat_trace_id()
+    answer_id = _generate_chat_answer_id()
+    intent_domain = str(context_payload.get("intent_domain") or "general")
 
     task_id = TaskManager.create_task(
         user_id=username,
@@ -1792,7 +2048,20 @@ def chat_submit(
         context_payload=context_payload,
         has_portfolio=has_portfolio,
     )
-    _write_mobile_chat_state(task_id=task_id, user_id=username, status="pending", error="", finished=False)
+    _write_mobile_chat_state(
+        task_id=task_id,
+        user_id=username,
+        status="pending",
+        error="",
+        finished=False,
+        extra_fields={
+            "trace_id": trace_id,
+            "answer_id": answer_id,
+            "prompt_text": raw_prompt or normalized_prompt,
+            "intent_domain": intent_domain,
+            "feedback_allowed": False,
+        },
+    )
     _set_mobile_chat_last_task(username, task_id)
     try:
         if raw_prompt:
@@ -1858,7 +2127,14 @@ def chat_status(task_id: str, username: str = Depends(get_current_user)):
         if isinstance(result, dict):
             ai_response = str(result.get("response") or "").strip()
             _write_mobile_chat_result(task_id=task_id, user_id=username, result_payload=result)
-            _write_mobile_chat_state(task_id=task_id, user_id=username, status="success", error="", finished=True)
+            _write_mobile_chat_state(
+                task_id=task_id,
+                user_id=username,
+                status="success",
+                error="",
+                finished=True,
+                extra_fields={"feedback_allowed": True},
+            )
 
         queue_status = _queue_mobile_chat_memory_persist(
             task_id=task_id,
@@ -1893,6 +2169,10 @@ def chat_status(task_id: str, username: str = Depends(get_current_user)):
             TaskManager.clear_user_pending_task(username)
             _clear_mobile_chat_last_task_if_matches(username, task_id)
             return _build_mobile_chat_error_response("AI思考太久，请重新提问。", code="task_timeout")
+    if status_name == "success":
+        refreshed = _build_mobile_chat_runtime_snapshot(task_id=task_id, username=username)
+        if refreshed:
+            return refreshed
     return status
 
 
@@ -1995,6 +2275,187 @@ def chat_cancel(
         pass
 
     return {"status": "ok", "task_id": task_id, "message": err_msg}
+
+
+@app.post("/api/chat/feedback", tags=["AI问答"])
+def chat_feedback(
+    body: ChatFeedbackRequest,
+    username: str = Depends(get_current_user),
+):
+    answer_id = str(body.answer_id or "").strip()
+    trace_id = str(body.trace_id or "").strip()
+    if not answer_id or not trace_id:
+        raise HTTPException(status_code=400, detail="trace_id and answer_id are required")
+
+    result = submit_chat_feedback(
+        _get_chat_feedback_engine(),
+        answer_id=answer_id,
+        trace_id=trace_id,
+        user_id=username,
+        feedback_type=str(body.feedback_type or ""),
+        reason_code=str(body.reason_code or ""),
+        feedback_text=str(body.feedback_text or "").strip(),
+    )
+    code = str(result.get("code") or "")
+    if code == "answer_not_found":
+        raise HTTPException(status_code=404, detail="answer not found")
+    if code == "forbidden":
+        raise HTTPException(status_code=403, detail="no permission to rate this answer")
+    if code == "trace_mismatch":
+        raise HTTPException(status_code=400, detail="trace_id does not match answer")
+    if code == "unsupported_feedback_type":
+        raise HTTPException(status_code=400, detail="unsupported feedback_type")
+    if code == "invalid_reason_code":
+        raise HTTPException(status_code=400, detail="invalid reason_code")
+    if code != "ok":
+        raise HTTPException(status_code=500, detail="failed to save feedback")
+
+    return {"status": "ok", "message": "feedback received"}
+
+
+@app.get("/api/chat/feedback/failure-candidates", tags=["AI问答"])
+def chat_feedback_failure_candidates(
+    limit: int = Query(20, ge=1, le=100),
+    intent_domain: str = Query(""),
+    reason_code: str = Query(""),
+    keyword: str = Query(""),
+    start_at: str = Query(""),
+    end_at: str = Query(""),
+    min_occurrence: int = Query(1, ge=1, le=20),
+    username: str = Depends(get_current_user),
+):
+    _ensure_chat_feedback_admin(username)
+    items = _list_chat_feedback_failure_candidates(
+        limit=limit,
+        intent_domain=intent_domain,
+        reason_code=reason_code,
+        keyword=keyword,
+        start_at=start_at,
+        end_at=end_at,
+        min_occurrence=min_occurrence,
+    )
+    return {
+        "status": "ok",
+        "items": items,
+        "count": len(items),
+    }
+
+
+@app.get("/api/chat/feedback/events", tags=["AI问答"])
+def chat_feedback_events(
+    limit: int = Query(100, ge=1, le=200),
+    feedback_type: str = Query(""),
+    answer_id: str = Query(""),
+    user_id: str = Query(""),
+    intent_domain: str = Query(""),
+    reason_code: str = Query(""),
+    keyword: str = Query(""),
+    start_at: str = Query(""),
+    end_at: str = Query(""),
+    username: str = Depends(get_current_user),
+):
+    _ensure_chat_feedback_admin(username)
+    items = _list_chat_feedback_events(
+        limit=limit,
+        feedback_type=feedback_type,
+        answer_id=answer_id,
+        user_id=user_id,
+        intent_domain=intent_domain,
+        reason_code=reason_code,
+        keyword=keyword,
+        start_at=start_at,
+        end_at=end_at,
+    )
+    return {
+        "status": "ok",
+        "items": items,
+        "count": len(items),
+    }
+
+
+@app.get("/api/chat/feedback/samples", tags=["AI问答"])
+def chat_feedback_samples(
+    limit: int = Query(100, ge=1, le=200),
+    sample_status: str = Query(""),
+    optimization_type: str = Query(""),
+    intent_domain: str = Query(""),
+    reason_code: str = Query(""),
+    keyword: str = Query(""),
+    username: str = Depends(get_current_user),
+):
+    _ensure_chat_feedback_admin(username)
+    items = _list_chat_feedback_samples(
+        limit=limit,
+        sample_status=sample_status,
+        optimization_type=optimization_type,
+        intent_domain=intent_domain,
+        reason_code=reason_code,
+        keyword=keyword,
+    )
+    return {
+        "status": "ok",
+        "items": items,
+        "count": len(items),
+    }
+
+
+@app.post("/api/chat/feedback/samples", tags=["AI问答"])
+def chat_feedback_sample_create(
+    body: ChatFeedbackSampleCreateRequest,
+    username: str = Depends(get_current_user),
+):
+    _ensure_chat_feedback_admin(username)
+    result = _upsert_chat_feedback_sample(
+        prompt_text=str(body.prompt_text or "").strip(),
+        reason_code=str(body.reason_code or "").strip(),
+        intent_domain=str(body.intent_domain or "general").strip(),
+        occurrence_count=int(body.occurrence_count or 1),
+        latest_feedback_at=str(body.latest_feedback_at or "").strip(),
+        latest_feedback_text=str(body.latest_feedback_text or "").strip(),
+        sample_answer_id=str(body.sample_answer_id or "").strip(),
+        sample_trace_id=str(body.sample_trace_id or "").strip(),
+        sample_response_text=str(body.sample_response_text or "").strip(),
+        created_by=username,
+        sample_status=str(body.sample_status or "new").strip(),
+        optimization_type=str(body.optimization_type or "").strip(),
+        review_notes=str(body.review_notes or "").strip(),
+    )
+    code = str(result.get("code") or "")
+    if code == "invalid_candidate":
+        raise HTTPException(status_code=400, detail="invalid candidate payload")
+    if code != "created" and code != "updated":
+        raise HTTPException(status_code=500, detail="failed to save feedback sample")
+    return {
+        "status": "ok",
+        "code": code,
+        "sample": result.get("sample") or {},
+    }
+
+
+@app.post("/api/chat/feedback/samples/update", tags=["AI问答"])
+def chat_feedback_sample_update(
+    body: ChatFeedbackSampleUpdateRequest,
+    username: str = Depends(get_current_user),
+):
+    _ensure_chat_feedback_admin(username)
+    result = _update_chat_feedback_sample(
+        sample_key=str(body.sample_key or "").strip(),
+        sample_status=body.sample_status,
+        optimization_type=body.optimization_type,
+        review_notes=body.review_notes,
+        reviewed_by=username,
+    )
+    code = str(result.get("code") or "")
+    if code == "sample_key_required":
+        raise HTTPException(status_code=400, detail="sample_key is required")
+    if code == "sample_not_found":
+        raise HTTPException(status_code=404, detail="sample not found")
+    if code != "ok":
+        raise HTTPException(status_code=500, detail="failed to update feedback sample")
+    return {
+        "status": "ok",
+        "sample": result.get("sample") or {},
+    }
 
 
 # ════════════════════════════════════════════════════════════

@@ -6,6 +6,7 @@ import asyncio
 from datetime import datetime, timedelta
 from unittest.mock import patch, Mock
 from fastapi import UploadFile
+from sqlalchemy import create_engine, text
 
 
 _IMPORT_ERROR = None
@@ -41,6 +42,12 @@ class _FakeRedis:
 
 @unittest.skipIf(mobile_api is None, f"mobile_api import failed: {_IMPORT_ERROR}")
 class TestMobileApiChatMemoryAsync(unittest.TestCase):
+    def _make_feedback_engine(self):
+        engine = create_engine("sqlite:///:memory:", future=True)
+        mobile_api._CHAT_FEEDBACK_SCHEMA_READY = False
+        mobile_api._CHAT_FEEDBACK_SCHEMA_ENGINE_ID = ""
+        return engine
+
     def test_mobile_prompt_keeps_raw_input(self):
         raw = "请做螺纹钢技术分析并给期权策略"
         self.assertEqual(mobile_api._build_mobile_chat_prompt(raw), raw)
@@ -375,6 +382,169 @@ class TestMobileApiChatMemoryAsync(unittest.TestCase):
         self.assertEqual(state.get("status"), "canceled")
         self.assertIsNone(fake_redis.get(mobile_api._mobile_chat_last_task_key("u1")))
         mocked_clear.assert_called_once_with("u1")
+
+    def test_chat_status_success_includes_feedback_meta_and_persists_answer_event(self):
+        fake_redis = _FakeRedis()
+        engine = self._make_feedback_engine()
+        body = mobile_api.ChatSubmitRequest(prompt="analyze gold trend", history=[])
+        success_status = {"status": "success", "result": {"response": "AI response"}}
+
+        with patch.object(mobile_api, "_redis", fake_redis), patch.object(
+            mobile_api.de, "engine", engine
+        ), patch.object(
+            mobile_api.de, "get_user_profile", return_value={}
+        ), patch.object(
+            mobile_api, "_build_mobile_context_payload", return_value={"is_followup": False, "intent_domain": "general"}
+        ), patch.object(
+            mobile_api, "_detect_mobile_has_portfolio", return_value=False
+        ), patch.object(
+            mobile_api.TaskManager, "create_task", return_value="task-meta"
+        ), patch.object(
+            mobile_api.TaskManager, "get_task_status", return_value=success_status
+        ), patch.object(
+            mobile_api.TaskManager, "clear_user_pending_task"
+        ), patch.object(
+            mobile_api, "_dispatch_mobile_chat_memory_task"
+        ):
+            mobile_api.chat_submit(body=body, username="u1")
+            out = mobile_api.chat_status(task_id="task-meta", username="u1")
+
+        self.assertEqual(out["status"], "success")
+        self.assertTrue(out.get("feedback_allowed"))
+        self.assertTrue(str(out.get("trace_id", "")).startswith("trace_"))
+        self.assertTrue(str(out.get("answer_id", "")).startswith("answer_"))
+        with engine.begin() as conn:
+            row = conn.execute(
+                text("SELECT user_id, prompt_text, response_text FROM chat_answer_events WHERE answer_id = :aid"),
+                {"aid": out["answer_id"]},
+            ).mappings().fetchone()
+        self.assertIsNotNone(row)
+        self.assertEqual(row["user_id"], "u1")
+        self.assertIn("analyze gold trend", row["prompt_text"])
+        self.assertIn("AI response", row["response_text"])
+
+    def test_chat_feedback_persists_down_feedback(self):
+        engine = self._make_feedback_engine()
+        with patch.object(mobile_api.de, "engine", engine):
+            saved = mobile_api._save_chat_answer_event(
+                task_id="task-1",
+                user_id="u1",
+                trace_id="trace_1",
+                answer_id="answer_1",
+                prompt_text="review my holdings",
+                response_text="This answer is still too generic",
+                intent_domain="stock_portfolio",
+                feedback_allowed=True,
+            )
+            self.assertTrue(saved)
+            out = mobile_api.chat_feedback(
+                body=mobile_api.ChatFeedbackRequest(
+                    trace_id="trace_1",
+                    answer_id="answer_1",
+                    feedback_type="down",
+                    reason_code="not_actionable",
+                    feedback_text="Please give me a concrete allocation step",
+                ),
+                username="u1",
+            )
+
+        self.assertEqual(out["status"], "ok")
+        with engine.begin() as conn:
+            row = conn.execute(
+                text(
+                    """
+                    SELECT feedback_type, reason_code, feedback_text, intent_domain
+                    FROM chat_feedback_events
+                    WHERE answer_id = :aid
+                    """
+                ),
+                {"aid": "answer_1"},
+            ).mappings().fetchone()
+        self.assertIsNotNone(row)
+        self.assertEqual(row["feedback_type"], "down")
+        self.assertEqual(row["reason_code"], "not_actionable")
+        self.assertIn("allocation", row["feedback_text"])
+        self.assertEqual(row["intent_domain"], "stock_portfolio")
+
+    def test_chat_feedback_rejects_invalid_reason_code(self):
+        engine = self._make_feedback_engine()
+        with patch.object(mobile_api.de, "engine", engine):
+            mobile_api._save_chat_answer_event(
+                task_id="task-2",
+                user_id="u1",
+                trace_id="trace_2",
+                answer_id="answer_2",
+                prompt_text="test prompt",
+                response_text="test response",
+                intent_domain="general",
+                feedback_allowed=True,
+            )
+            with self.assertRaises(Exception):
+                mobile_api.chat_feedback(
+                    body=mobile_api.ChatFeedbackRequest(
+                        trace_id="trace_2",
+                        answer_id="answer_2",
+                        feedback_type="down",
+                        reason_code="bad_code",
+                    ),
+                    username="u1",
+                )
+
+        with engine.begin() as conn:
+            count = conn.execute(text("SELECT COUNT(1) FROM chat_feedback_events")).scalar()
+        self.assertEqual(count, 0)
+
+    def test_list_chat_feedback_failure_candidates_groups_repeated_prompts(self):
+        engine = self._make_feedback_engine()
+        with patch.object(mobile_api.de, "engine", engine):
+            mobile_api._save_chat_answer_event(
+                task_id="task-a",
+                user_id="u1",
+                trace_id="trace_a",
+                answer_id="answer_a",
+                prompt_text="review my holdings",
+                response_text="answer A",
+                intent_domain="stock_portfolio",
+                feedback_allowed=True,
+            )
+            mobile_api._save_chat_answer_event(
+                task_id="task-b",
+                user_id="u2",
+                trace_id="trace_b",
+                answer_id="answer_b",
+                prompt_text="review my holdings",
+                response_text="answer B",
+                intent_domain="stock_portfolio",
+                feedback_allowed=True,
+            )
+            mobile_api._save_chat_feedback_event(
+                answer_id="answer_a",
+                trace_id="trace_a",
+                user_id="u1",
+                prompt_text="review my holdings",
+                response_text="answer A",
+                intent_domain="stock_portfolio",
+                feedback_type="down",
+                reason_code="too_generic",
+                feedback_text="be more specific",
+            )
+            mobile_api._save_chat_feedback_event(
+                answer_id="answer_b",
+                trace_id="trace_b",
+                user_id="u2",
+                prompt_text="review my holdings",
+                response_text="answer B",
+                intent_domain="stock_portfolio",
+                feedback_type="down",
+                reason_code="too_generic",
+                feedback_text="give a direct action",
+            )
+            out = mobile_api._list_chat_feedback_failure_candidates(limit=10)
+
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0]["reason_code"], "too_generic")
+        self.assertEqual(out[0]["occurrence_count"], 2)
+        self.assertEqual(out[0]["intent_domain"], "stock_portfolio")
 
     def test_position_upload_routes_option_to_chat_task(self):
         upload = UploadFile(filename="position.png", file=io.BytesIO(b"fake-bytes"))
