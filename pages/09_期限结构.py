@@ -805,9 +805,9 @@ if product_code in STOCK_INDEX_FUTURES:
         if long_error:
             st.info(f"\u957f\u671f\u56fe\u5b58\u5728\u90e8\u5206\u65e5\u671f\u7f3a\u5931\uff08{long_error}\uff09\uff0c\u5df2\u5c55\u793a\u53ef\u7528\u6570\u636e\u3002")
 structure_type_map = {
-    "Contango": "正向市场",
-    "Backwardation": "反向市场",
-    "Flat": "平坦",
+    "Contango": "升水结构",
+    "Backwardation": "贴水结构",
+    "Flat": "平坦结构",
     "InsufficientData": "数据不足",
 }
 structure_type = structure_type_map.get(summary.get("structure_type"), str(summary.get("structure_type") or "--"))
@@ -820,7 +820,7 @@ with c1:
     st.markdown(
         f"""
         <div class="ts-metric">
-          <div class="k">{_metric_label("结构类型", "按最新曲线的远月价格减近月价格判断：远月高于近月为正向市场，远月低于近月为反向市场，接近持平为平坦。")}</div>
+          <div class="k">{_metric_label("结构类型", "按最新曲线的远月价格减近月价格判断：远月高于近月为升水结构，远月低于近月为贴水结构，接近持平为平坦结构。")}</div>
           <div class="v">{structure_type}</div>
         </div>
         """,
