@@ -62,6 +62,15 @@ def _perf_user_id() -> str:
     )
 
 
+def _metric_label(label: str, help_text: str) -> str:
+    safe_label = html.escape(label)
+    safe_help = html.escape(help_text)
+    return (
+        f'{safe_label}<span class="ts-help" tabindex="0">?'
+        f'<span class="ts-tip">{safe_help}</span></span>'
+    )
+
+
 with st.sidebar:
     show_navigation()
 
@@ -183,12 +192,59 @@ st.markdown(
         color: #93c5fd;
         font-size: 12px;
         margin-bottom: 8px;
+        display: flex;
+        align-items: center;
+        gap: 6px;
     }
     .ts-metric .v {
         color: #f8fafc;
         font-size: 24px;
         font-weight: 700;
         line-height: 1.1;
+    }
+    .ts-help {
+        position: relative;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 16px;
+        height: 16px;
+        border: 1px solid rgba(125, 211, 252, 0.55);
+        border-radius: 50%;
+        color: #bae6fd;
+        background: rgba(14, 165, 233, 0.12);
+        font-family: "IBM Plex Mono", "Consolas", monospace;
+        font-size: 11px;
+        font-weight: 700;
+        cursor: help;
+        line-height: 1;
+    }
+    .ts-help .ts-tip {
+        position: absolute;
+        left: 50%;
+        bottom: calc(100% + 8px);
+        transform: translateX(-50%) translateY(4px);
+        width: max-content;
+        max-width: 280px;
+        padding: 9px 11px;
+        border: 1px solid rgba(125, 211, 252, 0.36);
+        border-radius: 8px;
+        background: rgba(4, 12, 28, 0.96);
+        color: #dbeafe;
+        box-shadow: 0 10px 24px rgba(2, 6, 23, 0.45);
+        font-size: 12px;
+        font-weight: 500;
+        line-height: 1.55;
+        white-space: normal;
+        opacity: 0;
+        pointer-events: none;
+        transition: opacity .14s ease, transform .14s ease;
+        z-index: 20;
+    }
+    .ts-help:hover .ts-tip,
+    .ts-help:focus .ts-tip {
+        opacity: 1;
+        transform: translateX(-50%) translateY(0);
     }
     .ts-footnote {
         color: #94a3b8;
@@ -764,7 +820,7 @@ with c1:
     st.markdown(
         f"""
         <div class="ts-metric">
-          <div class="k">结构类型</div>
+          <div class="k">{_metric_label("结构类型", "按最新曲线的远月价格减近月价格判断：远月高于近月为正向市场，远月低于近月为反向市场，接近持平为平坦。")}</div>
           <div class="v">{structure_type}</div>
         </div>
         """,
@@ -775,7 +831,7 @@ with c2:
     st.markdown(
         f"""
         <div class="ts-metric">
-          <div class="k">近远月价差</div>
+          <div class="k">{_metric_label("近远月价差", "最新曲线中最远月合约收盘价减最近月合约收盘价。正值表示远月更贵，负值表示远月更便宜。")}</div>
           <div class="v">{v}</div>
         </div>
         """,
@@ -786,7 +842,7 @@ with c3:
     st.markdown(
         f"""
         <div class="ts-metric">
-          <div class="k">近远月价差%</div>
+          <div class="k">{_metric_label("近远月价差%", "近远月价差除以最近月合约价格，用百分比表达期限结构两端的相对差异。")}</div>
           <div class="v">{v}</div>
         </div>
         """,
@@ -797,7 +853,7 @@ with c4:
     st.markdown(
         f"""
         <div class="ts-metric">
-          <div class="k">每档斜率</div>
+          <div class="k">{_metric_label("每档斜率", "近远月价差除以有效合约档位数减一，表示期限结构每往远月推进一档的平均价格变化。")}</div>
           <div class="v">{v}</div>
         </div>
         """,
@@ -857,4 +913,3 @@ _perf_page_log(
     cache_hit=-1,
     stage="page_done",
 )
-
