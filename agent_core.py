@@ -25,6 +25,7 @@ from chart_annotation_tools import draw_pattern_annotation_chart, draw_forecast_
 from kline_tools import analyze_kline_pattern
 from screener_tool import search_top_stocks, get_available_patterns
 from news_tools import get_financial_news
+from news_rag_interpreter import interpret_market_news_tool
 from fund_flow_tools import tool_get_retail_money_flow
 from polymarket_tool import tool_get_polymarket_sentiment
 from plot_tools import draw_chart_tool,draw_macro_compare_chart
@@ -1114,8 +1115,33 @@ def _enforce_margin_monitor_routing(query: str, plan: List[str]) -> List[str]:
     return deduped
 
 
+CHART_REQUEST_KEYWORDS = (
+    "画图",
+    "画一下",
+    "画出来",
+    "出图",
+    "图表",
+    "走势图",
+    "走势可视化",
+    "K线图",
+    "k线图",
+    "K 线图",
+    "k 线图",
+    "candlestick",
+    "chart",
+    "plot",
+)
+
+
+def _wants_chart(query: str) -> bool:
+    q = str(query or "")
+    q_lower = q.lower()
+    return any(keyword.lower() in q_lower for keyword in CHART_REQUEST_KEYWORDS)
+
+
 def build_generalist_tools():
     return [
+        interpret_market_news_tool,
         analyze_kline_pattern, search_investment_knowledge, get_market_snapshot, get_commodity_iv_info,
         search_broker_holdings_on_date, tool_analyze_position_change,
         tool_query_specific_option, get_historical_price, get_volume_oi, get_futures_oi_ranking,
@@ -1314,6 +1340,8 @@ def supervisor_node(state: AgentState, llm):
 
     final_plan = _enforce_option_portfolio_isolation(query, final_plan)
     final_plan = _enforce_margin_monitor_routing(query, final_plan)
+    if _wants_chart(query) and not any(p in final_plan for p in ("analyst", "generalist")):
+        final_plan = ["generalist"] + list(final_plan)
 
     # 去重并保持顺序，避免路由重复
     deduped_plan = []
@@ -1355,6 +1383,7 @@ def supervisor_node(state: AgentState, llm):
 def generalist_node(state: AgentState, llm):
     query = state["user_query"]
     symbol_input = state.get("symbol", "")
+    wants_chart = _wants_chart(query)
     is_followup = bool(state.get("is_followup", False))
     recent_context = str(state.get("recent_context", "") or "").strip()
     mem_context = str(state.get("memory_context", "") or "").strip()
@@ -1413,6 +1442,7 @@ def generalist_node(state: AgentState, llm):
         21.查单只股票的成交量详情 -> query_stock_volume
         22.期权策略回测 -> run_option_strategy_backtest
         23. 用户问“某策略在某时间段的胜率/盈亏比/回撤”时，必须调用回测工具，禁止口头估算。
+        24. 用户问“为什么涨跌/新闻影响/宏观消息怎么看/最近消息如何影响行情”时，优先调用 interpret_market_news_tool，用交易员口吻回答主线、盘面验证、反向风险和接下来盯什么。
 
         【行为准则】
         1. 先给结论，然后解释理由。
@@ -1420,6 +1450,13 @@ def generalist_node(state: AgentState, llm):
         3. 禁止空谈，必须用工具获取的数据说话。
         4. 不要编造数据，如果没查到数据就说不知道。
         5. 若处于连续追问模式，第一段必须先承接上一轮关键结论，再回答当前问题。
+        """
+
+    if wants_chart:
+        prompt += """
+        【强制画图】
+        用户明确要求图表/走势图/K线图，必须调用 `draw_chart_tool` 生成图表。
+        禁止只输出“无法渲染图表”之类的文字降级说明。
         """
 
     prompt += """
@@ -1531,7 +1568,7 @@ def analyst_node(state: AgentState, llm):
             """
 
     # 2. 注入“严谨”人设进行润色
-    is_chart_only = any(kw in query for kw in ["K线图", "k线图"])
+    is_chart_only = _wants_chart(query)
 
     if is_chart_only:
         # 🔥 画图快速模式 - 简化 prompt
@@ -1541,7 +1578,7 @@ def analyst_node(state: AgentState, llm):
             【客户需求】：{query}
 
             【任务】：
-            用户想要看图表，请直接调用 `draw_chart_tool` 画图。
+            用户想要看图表，请必须调用 `draw_chart_tool` 画图。禁止只输出“无法渲染图表”之类的文字降级说明。
 
             【回复要求】：
             1. 画完图后，只要简短说明图表关键信息（如当前价格、涨跌幅）。
@@ -2227,6 +2264,7 @@ def researcher_node(state: AgentState,llm=None):
     current_date = datetime.now().strftime("%Y年%m月%d日 %A")
     # 1. 装备舆情与搜索工具
     tools = [
+        interpret_market_news_tool,  # 新闻RAG解释器：补背景、查行情验证、用交易员口吻解读新闻影响
         get_finance_related_trends,  # 查财经类热点 (同花顺/东方财富热榜)
         get_today_hotlist,  # 查全网热搜 (抖音/微博/百度)
         tool_get_polymarket_sentiment,  # 查预测市场胜率 (Polymarket)
@@ -2245,6 +2283,10 @@ def researcher_node(state: AgentState,llm=None):
         【标的】: {symbol_name}({symbol})  
 
         【工具调用策略】：
+
+        0. 🧭 **新闻/事件影响解读** (如 "为什么涨跌"、"这条新闻影响什么"、"宏观消息怎么看"):
+           - **优先调用** `interpret_market_news_tool`。
+           - 它会先补背景，再查行情/知识库/预测市场验证，最后用交易员口吻给出主线、反向风险和接下来盯什么。
 
         1. 🎲 **宏观预期/大事件/胜率** (如 "大选谁赢"、"降息概率"、"地缘政治"、"战争"):
            - **必须调用** `tool_get_polymarket_sentiment`。
