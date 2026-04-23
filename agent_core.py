@@ -1114,6 +1114,30 @@ def _enforce_margin_monitor_routing(query: str, plan: List[str]) -> List[str]:
     return deduped
 
 
+CHART_REQUEST_KEYWORDS = (
+    "画图",
+    "画一下",
+    "画出来",
+    "出图",
+    "图表",
+    "走势图",
+    "走势可视化",
+    "K线图",
+    "k线图",
+    "K 线图",
+    "k 线图",
+    "candlestick",
+    "chart",
+    "plot",
+)
+
+
+def _wants_chart(query: str) -> bool:
+    q = str(query or "")
+    q_lower = q.lower()
+    return any(keyword.lower() in q_lower for keyword in CHART_REQUEST_KEYWORDS)
+
+
 def build_generalist_tools():
     return [
         analyze_kline_pattern, search_investment_knowledge, get_market_snapshot, get_commodity_iv_info,
@@ -1314,6 +1338,8 @@ def supervisor_node(state: AgentState, llm):
 
     final_plan = _enforce_option_portfolio_isolation(query, final_plan)
     final_plan = _enforce_margin_monitor_routing(query, final_plan)
+    if _wants_chart(query) and not any(p in final_plan for p in ("analyst", "generalist")):
+        final_plan = ["generalist"] + list(final_plan)
 
     # 去重并保持顺序，避免路由重复
     deduped_plan = []
@@ -1355,6 +1381,7 @@ def supervisor_node(state: AgentState, llm):
 def generalist_node(state: AgentState, llm):
     query = state["user_query"]
     symbol_input = state.get("symbol", "")
+    wants_chart = _wants_chart(query)
     is_followup = bool(state.get("is_followup", False))
     recent_context = str(state.get("recent_context", "") or "").strip()
     mem_context = str(state.get("memory_context", "") or "").strip()
@@ -1413,13 +1440,19 @@ def generalist_node(state: AgentState, llm):
         21.查单只股票的成交量详情 -> query_stock_volume
         22.期权策略回测 -> run_option_strategy_backtest
         23. 用户问“某策略在某时间段的胜率/盈亏比/回撤”时，必须调用回测工具，禁止口头估算。
-
         【行为准则】
         1. 先给结论，然后解释理由。
         2. 不要简单复述，要有深度洞察。
         3. 禁止空谈，必须用工具获取的数据说话。
         4. 不要编造数据，如果没查到数据就说不知道。
         5. 若处于连续追问模式，第一段必须先承接上一轮关键结论，再回答当前问题。
+        """
+
+    if wants_chart:
+        prompt += """
+        【强制画图】
+        用户明确要求图表/走势图/K线图，必须调用 `draw_chart_tool` 生成图表。
+        禁止只输出“无法渲染图表”之类的文字降级说明。
         """
 
     prompt += """
@@ -1531,7 +1564,7 @@ def analyst_node(state: AgentState, llm):
             """
 
     # 2. 注入“严谨”人设进行润色
-    is_chart_only = any(kw in query for kw in ["K线图", "k线图"])
+    is_chart_only = _wants_chart(query)
 
     if is_chart_only:
         # 🔥 画图快速模式 - 简化 prompt
@@ -1541,7 +1574,7 @@ def analyst_node(state: AgentState, llm):
             【客户需求】：{query}
 
             【任务】：
-            用户想要看图表，请直接调用 `draw_chart_tool` 画图。
+            用户想要看图表，请必须调用 `draw_chart_tool` 画图。禁止只输出“无法渲染图表”之类的文字降级说明。
 
             【回复要求】：
             1. 画完图后，只要简短说明图表关键信息（如当前价格、涨跌幅）。

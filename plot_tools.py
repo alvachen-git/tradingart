@@ -12,6 +12,7 @@ from dotenv import load_dotenv
 import uuid
 import hashlib
 import json
+from unified_stock_view import UNIFIED_STOCK_VIEW_NAME, ensure_unified_stock_view, get_stock_price_source
 
 # 初始化
 load_dotenv(override=True)
@@ -28,10 +29,12 @@ def get_db_engine():
 
 
 engine = get_db_engine()
+ensure_unified_stock_view(engine)
+STOCK_DAILY_SOURCE = get_stock_price_source(engine)
 
 # 数据库表映射
 TABLE_MAP = {
-    'stock': 'stock_price',
+    'stock': STOCK_DAILY_SOURCE,
     'index': 'index_price',
     'future': 'futures_price',
 }
@@ -171,7 +174,46 @@ def _resolve_symbol_smart(query):
             return val
 
     # 5. 放行
-    return symbol_map.resolve_symbol(query)
+    direct = symbol_map.resolve_symbol(query)
+    if direct and direct[0]:
+        return direct
+
+    # 自然语言兜底：从“微软技术面画图分析下”这类整句中抽出标的。
+    code_matches = re.findall(
+        r"(?<![A-Z0-9])([A-Z]{1,6}(?:\.US)?|\d{6}(?:\.(?:SH|SZ|BJ|HK))?)(?![A-Z0-9])",
+        q,
+    )
+    for code in code_matches:
+        result = symbol_map.resolve_symbol(code)
+        if result and result[0]:
+            return result
+
+    try:
+        us_alias_map = symbol_map.get_us_stock_alias_map()
+        best_alias = ""
+        for alias in us_alias_map.keys():
+            alias = str(alias or "").strip().upper()
+            if len(alias) >= 2 and alias in q and len(alias) > len(best_alias):
+                best_alias = alias
+        if best_alias:
+            ticker = us_alias_map.get(best_alias)
+            if ticker:
+                return f"{ticker}.US", "stock"
+    except Exception:
+        pass
+
+    cleaned = re.sub(
+        r"(技术面|技术分析|画图|画一下|图表|走势图|K线图|K线|分析|怎么看|如何|一下|下)",
+        " ",
+        query,
+        flags=re.IGNORECASE,
+    ).strip()
+    if cleaned and cleaned != query:
+        result = symbol_map.resolve_symbol(cleaned)
+        if result and result[0]:
+            return result
+
+    return direct
 
 def save_chart_as_json(fig, name):
     """保存图表并返回文件名（检票员模式）"""
@@ -270,9 +312,10 @@ def _fetch_data(ts_code, start_date, asset_type):
         df = pd.read_sql(sql, engine, params={"c1": base_code, "c2": f"{base_code}0", "s_date": start_date})
     else:
         # 股票/指数
-        table = TABLE_MAP.get(asset_type, 'stock_price')
+        table = TABLE_MAP.get(asset_type, STOCK_DAILY_SOURCE)
+        volume_expr = "volume AS vol" if table == UNIFIED_STOCK_VIEW_NAME else "vol"
         sql = text(f"""
-            SELECT trade_date, open_price, close_price, high_price, low_price, vol 
+            SELECT trade_date, open_price, close_price, high_price, low_price, {volume_expr}
             FROM {table} 
             WHERE ts_code = :code AND trade_date >= :s_date 
             ORDER BY trade_date ASC
@@ -642,8 +685,8 @@ def plot_correlation_scatter(symbol_a, symbol_b, period='1y'):
     """
     try:
         # 1. 解析代码
-        res_a = symbol_map._resolve_symbol_smart(symbol_a)
-        res_b = symbol_map._resolve_symbol_smart(symbol_b)
+        res_a = _resolve_symbol_smart(symbol_a)
+        res_b = _resolve_symbol_smart(symbol_b)
 
         if not res_a[0] or not res_b[0]:
             return f"❌ 无法识别品种: {symbol_a} 或 {symbol_b}"
@@ -656,10 +699,10 @@ def plot_correlation_scatter(symbol_a, symbol_b, period='1y'):
 
         # 定义内部获取数据的 helper (复用 get_price_data 的逻辑)
         def _fetch(code, asset_type):
-            table = TABLE_MAP.get(asset_type, 'stock_price')
-            col_code = 'ts_code'
-            query = f"SELECT trade_date, close FROM {table} WHERE {col_code}='{code}' AND trade_date>='{start_date}' ORDER BY trade_date"
-            return pd.read_sql(query, engine)
+            df = _fetch_data(code, start_date, asset_type)
+            if df.empty:
+                return df
+            return df[["trade_date", "close_price"]].rename(columns={"close_price": "close"})
 
         df_a = _fetch(code_a, type_a)
         df_b = _fetch(code_b, type_b)
