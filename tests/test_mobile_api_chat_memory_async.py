@@ -81,6 +81,8 @@ class TestMobileApiChatMemoryAsync(unittest.TestCase):
             mobile_api.de, "get_user_profile", return_value={}
         ), patch.object(
             mobile_api, "_build_mobile_context_payload", return_value={"is_followup": False}
+        ), patch.object(
+            mobile_api, "classify_chat_mode", return_value=mobile_api.CHAT_MODE_ANALYSIS
         ) as mocked_ctx, patch.object(
             mobile_api, "_detect_mobile_has_portfolio", return_value=False
         ) as mocked_has_portfolio, patch.object(

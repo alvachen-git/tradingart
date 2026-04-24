@@ -2080,6 +2080,7 @@ def chat_submit(
     chat_mode = classify_chat_mode(
         normalized_prompt,
         is_followup=bool(context_payload.get("is_followup", False)),
+        recent_context=str(context_payload.get("recent_context") or ""),
     )
     context_payload["chat_mode"] = chat_mode
     has_portfolio = _detect_mobile_has_portfolio(username)

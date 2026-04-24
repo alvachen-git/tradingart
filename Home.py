@@ -250,6 +250,188 @@ def _render_chat_waiting_card(
     </div>
     """
 
+
+@st.fragment(run_every=1.5)
+def _render_pending_chat_task_fragment(task_info_snapshot: Dict[str, Any]) -> None:
+    task_info = st.session_state.get("pending_task") or task_info_snapshot
+    if not task_info:
+        return
+
+    task_id = task_info["task_id"]
+    task_start = task_info["start_time"]
+    task_mode = task_info.get("mode", "normal")
+    current_user = st.session_state.get("user_id", "访客")
+
+    if time.time() - task_start >= 1800:
+        st.warning("⏱️ 任务处理超时，请重新提问。")
+        st.session_state.pending_task = None
+        TaskManager().clear_user_pending_task(current_user)
+        st.rerun()
+        return
+
+    status_placeholder = st.empty()
+    content_placeholder = st.empty()
+
+    use_deep_manager = (task_mode == "deep" and ENABLE_DEEP_MODE and DeepTaskManager is not None)
+    task_manager = DeepTaskManager() if use_deep_manager else TaskManager()
+    task_status = task_manager.get_task_status(task_id)
+    current_status = task_status["status"]
+
+    if current_status in ["pending", "processing"]:
+        progress_msg = task_status.get("progress", "正在处理...")
+        elapsed_sec = int(max(0, time.time() - task_start))
+        analysis_mode_label = str(task_info.get("analysis_mode_label", "") or "")
+        chat_mode = str(task_info.get("chat_mode") or task_status.get("chat_mode") or CHAT_MODE_ANALYSIS)
+        status_placeholder.markdown(
+            _render_chat_waiting_card(
+                chat_mode=chat_mode,
+                progress_msg=progress_msg,
+                elapsed_sec=elapsed_sec,
+                analysis_mode_label=analysis_mode_label,
+            ),
+            unsafe_allow_html=True,
+        )
+
+        with content_placeholder.container():
+            waiting_caption = _get_chat_waiting_card_config(chat_mode, analysis_mode_label)["caption"]
+            st.caption(waiting_caption)
+        return
+
+    if current_status == "success":
+        status_placeholder.empty()
+        result = task_status.get("result")
+
+        if result and isinstance(result, dict):
+            final_response_md = result.get("response", "")
+            final_img_path = result.get("chart", "")
+            attachments = result.get("attachments", [])
+
+            if not final_response_md:
+                final_response_md = "抱歉，AI 分析未返回有效结果。"
+
+            if final_img_path:
+                try:
+                    render_chart_by_filename(final_img_path)
+                except Exception as e:
+                    print(f"图表渲染失败: {e}")
+
+            final_response_md = clean_chart_tag(final_response_md)
+
+            inline_state = {"has_inline": False, "used_indices": set()}
+            if final_response_md and len(final_response_md) > 0:
+                if attachments:
+                    with content_placeholder.container():
+                        inline_state = render_response_with_inline_attachments(
+                            final_response_md,
+                            attachments,
+                            render_plain_when_no_token=False,
+                        )
+
+                if not inline_state["has_inline"]:
+                    placeholder = content_placeholder.empty()
+                    full_response = ""
+
+                    if len(final_response_md) > 800:
+                        update_interval = 100
+                        chars = list(final_response_md)
+
+                        for i in range(0, len(chars), update_interval):
+                            chunk = ''.join(chars[i:i + update_interval])
+                            full_response += chunk
+                            placeholder.markdown(full_response + "▌", unsafe_allow_html=True)
+                            time.sleep(0.05)
+
+                        placeholder.markdown(full_response, unsafe_allow_html=True)
+                    else:
+                        delay_time = 0.01
+
+                        for char in stream_text_generator(final_response_md, delay=delay_time):
+                            full_response += char
+                            placeholder.markdown(full_response + "▌", unsafe_allow_html=True)
+
+                        placeholder.markdown(full_response, unsafe_allow_html=True)
+
+            if attachments:
+                with content_placeholder.container():
+                    render_knowledge_attachments(attachments, exclude_indices=inline_state["used_indices"])
+
+            trace_id = str(task_info.get("trace_id") or generate_chat_trace_id()).strip()
+            answer_id = str(task_info.get("answer_id") or generate_chat_answer_id()).strip()
+            intent_domain = str(task_info.get("intent_domain") or "general").strip() or "general"
+            feedback_allowed = False
+            if current_user != "访客" and final_response_md:
+                feedback_allowed = save_chat_answer_event(
+                    _get_home_feedback_engine(),
+                    task_id=task_id,
+                    user_id=current_user,
+                    trace_id=trace_id,
+                    answer_id=answer_id,
+                    prompt_text=str(task_info.get("raw_prompt") or task_info.get("prompt") or "").strip(),
+                    response_text=final_response_md,
+                    intent_domain=intent_domain,
+                    feedback_allowed=True,
+                )
+
+            message_data = {
+                "role": "ai",
+                "content": final_response_md,
+                "chart": final_img_path,
+                "attachments": attachments,
+                "trace_id": trace_id,
+                "answer_id": answer_id,
+                "feedback_allowed": feedback_allowed,
+                "intent_domain": intent_domain,
+            }
+            st.session_state.messages.append(message_data)
+
+            if current_user != "访客":
+                try:
+                    memory_record = _build_memory_record(final_response_md)
+                    mem.save_interaction(
+                        current_user,
+                        task_info["prompt"],
+                        memory_record,
+                        topic=_classify_intent_domain(task_info.get("prompt", "")),
+                    )
+                except Exception as e:
+                    print(f"记忆存储失败: {e}")
+
+        st.session_state.pending_task = None
+        task_manager.clear_user_pending_task(current_user)
+        st.rerun()
+        return
+
+    if current_status == "error":
+        status_placeholder.error("❌ 分析失败")
+        error_msg = task_status.get("error", "未知错误")
+        content_placeholder.error(f"抱歉，分析过程出现问题：{error_msg[:100]}")
+
+        st.session_state.pending_task = None
+        task_manager.clear_user_pending_task(current_user)
+        if task_mode == "deep":
+            st.session_state.deep_mode_enabled = False
+            fallback_prompt = str(task_info.get("prompt") or "").strip()
+            if fallback_prompt and st.button("一键转普通分析", key=f"deep_fallback_error_{task_id}"):
+                process_user_input(fallback_prompt, deep_mode=False)
+                st.rerun()
+            return
+
+        st.rerun()
+        return
+
+    if current_status == "timeout":
+        status_placeholder.warning("⏱️ Deep 报告超时")
+        content_placeholder.warning("Deep 报告在预算与时限内未完成，建议缩小问题范围或切换普通分析。")
+
+        st.session_state.pending_task = None
+        task_manager.clear_user_pending_task(current_user)
+        st.session_state.deep_mode_enabled = False
+        fallback_prompt = str(task_info.get("prompt") or "").strip()
+        if fallback_prompt and st.button("一键转普通分析", key=f"deep_fallback_timeout_{task_id}"):
+            process_user_input(fallback_prompt, deep_mode=False)
+            st.rerun()
+        return
+
 ANNOUNCEMENT_CONTENT = {
     "title": "📡 情报站内容升级",
     "sections": [
@@ -656,6 +838,42 @@ def stream_text_generator(text, delay=0.01):
     for char in text:
         yield char
         time.sleep(delay)
+
+
+def _render_simple_chat_typing_indicator() -> str:
+    return """
+    <style>
+    .simple-chat-typing {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 10px 14px;
+        border-radius: 14px;
+        background: rgba(30, 41, 59, 0.78);
+        border: 1px solid rgba(148, 163, 184, 0.22);
+        box-shadow: 0 8px 24px rgba(15, 23, 42, 0.16);
+    }
+    .simple-chat-dot {
+        width: 7px;
+        height: 7px;
+        border-radius: 999px;
+        background: #dbeafe;
+        opacity: 0.35;
+        animation: simpleChatTypingPulse 1.2s infinite ease-in-out;
+    }
+    .simple-chat-dot:nth-child(2) { animation-delay: 0.18s; }
+    .simple-chat-dot:nth-child(3) { animation-delay: 0.36s; }
+    @keyframes simpleChatTypingPulse {
+        0%, 80%, 100% { transform: translateY(0); opacity: 0.35; }
+        40% { transform: translateY(-2px); opacity: 1; }
+    }
+    </style>
+    <div class="simple-chat-typing" aria-label="AI 正在输入">
+        <span class="simple-chat-dot"></span>
+        <span class="simple-chat-dot"></span>
+        <span class="simple-chat-dot"></span>
+    </div>
+    """
 # ==========================================
 #  2. 极简主义 CSS 注入 [修改点：新增卡片样式]
 # ==========================================
@@ -2595,6 +2813,7 @@ def process_user_input(
     chat_mode = classify_chat_mode(
         prompt_text,
         is_followup=bool(context_payload.get("is_followup", False)),
+        recent_context=str(context_payload.get("recent_context") or ""),
         has_uploaded_image=bool(uploaded_image),
         has_structured_payload=has_structured_upload,
         vision_position_domain=vision_position_domain,
@@ -2613,22 +2832,30 @@ def process_user_input(
     intent_domain = str(context_payload.get("intent_domain") or "general")
 
     if chat_mode == CHAT_MODE_SIMPLE and not deep_mode:
-        simple_status_placeholder = st.empty()
-        simple_status_placeholder.markdown(
-            _render_chat_waiting_card(
-                chat_mode=CHAT_MODE_SIMPLE,
-                progress_msg="正在生成轻量聊天回复...",
-                elapsed_sec=0,
-            ),
-            unsafe_allow_html=True,
-        )
-        with st.status("💬 正在生成聊天回复", expanded=True) as status:
-            st.write("识别用户语气与上下文")
-            st.write("调用轻量模型组织自然回复")
+        with st.chat_message("ai"):
+            typing_placeholder = st.empty()
+            typing_placeholder.markdown(_render_simple_chat_typing_indicator(), unsafe_allow_html=True)
+            time.sleep(0.08)
             llm_turbo = ChatTongyi(model="qwen-turbo", temperature=0.1)
             simple_response = simple_chatter_reply(prompt_text, llm_turbo)
-            status.update(label="✅ 聊天回复已生成", state="complete", expanded=False)
-        simple_status_placeholder.empty()
+            typing_placeholder.empty()
+            response_placeholder = st.empty()
+            full_response = ""
+
+            if len(simple_response) > 220:
+                update_interval = 40
+                chars = list(simple_response)
+                for i in range(0, len(chars), update_interval):
+                    chunk = ''.join(chars[i:i + update_interval])
+                    full_response += chunk
+                    response_placeholder.markdown(full_response + "▌", unsafe_allow_html=True)
+                    time.sleep(0.03)
+            else:
+                for char in stream_text_generator(simple_response, delay=0.008):
+                    full_response += char
+                    response_placeholder.markdown(full_response + "▌", unsafe_allow_html=True)
+
+            response_placeholder.markdown(simple_response, unsafe_allow_html=True)
 
         feedback_allowed = False
         if current_user != "访客" and simple_response:
@@ -3589,210 +3816,7 @@ if "pending_portfolio_task" in st.session_state and st.session_state.pending_por
 # 🔥 [新增] 任务恢复机制（正确位置）
 # ==========================================
 if "pending_task" in st.session_state and st.session_state.pending_task:
-    task_info = st.session_state.pending_task
-    task_id = task_info["task_id"]
-    task_start = task_info["start_time"]
-    task_mode = task_info.get("mode", "normal")
-
-    # 获取当前用户
-    current_user = st.session_state.get('user_id', "访客")
-
-    # 检查任务是否超时（30分钟）
-    if time.time() - task_start < 1800:
-        with st.container():
-            status_placeholder = st.empty()
-            content_placeholder = st.empty()
-
-            # 查询任务状态
-            use_deep_manager = (task_mode == "deep" and ENABLE_DEEP_MODE and DeepTaskManager is not None)
-            task_manager = DeepTaskManager() if use_deep_manager else TaskManager()
-            task_status = task_manager.get_task_status(task_id)
-            current_status = task_status["status"]
-
-            if current_status in ["pending", "processing"]:
-                progress_msg = task_status.get("progress", "正在处理...")
-                elapsed_sec = int(max(0, time.time() - task_start))
-                analysis_mode_label = str(task_info.get("analysis_mode_label", "") or "")
-                chat_mode = str(task_info.get("chat_mode") or task_status.get("chat_mode") or CHAT_MODE_ANALYSIS)
-                status_placeholder.markdown(
-                    _render_chat_waiting_card(
-                        chat_mode=chat_mode,
-                        progress_msg=progress_msg,
-                        elapsed_sec=elapsed_sec,
-                        analysis_mode_label=analysis_mode_label,
-                    ),
-                    unsafe_allow_html=True,
-                )
-
-                with content_placeholder.container():
-                    waiting_caption = _get_chat_waiting_card_config(chat_mode, analysis_mode_label)["caption"]
-                    st.caption(waiting_caption)
-
-                # 自动轮询任务状态，避免用户手动点击刷新
-                if not is_announcement_holdoff_active():
-                    time.sleep(1.5)
-                    st.rerun()
-
-            elif current_status == "success":
-                # 任务完成，显示结果
-                status_placeholder.empty()
-                result = task_status.get("result")
-
-                if result and isinstance(result, dict):
-                    final_response_md = result.get("response", "")
-                    final_img_path = result.get("chart", "")
-                    attachments = result.get("attachments", [])
-
-                    if not final_response_md:
-                        final_response_md = "抱歉，AI 分析未返回有效结果。"
-
-                    # 渲染图表
-                    if final_img_path:
-                        try:
-                            render_chart_by_filename(final_img_path)
-                        except Exception as e:
-                            print(f"图表渲染失败: {e}")
-
-                    # 清理图片标签
-                    final_response_md = clean_chart_tag(final_response_md)
-
-                    # 打字机效果（优化：批量更新）
-                    inline_state = {"has_inline": False, "used_indices": set()}
-                    if final_response_md and len(final_response_md) > 0:
-                        if attachments:
-                            with content_placeholder.container():
-                                inline_state = render_response_with_inline_attachments(
-                                    final_response_md,
-                                    attachments,
-                                    render_plain_when_no_token=False,
-                                )
-
-                        if not inline_state["has_inline"]:
-                            placeholder = content_placeholder.empty()
-                            full_response = ""
-
-                            # 🔥 [修复] 批量更新，减少 WebSocket 消息
-                            if len(final_response_md) > 800:
-                                # 长文本：每 50 个字符更新一次
-                                update_interval = 100
-                                chars = list(final_response_md)
-
-                                for i in range(0, len(chars), update_interval):
-                                    chunk = ''.join(chars[i:i+update_interval])
-                                    full_response += chunk
-                                    placeholder.markdown(full_response + "▌", unsafe_allow_html=True)
-                                    time.sleep(0.05)  # 每批次延迟 50ms
-
-                                placeholder.markdown(full_response, unsafe_allow_html=True)
-                            else:
-                                # 短文本：正常打字机效果
-                                delay_time = 0.01
-
-                                for char in stream_text_generator(final_response_md, delay=delay_time):
-                                    full_response += char
-                                    placeholder.markdown(full_response + "▌", unsafe_allow_html=True)
-
-                                placeholder.markdown(full_response, unsafe_allow_html=True)
-
-                    if attachments:
-                        with content_placeholder.container():
-                            render_knowledge_attachments(attachments, exclude_indices=inline_state["used_indices"])
-
-                    # 存入历史
-                    trace_id = str(task_info.get("trace_id") or generate_chat_trace_id()).strip()
-                    answer_id = str(task_info.get("answer_id") or generate_chat_answer_id()).strip()
-                    intent_domain = str(task_info.get("intent_domain") or "general").strip() or "general"
-                    feedback_allowed = False
-                    if current_user != "访客" and final_response_md:
-                        feedback_allowed = save_chat_answer_event(
-                            _get_home_feedback_engine(),
-                            task_id=task_id,
-                            user_id=current_user,
-                            trace_id=trace_id,
-                            answer_id=answer_id,
-                            prompt_text=str(task_info.get("raw_prompt") or task_info.get("prompt") or "").strip(),
-                            response_text=final_response_md,
-                            intent_domain=intent_domain,
-                            feedback_allowed=True,
-                        )
-
-                    message_data = {
-                        "role": "ai",
-                        "content": final_response_md,
-                        "chart": final_img_path,
-                        "attachments": attachments,
-                        "trace_id": trace_id,
-                        "answer_id": answer_id,
-                        "feedback_allowed": feedback_allowed,
-                        "intent_domain": intent_domain,
-                    }
-                    st.session_state.messages.append(message_data)
-
-                    # 保存记忆
-                    if current_user != "访客":
-                        try:
-                            memory_record = _build_memory_record(final_response_md)
-                            mem.save_interaction(
-                                current_user,
-                                task_info["prompt"],
-                                memory_record,
-                                topic=_classify_intent_domain(task_info.get("prompt", "")),
-                            )
-                        except Exception as e:
-                            print(f"记忆存储失败: {e}")
-
-                # 清除待处理任务
-                del st.session_state.pending_task
-
-                # 🔥 [新增] 同时清除 Redis 中的待处理任务
-                task_manager.clear_user_pending_task(current_user)
-
-                time.sleep(1)
-                st.rerun()  # 刷新页面
-
-            elif current_status == "error":
-                # 任务失败
-                status_placeholder.error("❌ 分析失败")
-                error_msg = task_status.get("error", "未知错误")
-                content_placeholder.error(f"抱歉，分析过程出现问题：{error_msg[:100]}")
-
-                # 清除待处理任务
-                del st.session_state.pending_task
-
-                # 🔥 [新增] 同时清除 Redis 中的待处理任务
-                task_manager.clear_user_pending_task(current_user)
-                if task_mode == "deep":
-                    st.session_state.deep_mode_enabled = False
-                    fallback_prompt = str(task_info.get("prompt") or "").strip()
-                    if fallback_prompt and st.button("一键转普通分析", key=f"deep_fallback_error_{task_id}"):
-                        process_user_input(fallback_prompt, deep_mode=False)
-                        st.rerun()
-                else:
-                    time.sleep(2)
-                    st.rerun()
-            elif current_status == "timeout":
-                status_placeholder.warning("⏱️ Deep 报告超时")
-                content_placeholder.warning("Deep 报告在预算与时限内未完成，建议缩小问题范围或切换普通分析。")
-                del st.session_state.pending_task
-                task_manager.clear_user_pending_task(current_user)
-                st.session_state.deep_mode_enabled = False
-                fallback_prompt = str(task_info.get("prompt") or "").strip()
-                if fallback_prompt and st.button("一键转普通分析", key=f"deep_fallback_timeout_{task_id}"):
-                    process_user_input(fallback_prompt, deep_mode=False)
-                    st.rerun()
-    else:
-        # 超时，清除任务
-        st.warning("⏱️ 任务超时，请重新提问")
-        del st.session_state.pending_task
-
-        # 🔥 [新增] 同时清除 Redis 中的待处理任务
-        current_user = st.session_state.get('user_id', "访客")
-        if current_user != "访客":
-            use_deep_manager = (task_mode == "deep" and ENABLE_DEEP_MODE and DeepTaskManager is not None)
-            task_manager = DeepTaskManager() if use_deep_manager else TaskManager()
-            task_manager.clear_user_pending_task(current_user)
-
-        st.rerun()
+    _render_pending_chat_task_fragment(st.session_state.pending_task)
 
 
 

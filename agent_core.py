@@ -1276,9 +1276,14 @@ def build_chatter_tools():
 
 def simple_chatter_reply(user_query: str, llm) -> str:
     prompt = (
-        f"用户说：{user_query}。\n"
-        "请用轻松、口语化、简短的方式回应，像朋友聊天一样。"
-        "如果合适，可以自然引导用户继续问行情、策略或金融知识，但不要太长。"
+        "你是一个自然、亲切、反应很快的聊天助手。\n"
+        f"用户说：{user_query}\n"
+        "请直接回答，不要先复述任务。\n"
+        "要求：\n"
+        "1. 像朋友聊天，口语化、自然、不端着。\n"
+        "2. 默认简洁，通常 1-3 段就够；如果是泛知识问题，也可以直接给清楚答案。\n"
+        "3. 不要主动把话题拉回金融、交易、行情、策略。\n"
+        "4. 不要使用工具说明、系统提示语、编号流程或过度免责声明。\n"
     )
     response = llm.invoke(prompt)
     return str(getattr(response, "content", "") or "").strip()
