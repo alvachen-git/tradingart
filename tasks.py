@@ -28,7 +28,12 @@ for key in [
 
 from llm_compat import ChatTongyiCompat as ChatTongyi
 from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
-from agent_core import build_trading_graph
+from agent_core import build_trading_graph, knowledge_chatter_node
+from chat_routing import (
+    CHAT_MODE_ANALYSIS,
+    CHAT_MODE_KNOWLEDGE,
+    default_progress_for_chat_mode,
+)
 from knowledge_tools import search_knowledge_structured
 from tools.oss_utils import generate_signed_get_url
 from tools.url_content_tools import build_link_context, extract_first_url
@@ -82,6 +87,7 @@ def _write_mobile_chat_state(
     status: str,
     error: str = "",
     finished: bool = False,
+    extra_fields: dict | None = None,
 ):
     if not task_id:
         return
@@ -97,6 +103,15 @@ def _write_mobile_chat_state(
             "updated_at": now_iso,
             "finished_at": now_iso if finished else str(existing.get("finished_at") or ""),
         }
+        if isinstance(existing, dict):
+            for key, value in existing.items():
+                if key not in payload and value is not None:
+                    payload[key] = value
+        if isinstance(extra_fields, dict):
+            for key, value in extra_fields.items():
+                if value is None:
+                    continue
+                payload[str(key)] = value
         _task_redis.setex(
             _mobile_chat_state_key(task_id),
             _MOBILE_CHAT_RESULT_TTL_SECONDS,
@@ -601,12 +616,20 @@ def process_ai_query(
     """后台处理 AI 查询"""
     try:
         task_id = str(getattr(getattr(self, "request", None), "id", "") or "").strip()
+        context_payload = context_payload or {}
         _write_mobile_chat_state(
             task_id=task_id,
             user_id=str(user_id or ""),
             status="processing",
             error="",
             finished=False,
+            extra_fields={
+                "chat_mode": str(context_payload.get("chat_mode") or CHAT_MODE_ANALYSIS),
+                "progress": default_progress_for_chat_mode(
+                    str(context_payload.get("chat_mode") or CHAT_MODE_ANALYSIS),
+                    status="processing",
+                ),
+            },
         )
 
         prompt_for_graph = prompt
@@ -690,7 +713,6 @@ def process_ai_query(
 
         input_messages.append(HumanMessage(content=final_prompt))
 
-        context_payload = context_payload or {}
         account_total_capital = context_payload.get("account_total_capital")
         if account_total_capital is None:
             try:
@@ -725,6 +747,17 @@ def process_ai_query(
         }
 
         self.update_state(state='PROCESSING', meta={'progress': '团队正在协作分析...'})
+        _write_mobile_chat_state(
+            task_id=task_id,
+            user_id=str(user_id or ""),
+            status="processing",
+            error="",
+            finished=False,
+            extra_fields={
+                "chat_mode": CHAT_MODE_ANALYSIS,
+                "progress": "团队正在协作分析...",
+            },
+        )
 
         final_state = app.invoke(inputs, {"recursion_limit": 30})
 
@@ -939,6 +972,10 @@ def process_ai_query(
             status="success",
             error="",
             finished=True,
+            extra_fields={
+                "chat_mode": CHAT_MODE_ANALYSIS,
+                "progress": "已完成",
+            },
         )
         return payload
 
@@ -954,6 +991,10 @@ def process_ai_query(
             status="error",
             error="分析过程中出现错误，请稍后重试",
             finished=True,
+            extra_fields={
+                "chat_mode": CHAT_MODE_ANALYSIS,
+                "progress": "任务失败",
+            },
         )
         payload = {
             "status": "error",
@@ -961,6 +1002,142 @@ def process_ai_query(
             "chart": None,
             "attachments": [],
             "error": error_msg
+        }
+        _write_mobile_chat_result(task_id=task_id, user_id=str(user_id or ""), result_payload=payload)
+        return payload
+
+
+@celery_app.task(bind=True, name="tasks.process_knowledge_chat")
+def process_knowledge_chat(
+    self,
+    user_id,
+    prompt,
+    risk_preference="稳健型",
+    history_messages=None,
+    context_payload=None,
+):
+    """后台处理知识问答，不走 supervisor。"""
+    try:
+        task_id = str(getattr(getattr(self, "request", None), "id", "") or "").strip()
+        context_payload = context_payload or {}
+        _write_mobile_chat_state(
+            task_id=task_id,
+            user_id=str(user_id or ""),
+            status="processing",
+            error="",
+            finished=False,
+            extra_fields={
+                "chat_mode": CHAT_MODE_KNOWLEDGE,
+                "progress": default_progress_for_chat_mode(CHAT_MODE_KNOWLEDGE, status="processing"),
+            },
+        )
+
+        self.update_state(state="PROCESSING", meta={"progress": "正在初始化知识问答..."})
+        llm = ChatTongyi(model="qwen3.6-plus", streaming=False, temperature=0.2)
+
+        input_messages = []
+        for msg in history_messages or []:
+            if msg.get("role") == "user":
+                input_messages.append(HumanMessage(content=msg["content"]))
+            elif msg.get("role") in ["assistant", "ai"]:
+                content = msg["content"][:500] + "..." if len(msg["content"]) > 500 else msg["content"]
+                input_messages.append(AIMessage(content=content))
+        input_messages.append(HumanMessage(content=prompt))
+
+        state = {
+            "user_query": prompt,
+            "messages": input_messages,
+            "risk_preference": risk_preference,
+            "is_followup": bool(context_payload.get("is_followup", False)),
+            "recent_context": str(context_payload.get("recent_context", "")),
+            "memory_context": str(context_payload.get("memory_context", "")),
+            "conversation_id": str(context_payload.get("conversation_id", f"{user_id}-default")),
+            "user_id": str(user_id or ""),
+            "knowledge_context": "",
+        }
+
+        self.update_state(state="PROCESSING", meta={"progress": "正在检索知识库..."})
+        _write_mobile_chat_state(
+            task_id=task_id,
+            user_id=str(user_id or ""),
+            status="processing",
+            error="",
+            finished=False,
+            extra_fields={
+                "chat_mode": CHAT_MODE_KNOWLEDGE,
+                "progress": "正在检索知识库...",
+            },
+        )
+        result_state = knowledge_chatter_node(state, llm=llm)
+
+        self.update_state(state="PROCESSING", meta={"progress": "正在整理知识回答..."})
+        _write_mobile_chat_state(
+            task_id=task_id,
+            user_id=str(user_id or ""),
+            status="processing",
+            error="",
+            finished=False,
+            extra_fields={
+                "chat_mode": CHAT_MODE_KNOWLEDGE,
+                "progress": "正在整理知识回答...",
+            },
+        )
+
+        messages = result_state.get("messages", [])
+        final_response = ""
+        if messages:
+            final_response = str(getattr(messages[-1], "content", "") or "").strip()
+        if final_response:
+            final_response = re.sub(r'!\[.*?\]\(.*?\)', '', final_response).strip()
+            final_response = re.sub(r'IMAGE_CREATED:chart_[a-zA-Z0-9_]+\.json', '', final_response).strip()
+            final_response = re.sub(r'`([a-z_]+)`', r'\1', final_response).strip()
+
+        attachments = _build_image_attachments(prompt, top_k=3)
+        final_response, attachments = _inject_inline_attachment_tokens(final_response, attachments)
+
+        payload = {
+            "status": "success",
+            "response": final_response or "抱歉，暂时没有获取到有效知识回答",
+            "chart": None,
+            "attachments": attachments,
+            "error": None,
+        }
+        _write_mobile_chat_result(task_id=task_id, user_id=str(user_id or ""), result_payload=payload)
+        _write_mobile_chat_state(
+            task_id=task_id,
+            user_id=str(user_id or ""),
+            status="success",
+            error="",
+            finished=True,
+            extra_fields={
+                "chat_mode": CHAT_MODE_KNOWLEDGE,
+                "progress": "已完成",
+            },
+        )
+        return payload
+    except Exception as e:
+        import traceback
+
+        error_msg = f"知识问答任务执行失败: {str(e)}\n{traceback.format_exc()}"
+        print(f"❌ {error_msg}")
+        task_id = str(getattr(getattr(self, "request", None), "id", "") or "").strip()
+        _write_mobile_chat_state(
+            task_id=task_id,
+            user_id=str(user_id or ""),
+            status="error",
+            error="知识问答过程中出现错误，请稍后重试",
+            finished=True,
+            extra_fields={
+                "chat_mode": CHAT_MODE_KNOWLEDGE,
+                "progress": "任务失败",
+            },
+        )
+        payload = {
+            "status": "error",
+            "response": "知识问答过程中出现错误，请稍后重试",
+            "chart": None,
+            "attachments": [],
+            "error": error_msg,
         }
         _write_mobile_chat_result(task_id=task_id, user_id=str(user_id or ""), result_payload=payload)
         return payload

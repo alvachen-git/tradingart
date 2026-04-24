@@ -117,6 +117,53 @@ class TestMobileApiChatMemoryAsync(unittest.TestCase):
         self.assertTrue(ctx.get("is_followup"))
         self.assertIn("用户: 先看黄金技术面", ctx.get("recent_context", ""))
 
+    def test_chat_submit_simple_chat_returns_immediate(self):
+        body = mobile_api.ChatSubmitRequest(prompt="你好", history=[])
+        with patch.object(mobile_api.de, "get_user_profile", return_value={}), patch.object(
+            mobile_api, "_detect_mobile_has_portfolio", return_value=False
+        ), patch.object(
+            mobile_api, "ChatTongyi", return_value=object()
+        ), patch.object(
+            mobile_api, "simple_chatter_reply", return_value="你好呀，我在。"
+        ) as mocked_reply, patch.object(
+            mobile_api, "_save_chat_answer_event", return_value=True
+        ), patch.object(
+            mobile_api, "_queue_mobile_chat_memory_persist", return_value="queued"
+        ), patch.object(
+            mobile_api.TaskManager, "create_task"
+        ) as mocked_create, patch.object(
+            mobile_api.TaskManager, "create_knowledge_task"
+        ) as mocked_knowledge:
+            out = mobile_api.chat_submit(body=body, username="u1")
+
+        self.assertEqual(out["delivery_mode"], "immediate")
+        self.assertEqual(out["chat_mode"], "simple_chat")
+        self.assertEqual(out["result"]["response"], "你好呀，我在。")
+        mocked_reply.assert_called_once()
+        mocked_create.assert_not_called()
+        mocked_knowledge.assert_not_called()
+
+    def test_chat_submit_knowledge_chat_uses_knowledge_task(self):
+        fake_redis = _FakeRedis()
+        body = mobile_api.ChatSubmitRequest(prompt="什么是牛市价差", history=[])
+        with patch.object(mobile_api, "_redis", fake_redis), patch.object(
+            mobile_api.de, "get_user_profile", return_value={}
+        ), patch.object(
+            mobile_api, "_detect_mobile_has_portfolio", return_value=False
+        ), patch.object(
+            mobile_api.TaskManager, "create_knowledge_task", return_value="task-kg"
+        ) as mocked_knowledge, patch.object(
+            mobile_api.TaskManager, "create_task"
+        ) as mocked_create:
+            out = mobile_api.chat_submit(body=body, username="u1")
+
+        self.assertEqual(out["delivery_mode"], "task")
+        self.assertEqual(out["chat_mode"], "knowledge_chat")
+        self.assertEqual(out["task_id"], "task-kg")
+        mocked_knowledge.assert_called_once()
+        mocked_create.assert_not_called()
+        self.assertEqual(fake_redis.get(mobile_api._mobile_chat_prompt_key("task-kg")), "什么是牛市价差")
+
     def test_mobile_context_cross_domain_does_not_inject_recent_or_memory(self):
         history = [
             {"role": "user", "content": "我的股票持仓要不要调仓"},

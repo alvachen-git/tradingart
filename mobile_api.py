@@ -67,12 +67,21 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
+from llm_compat import ChatTongyiCompat as ChatTongyi
 
 # 确保同目录模块可以 import
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import auth_utils as auth
 from task_manager import TaskManager
+from agent_core import simple_chatter_reply
+from chat_routing import (
+    CHAT_MODE_ANALYSIS,
+    CHAT_MODE_KNOWLEDGE,
+    CHAT_MODE_SIMPLE,
+    classify_chat_mode,
+    default_progress_for_chat_mode,
+)
 import subscription_service as sub_svc
 import payment_service as pay_svc
 import data_engine as de
@@ -104,6 +113,7 @@ from chat_feedback_service import (
     list_chat_feedback_events,
     list_chat_feedback_failure_candidates,
     list_chat_feedback_samples,
+    save_chat_feedback_event,
     save_chat_answer_event,
     submit_chat_feedback,
     update_chat_feedback_sample,
@@ -1639,6 +1649,9 @@ def _build_mobile_chat_success_response(result_payload: dict, state: Optional[di
     if answer_id:
         payload["answer_id"] = answer_id
     payload["feedback_allowed"] = bool(state.get("feedback_allowed", bool(answer_id)))
+    chat_mode = str(state.get("chat_mode") or "").strip()
+    if chat_mode:
+        payload["chat_mode"] = chat_mode
     return payload
 
 
@@ -1701,6 +1714,10 @@ def _save_chat_answer_event(
 
 def _get_chat_answer_event(answer_id: str) -> dict:
     return get_chat_answer_event(_get_chat_feedback_engine(), answer_id)
+
+
+def _save_chat_feedback_event(**kwargs) -> bool:
+    return save_chat_feedback_event(_get_chat_feedback_engine(), **kwargs)
 
 
 def _list_chat_feedback_failure_candidates(
@@ -1874,6 +1891,23 @@ def _build_mobile_chat_runtime_snapshot(task_id: str, username: str) -> dict:
             _clear_mobile_chat_last_task_if_matches(username, task_id)
             return _build_mobile_chat_error_response("AI思考太久，请重新提问。", code="task_timeout")
 
+    if status_name in {"pending", "processing"} and state:
+        chat_mode = str(state.get("chat_mode") or CHAT_MODE_ANALYSIS).strip() or CHAT_MODE_ANALYSIS
+        payload = {
+            "status": status_name,
+            "progress": str(state.get("progress") or default_progress_for_chat_mode(chat_mode, status=status_name)),
+            "result": None,
+            "error": None,
+            "chat_mode": chat_mode,
+        }
+        trace_id = str(state.get("trace_id") or "").strip()
+        answer_id = str(state.get("answer_id") or "").strip()
+        if trace_id:
+            payload["trace_id"] = trace_id
+        if answer_id:
+            payload["answer_id"] = answer_id
+        return payload
+
     return {}
 
 
@@ -2043,19 +2077,69 @@ def chat_submit(
         history=history_for_task,
         profile=profile,
     )
+    chat_mode = classify_chat_mode(
+        normalized_prompt,
+        is_followup=bool(context_payload.get("is_followup", False)),
+    )
+    context_payload["chat_mode"] = chat_mode
     has_portfolio = _detect_mobile_has_portfolio(username)
     trace_id = _generate_chat_trace_id()
     answer_id = _generate_chat_answer_id()
     intent_domain = str(context_payload.get("intent_domain") or "general")
 
-    task_id = TaskManager.create_task(
-        user_id=username,
-        prompt=normalized_prompt,
-        risk_preference=risk,
-        history_messages=history_for_task,
-        context_payload=context_payload,
-        has_portfolio=has_portfolio,
-    )
+    if chat_mode == CHAT_MODE_SIMPLE:
+        llm_turbo = ChatTongyi(model="qwen-turbo", streaming=False, temperature=0.1)
+        response_text = simple_chatter_reply(normalized_prompt, llm_turbo)
+        feedback_allowed = _save_chat_answer_event(
+            task_id=f"immediate-{uuid.uuid4()}",
+            user_id=username,
+            trace_id=trace_id,
+            answer_id=answer_id,
+            prompt_text=raw_prompt or normalized_prompt,
+            response_text=response_text,
+            intent_domain=intent_domain,
+            feedback_allowed=True,
+        )
+        _queue_mobile_chat_memory_persist(
+            task_id=f"immediate-memory-{uuid.uuid4()}",
+            username=username,
+            user_prompt=raw_prompt or normalized_prompt,
+            ai_response=response_text,
+        )
+        return {
+            "delivery_mode": "immediate",
+            "task_id": "",
+            "message": "已直接回复",
+            "chat_mode": CHAT_MODE_SIMPLE,
+            "trace_id": trace_id,
+            "answer_id": answer_id,
+            "feedback_allowed": feedback_allowed,
+            "result": {
+                "status": "success",
+                "response": response_text,
+                "chart": None,
+                "attachments": [],
+                "error": None,
+            },
+        }
+
+    if chat_mode == CHAT_MODE_KNOWLEDGE:
+        task_id = TaskManager.create_knowledge_task(
+            user_id=username,
+            prompt=normalized_prompt,
+            risk_preference=risk,
+            history_messages=history_for_task,
+            context_payload=context_payload,
+        )
+    else:
+        task_id = TaskManager.create_task(
+            user_id=username,
+            prompt=normalized_prompt,
+            risk_preference=risk,
+            history_messages=history_for_task,
+            context_payload=context_payload,
+            has_portfolio=has_portfolio,
+        )
     _write_mobile_chat_state(
         task_id=task_id,
         user_id=username,
@@ -2068,6 +2152,8 @@ def chat_submit(
             "prompt_text": raw_prompt or normalized_prompt,
             "intent_domain": intent_domain,
             "feedback_allowed": False,
+            "chat_mode": chat_mode,
+            "progress": default_progress_for_chat_mode(chat_mode, status="pending"),
         },
     )
     _set_mobile_chat_last_task(username, task_id)
@@ -2076,7 +2162,13 @@ def chat_submit(
             _redis.setex(_mobile_chat_prompt_key(task_id), _MOBILE_CHAT_PROMPT_TTL, raw_prompt)
     except Exception as e:
         print(f"[mobile-memory] prompt cache failed task_id={task_id} err={e}")
-    return {"task_id": task_id, "message": "任务已提交，正在分析..."}
+    submit_message = "任务已提交，正在整理知识回答..." if chat_mode == CHAT_MODE_KNOWLEDGE else "任务已提交，正在分析..."
+    return {
+        "delivery_mode": "task",
+        "task_id": task_id,
+        "message": submit_message,
+        "chat_mode": chat_mode,
+    }
 
 
 @app.get("/api/chat/status/{task_id}", tags=["AI问答"])
@@ -2115,10 +2207,11 @@ def chat_status(task_id: str, username: str = Depends(get_current_user)):
 
             TaskManager.clear_user_pending_task(username)
             _clear_mobile_chat_last_task_if_matches(username, task_id)
+            return runtime_snapshot
         elif status_name == "error":
             TaskManager.clear_user_pending_task(username)
             _clear_mobile_chat_last_task_if_matches(username, task_id)
-        return runtime_snapshot
+            return runtime_snapshot
 
     status = TaskManager.get_task_status(task_id)
     status_name = str(status.get("status") or "").strip().lower()
@@ -2135,13 +2228,21 @@ def chat_status(task_id: str, username: str = Depends(get_current_user)):
         if isinstance(result, dict):
             ai_response = str(result.get("response") or "").strip()
             _write_mobile_chat_result(task_id=task_id, user_id=username, result_payload=result)
+            existing_state = _read_mobile_chat_state(task_id)
             _write_mobile_chat_state(
                 task_id=task_id,
                 user_id=username,
                 status="success",
                 error="",
                 finished=True,
-                extra_fields={"feedback_allowed": True},
+                extra_fields={
+                    "feedback_allowed": True,
+                    "trace_id": str(existing_state.get("trace_id") or "").strip(),
+                    "answer_id": str(existing_state.get("answer_id") or "").strip(),
+                    "prompt_text": str(existing_state.get("prompt_text") or "").strip(),
+                    "intent_domain": str(existing_state.get("intent_domain") or "general").strip(),
+                    "chat_mode": str(existing_state.get("chat_mode") or status.get("chat_mode") or CHAT_MODE_ANALYSIS),
+                },
             )
 
         queue_status = _queue_mobile_chat_memory_persist(
@@ -2181,6 +2282,8 @@ def chat_status(task_id: str, username: str = Depends(get_current_user)):
         refreshed = _build_mobile_chat_runtime_snapshot(task_id=task_id, username=username)
         if refreshed:
             return refreshed
+    elif runtime_snapshot and str(runtime_snapshot.get("status") or "").strip().lower() in {"pending", "processing"}:
+        return runtime_snapshot
     return status
 
 
@@ -2219,6 +2322,9 @@ def chat_pending(username: str = Depends(get_current_user)):
         "status": status_name or "pending",
         "updated_at": updated_at,
     }
+    chat_mode = str(snapshot.get("chat_mode") or state.get("chat_mode") or "").strip()
+    if chat_mode:
+        payload["chat_mode"] = chat_mode
     if result_payload is not None:
         payload["result"] = result_payload
     if err_msg:

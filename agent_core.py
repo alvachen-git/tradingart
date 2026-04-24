@@ -1274,6 +1274,16 @@ def build_chatter_tools():
     ]
 
 
+def simple_chatter_reply(user_query: str, llm) -> str:
+    prompt = (
+        f"用户说：{user_query}。\n"
+        "请用轻松、口语化、简短的方式回应，像朋友聊天一样。"
+        "如果合适，可以自然引导用户继续问行情、策略或金融知识，但不要太长。"
+    )
+    response = llm.invoke(prompt)
+    return str(getattr(response, "content", "") or "").strip()
+
+
 # ==========================================
 # 2. 定义 Supervisor (大管家)
 # ==========================================
@@ -2519,9 +2529,9 @@ def macro_analyst_node(state: AgentState, llm):
 # 🟣 6. 聊天/知识问答员 (Chatter)
 # 职责：闲聊 + 百科知识问答 (RAG + Web)
 # ==========================================
-def chatter_node(state: AgentState, llm=None):
+def knowledge_chatter_node(state: AgentState, llm=None):
     """
-    聊天/知识问答员 - 使用 ReAct 模式自主思考和检索
+    知识问答员 - 使用 ReAct 模式自主思考和检索
     优先使用内部知识库，必要时辅以网络搜索
     """
     user_query = state["user_query"]
@@ -2539,17 +2549,6 @@ def chatter_node(state: AgentState, llm=None):
     if is_followup and combined_context == "无":
         return {
             "messages": [HumanMessage(content="【知识问答】\n我这轮没有检索到上一轮关键结论，暂时无法安全承接。请补充上一轮的核心结论（例如方向、关键位、策略），我立刻继续。")],
-            "knowledge_context": ""
-        }
-
-    # 判断是否是简单问候（不需要工具）
-    is_greeting = len(user_query) < 5 and any(x in user_query for x in ["你好", "嗨", "早", "谢", "hello", "hi", "嘿", "晚上好", "早上好", "早安", "中午好", "下午好"])
-
-    if is_greeting and not is_followup:
-        # 简单问候直接回复，不启动 ReAct
-        response = llm.invoke(f"用户说：{user_query}。请热情回应，并引导用户询问行情、策略或金融知识。")
-        return {
-            "messages": [HumanMessage(content=f"【闲聊】\n{response.content}")],
             "knowledge_context": ""
         }
 
@@ -2659,6 +2658,30 @@ def chatter_node(state: AgentState, llm=None):
                 "messages": [HumanMessage(content=f"【闲聊】\n抱歉，我遇到了一些问题。请稍后再试或换个方式提问。")],
                 "knowledge_context": ""
             }
+
+
+def chatter_node(state: AgentState, llm=None):
+    """
+    聊天/知识问答员 - 图内兜底
+    简单问候用轻量直答，其他问题进入知识问答模式
+    """
+    user_query = state["user_query"]
+    is_followup = bool(state.get("is_followup", False))
+    is_greeting = len(user_query) < 5 and any(
+        x in user_query for x in ["你好", "嗨", "早", "谢", "hello", "hi", "嘿", "晚上好", "早上好", "早安", "中午好", "下午好"]
+    )
+
+    if is_greeting and not is_followup:
+        try:
+            reply = simple_chatter_reply(user_query, llm)
+            return {
+                "messages": [HumanMessage(content=f"【闲聊】\n{reply}")],
+                "knowledge_context": "",
+            }
+        except Exception as e:
+            print(f"⚠️ chatter_node 简单回复失败: {e}")
+
+    return knowledge_chatter_node(state, llm=llm)
 
 
 # 🟣 =选股员 (Screener)

@@ -35,7 +35,13 @@ import memory_utils as mem
 import threading
 from datetime import datetime, timedelta
 from auth_ui import show_auth_dialog, sidebar_user_menu
-from agent_core import build_trading_graph
+from agent_core import build_trading_graph, simple_chatter_reply
+from chat_routing import (
+    CHAT_MODE_ANALYSIS,
+    CHAT_MODE_KNOWLEDGE,
+    CHAT_MODE_SIMPLE,
+    classify_chat_mode,
+)
 from vision_tools import analyze_financial_image, analyze_position_image
 from data_engine import get_commodity_iv_info
 import time
@@ -95,6 +101,154 @@ HOME_PROMO_BANNER = {
     "text": "【5月培训】机构是如何卖期权",
     "target_page": "pages/25_期权重盾班.py",
 }
+
+
+def _get_chat_waiting_card_config(chat_mode: str, analysis_mode_label: str = "") -> Dict[str, Any]:
+    if analysis_mode_label == "option_position_upload":
+        return {
+            "title": "⚙️ 期权持仓分析中",
+            "steps": [
+                ("📥 正在解析期权持仓截图", "识别合约腿与方向"),
+                ("📐 正在计算 Delta 与暴露", "核对标的、IV 与合约参数"),
+                ("🧭 正在生成调仓方案", "输出目标区间与建议调整量"),
+                ("📝 正在整理期权结论", "生成结构化执行清单"),
+            ],
+            "gradient": "linear-gradient(135deg, rgba(15, 23, 42, 0.92), rgba(30, 58, 138, 0.92))",
+            "border": "rgba(56, 189, 248, 0.34)",
+            "phase_color": "#7dd3fc",
+            "meta_color": "#cbd5e1",
+            "sub_color": "#e2e8f0",
+            "dot_color": "#7dd3fc",
+            "caption": "正在后台持续处理，完成后会自动返回结果。",
+        }
+    if chat_mode == CHAT_MODE_KNOWLEDGE:
+        return {
+            "title": "📚 正在整理知识回答",
+            "steps": [
+                ("🔎 正在检索知识库", "汇总内部资料与历史知识片段"),
+                ("🧠 正在梳理关键概念", "提炼定义、原理与常见误区"),
+                ("✍️ 正在生成通俗讲解", "组织成更容易理解的回答"),
+            ],
+            "gradient": "linear-gradient(135deg, rgba(22, 34, 24, 0.96), rgba(34, 94, 60, 0.96))",
+            "border": "rgba(74, 222, 128, 0.32)",
+            "phase_color": "#bbf7d0",
+            "meta_color": "#dcfce7",
+            "sub_color": "#f0fdf4",
+            "dot_color": "#86efac",
+            "caption": "知识问答正在慢思考，完成后会自动返回结果。",
+        }
+    if chat_mode == CHAT_MODE_SIMPLE:
+        return {
+            "title": "💬 正在生成聊天回复",
+            "steps": [
+                ("✨ 正在理解你的问题", "识别语气与上下文"),
+                ("🗣️ 正在组织自然表达", "生成更口语化的简短回复"),
+            ],
+            "gradient": "linear-gradient(135deg, rgba(54, 28, 14, 0.96), rgba(146, 64, 14, 0.96))",
+            "border": "rgba(251, 191, 36, 0.34)",
+            "phase_color": "#fde68a",
+            "meta_color": "#ffedd5",
+            "sub_color": "#fff7ed",
+            "dot_color": "#fbbf24",
+            "caption": "轻量聊天通常会很快返回。",
+        }
+    return {
+        "title": "🚀 团队正在协作分析",
+        "steps": [
+            ("🛰️ 正在检索市场数据", "读取行情、新闻与历史上下文"),
+            ("🧠 正在进行策略推理", "多模型协作评估方向与风险"),
+            ("🧪 正在校验关键结论", "交叉检查数据一致性与边界条件"),
+            ("📝 正在整理最终回答", "生成结构化结论与可执行建议"),
+        ],
+        "gradient": "linear-gradient(135deg, rgba(15, 23, 42, 0.92), rgba(30, 58, 138, 0.92))",
+        "border": "rgba(148, 163, 184, 0.28)",
+        "phase_color": "#bfdbfe",
+        "meta_color": "#94a3b8",
+        "sub_color": "#cbd5e1",
+        "dot_color": "#93c5fd",
+        "caption": "正在后台持续处理，完成后会自动返回结果。",
+    }
+
+
+def _render_chat_waiting_card(
+    *,
+    chat_mode: str,
+    progress_msg: str,
+    elapsed_sec: int,
+    analysis_mode_label: str = "",
+) -> str:
+    config = _get_chat_waiting_card_config(chat_mode, analysis_mode_label)
+    steps = config["steps"]
+    phase_idx = (elapsed_sec // 6) % len(steps)
+    phase_title, phase_desc = steps[phase_idx]
+    return f"""
+    <style>
+    .thinking-wrap {{
+        background: {config["gradient"]};
+        border: 1px solid {config["border"]};
+        border-radius: 14px;
+        padding: 14px 16px;
+        color: #e2e8f0;
+        margin-bottom: 8px;
+        box-shadow: 0 14px 38px rgba(15, 23, 42, 0.18);
+    }}
+    .thinking-title {{
+        font-weight: 700;
+        font-size: 16px;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+    }}
+    .thinking-sub {{
+        margin-top: 6px;
+        font-size: 13px;
+        color: {config["sub_color"]};
+    }}
+    .thinking-phase {{
+        margin-top: 8px;
+        color: {config["phase_color"]};
+        font-size: 13px;
+        font-weight: 600;
+    }}
+    .thinking-meta {{
+        margin-top: 4px;
+        color: {config["meta_color"]};
+        font-size: 12px;
+    }}
+    .thinking-dots {{
+        display: inline-flex;
+        gap: 4px;
+        margin-left: 2px;
+    }}
+    .thinking-dot {{
+        width: 6px;
+        height: 6px;
+        border-radius: 999px;
+        background: {config["dot_color"]};
+        opacity: 0.35;
+        animation: dotPulse 1.2s infinite ease-in-out;
+    }}
+    .thinking-dot:nth-child(2) {{ animation-delay: 0.2s; }}
+    .thinking-dot:nth-child(3) {{ animation-delay: 0.4s; }}
+    @keyframes dotPulse {{
+        0%, 80%, 100% {{ transform: scale(0.8); opacity: 0.35; }}
+        40% {{ transform: scale(1.2); opacity: 1; }}
+    }}
+    </style>
+    <div class="thinking-wrap">
+        <div class="thinking-title">
+            {config["title"]}
+            <span class="thinking-dots">
+                <span class="thinking-dot"></span>
+                <span class="thinking-dot"></span>
+                <span class="thinking-dot"></span>
+            </span>
+        </div>
+        <div class="thinking-phase">{phase_title}</div>
+        <div class="thinking-sub">{progress_msg}</div>
+        <div class="thinking-meta">{phase_desc} · 已等待 {elapsed_sec}s</div>
+    </div>
+    """
 
 ANNOUNCEMENT_CONTENT = {
     "title": "📡 情报站内容升级",
@@ -1779,6 +1933,7 @@ def _restore_pending_tasks_after_auto_login_once():
             "trace_id": generate_chat_trace_id(),
             "answer_id": generate_chat_answer_id(),
             "intent_domain": "general",
+            "chat_mode": str(pending_task_data.get("chat_mode") or CHAT_MODE_ANALYSIS),
         }
         if not st.session_state.get("messages"):
             st.session_state.messages = [{"role": "user", "content": pending_task_data["prompt"]}]
@@ -2437,15 +2592,85 @@ def process_user_input(
         vision_position_payload=vision_position_payload,
         vision_position_domain=vision_position_domain,
     )
+    chat_mode = classify_chat_mode(
+        prompt_text,
+        is_followup=bool(context_payload.get("is_followup", False)),
+        has_uploaded_image=bool(uploaded_image),
+        has_structured_payload=has_structured_upload,
+        vision_position_domain=vision_position_domain,
+    )
+    if deep_mode:
+        chat_mode = CHAT_MODE_ANALYSIS
+    context_payload["chat_mode"] = chat_mode
 
     # --- 2. 显示用户提问 (保留) ---
     st.session_state.messages.append({"role": "user", "content": prompt_text})
 
     # 构造最终 Prompt
     final_prompt = image_context + prompt_text
+    trace_id = generate_chat_trace_id()
+    answer_id = generate_chat_answer_id()
+    intent_domain = str(context_payload.get("intent_domain") or "general")
+
+    if chat_mode == CHAT_MODE_SIMPLE and not deep_mode:
+        simple_status_placeholder = st.empty()
+        simple_status_placeholder.markdown(
+            _render_chat_waiting_card(
+                chat_mode=CHAT_MODE_SIMPLE,
+                progress_msg="正在生成轻量聊天回复...",
+                elapsed_sec=0,
+            ),
+            unsafe_allow_html=True,
+        )
+        with st.status("💬 正在生成聊天回复", expanded=True) as status:
+            st.write("识别用户语气与上下文")
+            st.write("调用轻量模型组织自然回复")
+            llm_turbo = ChatTongyi(model="qwen-turbo", temperature=0.1)
+            simple_response = simple_chatter_reply(prompt_text, llm_turbo)
+            status.update(label="✅ 聊天回复已生成", state="complete", expanded=False)
+        simple_status_placeholder.empty()
+
+        feedback_allowed = False
+        if current_user != "访客" and simple_response:
+            feedback_allowed = save_chat_answer_event(
+                _get_home_feedback_engine(),
+                task_id=f"immediate-{uuid.uuid4()}",
+                user_id=current_user,
+                trace_id=trace_id,
+                answer_id=answer_id,
+                prompt_text=prompt_text,
+                response_text=simple_response,
+                intent_domain=intent_domain,
+                feedback_allowed=True,
+            )
+
+        st.session_state.messages.append(
+            {
+                "role": "ai",
+                "content": simple_response,
+                "chart": "",
+                "attachments": [],
+                "trace_id": trace_id,
+                "answer_id": answer_id,
+                "feedback_allowed": feedback_allowed,
+                "intent_domain": intent_domain,
+            }
+        )
+        if current_user != "访客":
+            try:
+                mem.save_interaction(
+                    current_user,
+                    prompt_text,
+                    _build_memory_record(simple_response),
+                    topic=_classify_intent_domain(prompt_text),
+                )
+            except Exception as e:
+                print(f"记忆存储失败: {e}")
+        st.rerun()
+        return
 
     # --- 3. 极速伪路由检查（默认关闭，可通过环境变量显式开启） ---
-    if FAST_ROUTER_ENABLED and not deep_mode:
+    if FAST_ROUTER_ENABLED and chat_mode == CHAT_MODE_ANALYSIS and not deep_mode:
         is_hit, fast_response = fast_router_check(final_prompt)
         if is_hit:
             st.session_state.messages.append({"role": "assistant", "content": fast_response})
@@ -2493,17 +2718,20 @@ def process_user_input(
     recent_history = history_msgs[-4:] if len(history_msgs) > 4 else history_msgs
     history_for_task = [{"role": msg["role"], "content": msg["content"]} for msg in recent_history]
 
-    # 提交后台任务
-    trace_id = generate_chat_trace_id()
-    answer_id = generate_chat_answer_id()
-    intent_domain = str(context_payload.get("intent_domain") or "general")
-
     if deep_mode:
         deep_risk = "balanced"
         task_id = task_manager.create_task(
             user_id=current_user,
             prompt=final_prompt,
             risk_preference=deep_risk,
+            history_messages=history_for_task,
+            context_payload=context_payload,
+        )
+    elif chat_mode == CHAT_MODE_KNOWLEDGE:
+        task_id = task_manager.create_knowledge_task(
+            user_id=current_user,
+            prompt=prompt_text,
+            risk_preference=risk,
             history_messages=history_for_task,
             context_payload=context_payload,
         )
@@ -2593,6 +2821,7 @@ def process_user_input(
         "trace_id": trace_id,
         "answer_id": answer_id,
         "intent_domain": intent_domain,
+        "chat_mode": chat_mode,
     }
 
 
@@ -3384,94 +3613,20 @@ if "pending_task" in st.session_state and st.session_state.pending_task:
                 progress_msg = task_status.get("progress", "正在处理...")
                 elapsed_sec = int(max(0, time.time() - task_start))
                 analysis_mode_label = str(task_info.get("analysis_mode_label", "") or "")
-                if analysis_mode_label == "option_position_upload":
-                    card_title = "⚙️ 期权持仓分析中"
-                    phase_steps = [
-                        ("📥 正在解析期权持仓截图", "识别合约腿与方向"),
-                        ("📐 正在计算 Delta 与暴露", "核对标的、IV 与合约参数"),
-                        ("🧭 正在生成调仓方案", "输出目标区间与建议调整量"),
-                        ("📝 正在整理期权结论", "生成结构化执行清单"),
-                    ]
-                else:
-                    card_title = "🚀 团队正在协作分析"
-                    phase_steps = [
-                        ("🛰️ 正在检索市场数据", "读取行情、新闻与历史上下文"),
-                        ("🧠 正在进行策略推理", "多模型协作评估方向与风险"),
-                        ("🧪 正在校验关键结论", "交叉检查数据一致性与边界条件"),
-                        ("📝 正在整理最终回答", "生成结构化结论与可执行建议"),
-                    ]
-                phase_idx = (elapsed_sec // 6) % len(phase_steps)
-                phase_title, phase_desc = phase_steps[phase_idx]
-                status_placeholder.markdown(f"""
-                <style>
-                .thinking-wrap {{
-                    background: linear-gradient(135deg, rgba(15, 23, 42, 0.92), rgba(30, 58, 138, 0.92));
-                    border: 1px solid rgba(148, 163, 184, 0.28);
-                    border-radius: 12px;
-                    padding: 14px 16px;
-                    color: #e2e8f0;
-                    margin-bottom: 8px;
-                }}
-                .thinking-title {{
-                    font-weight: 700;
-                    font-size: 16px;
-                    display: flex;
-                    align-items: center;
-                    gap: 8px;
-                }}
-                .thinking-sub {{
-                    margin-top: 6px;
-                    font-size: 13px;
-                    color: #cbd5e1;
-                }}
-                .thinking-phase {{
-                    margin-top: 8px;
-                    color: #bfdbfe;
-                    font-size: 13px;
-                    font-weight: 600;
-                }}
-                .thinking-meta {{
-                    margin-top: 4px;
-                    color: #94a3b8;
-                    font-size: 12px;
-                }}
-                .thinking-dots {{
-                    display: inline-flex;
-                    gap: 4px;
-                    margin-left: 2px;
-                }}
-                .thinking-dot {{
-                    width: 6px;
-                    height: 6px;
-                    border-radius: 999px;
-                    background: #93c5fd;
-                    opacity: 0.35;
-                    animation: dotPulse 1.2s infinite ease-in-out;
-                }}
-                .thinking-dot:nth-child(2) {{ animation-delay: 0.2s; }}
-                .thinking-dot:nth-child(3) {{ animation-delay: 0.4s; }}
-                @keyframes dotPulse {{
-                    0%, 80%, 100% {{ transform: scale(0.8); opacity: 0.35; }}
-                    40% {{ transform: scale(1.2); opacity: 1; }}
-                }}
-                </style>
-                <div class="thinking-wrap">
-                    <div class="thinking-title">
-                        {card_title}
-                        <span class="thinking-dots">
-                            <span class="thinking-dot"></span>
-                            <span class="thinking-dot"></span>
-                            <span class="thinking-dot"></span>
-                        </span>
-                    </div>
-                    <div class="thinking-phase">{phase_title}</div>
-                    <div class="thinking-sub">{progress_msg}</div>
-                    <div class="thinking-meta">{phase_desc} · 已等待 {elapsed_sec}s</div>
-                </div>
-                """, unsafe_allow_html=True)
+                chat_mode = str(task_info.get("chat_mode") or task_status.get("chat_mode") or CHAT_MODE_ANALYSIS)
+                status_placeholder.markdown(
+                    _render_chat_waiting_card(
+                        chat_mode=chat_mode,
+                        progress_msg=progress_msg,
+                        elapsed_sec=elapsed_sec,
+                        analysis_mode_label=analysis_mode_label,
+                    ),
+                    unsafe_allow_html=True,
+                )
 
                 with content_placeholder.container():
-                    st.caption("正在后台持续处理，完成后会自动返回结果。")
+                    waiting_caption = _get_chat_waiting_card_config(chat_mode, analysis_mode_label)["caption"]
+                    st.caption(waiting_caption)
 
                 # 自动轮询任务状态，避免用户手动点击刷新
                 if not is_announcement_holdoff_active():
