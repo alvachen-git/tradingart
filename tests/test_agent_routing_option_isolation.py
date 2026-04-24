@@ -647,3 +647,109 @@ def test_compose_option_sections_filters_non_core_intel_sections():
     assert "DELTA" in out
     assert "NOISE_1" not in out
     assert "NOISE_2" not in out
+
+
+def test_news_impact_query_detection():
+    assert agent_core._is_news_impact_query("黄金为什么涨？")
+    assert agent_core._is_news_impact_query("美联储鹰派表态对A股有什么影响？")
+    assert not agent_core._is_news_impact_query("请全面分析黄金")
+
+
+def test_finalizer_uses_news_flash_template_for_news_queries(monkeypatch):
+    class _DummyResp:
+        content = """> 📅 日期：2026年04月24日 00:40
+> ✍️ 签发：交易台CIO | 🎯 模式：事件快评
+
+### 交易台一句话
+- 黄金这波走强，主线先看避险和实际利率预期回落。
+
+### 主线
+- 市场先交易避险溢价，不是单纯追通胀。
+
+### 盘面验证
+- 金价偏强，美元和美债没有形成持续压制。
+
+### 反向风险
+- 如果避险情绪退潮，这波容易先回吐。
+
+### 接下来盯什么
+- 盯美元、10Y美债和地缘消息。
+
+### 交易应对
+- 先别追高，等回踩确认再说。"""
+
+    class _DummyLLM:
+        def invoke(self, prompt):
+            assert "事件快评" in prompt
+            return _DummyResp()
+
+    state = {
+        "messages": [
+            agent_core.HumanMessage(
+                content="【情报与舆情】\n黄金偏强，主线是避险和实际利率预期。"
+            )
+        ],
+        "user_query": "黄金为什么涨？",
+        "symbol": "AU",
+        "symbol_name": "黄金",
+        "risk_preference": "稳健型",
+        "macro_view": "美债和美元没有形成持续压制。",
+        "trend_signal": "",
+        "key_levels": "",
+        "memory_context": "",
+        "vision_position_domain": "",
+        "vision_position_payload": {},
+    }
+
+    out = agent_core.finalizer_node(state, llm=_DummyLLM())
+    content = out["messages"][0].content
+    assert "### 交易台一句话" in content
+    assert "### 主线" in content
+    assert "### 接下来盯什么" in content
+    assert "Executive Summary" not in content
+
+
+def test_finalizer_keeps_cio_template_for_non_news_queries(monkeypatch):
+    class _DummyResp:
+        content = """### 🎯 核心结论
+- 正常 CIO 长报告
+
+### 📈 市场深度解析
+- 这里是常规分析。
+
+### ⚖️ 交易策略部署
+- 这里是常规策略。"""
+
+    class _DummyKnowledge:
+        @staticmethod
+        def invoke(_query):
+            return "知识库上下文"
+
+    class _DummyLLM:
+        def invoke(self, prompt):
+            assert "事件快评" not in prompt
+            return _DummyResp()
+
+    monkeypatch.setattr(agent_core, "search_investment_knowledge", _DummyKnowledge())
+
+    state = {
+        "messages": [
+            agent_core.HumanMessage(content="【技术分析】\n趋势偏强。"),
+            agent_core.HumanMessage(content="【数据监控】\n资金面稳定。"),
+        ],
+        "user_query": "请全面分析黄金",
+        "symbol": "AU",
+        "symbol_name": "黄金",
+        "risk_preference": "稳健型",
+        "macro_view": "宏观中性。",
+        "trend_signal": "看涨",
+        "key_levels": "",
+        "memory_context": "",
+        "vision_position_domain": "",
+        "vision_position_payload": {},
+    }
+
+    out = agent_core.finalizer_node(state, llm=_DummyLLM())
+    content = out["messages"][0].content
+    assert "### 🎯 核心结论" in content
+    assert "### ⚖️ 交易策略部署" in content

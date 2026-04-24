@@ -25,6 +25,7 @@ from chart_annotation_tools import draw_pattern_annotation_chart, draw_forecast_
 from kline_tools import analyze_kline_pattern
 from screener_tool import search_top_stocks, get_available_patterns
 from news_tools import get_financial_news
+from news_rag_interpreter import interpret_market_news_tool
 from fund_flow_tools import tool_get_retail_money_flow
 from polymarket_tool import tool_get_polymarket_sentiment
 from plot_tools import draw_chart_tool,draw_macro_compare_chart
@@ -1138,8 +1139,73 @@ def _wants_chart(query: str) -> bool:
     return any(keyword.lower() in q_lower for keyword in CHART_REQUEST_KEYWORDS)
 
 
+NEWS_IMPACT_DIRECT_PATTERNS = (
+    "为什么涨",
+    "为什么跌",
+    "为何涨",
+    "为何跌",
+    "涨什么原因",
+    "跌什么原因",
+    "上涨原因",
+    "下跌原因",
+)
+
+NEWS_IMPACT_EVENT_KEYWORDS = (
+    "新闻",
+    "消息",
+    "事件",
+    "宏观",
+    "地缘",
+    "冲突",
+    "战争",
+    "制裁",
+    "中东",
+    "美联储",
+    "非农",
+    "cpi",
+    "pce",
+    "关税",
+    "降息",
+    "加息",
+    "鹰派",
+    "鸽派",
+    "财报",
+    "停火",
+    "通胀",
+)
+
+NEWS_IMPACT_IMPACT_KEYWORDS = (
+    "有什么影响",
+    "什么影响",
+    "如何影响",
+    "影响多大",
+    "怎么看",
+    "利多还是利空",
+    "利多利空",
+    "怎么解读",
+    "怎么理解",
+    "对a股",
+    "对港股",
+    "对黄金",
+    "对原油",
+    "对美股",
+)
+
+
+def _is_news_impact_query(query: str) -> bool:
+    text = str(query or "").strip().lower()
+    if not text:
+        return False
+    if any(pattern in text for pattern in NEWS_IMPACT_DIRECT_PATTERNS):
+        return True
+    has_event = any(keyword in text for keyword in NEWS_IMPACT_EVENT_KEYWORDS)
+    has_impact = any(keyword in text for keyword in NEWS_IMPACT_IMPACT_KEYWORDS)
+    return has_event and has_impact
+
+
 def build_generalist_tools():
     return [
+        interpret_market_news_tool,
         analyze_kline_pattern, search_investment_knowledge, get_market_snapshot, get_commodity_iv_info,
         search_broker_holdings_on_date, tool_analyze_position_change,
         tool_query_specific_option, get_historical_price, get_volume_oi, get_futures_oi_ranking,
@@ -1440,6 +1506,7 @@ def generalist_node(state: AgentState, llm):
         21.查单只股票的成交量详情 -> query_stock_volume
         22.期权策略回测 -> run_option_strategy_backtest
         23. 用户问“某策略在某时间段的胜率/盈亏比/回撤”时，必须调用回测工具，禁止口头估算。
+        24. 用户问“为什么涨跌/新闻影响/宏观消息怎么看/最近消息如何影响行情”时，优先调用 interpret_market_news_tool，用交易员口吻回答主线、盘面验证、反向风险和接下来盯什么。
         【行为准则】
         1. 先给结论，然后解释理由。
         2. 不要简单复述，要有深度洞察。
@@ -2260,6 +2327,7 @@ def researcher_node(state: AgentState,llm=None):
     current_date = datetime.now().strftime("%Y年%m月%d日 %A")
     # 1. 装备舆情与搜索工具
     tools = [
+        interpret_market_news_tool,  # 新闻RAG解释器：补背景、查行情验证、用交易员口吻解读新闻影响
         get_finance_related_trends,  # 查财经类热点 (同花顺/东方财富热榜)
         get_today_hotlist,  # 查全网热搜 (抖音/微博/百度)
         tool_get_polymarket_sentiment,  # 查预测市场胜率 (Polymarket)
@@ -2278,6 +2346,10 @@ def researcher_node(state: AgentState,llm=None):
         【标的】: {symbol_name}({symbol})  
 
         【工具调用策略】：
+
+        0. 🧭 **新闻/事件影响解读** (如 "为什么涨跌"、"这条新闻影响什么"、"宏观消息怎么看"):
+           - **优先调用** `interpret_market_news_tool`。
+           - 它会先补背景，再查行情/知识库/预测市场验证，最后用交易员口吻给出主线、反向风险和接下来盯什么。
 
         1. 🎲 **宏观预期/大事件/胜率** (如 "大选谁赢"、"降息概率"、"地缘政治"、"战争"):
            - **必须调用** `tool_get_polymarket_sentiment`。
@@ -3268,8 +3340,20 @@ def finalizer_node(state: AgentState, llm):
     has_chart = "chart_" in context_text or "![" in context_text
     complex_keywords = ["画", "图", "对比", "分析", "价差", "相关性", "走势"]
     is_complex_task = any(kw in user_query for kw in complex_keywords)
+    is_news_impact = _is_news_impact_query(user_query)
 
     display_name = f"{symbol_name}({symbol})" if symbol_name else symbol
+
+    def _extract_finalizer_chart_img() -> str:
+        local_chart_img = state.get("chart_img", "")
+        if state.get("macro_chart"):
+            local_chart_img = state.get("macro_chart")
+        if not local_chart_img:
+            chart_matches = re.findall(r'IMAGE_CREATED:(chart_[a-zA-Z0-9_]+\.json)', context_text)
+            if chart_matches:
+                local_chart_img = chart_matches[-1]
+                print(f"📊 finalizer 从报告中提取到图表: {local_chart_img}")
+        return local_chart_img
 
     def _normalize_symbol_text(text: str) -> str:
         return re.sub(r'[^A-Z0-9]', '', (text or "").upper())
@@ -3291,6 +3375,68 @@ def finalizer_node(state: AgentState, llm):
                 except ValueError:
                     pass
         return {item for item in aliases if len(item) >= 2}
+
+    if is_news_impact and not is_option_position_mode:
+        news_prompt = f"""
+                你是交易台的首席投资官，但当前只处理“新闻/事件影响解读”。
+                这次不要写成长篇投研报告，不要使用“Executive Summary / 市场深度解析 / 交易策略部署 / 首席投资官寄语”这套长模板。
+
+                【当前日期】：{today_str}
+                【用户问题】：{user_query}
+                【分析标的】：{display_name}
+                【客户风险偏好】：{risk_pref}
+
+                【团队报告池，必须优先采信】：
+                {context_text}
+
+                【已有的宏观分析报告】：
+                {macro_view}
+
+                【输出目标】：
+                用交易员风格，给一份短、清楚、能落地的“事件快评”。
+                先说主线，再说盘面验证，再说反向风险，最后说接下来盯什么和怎么应对。
+
+                【强制要求】：
+                1. 不要写成长报告，不要超过 6 个小节。
+                2. 每个小节 1-3 条，短句，口语化，别学术化。
+                3. 只用团队报告池里已有的信息，不要臆造新数据。
+                4. 如果证据不够，就明确说“这波先按交易假设看，不算确认”。
+                5. 如果是宏观事件对市场影响，重点回答传导链，不要展开大而全资产配置长文。
+
+                【格式模板】：
+                > 📅 日期：{today_str}
+                > ✍️ 签发：交易台CIO | 🎯 模式：事件快评
+
+                ### 交易台一句话
+                - 用一句话先回答用户。
+
+                ### 主线
+                - 现在市场主要在交易什么。
+
+                ### 盘面验证
+                - 哪些价格/利率/美元/情绪/IV 信号在配合。
+
+                ### 反向风险
+                - 什么情况会让这条逻辑失效或先回吐。
+
+                ### 接下来盯什么
+                - 未来 1-3 个最重要的观察点。
+
+                ### 交易应对
+                - 给偏稳健的应对方式，讲清楚是不追、等回踩、还是只做轻仓确认。
+                """
+        final_verdict = llm.invoke(news_prompt)
+        final_text = f"【最终决策】\n{final_verdict.content}"
+        lock_result = _lock_option_and_price(final_text)
+        return {
+            "messages": [HumanMessage(content=str(lock_result.get("text") or final_text))],
+            "chart_img": _extract_finalizer_chart_img(),
+            "canonical_option_legs_block": str(lock_result.get("canonical_option_legs_block") or canonical_option_legs_block),
+            "option_direction_conflict_count": int(lock_result.get("option_direction_conflict_count") or 0),
+            "authoritative_underlying_quotes": authoritative_underlying_quotes,
+            "authoritative_quote_block": str(lock_result.get("authoritative_quote_block") or authoritative_quote_block),
+            "price_conflict_count": int(lock_result.get("price_conflict_count") or 0),
+        }
 
     # 获取当前最后一次执行的计划（用于判断是不是王牌）
     # (由于 state plan 被 pop 了，我们用简单的长度判断通常够用，或者看 context)
