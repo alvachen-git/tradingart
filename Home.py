@@ -298,7 +298,7 @@ def _get_home_feedback_cache() -> Dict[str, Dict[str, Any]]:
 
 
 def _inject_home_feedback_styles():
-    css_version = "home_feedback_scoped_20260421"
+    css_version = "home_feedback_scoped_20260424"
     if st.session_state.get("_home_feedback_css_version") == css_version:
         return
     st.markdown(
@@ -313,25 +313,35 @@ def _inject_home_feedback_styles():
             color: #f8fafc !important;
         }
         div[data-testid="stExpander"] div[data-baseweb="select"] > div {
-            background: rgba(15, 23, 42, 0.92) !important;
-            color: #f8fafc !important;
+            background: #f8fafc !important;
+            color: #0f172a !important;
             border: 1px solid rgba(148, 163, 184, 0.32) !important;
         }
-        div[data-testid="stExpander"] div[data-baseweb="select"] span {
-            color: #f8fafc !important;
+        div[data-testid="stExpander"] div[data-baseweb="select"] span,
+        div[data-testid="stExpander"] div[data-baseweb="select"] div,
+        div[data-testid="stExpander"] div[data-baseweb="select"] svg,
+        div[data-testid="stExpander"] div[data-baseweb="select"] p {
+            color: #0f172a !important;
+            fill: #64748b !important;
         }
         div[data-testid="stExpander"] div[data-baseweb="select"] input {
-            color: #f8fafc !important;
-            -webkit-text-fill-color: #f8fafc !important;
+            color: #0f172a !important;
+            -webkit-text-fill-color: #0f172a !important;
+        }
+        div[data-testid="stExpander"] div[data-baseweb="select"] input::placeholder,
+        div[data-testid="stExpander"] div[data-baseweb="select"] [aria-placeholder="true"] {
+            color: #64748b !important;
+            -webkit-text-fill-color: #64748b !important;
+            opacity: 1 !important;
         }
         div[role="listbox"] {
-            background: #0f172a !important;
-            color: #f8fafc !important;
+            background: #f8fafc !important;
+            color: #0f172a !important;
             border: 1px solid rgba(148, 163, 184, 0.28) !important;
         }
         div[role="option"] {
-            background: #0f172a !important;
-            color: #f8fafc !important;
+            background: #f8fafc !important;
+            color: #0f172a !important;
         }
         div[role="option"][aria-selected="true"] {
             background: #1d4ed8 !important;
