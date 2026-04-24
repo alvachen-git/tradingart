@@ -43,6 +43,11 @@ celery_app.conf.update(
     enable_utc=True,
     result_expires=3600,
     task_time_limit=1800,
+    task_default_queue='analysis_heavy',
+    task_routes={
+        'tasks.process_ai_query': {'queue': 'analysis_heavy'},
+        'tasks.process_knowledge_chat': {'queue': 'knowledge_chat'},
+    },
     worker_prefetch_multiplier=1,
     worker_max_tasks_per_child=10,
 )
