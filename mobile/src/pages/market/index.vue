@@ -1,7 +1,17 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, watch, nextTick, getCurrentInstance } from 'vue'
 import { onShow, onHide, onShareAppMessage, onShareTimeline } from '@dcloudio/uni-app'
-import { marketApi, type OptionItem, type ContractLiveItem, type ChaosSnapshotPayload } from '../../api/index'
+import {
+  marketApi,
+  type OptionItem,
+  type ContractLiveItem,
+  type ChaosSnapshotPayload,
+  type TermProductItem,
+  type TermWindowItem,
+  type TermStructurePayload,
+  type TermStructureBlock,
+  type TermLongBlock,
+} from '../../api/index'
 import { useAuthStore } from '../../store/auth'
 import BottomNav from '../../components/BottomNav.vue'
 
@@ -10,8 +20,8 @@ const SHARE_TITLE = '爱波塔 - 市场数据学习工具'
 const SHARE_PATH = '/pages/login/index'
 
 // ── Tab ──────────────────────────────────────────────────
-type Tab = 'options' | 'holding' | 'chaos'
-const activeTab = ref<Tab>('chaos')
+type Tab = 'options' | 'holding' | 'chaos' | 'term'
+const activeTab = ref<Tab>('options')
 
 // ── 商品期权数据 ──────────────────────────────────────────
 const options = ref<OptionItem[]>([])
@@ -88,6 +98,42 @@ const holdingLoading = ref(false)
 const chaosData = ref<ChaosSnapshotPayload | null>(null)
 const chaosLoading = ref(false)
 const chaosError = ref('')
+
+// ── 期限结构 ───────────────────────────────────────────────
+const termProducts = ref<TermProductItem[]>([])
+const termWindows = ref<TermWindowItem[]>([
+  { key: '3d', label: '3交易日' },
+  { key: '1w', label: '1周' },
+  { key: '2w', label: '2周' },
+  { key: '1m', label: '1月' },
+])
+const termProduct = ref('IH')
+const termWindow = ref('3d')
+const termData = ref<TermStructurePayload | null>(null)
+const termLoading = ref(false)
+const termProductsLoading = ref(false)
+const termError = ref('')
+const showTermPicker = ref(false)
+const termSearch = ref('')
+const showTermWindowPicker = ref(false)
+const termMainZoom = ref(1)
+const termBasisZoom = ref(1)
+const termLongZoom = ref(1)
+const termTooltip = ref<TermTooltipState | null>(null)
+const termChartRects = ref<Record<TermChartKey, { left: number; top: number; width: number; height: number } | null>>({
+  main: null,
+  basis: null,
+  long: null,
+})
+const pageInstance = getCurrentInstance()
+let termLongPressTimer: ReturnType<typeof setTimeout> | null = null
+let termPressKey: TermChartKey | null = null
+let termPressActive = false
+let termPressStartX = 0
+let termPressStartY = 0
+let termPinchKey: TermChartKey | null = null
+let termPinchStartDistance = 0
+let termPinchStartZoom = 1
 
 // 与网站版 03_商品持仓.py COMMODITIES 保持相同顺序
 const HOLDING_PRODUCTS = [
@@ -166,9 +212,51 @@ const filteredHoldingProducts = computed(() => {
   )
 })
 
+const fallbackTermProducts = computed<TermProductItem[]>(() =>
+  HOLDING_PRODUCTS.map(p => ({
+    code: p.code.toUpperCase(),
+    name: p.name,
+    is_index: ['ih', 'if', 'ic', 'im'].includes(p.code),
+  }))
+)
+
+const termProductList = computed(() => termProducts.value.length ? termProducts.value : fallbackTermProducts.value)
+
+const filteredTermProducts = computed(() => {
+  const q = termSearch.value.trim().toLowerCase()
+  const src = termProductList.value
+  if (!q) return src
+  return src.filter(p =>
+    p.code.toLowerCase().includes(q) || p.name.includes(q)
+  )
+})
+
 const holdingProductName = computed(() => {
   const p = HOLDING_PRODUCTS.find(p => p.code === holdingProduct.value)
   return p ? `${p.name} (${p.code.toUpperCase()})` : holdingProduct.value.toUpperCase()
+})
+
+const selectedTermProductInfo = computed(() => {
+  return termProductList.value.find(p => p.code === termProduct.value)
+    || { code: termProduct.value, name: termProduct.value, is_index: false }
+})
+
+const termProductName = computed(() => {
+  const p = selectedTermProductInfo.value
+  return `${p.name} (${p.code})`
+})
+
+const selectedTermWindowLabel = computed(() => {
+  return termWindows.value.find(w => w.key === termWindow.value)?.label
+    || termData.value?.window_label
+    || '3交易日'
+})
+
+const termTableSeries = computed(() => {
+  return (termData.value?.main?.series || []).map(s => ({
+    key: s.label,
+    label: compactDisplayDate(s.display_date || s.trade_date) || s.label,
+  }))
 })
 
 function openHoldingPicker() {
@@ -186,6 +274,38 @@ function selectHoldingFromPicker(code: string) {
     holdingProduct.value = code
     loadHolding(code)
   }
+}
+
+function openTermPicker() {
+  termSearch.value = ''
+  showTermPicker.value = true
+}
+
+function closeTermPicker() {
+  showTermPicker.value = false
+}
+
+function selectTermFromPicker(code: string) {
+  closeTermPicker()
+  if (termProduct.value !== code) {
+    termProduct.value = code
+    loadTermStructure()
+  }
+}
+
+function openTermWindowPicker() {
+  showTermWindowPicker.value = true
+}
+
+function closeTermWindowPicker() {
+  showTermWindowPicker.value = false
+}
+
+function selectTermWindowFromPicker(key: string) {
+  closeTermWindowPicker()
+  if (termWindow.value === key) return
+  termWindow.value = key
+  loadTermStructure()
 }
 
 // 持仓分析排序
@@ -353,6 +473,501 @@ const displayedOptions = computed(() => {
   return list
 })
 
+type TermChart = {
+  width: number
+  height: number
+  xLabels: Array<{ x: number; label: string }>
+  yLabels: Array<{ y: number; label: string }>
+  lines: Array<{
+    label: string
+    color: string
+    points: string
+    samples: Array<{ index: number; x: number; y: number; display: string }>
+  }>
+  sampleXs: number[]
+  tooltipLabels: string[]
+  empty: boolean
+}
+
+type TermChartKey = 'main' | 'basis' | 'long'
+
+type TermTooltipState = {
+  key: TermChartKey
+  title: string
+  leftPct: number
+  topPct: number
+  guideLeftPct: number
+  align: 'left' | 'right'
+  vertical: 'above' | 'below'
+  dots: Array<{ leftPct: number; topPct: number; color: string }>
+  rows: Array<{ label: string; color: string; value: string }>
+}
+
+const TERM_W = 660
+const TERM_H = 300
+const TERM_PAD_L = 24
+const TERM_PAD_R = 12
+const TERM_PAD_T = 16
+const TERM_PAD_B = 26
+const TERM_COLORS: Record<string, string> = {
+  '窗口起点': '#38bdf8',
+  '窗口中点': '#f59e0b',
+  '最新': '#fb7185',
+}
+
+function safeNum(v: any): number | null {
+  const n = Number(v)
+  return Number.isFinite(n) ? n : null
+}
+
+function fmtTermNum(v: any, digits = 2): string {
+  const n = safeNum(v)
+  if (n === null) return '--'
+  if (Math.abs(n) >= 1000) return n.toLocaleString(undefined, { maximumFractionDigits: 0 })
+  return n.toFixed(digits)
+}
+
+function fmtTermPct(v: any): string {
+  const n = safeNum(v)
+  if (n === null) return '--'
+  return `${(n * 100).toFixed(2)}%`
+}
+
+function termStructureLabel(v?: string): string {
+  if (v === 'Contango') return '升水'
+  if (v === 'Backwardation') return '贴水'
+  if (v === 'Flat') return '平水'
+  if (v === 'InsufficientData') return '不足'
+  return v || '--'
+}
+
+function termStructureClass(v?: string): string {
+  if (v === 'Contango') return 'term-up'
+  if (v === 'Backwardation') return 'term-down'
+  return 'term-flat'
+}
+
+function compactDisplayDate(v?: string): string {
+  const text = String(v || '').trim()
+  if (!text) return ''
+  if (/^\d{8}$/.test(text)) return `${text.slice(4, 6)}/${text.slice(6, 8)}`
+  const m = text.match(/^(\d{4})-(\d{2})-(\d{2})/)
+  if (m) return `${m[2]}/${m[3]}`
+  return text
+}
+
+function buildBlockChart(block?: TermStructureBlock | null, valueKey: 'close_price' | 'basis' = 'close_price'): TermChart | null {
+  if (!block?.contracts?.length || !block?.series?.length) return null
+  const normalizedSeries = block.series.map((s, idx) => {
+    const samples: Array<{ index: number; value: number }> = []
+    for (let i = 0; i < block.contracts.length; i++) {
+      const point = (s.points || [])[i]
+      const val = safeNum((point as any)?.[valueKey])
+      if (val !== null) samples.push({ index: i, value: val })
+    }
+    const isMissingBasisSeries = valueKey === 'basis'
+      && samples.length > 0
+      && samples.every(sample => Math.abs(sample.value) < 1e-9)
+    return {
+      idx,
+      source: s,
+      samples,
+      isMissingBasisSeries,
+    }
+  }).filter(item => item.samples.length && !item.isMissingBasisSeries)
+  const values = normalizedSeries.flatMap(item => item.samples.map(sample => sample.value))
+  if (values.length < 2) return null
+  const min = Math.min(...values)
+  const max = Math.max(...values)
+  const span = max - min || 1
+  const innerW = TERM_W - TERM_PAD_L - TERM_PAD_R
+  const innerH = TERM_H - TERM_PAD_T - TERM_PAD_B
+  const toX = (i: number) => TERM_PAD_L + (block.contracts.length <= 1 ? 0 : (i / (block.contracts.length - 1)) * innerW)
+  const toY = (v: number) => TERM_PAD_T + innerH - ((v - min) / span) * innerH
+  const sampleXs = block.contracts.map((_, i) => toX(i))
+  const lines = normalizedSeries.map(({ source: s, idx }) => {
+    const pts: string[] = []
+    const samples: Array<{ index: number; x: number; y: number; display: string }> = []
+    for (let i = 0; i < block.contracts.length; i++) {
+      const point = (s.points || [])[i]
+      const val = safeNum((point as any)?.[valueKey])
+      if (val !== null) {
+        const x = toX(i)
+        const y = toY(val)
+        pts.push(`${x.toFixed(1)},${y.toFixed(1)}`)
+        samples.push({ index: i, x, y, display: fmtTermNum(val) })
+      }
+    }
+    return {
+      label: compactDisplayDate(s.display_date || s.trade_date) || s.label,
+      color: TERM_COLORS[s.label] || ['#38bdf8', '#f59e0b', '#fb7185'][idx % 3],
+      points: pts.join(' '),
+      samples,
+    }
+  }).filter(line => line.points)
+  const tickIndexes = block.contracts.length <= 7
+    ? block.contracts.map((_, i) => i)
+    : Array.from(new Set([0, Math.floor((block.contracts.length - 1) / 2), block.contracts.length - 1]))
+  return {
+    width: TERM_W,
+    height: TERM_H,
+    xLabels: tickIndexes.map(i => ({ x: toX(i), label: block.contracts[i] })),
+    yLabels: [
+      { y: toY(max), label: fmtTermNum(max) },
+      { y: toY((max + min) / 2), label: fmtTermNum((max + min) / 2) },
+      { y: toY(min), label: fmtTermNum(min) },
+    ],
+    lines,
+    sampleXs,
+    tooltipLabels: block.contracts.slice(),
+    empty: !lines.length,
+  }
+}
+
+function buildLongChart(block?: TermLongBlock | null): TermChart | null {
+  const raw = block?.points || []
+  const points = raw.filter(p => safeNum(p.basis) !== null)
+  if (points.length < 2) return null
+  const values = points.map(p => Number(p.basis))
+  const min = Math.min(...values)
+  const max = Math.max(...values)
+  const span = max - min || 1
+  const innerW = TERM_W - TERM_PAD_L - TERM_PAD_R
+  const innerH = TERM_H - TERM_PAD_T - TERM_PAD_B
+  const toX = (i: number) => TERM_PAD_L + (i / (points.length - 1)) * innerW
+  const toY = (v: number) => TERM_PAD_T + innerH - ((v - min) / span) * innerH
+  const sampleXs = points.map((_, i) => toX(i))
+  const samples = points.map((p, i) => ({
+    index: i,
+    x: toX(i),
+    y: toY(Number(p.basis)),
+    display: fmtTermNum(p.basis),
+  }))
+  const linePoints = samples.map(p => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' ')
+  const tickIndexes = Array.from(new Set([0, Math.floor((points.length - 1) / 2), points.length - 1]))
+  return {
+    width: TERM_W,
+    height: TERM_H,
+    xLabels: tickIndexes.map(i => ({ x: toX(i), label: (points[i].display_date || points[i].trade_date || '').slice(5) })),
+    yLabels: [
+      { y: toY(max), label: fmtTermNum(max) },
+      { y: toY((max + min) / 2), label: fmtTermNum((max + min) / 2) },
+      { y: toY(min), label: fmtTermNum(min) },
+    ],
+    lines: [{ label: '近月升贴水', color: '#22d3ee', points: linePoints, samples }],
+    sampleXs,
+    tooltipLabels: points.map(p => p.display_date || p.trade_date || '--'),
+    empty: false,
+  }
+}
+
+const termMainChart = computed(() => buildBlockChart(termData.value?.main, 'close_price'))
+const termBasisChart = computed(() => buildBlockChart(termData.value?.basis_anchor, 'basis'))
+const termLongChart = computed(() => buildLongChart(termData.value?.basis_longterm))
+const termTableRows = computed(() => {
+  const block = termData.value?.main
+  if (!block?.contracts?.length) return []
+  return block.contracts.map((contract, idx) => {
+    const row: Record<string, string> = { contract }
+    for (const s of block.series || []) {
+      row[s.label] = fmtTermNum((s.points || [])[idx]?.close_price)
+    }
+    return row
+  })
+})
+
+function termAxisXStyle(x: number) {
+  const pct = Math.max(5, Math.min(92, (Number(x) / TERM_W) * 100))
+  return {
+    left: `${pct}%`,
+    bottom: '-2rpx',
+    transform: 'translateX(-50%)',
+  }
+}
+
+function termAxisYStyle(y: number) {
+  const pct = Math.max(9, Math.min(82, (Number(y) / TERM_H) * 100))
+  return {
+    top: `${pct}%`,
+    right: '4rpx',
+    transform: 'translateY(-50%)',
+  }
+}
+
+function termZoomValue(key: TermChartKey): number {
+  if (key === 'basis') return termBasisZoom.value
+  if (key === 'long') return termLongZoom.value
+  return termMainZoom.value
+}
+
+function termChartBoxStyle(key: TermChartKey) {
+  const height = Math.round(300 * termZoomValue(key))
+  return { height: `${height}rpx` }
+}
+
+function setTermZoom(key: TermChartKey, value: number) {
+  const next = Math.max(1, Math.min(1.7, Number(value) || 1))
+  const rounded = Math.round(next * 100) / 100
+  if (key === 'basis') termBasisZoom.value = rounded
+  else if (key === 'long') termLongZoom.value = rounded
+  else termMainZoom.value = rounded
+  nextTick(() => refreshTermChartRects())
+}
+
+function refreshTermChartRects() {
+  if (activeTab.value !== 'term') return
+  const proxy = pageInstance?.proxy
+  if (!proxy || typeof uni.createSelectorQuery !== 'function') return
+  const query = uni.createSelectorQuery().in(proxy)
+  query.select('#term-chart-main').boundingClientRect()
+  query.select('#term-chart-basis').boundingClientRect()
+  query.select('#term-chart-long').boundingClientRect()
+  query.exec((res: any[]) => {
+    const [main, basis, long] = res || []
+    termChartRects.value = {
+      main: main?.width ? main : null,
+      basis: basis?.width ? basis : null,
+      long: long?.width ? long : null,
+    }
+  })
+}
+
+function eventPagePoint(e: any): { x: number; y: number } | null {
+  const touch = e?.touches?.[0] || e?.changedTouches?.[0]
+  if (touch) {
+    const x = Number(touch.clientX ?? touch.pageX ?? touch.x)
+    const y = Number(touch.clientY ?? touch.pageY ?? touch.y)
+    return Number.isFinite(x) && Number.isFinite(y) ? { x, y } : null
+  }
+  const detail = e?.detail
+  if (detail && Number.isFinite(Number(detail.x)) && Number.isFinite(Number(detail.y))) {
+    return { x: Number(detail.x), y: Number(detail.y) }
+  }
+  const mouseX = Number(e?.clientX)
+  const mouseY = Number(e?.clientY)
+  if (Number.isFinite(mouseX) && Number.isFinite(mouseY)) return { x: mouseX, y: mouseY }
+  return null
+}
+
+function chartByKey(key: TermChartKey): TermChart | null {
+  if (key === 'basis') return termBasisChart.value
+  if (key === 'long') return termLongChart.value
+  return termMainChart.value
+}
+
+function buildTermTooltip(key: TermChartKey, chart: TermChart, pageX: number): TermTooltipState | null {
+  const rect = termChartRects.value[key]
+  if (!rect?.width || !chart.sampleXs.length) return null
+  const ratio = Math.max(0, Math.min(1, (pageX - rect.left) / rect.width))
+  const chartX = TERM_PAD_L + ratio * (TERM_W - TERM_PAD_L - TERM_PAD_R)
+  let targetIndex = 0
+  let bestDist = Number.POSITIVE_INFINITY
+  chart.sampleXs.forEach((x, idx) => {
+    const dist = Math.abs(x - chartX)
+    if (dist < bestDist) {
+      bestDist = dist
+      targetIndex = idx
+    }
+  })
+  const rows = chart.lines.map(line => {
+    const sample = line.samples.find(item => item.index === targetIndex)
+    if (!sample) return null
+    return {
+      label: line.label,
+      color: line.color,
+      value: sample.display,
+      x: sample.x,
+      y: sample.y,
+    }
+  }).filter(Boolean) as Array<{ label: string; color: string; value: string; x: number; y: number }>
+  if (!rows.length) return null
+  const anchorX = rows[0].x
+  const topY = Math.min(...rows.map(row => row.y))
+  const align = anchorX > TERM_W * 0.7 ? 'right' : 'left'
+  const vertical = topY < TERM_H * 0.24 ? 'below' : 'above'
+  return {
+    key,
+    title: chart.tooltipLabels[targetIndex] || '--',
+    leftPct: Math.max(8, Math.min(94, (anchorX / TERM_W) * 100)),
+    topPct: vertical === 'below'
+      ? Math.max(6, Math.min(76, ((topY + 8) / TERM_H) * 100))
+      : Math.max(10, Math.min(58, ((topY - 18) / TERM_H) * 100)),
+    guideLeftPct: Math.max(4, Math.min(96, (anchorX / TERM_W) * 100)),
+    align,
+    vertical,
+    dots: rows.map(row => ({
+      leftPct: Math.max(4, Math.min(96, (row.x / TERM_W) * 100)),
+      topPct: Math.max(6, Math.min(92, (row.y / TERM_H) * 100)),
+      color: row.color,
+    })),
+    rows: rows.map(row => ({ label: row.label, color: row.color, value: row.value })),
+  }
+}
+
+function updateTermTooltip(key: TermChartKey, chart: TermChart | null, e: any) {
+  const point = eventPagePoint(e)
+  if (!chart || !point) return
+  const next = buildTermTooltip(key, chart, point.x)
+  if (next) termTooltip.value = next
+}
+
+function clearTermLongPressTimer() {
+  if (termLongPressTimer) {
+    clearTimeout(termLongPressTimer)
+    termLongPressTimer = null
+  }
+}
+
+function touchDistance(e: any): number | null {
+  const touches = e?.touches || []
+  if (touches.length < 2) return null
+  const [a, b] = touches
+  const ax = Number(a?.clientX ?? a?.pageX ?? a?.x)
+  const ay = Number(a?.clientY ?? a?.pageY ?? a?.y)
+  const bx = Number(b?.clientX ?? b?.pageX ?? b?.x)
+  const by = Number(b?.clientY ?? b?.pageY ?? b?.y)
+  if (![ax, ay, bx, by].every(Number.isFinite)) return null
+  return Math.hypot(ax - bx, ay - by)
+}
+
+function startTermPress(key: TermChartKey, e: any) {
+  const distance = touchDistance(e)
+  if (distance && distance > 0) {
+    clearTermLongPressTimer()
+    termTooltip.value = null
+    termPressKey = null
+    termPressActive = false
+    termPinchKey = key
+    termPinchStartDistance = distance
+    termPinchStartZoom = termZoomValue(key)
+    return
+  }
+  const point = eventPagePoint(e)
+  const chart = chartByKey(key)
+  if (!point || !chart) return
+  clearTermLongPressTimer()
+  termPressKey = key
+  termPressActive = false
+  termPressStartX = point.x
+  termPressStartY = point.y
+  termLongPressTimer = setTimeout(() => {
+    termPressActive = true
+    updateTermTooltip(key, chart, e)
+  }, 260)
+}
+
+function moveTermPress(key: TermChartKey, e: any) {
+  const distance = touchDistance(e)
+  if (distance && distance > 0 && termPinchKey === key && termPinchStartDistance > 0) {
+    clearTermLongPressTimer()
+    termTooltip.value = null
+    termPressActive = false
+    setTermZoom(key, termPinchStartZoom * (distance / termPinchStartDistance))
+    return
+  }
+  const point = eventPagePoint(e)
+  const chart = chartByKey(key)
+  if (!point || !chart || termPressKey !== key) return
+  if (!termPressActive) {
+    if (Math.abs(point.x - termPressStartX) > 10 || Math.abs(point.y - termPressStartY) > 10) {
+      clearTermLongPressTimer()
+      termPressKey = null
+    }
+    return
+  }
+  updateTermTooltip(key, chart, e)
+}
+
+function endTermPress() {
+  clearTermLongPressTimer()
+  termPressKey = null
+  if (termPressActive) termTooltip.value = null
+  termPressActive = false
+  termPinchKey = null
+  termPinchStartDistance = 0
+}
+
+function parseChartPoints(points: string): Array<{ x: number; y: number }> {
+  return String(points || '').split(/\s+/).map(item => {
+    const [x, y] = item.split(',').map(Number)
+    return { x, y }
+  }).filter(p => Number.isFinite(p.x) && Number.isFinite(p.y))
+}
+
+function drawTermChart(canvasId: string, chart: TermChart | null) {
+  if (typeof uni.createCanvasContext !== 'function') return
+  const ctx = uni.createCanvasContext(canvasId)
+  const w = TERM_W
+  const h = TERM_H
+  ctx.clearRect(0, 0, w, h)
+  ctx.setFillStyle('#0b1528')
+  ctx.fillRect(0, 0, w, h)
+  if (!chart || chart.empty) {
+    ctx.setFillStyle('#7f8ea8')
+    ctx.setFontSize(22)
+    ctx.fillText('暂无曲线数据', 250, 150)
+    ctx.draw()
+    return
+  }
+  ctx.setStrokeStyle('rgba(148,163,184,0.18)')
+  ctx.setLineWidth(1)
+  for (const y of chart.yLabels) {
+    ctx.beginPath()
+    ctx.moveTo(TERM_PAD_L, y.y)
+    ctx.lineTo(w - TERM_PAD_R, y.y)
+    ctx.stroke()
+    ctx.setFillStyle('#dbeafe')
+    ctx.setFontSize(20)
+    ;(ctx as any).setTextAlign?.('right')
+    ctx.fillText(y.label, w - TERM_PAD_R - 4, y.y - 5)
+  }
+  ctx.setStrokeStyle('rgba(203,213,225,0.46)')
+  ctx.setLineWidth(1.5)
+  ctx.beginPath()
+  ctx.moveTo(TERM_PAD_L, TERM_PAD_T)
+  ctx.lineTo(TERM_PAD_L, h - TERM_PAD_B)
+  ctx.lineTo(w - TERM_PAD_R, h - TERM_PAD_B)
+  ctx.stroke()
+  for (const line of chart.lines) {
+    const pts = parseChartPoints(line.points)
+    if (pts.length < 2) continue
+    ctx.beginPath()
+    pts.forEach((p, idx) => {
+      if (idx === 0) ctx.moveTo(p.x, p.y)
+      else ctx.lineTo(p.x, p.y)
+    })
+    ctx.setStrokeStyle(line.color)
+    ctx.setLineWidth(4)
+    ctx.stroke()
+    for (const p of pts) {
+      ctx.beginPath()
+      ctx.arc(p.x, p.y, 4, 0, Math.PI * 2)
+      ctx.setFillStyle(line.color)
+      ctx.fill()
+    }
+  }
+  ctx.setFillStyle('#dbeafe')
+  ctx.setFontSize(20)
+  ;(ctx as any).setTextAlign?.('center')
+  for (const x of chart.xLabels) {
+    ctx.fillText(x.label, x.x, h - 7)
+  }
+  ;(ctx as any).setTextAlign?.('left')
+  ctx.draw()
+}
+
+function drawTermCharts() {
+  if (activeTab.value !== 'term') return
+  nextTick(() => {
+    drawTermChart('termMainCanvas', termMainChart.value)
+    drawTermChart('termBasisCanvas', termBasisChart.value)
+    drawTermChart('termLongCanvas', termLongChart.value)
+    refreshTermChartRects()
+  })
+}
+
+watch([termMainChart, termBasisChart, termLongChart, activeTab, termMainZoom, termBasisZoom, termLongZoom], drawTermCharts)
+
 // ── 事件处理 ──────────────────────────────────────────────
 onShow(() => {
   if (!auth.isLoggedIn) { uni.reLaunch({ url: '/pages/login/index' }); return }
@@ -368,6 +983,9 @@ onShow(() => {
   } else if (activeTab.value === 'chaos') {
     if (!chaosData.value) loadChaos()
     stopLivePolling()
+  } else if (activeTab.value === 'term') {
+    if (!termData.value) loadTermStructure()
+    stopLivePolling()
   }
 })
 
@@ -376,6 +994,7 @@ onHide(() => {
 })
 
 async function switchTab(t: Tab) {
+  endTermPress()
   activeTab.value = t
   if (t === 'options') {
     if (options.value.length === 0) loadOptions()
@@ -388,6 +1007,11 @@ async function switchTab(t: Tab) {
     loadHolding(holdingProduct.value)
   }
   if (t === 'chaos' && !chaosData.value) loadChaos()
+  if (t === 'term') {
+    if (!termProducts.value.length) loadTermProducts()
+    if (!termData.value) loadTermStructure()
+    else drawTermCharts()
+  }
 }
 
 async function loadOptions() {
@@ -431,6 +1055,53 @@ async function loadChaos() {
   }
 }
 
+async function loadTermProducts() {
+  if (termProductsLoading.value) return
+  termProductsLoading.value = true
+  try {
+    const res = await marketApi.termProducts()
+    termProducts.value = res.items || []
+    if (res.windows?.length) termWindows.value = res.windows
+    if (!termProduct.value) termProduct.value = res.default_product || 'IH'
+    if (!termWindow.value) termWindow.value = res.default_window || '3d'
+  } catch (_) {
+    // 产品列表失败时使用本地 HOLDING_PRODUCTS 兜底，不打断页面。
+  } finally {
+    termProductsLoading.value = false
+  }
+}
+
+async function loadTermStructure() {
+  termLoading.value = true
+  termError.value = ''
+  termTooltip.value = null
+  try {
+    await loadTermProducts()
+    const res = await marketApi.termStructure({
+      product: termProduct.value,
+      window: termWindow.value,
+      slots: 7,
+    })
+    termData.value = res
+    if (res.windows?.length) termWindows.value = res.windows
+    termProduct.value = res.product || termProduct.value
+    termWindow.value = res.window || termWindow.value
+    drawTermCharts()
+  } catch (e: any) {
+    const msg = e.message || '加载失败'
+    termError.value = msg === 'Not Found' ? '期限结构服务更新中，请稍后刷新' : msg
+    uni.showToast({ title: termError.value, icon: 'none' })
+  } finally {
+    termLoading.value = false
+  }
+}
+
+function selectTermWindow(key: string) {
+  if (termWindow.value === key) return
+  termWindow.value = key
+  loadTermStructure()
+}
+
 async function selectHoldingProduct(code: string) {
   if (holdingProduct.value === code) return
   holdingProduct.value = code
@@ -471,6 +1142,8 @@ function refresh() {
     if (holdingProduct.value) loadHolding(holdingProduct.value)
   } else if (activeTab.value === 'chaos') {
     loadChaos()
+  } else if (activeTab.value === 'term') {
+    loadTermStructure()
   }
 }
 
@@ -560,21 +1233,28 @@ onShareTimeline(() => ({
   <view class="page">
     <!-- Tab（含刷新）-->
     <view class="tab-bar">
-      <view class="tab-item" :class="{ active: activeTab === 'chaos' }" @tap="switchTab('chaos')">
-        <text>混乱指数</text>
-      </view>
-      <view class="tab-item" :class="{ active: activeTab === 'options' }" @tap="switchTab('options')">
-        <text>市场数据</text>
-      </view>
-      <view class="tab-item" :class="{ active: activeTab === 'holding' }" @tap="switchTab('holding')">
-        <text>仓位变化</text>
-      </view>
+      <scroll-view class="tab-scroll" scroll-x>
+        <view class="tab-row">
+          <view class="tab-item" :class="{ active: activeTab === 'options' }" @tap="switchTab('options')">
+            <text>市场数据</text>
+          </view>
+          <view class="tab-item" :class="{ active: activeTab === 'holding' }" @tap="switchTab('holding')">
+            <text>仓位变化</text>
+          </view>
+          <view class="tab-item" :class="{ active: activeTab === 'term' }" @tap="switchTab('term')">
+            <text>期限结构</text>
+          </view>
+          <view class="tab-item" :class="{ active: activeTab === 'chaos' }" @tap="switchTab('chaos')">
+            <text>混乱指数</text>
+          </view>
+        </view>
+      </scroll-view>
       <!-- 实时状态指示点 -->
       <view v-if="activeTab === 'options' && liveTrading" class="live-dot-wrap">
         <view class="live-dot" /><text class="live-dot-text">{{ liveAt }}</text>
       </view>
       <view class="tab-refresh" @tap="refresh">
-        <text class="refresh-icon" :class="{ spinning: optLoading || holdingLoading || chaosLoading }">↻</text>
+        <text class="refresh-icon" :class="{ spinning: optLoading || holdingLoading || chaosLoading || termLoading }">↻</text>
       </view>
     </view>
 
@@ -680,6 +1360,244 @@ onShareTimeline(() => ({
 
       <view v-else-if="!optLoading" class="center-tip">
         <text class="muted-text">暂无数据，点刷新重试</text>
+      </view>
+    </view>
+
+    <!-- ══ 期限结构 Tab ══ -->
+    <view v-else-if="activeTab === 'term'" class="term-wrap">
+      <view class="term-hero">
+        <view class="term-filter-row">
+          <view class="term-filter-trigger" @tap="openTermWindowPicker">
+            <text>{{ selectedTermWindowLabel }}</text>
+            <text class="picker-arrow">▾</text>
+          </view>
+          <view class="term-filter-trigger term-product-trigger" @tap="openTermPicker">
+            <text>{{ termProductName }}</text>
+            <text class="picker-arrow">▾</text>
+          </view>
+        </view>
+        <view class="term-meta-line">
+          <text>最新：{{ termData?.main?.meta?.latest_trade_date || '--' }}</text>
+          <text>双指捏合缩放 · 长按看数值</text>
+        </view>
+      </view>
+
+      <view v-if="termLoading" class="center-tip">
+        <text class="muted-text">加载期限结构...</text>
+      </view>
+
+      <view v-else-if="termData?.has_data" class="term-content">
+        <view class="term-metrics">
+          <view class="term-metric">
+            <text class="metric-k">结构</text>
+            <text class="metric-v" :class="termStructureClass(termData.main?.summary?.structure_type)">
+              {{ termStructureLabel(termData.main?.summary?.structure_type) }}
+            </text>
+          </view>
+          <view class="term-metric">
+            <text class="metric-k">近远价差</text>
+            <text class="metric-v">{{ fmtTermNum(termData.main?.summary?.spread_abs) }}</text>
+          </view>
+          <view class="term-metric">
+            <text class="metric-k">价差%</text>
+            <text class="metric-v">{{ fmtTermPct(termData.main?.summary?.spread_pct) }}</text>
+          </view>
+          <view class="term-metric">
+            <text class="metric-k">每档斜率</text>
+            <text class="metric-v">{{ fmtTermNum(termData.main?.summary?.slope_per_step) }}</text>
+          </view>
+        </view>
+
+        <view class="term-card">
+          <view class="term-card-head">
+            <text class="term-card-title">期限结构曲线</text>
+            <view class="term-card-actions">
+              <text class="term-card-sub">{{ termData.product }} · {{ termData.product_name }}</text>
+            </view>
+          </view>
+          <view
+            v-if="termMainChart"
+            id="term-chart-main"
+            class="term-chart-box"
+            :style="termChartBoxStyle('main')"
+            @touchstart="startTermPress('main', $event)"
+            @touchmove="moveTermPress('main', $event)"
+            @touchend="endTermPress"
+            @touchcancel="endTermPress"
+            @mousedown="startTermPress('main', $event)"
+            @mousemove="moveTermPress('main', $event)"
+            @mouseup="endTermPress"
+            @mouseleave="endTermPress"
+          >
+            <!-- #ifdef MP-WEIXIN -->
+            <canvas canvas-id="termMainCanvas" class="term-canvas" :style="termChartBoxStyle('main')"></canvas>
+            <!-- #endif -->
+            <!-- #ifndef MP-WEIXIN -->
+            <svg class="term-svg" :viewBox="`0 0 ${termMainChart.width} ${termMainChart.height}`" preserveAspectRatio="none">
+              <line v-for="y in termMainChart.yLabels" :key="`main-y-${y.label}`" :x1="TERM_PAD_L" :y1="y.y" :x2="TERM_W - TERM_PAD_R" :y2="y.y" stroke="rgba(148,163,184,0.18)" stroke-width="1" />
+              <line :x1="TERM_PAD_L" :y1="TERM_PAD_T" :x2="TERM_PAD_L" :y2="TERM_H - TERM_PAD_B" stroke="rgba(203,213,225,0.46)" stroke-width="1.5" />
+              <line :x1="TERM_PAD_L" :y1="TERM_H - TERM_PAD_B" :x2="TERM_W - TERM_PAD_R" :y2="TERM_H - TERM_PAD_B" stroke="rgba(203,213,225,0.46)" stroke-width="1.5" />
+              <polyline v-for="line in termMainChart.lines" :key="line.label" :points="line.points" fill="none" :stroke="line.color" stroke-width="4" stroke-linejoin="round" stroke-linecap="round" />
+            </svg>
+            <view class="term-axis-overlay">
+              <text v-for="y in termMainChart.yLabels" :key="`main-y-label-${y.label}`" class="term-axis-tag term-axis-tag-y" :style="termAxisYStyle(y.y)">{{ y.label }}</text>
+              <text v-for="x in termMainChart.xLabels" :key="`main-x-${x.label}`" class="term-axis-tag term-axis-tag-x" :style="termAxisXStyle(x.x)">{{ x.label }}</text>
+            </view>
+            <!-- #endif -->
+            <view v-if="termTooltip?.key === 'main'" class="term-tooltip-layer">
+              <view class="term-tooltip-guide" :style="{ left: `${termTooltip.guideLeftPct}%` }"></view>
+              <view v-for="dot in termTooltip.dots" :key="`${dot.leftPct}-${dot.topPct}-${dot.color}`" class="term-tooltip-dot" :style="{ left: `${dot.leftPct}%`, top: `${dot.topPct}%`, background: dot.color }"></view>
+              <view class="term-tooltip-box" :class="{ 'term-tooltip-box-right': termTooltip.align === 'right', 'term-tooltip-box-below': termTooltip.vertical === 'below' }" :style="{ left: `${termTooltip.leftPct}%`, top: `${termTooltip.topPct}%` }">
+                <text class="term-tooltip-title">{{ termTooltip.title }}</text>
+                <view v-for="row in termTooltip.rows" :key="row.label" class="term-tooltip-row">
+                  <view class="term-tooltip-row-left">
+                    <view class="legend-dot" :style="{ background: row.color }"></view>
+                    <text>{{ row.label }}</text>
+                  </view>
+                  <text class="term-tooltip-val">{{ row.value }}</text>
+                </view>
+              </view>
+            </view>
+          </view>
+          <view v-else class="term-empty">暂无可绘制曲线</view>
+          <view class="term-legend">
+            <view v-for="line in termMainChart?.lines || []" :key="line.label" class="legend-item">
+              <view class="legend-dot" :style="{ background: line.color }"></view>
+              <text>{{ line.label }}</text>
+            </view>
+          </view>
+        </view>
+
+        <view v-if="termData.is_index" class="term-card">
+          <view class="term-card-head">
+            <text class="term-card-title">升贴水期限结构</text>
+            <view class="term-card-actions">
+              <text class="term-card-sub">指数参考差</text>
+            </view>
+          </view>
+          <view
+            v-if="termBasisChart"
+            id="term-chart-basis"
+            class="term-chart-box"
+            :style="termChartBoxStyle('basis')"
+            @touchstart="startTermPress('basis', $event)"
+            @touchmove="moveTermPress('basis', $event)"
+            @touchend="endTermPress"
+            @touchcancel="endTermPress"
+            @mousedown="startTermPress('basis', $event)"
+            @mousemove="moveTermPress('basis', $event)"
+            @mouseup="endTermPress"
+            @mouseleave="endTermPress"
+          >
+            <!-- #ifdef MP-WEIXIN -->
+            <canvas canvas-id="termBasisCanvas" class="term-canvas" :style="termChartBoxStyle('basis')"></canvas>
+            <!-- #endif -->
+            <!-- #ifndef MP-WEIXIN -->
+            <svg class="term-svg" :viewBox="`0 0 ${termBasisChart.width} ${termBasisChart.height}`" preserveAspectRatio="none">
+              <line v-for="y in termBasisChart.yLabels" :key="`basis-y-${y.label}`" :x1="TERM_PAD_L" :y1="y.y" :x2="TERM_W - TERM_PAD_R" :y2="y.y" stroke="rgba(148,163,184,0.18)" stroke-width="1" />
+              <line :x1="TERM_PAD_L" :y1="TERM_PAD_T" :x2="TERM_PAD_L" :y2="TERM_H - TERM_PAD_B" stroke="rgba(203,213,225,0.46)" stroke-width="1.5" />
+              <line :x1="TERM_PAD_L" :y1="TERM_H - TERM_PAD_B" :x2="TERM_W - TERM_PAD_R" :y2="TERM_H - TERM_PAD_B" stroke="rgba(203,213,225,0.46)" stroke-width="1.5" />
+              <polyline v-for="line in termBasisChart.lines" :key="line.label" :points="line.points" fill="none" :stroke="line.color" stroke-width="4" stroke-linejoin="round" stroke-linecap="round" />
+            </svg>
+            <view class="term-axis-overlay">
+              <text v-for="y in termBasisChart.yLabels" :key="`basis-y-label-${y.label}`" class="term-axis-tag term-axis-tag-y" :style="termAxisYStyle(y.y)">{{ y.label }}</text>
+              <text v-for="x in termBasisChart.xLabels" :key="`basis-x-${x.label}`" class="term-axis-tag term-axis-tag-x" :style="termAxisXStyle(x.x)">{{ x.label }}</text>
+            </view>
+            <!-- #endif -->
+            <view v-if="termTooltip?.key === 'basis'" class="term-tooltip-layer">
+              <view class="term-tooltip-guide" :style="{ left: `${termTooltip.guideLeftPct}%` }"></view>
+              <view v-for="dot in termTooltip.dots" :key="`${dot.leftPct}-${dot.topPct}-${dot.color}`" class="term-tooltip-dot" :style="{ left: `${dot.leftPct}%`, top: `${dot.topPct}%`, background: dot.color }"></view>
+              <view class="term-tooltip-box" :class="{ 'term-tooltip-box-right': termTooltip.align === 'right', 'term-tooltip-box-below': termTooltip.vertical === 'below' }" :style="{ left: `${termTooltip.leftPct}%`, top: `${termTooltip.topPct}%` }">
+                <text class="term-tooltip-title">{{ termTooltip.title }}</text>
+                <view v-for="row in termTooltip.rows" :key="row.label" class="term-tooltip-row">
+                  <view class="term-tooltip-row-left">
+                    <view class="legend-dot" :style="{ background: row.color }"></view>
+                    <text>{{ row.label }}</text>
+                  </view>
+                  <text class="term-tooltip-val">{{ row.value }}</text>
+                </view>
+              </view>
+            </view>
+          </view>
+          <view v-else class="term-empty">暂无升贴水数据</view>
+        </view>
+
+        <view v-if="termData.is_index" class="term-card">
+          <view class="term-card-head">
+            <text class="term-card-title">近月升贴水</text>
+            <view class="term-card-actions">
+              <text class="term-card-sub">最近1年</text>
+            </view>
+          </view>
+          <view
+            v-if="termLongChart"
+            id="term-chart-long"
+            class="term-chart-box"
+            :style="termChartBoxStyle('long')"
+            @touchstart="startTermPress('long', $event)"
+            @touchmove="moveTermPress('long', $event)"
+            @touchend="endTermPress"
+            @touchcancel="endTermPress"
+            @mousedown="startTermPress('long', $event)"
+            @mousemove="moveTermPress('long', $event)"
+            @mouseup="endTermPress"
+            @mouseleave="endTermPress"
+          >
+            <!-- #ifdef MP-WEIXIN -->
+            <canvas canvas-id="termLongCanvas" class="term-canvas" :style="termChartBoxStyle('long')"></canvas>
+            <!-- #endif -->
+            <!-- #ifndef MP-WEIXIN -->
+            <svg class="term-svg" :viewBox="`0 0 ${termLongChart.width} ${termLongChart.height}`" preserveAspectRatio="none">
+              <line v-for="y in termLongChart.yLabels" :key="`long-y-${y.label}`" :x1="TERM_PAD_L" :y1="y.y" :x2="TERM_W - TERM_PAD_R" :y2="y.y" stroke="rgba(148,163,184,0.18)" stroke-width="1" />
+              <line :x1="TERM_PAD_L" :y1="TERM_PAD_T" :x2="TERM_PAD_L" :y2="TERM_H - TERM_PAD_B" stroke="rgba(203,213,225,0.46)" stroke-width="1.5" />
+              <line :x1="TERM_PAD_L" :y1="TERM_H - TERM_PAD_B" :x2="TERM_W - TERM_PAD_R" :y2="TERM_H - TERM_PAD_B" stroke="rgba(203,213,225,0.46)" stroke-width="1.5" />
+              <polyline v-for="line in termLongChart.lines" :key="line.label" :points="line.points" fill="none" :stroke="line.color" stroke-width="4" stroke-linejoin="round" stroke-linecap="round" />
+            </svg>
+            <view class="term-axis-overlay">
+              <text v-for="y in termLongChart.yLabels" :key="`long-y-label-${y.label}`" class="term-axis-tag term-axis-tag-y" :style="termAxisYStyle(y.y)">{{ y.label }}</text>
+              <text v-for="x in termLongChart.xLabels" :key="`long-x-${x.label}`" class="term-axis-tag term-axis-tag-x" :style="termAxisXStyle(x.x)">{{ x.label }}</text>
+            </view>
+            <!-- #endif -->
+            <view v-if="termTooltip?.key === 'long'" class="term-tooltip-layer">
+              <view class="term-tooltip-guide" :style="{ left: `${termTooltip.guideLeftPct}%` }"></view>
+              <view v-for="dot in termTooltip.dots" :key="`${dot.leftPct}-${dot.topPct}-${dot.color}`" class="term-tooltip-dot" :style="{ left: `${dot.leftPct}%`, top: `${dot.topPct}%`, background: dot.color }"></view>
+              <view class="term-tooltip-box" :class="{ 'term-tooltip-box-right': termTooltip.align === 'right', 'term-tooltip-box-below': termTooltip.vertical === 'below' }" :style="{ left: `${termTooltip.leftPct}%`, top: `${termTooltip.topPct}%` }">
+                <text class="term-tooltip-title">{{ termTooltip.title }}</text>
+                <view v-for="row in termTooltip.rows" :key="row.label" class="term-tooltip-row">
+                  <view class="term-tooltip-row-left">
+                    <view class="legend-dot" :style="{ background: row.color }"></view>
+                    <text>{{ row.label }}</text>
+                  </view>
+                  <text class="term-tooltip-val">{{ row.value }}</text>
+                </view>
+              </view>
+            </view>
+          </view>
+          <view v-else class="term-empty">暂无一年趋势数据</view>
+        </view>
+
+        <view class="term-table-card">
+          <view class="term-card-head">
+            <text class="term-card-title">月份明细</text>
+            <text class="term-card-sub">收盘价</text>
+          </view>
+          <scroll-view scroll-x>
+            <view class="term-table">
+              <view class="term-tr term-th">
+                <text class="term-td term-contract">月份</text>
+                <text v-for="col in termTableSeries" :key="`term-th-${col.key}`" class="term-td">{{ col.label }}</text>
+              </view>
+              <view v-for="row in termTableRows" :key="row.contract" class="term-tr">
+                <text class="term-td term-contract">{{ row.contract }}</text>
+                <text v-for="col in termTableSeries" :key="`term-row-${row.contract}-${col.key}`" class="term-td">{{ row[col.key] || '--' }}</text>
+              </view>
+            </view>
+          </scroll-view>
+        </view>
+      </view>
+
+      <view v-else class="center-tip">
+        <text class="muted-text">{{ termData?.main?.error ? '该品种暂无期限结构数据，换个品种或窗口试试' : (termError || '暂无期限结构数据，点刷新重试') }}</text>
       </view>
     </view>
 
@@ -866,19 +1784,21 @@ onShareTimeline(() => ({
     </view>
 
     <!-- 品种选择弹窗（覆盖整个页面）-->
-    <view v-if="showHoldingPicker" class="picker-overlay" @tap.self="closeHoldingPicker">
-      <view class="picker-sheet">
+    <view v-if="showHoldingPicker" class="picker-overlay" @tap="closeHoldingPicker">
+      <view class="picker-sheet" @tap.stop>
         <view class="picker-sheet-header">
           <text class="picker-sheet-title">选择品种</text>
-          <text class="picker-sheet-close" @tap="closeHoldingPicker">✕</text>
+          <text class="picker-sheet-close" @tap.stop="closeHoldingPicker">✕</text>
         </view>
-        <view class="picker-search-bar">
+        <view class="picker-search-bar" @tap.stop>
           <input
             class="picker-search-input"
             v-model="holdingSearch"
             type="text"
             confirm-type="search"
+            :adjust-position="false"
             :cursor-spacing="120"
+            @tap.stop
             placeholder="搜索品种名称或代码..."
             placeholder-style="color:#556070"
           />
@@ -899,6 +1819,63 @@ onShareTimeline(() => ({
       </view>
     </view>
 
+    <view v-if="showTermPicker" class="picker-overlay" @tap="closeTermPicker">
+      <view class="picker-sheet" @tap.stop>
+        <view class="picker-sheet-header">
+          <text class="picker-sheet-title">选择品种</text>
+          <text class="picker-sheet-close" @tap.stop="closeTermPicker">✕</text>
+        </view>
+        <view class="picker-search-bar" @tap.stop>
+          <input
+            class="picker-search-input"
+            v-model="termSearch"
+            type="text"
+            confirm-type="search"
+            :adjust-position="false"
+            :cursor-spacing="120"
+            @tap.stop
+            placeholder="搜索品种名称或代码..."
+            placeholder-style="color:#556070"
+          />
+        </view>
+        <scroll-view class="picker-list" scroll-y>
+          <view
+            v-for="p in filteredTermProducts"
+            :key="p.code"
+            class="picker-item"
+            :class="{ 'picker-item-active': termProduct === p.code }"
+            @tap="selectTermFromPicker(p.code)"
+          >
+            <text class="picker-item-code">{{ p.code }}</text>
+            <text class="picker-item-name">{{ p.name }}</text>
+            <text v-if="p.is_index" class="picker-item-tag">指数</text>
+            <text v-if="termProduct === p.code" class="picker-item-check">✓</text>
+          </view>
+        </scroll-view>
+      </view>
+    </view>
+
+    <view v-if="showTermWindowPicker" class="picker-overlay" @tap="closeTermWindowPicker">
+      <view class="picker-sheet picker-sheet-compact" @tap.stop>
+        <view class="picker-sheet-header">
+          <text class="picker-sheet-title">选择周期</text>
+          <text class="picker-sheet-close" @tap.stop="closeTermWindowPicker">✕</text>
+        </view>
+        <scroll-view class="picker-list" scroll-y>
+          <view
+            v-for="w in termWindows"
+            :key="w.key"
+            class="picker-item"
+            :class="{ 'picker-item-active': termWindow === w.key }"
+            @tap="selectTermWindowFromPicker(w.key)"
+          >
+            <text class="picker-item-name">{{ w.label }}</text>
+            <text v-if="termWindow === w.key" class="picker-item-check">✓</text>
+          </view>
+        </scroll-view>
+      </view>
+    </view>
+
     <view style="height: 120rpx;" />
     <BottomNav active="market" />
   </view>
@@ -909,7 +1886,9 @@ onShareTimeline(() => ({
 
 /* Tab */
 .tab-bar { display: flex; align-items: center; border-bottom: 1px solid #162035; }
-.tab-item { flex: 1; text-align: center; padding: 22rpx 0; font-size: 28rpx; color: #666666; }
+.tab-scroll { flex: 1; min-width: 0; white-space: nowrap; }
+.tab-row { display: flex; min-width: 672rpx; }
+.tab-item { width: 168rpx; flex-shrink: 0; text-align: center; padding: 22rpx 0; font-size: 28rpx; color: #666666; }
 .tab-item.active { color: #f5c518; border-bottom: 3rpx solid #f5c518; font-weight: 700; }
 .tab-refresh { width: 72rpx; display: flex; align-items: center; justify-content: center; padding: 22rpx 0; flex-shrink: 0; }
 .refresh-icon { font-size: 36rpx; color: #aaaaaa; }
@@ -1056,7 +2035,346 @@ onShareTimeline(() => ({
 .picker-item-active { background: rgba(245, 197, 24, 0.06); }
 .picker-item-code  { width: 72rpx; font-size: 22rpx; color: #888888; font-weight: 600; flex-shrink: 0; }
 .picker-item-name  { flex: 1; font-size: 28rpx; color: #f0f0f0; }
+.picker-item-tag {
+  flex-shrink: 0;
+  padding: 3rpx 10rpx;
+  border-radius: 999rpx;
+  border: 1px solid rgba(56, 189, 248, 0.35);
+  background: rgba(56, 189, 248, 0.10);
+  color: #7dd3fc;
+  font-size: 18rpx;
+}
 .picker-item-check { font-size: 26rpx; color: #f5c518; flex-shrink: 0; }
+
+/* 期限结构 */
+.term-wrap {
+  padding: 18rpx 18rpx 28rpx;
+}
+.term-hero {
+  position: relative;
+  overflow: hidden;
+  border-radius: 26rpx;
+  border: 1px solid #243652;
+  background:
+    radial-gradient(circle at 12% 0%, rgba(56, 189, 248, 0.18), transparent 36%),
+    radial-gradient(circle at 100% 28%, rgba(245, 197, 24, 0.16), transparent 34%),
+    linear-gradient(145deg, #101d31, #0d1729 58%, #0a1324);
+  padding: 24rpx;
+  box-shadow: 0 14rpx 40rpx rgba(0, 0, 0, 0.22);
+}
+.term-filter-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14rpx;
+}
+.term-filter-trigger {
+  min-height: 58rpx;
+  padding: 0 18rpx;
+  border-radius: 999rpx;
+  border: 1px solid rgba(125, 211, 252, 0.36);
+  background: rgba(9, 18, 33, 0.72);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10rpx;
+  color: #dbeafe;
+  font-size: 23rpx;
+  font-weight: 700;
+}
+.term-filter-trigger text:first-child {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.term-product-trigger {
+  flex: 1;
+  max-width: 330rpx;
+}
+.term-filter-row .term-filter-trigger:first-child {
+  min-width: 196rpx;
+  max-width: 220rpx;
+}
+.term-product-trigger {
+  min-height: 58rpx;
+  justify-content: space-between;
+}
+.term-meta-line {
+  margin-top: 14rpx;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: #7d8ba4;
+  font-size: 21rpx;
+  font-variant-numeric: tabular-nums;
+}
+.term-content {
+  margin-top: 18rpx;
+  display: flex;
+  flex-direction: column;
+  gap: 18rpx;
+}
+.term-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12rpx;
+}
+.term-metric {
+  width: calc(50% - 6rpx);
+  min-height: 104rpx;
+  border-radius: 18rpx;
+  border: 1px solid #223452;
+  background: linear-gradient(180deg, #101d31, #0d1729);
+  padding: 16rpx;
+  box-sizing: border-box;
+}
+.metric-k {
+  display: block;
+  color: #71829b;
+  font-size: 21rpx;
+}
+.metric-v {
+  display: block;
+  margin-top: 8rpx;
+  color: #f8fafc;
+  font-size: 31rpx;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+.term-up { color: #f87171; }
+.term-down { color: #34d399; }
+.term-flat { color: #f5c518; }
+.term-card,
+.term-table-card {
+  border-radius: 22rpx;
+  border: 1px solid #233656;
+  background: #101b2f;
+  padding: 18rpx;
+}
+.term-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12rpx;
+  margin-bottom: 14rpx;
+}
+.term-card-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12rpx;
+  min-width: 0;
+}
+.term-card-title {
+  color: #f8fafc;
+  font-size: 28rpx;
+  font-weight: 800;
+}
+.term-card-sub {
+  max-width: 360rpx;
+  color: #71829b;
+  font-size: 20rpx;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.term-chart-box {
+  position: relative;
+  border-radius: 18rpx;
+  border: 1px solid #1e3150;
+  background:
+    linear-gradient(rgba(148, 163, 184, 0.045) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(148, 163, 184, 0.045) 1px, transparent 1px),
+    #0b1528;
+  background-size: 44rpx 44rpx;
+  overflow: hidden;
+  transition: height 0.16s ease;
+}
+.term-canvas,
+.term-svg {
+  width: 100%;
+  height: 300rpx;
+  display: block;
+}
+.term-axis-label {
+  fill: #dbeafe;
+  font-size: 20px;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+.term-axis-y {
+  fill: #f8fafc;
+}
+.term-axis-overlay {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  pointer-events: none;
+}
+.term-axis-tag {
+  position: absolute;
+  z-index: 2;
+  padding: 1rpx 4rpx;
+  border-radius: 6rpx;
+  background: rgba(11, 21, 40, 0.64);
+  color: #eaf2ff;
+  font-size: 20rpx;
+  line-height: 1.1;
+  font-weight: 800;
+  text-shadow: 0 1rpx 4rpx rgba(0, 0, 0, 0.9);
+  font-variant-numeric: tabular-nums;
+}
+.term-axis-tag-y {
+  color: #ffffff;
+  font-size: 18rpx;
+  font-weight: 700;
+}
+.term-axis-tag-x {
+  color: #dbeafe;
+  min-width: 42rpx;
+  text-align: center;
+}
+.term-tooltip-layer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 3;
+}
+.term-tooltip-guide {
+  position: absolute;
+  top: 12rpx;
+  bottom: 18rpx;
+  width: 2rpx;
+  background: rgba(226, 232, 240, 0.34);
+  transform: translateX(-50%);
+}
+.term-tooltip-dot {
+  position: absolute;
+  width: 14rpx;
+  height: 14rpx;
+  border-radius: 999rpx;
+  border: 2rpx solid rgba(255, 255, 255, 0.9);
+  box-shadow: 0 0 0 4rpx rgba(11, 21, 40, 0.45);
+  transform: translate(-50%, -50%);
+}
+.term-tooltip-box {
+  position: absolute;
+  min-width: 176rpx;
+  max-width: 260rpx;
+  padding: 12rpx 14rpx;
+  border-radius: 16rpx;
+  border: 1px solid rgba(125, 211, 252, 0.28);
+  background: rgba(7, 14, 27, 0.92);
+  box-shadow: 0 12rpx 36rpx rgba(0, 0, 0, 0.28);
+  transform: translate(-10%, -100%);
+}
+.term-tooltip-box-right {
+  transform: translate(calc(-100% - 14rpx), -100%);
+}
+.term-tooltip-box-below {
+  transform: translate(-10%, 14rpx);
+}
+.term-tooltip-box-right.term-tooltip-box-below {
+  transform: translate(calc(-100% - 14rpx), 14rpx);
+}
+.term-tooltip-title {
+  display: block;
+  color: #f8fafc;
+  font-size: 22rpx;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+.term-tooltip-row {
+  margin-top: 8rpx;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12rpx;
+  color: #dbeafe;
+  font-size: 20rpx;
+}
+.term-tooltip-row-left {
+  display: flex;
+  align-items: center;
+  gap: 8rpx;
+}
+.term-tooltip-val {
+  color: #f8fafc;
+  font-size: 20rpx;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.term-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10rpx 18rpx;
+  margin-top: 12rpx;
+}
+.legend-item {
+  display: flex;
+  align-items: center;
+  gap: 8rpx;
+  color: #9fb0cd;
+  font-size: 21rpx;
+}
+.legend-dot {
+  width: 14rpx;
+  height: 14rpx;
+  border-radius: 999rpx;
+  flex-shrink: 0;
+}
+.term-empty {
+  height: 180rpx;
+  border-radius: 18rpx;
+  border: 1px dashed #263854;
+  color: #71829b;
+  font-size: 23rpx;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.picker-sheet-compact {
+  max-height: 560rpx;
+}
+.term-table {
+  min-width: 760rpx;
+}
+.term-tr {
+  display: flex;
+  align-items: center;
+  min-height: 62rpx;
+  border-bottom: 1px solid #17263e;
+}
+.term-tr:last-child { border-bottom: none; }
+.term-th {
+  min-height: 54rpx;
+  background: rgba(14, 28, 49, 0.8);
+  border-radius: 12rpx;
+  border-bottom: none;
+  margin-bottom: 6rpx;
+}
+.term-td {
+  width: 170rpx;
+  padding: 0 12rpx;
+  box-sizing: border-box;
+  color: #cbd5e1;
+  font-size: 22rpx;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+.term-th .term-td {
+  color: #7d8ba4;
+  font-size: 20rpx;
+  font-weight: 700;
+}
+.term-contract {
+  width: 150rpx;
+  text-align: left;
+  color: #f8fafc;
+  font-weight: 700;
+}
 
 /* 实时点（tab 栏内）*/
 .live-dot-wrap { display: flex; align-items: center; gap: 6rpx; padding: 0 14rpx; }

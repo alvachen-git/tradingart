@@ -36,6 +36,8 @@ mobile_api.py — 爱波塔手机端专用 FastAPI 后端
   GET    /api/pay/config                充值中心配置（外部链接）
 
   GET    /api/market/snapshot           综合行情快照
+  GET    /api/market/term-structure/products  期限结构品种与窗口
+  GET    /api/market/term-structure     期限结构数据（含股指升贴水）
 
   POST   /api/position/upload           上传持仓截图 → 自动分流(股票体检/期权分析)
   POST   /api/portfolio/upload          上传股票持仓截图 → 识别 → 提交体检
@@ -82,6 +84,12 @@ from ai_simulation_service import (
     get_positions as ai_get_positions,
     get_review_dates as ai_get_review_dates,
     get_trades as ai_get_trades,
+)
+from term_structure_service import (
+    WINDOW_LABELS as TERM_WINDOW_LABELS,
+    build_index_basis_longterm_payload,
+    build_index_basis_term_structure_payload,
+    build_term_structure_payload,
 )
 from chat_feedback_service import (
     CHAT_FEEDBACK_ALLOWED_TYPES as _CHAT_FEEDBACK_ALLOWED_TYPES,
@@ -2995,6 +3003,96 @@ def pay_config(username: str = Depends(get_current_user)):
 #  MARKET — 综合行情快照
 # ════════════════════════════════════════════════════════════
 
+TERM_STRUCTURE_PRODUCTS = [
+    {"code": "IH", "name": "上证50", "is_index": True},
+    {"code": "IF", "name": "沪深300", "is_index": True},
+    {"code": "IC", "name": "中证500", "is_index": True},
+    {"code": "IM", "name": "中证1000", "is_index": True},
+    {"code": "TS", "name": "2年期国债", "is_index": False},
+    {"code": "T", "name": "10年期国债", "is_index": False},
+    {"code": "TL", "name": "30年期国债", "is_index": False},
+    {"code": "LC", "name": "碳酸锂", "is_index": False},
+    {"code": "SI", "name": "工业硅", "is_index": False},
+    {"code": "PS", "name": "多晶硅", "is_index": False},
+    {"code": "PT", "name": "铂金", "is_index": False},
+    {"code": "PD", "name": "钯金", "is_index": False},
+    {"code": "AU", "name": "黄金", "is_index": False},
+    {"code": "AG", "name": "白银", "is_index": False},
+    {"code": "CU", "name": "沪铜", "is_index": False},
+    {"code": "AL", "name": "沪铝", "is_index": False},
+    {"code": "ZN", "name": "沪锌", "is_index": False},
+    {"code": "NI", "name": "沪镍", "is_index": False},
+    {"code": "SN", "name": "沪锡", "is_index": False},
+    {"code": "PB", "name": "沪铅", "is_index": False},
+    {"code": "RU", "name": "橡胶", "is_index": False},
+    {"code": "BR", "name": "BR橡胶", "is_index": False},
+    {"code": "I", "name": "铁矿石", "is_index": False},
+    {"code": "JM", "name": "焦煤", "is_index": False},
+    {"code": "J", "name": "焦炭", "is_index": False},
+    {"code": "RB", "name": "螺纹钢", "is_index": False},
+    {"code": "HC", "name": "热卷", "is_index": False},
+    {"code": "SP", "name": "纸浆", "is_index": False},
+    {"code": "LG", "name": "原木", "is_index": False},
+    {"code": "AO", "name": "氧化铝", "is_index": False},
+    {"code": "SH", "name": "烧碱", "is_index": False},
+    {"code": "FG", "name": "玻璃", "is_index": False},
+    {"code": "SA", "name": "纯碱", "is_index": False},
+    {"code": "M", "name": "豆粕", "is_index": False},
+    {"code": "A", "name": "豆一", "is_index": False},
+    {"code": "B", "name": "豆二", "is_index": False},
+    {"code": "C", "name": "玉米", "is_index": False},
+    {"code": "LH", "name": "生猪", "is_index": False},
+    {"code": "JD", "name": "鸡蛋", "is_index": False},
+    {"code": "CJ", "name": "红枣", "is_index": False},
+    {"code": "P", "name": "棕榈油", "is_index": False},
+    {"code": "Y", "name": "豆油", "is_index": False},
+    {"code": "OI", "name": "菜油", "is_index": False},
+    {"code": "L", "name": "塑料", "is_index": False},
+    {"code": "PK", "name": "花生", "is_index": False},
+    {"code": "RM", "name": "菜粕", "is_index": False},
+    {"code": "MA", "name": "甲醇", "is_index": False},
+    {"code": "TA", "name": "PTA", "is_index": False},
+    {"code": "PX", "name": "对二甲苯", "is_index": False},
+    {"code": "PR", "name": "瓶片", "is_index": False},
+    {"code": "PP", "name": "聚丙烯", "is_index": False},
+    {"code": "V", "name": "PVC", "is_index": False},
+    {"code": "EB", "name": "苯乙烯", "is_index": False},
+    {"code": "EG", "name": "乙二醇", "is_index": False},
+    {"code": "SS", "name": "不锈钢", "is_index": False},
+    {"code": "AD", "name": "铝合金", "is_index": False},
+    {"code": "BU", "name": "沥青", "is_index": False},
+    {"code": "FU", "name": "燃料油", "is_index": False},
+    {"code": "EC", "name": "集运欧线", "is_index": False},
+    {"code": "UR", "name": "尿素", "is_index": False},
+    {"code": "SR", "name": "白糖", "is_index": False},
+    {"code": "CF", "name": "棉花", "is_index": False},
+    {"code": "AP", "name": "苹果", "is_index": False},
+]
+TERM_STRUCTURE_PRODUCT_MAP = {item["code"]: item for item in TERM_STRUCTURE_PRODUCTS}
+TERM_STRUCTURE_WINDOWS = [
+    {"key": key, "label": TERM_WINDOW_LABELS.get(key, key)}
+    for key in ("3d", "1w", "2w", "1m")
+]
+TERM_STRUCTURE_INDEX_PRODUCTS = {"IF", "IH", "IC", "IM"}
+
+
+def _normalize_term_product(product: str) -> str:
+    return re.sub(r"[^A-Za-z0-9]", "", str(product or "").upper())
+
+
+def _normalize_term_window(window: str) -> str:
+    value = str(window or "3d").strip()
+    return value if value in TERM_WINDOW_LABELS else "3d"
+
+
+def _clamp_term_slots(slots: int) -> int:
+    try:
+        value = int(slots)
+    except Exception:
+        value = 7
+    return max(2, min(value, 12))
+
+
 @app.get("/api/market/snapshot", tags=["行情"])
 def market_snapshot(username: str = Depends(get_current_user)):
     """获取综合行情快照（原始接口，兼容旧版）"""
@@ -3007,6 +3105,79 @@ def market_snapshot(username: str = Depends(get_current_user)):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"行情获取失败: {e}")
+
+
+@app.get("/api/market/term-structure/products", tags=["行情"])
+def market_term_structure_products(username: str = Depends(get_current_user)):
+    """期限结构可选品种与观察窗口。"""
+    _ = username
+    return {
+        "items": TERM_STRUCTURE_PRODUCTS,
+        "windows": TERM_STRUCTURE_WINDOWS,
+        "default_product": "IH",
+        "default_window": "3d",
+        "default_slots": 7,
+    }
+
+
+@app.get("/api/market/term-structure", tags=["行情"])
+def market_term_structure(
+    product: str = Query(default="IH", description="品种代码，如 IH / RB / CU"),
+    window: str = Query(default="3d", description="观察窗口：3d / 1w / 2w / 1m"),
+    slots: int = Query(default=7, description="展示合约档位数，2-12"),
+    username: str = Depends(get_current_user),
+):
+    """移动端期限结构数据，股指品种额外返回升贴水结构。"""
+    _ = username
+    product_code = _normalize_term_product(product)
+    if product_code not in TERM_STRUCTURE_PRODUCT_MAP:
+        raise HTTPException(status_code=400, detail="不支持的品种")
+
+    window_key = _normalize_term_window(window)
+    slot_count = _clamp_term_slots(slots)
+    product_info = TERM_STRUCTURE_PRODUCT_MAP[product_code]
+    is_index = product_code in TERM_STRUCTURE_INDEX_PRODUCTS
+
+    try:
+        main_payload = build_term_structure_payload(
+            engine=de.engine,
+            product_code=product_code,
+            window_key=window_key,
+            contract_slots=slot_count,
+        )
+        basis_anchor = None
+        basis_longterm = None
+        if is_index:
+            basis_anchor = build_index_basis_term_structure_payload(
+                engine=de.engine,
+                product_code=product_code,
+                window_key=window_key,
+                contract_slots=slot_count,
+            )
+            basis_longterm = build_index_basis_longterm_payload(
+                engine=de.engine,
+                product_code=product_code,
+                lookback_years=1,
+            )
+
+        has_data = bool(main_payload.get("contracts") and main_payload.get("series"))
+        return {
+            "product": product_code,
+            "product_name": product_info["name"],
+            "is_index": is_index,
+            "has_data": has_data,
+            "window": window_key,
+            "window_label": TERM_WINDOW_LABELS.get(window_key, window_key),
+            "slots": slot_count,
+            "windows": TERM_STRUCTURE_WINDOWS,
+            "main": main_payload,
+            "basis_anchor": basis_anchor,
+            "basis_longterm": basis_longterm,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"期限结构获取失败: {e}")
 
 
 @app.get("/api/market/chaos", tags=["行情"])

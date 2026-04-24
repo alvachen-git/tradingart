@@ -290,12 +290,106 @@ export interface ChaosSnapshotPayload {
   category_breakdown: ChaosCategoryItem[]
 }
 
+export interface TermProductItem {
+  code: string
+  name: string
+  is_index: boolean
+}
+
+export interface TermWindowItem {
+  key: string
+  label: string
+}
+
+export interface TermPoint {
+  contract: string
+  close_price?: number | null
+  futures_close?: number | null
+  spot_close?: number | null
+  basis?: number | null
+  oi?: number | null
+}
+
+export interface TermSeries {
+  label: string
+  trade_date: string
+  display_date: string
+  points: TermPoint[]
+}
+
+export interface TermSummary {
+  structure_type: string
+  front_contract?: string | null
+  far_contract?: string | null
+  spread_abs?: number | null
+  spread_pct?: number | null
+  slope_per_step?: number | null
+}
+
+export interface TermStructureBlock {
+  anchors: Array<{ label: string; trade_date: string; display_date: string }>
+  contracts: string[]
+  series: TermSeries[]
+  summary: TermSummary
+  meta: Record<string, any>
+  error?: string
+}
+
+export interface TermLongPoint {
+  trade_date: string
+  display_date: string
+  contract: string
+  basis?: number | null
+  futures_close?: number | null
+  spot_close?: number | null
+}
+
+export interface TermLongBlock {
+  points: TermLongPoint[]
+  meta: Record<string, any>
+  error?: string
+}
+
+export interface TermProductsPayload {
+  items: TermProductItem[]
+  windows: TermWindowItem[]
+  default_product: string
+  default_window: string
+  default_slots: number
+}
+
+export interface TermStructurePayload {
+  product: string
+  product_name: string
+  is_index: boolean
+  has_data: boolean
+  window: string
+  window_label: string
+  slots: number
+  windows: TermWindowItem[]
+  main: TermStructureBlock
+  basis_anchor: TermStructureBlock | null
+  basis_longterm: TermLongBlock | null
+}
+
 export const marketApi = {
   snapshot: () =>
     request<{ data: any }>('GET', '/api/market/snapshot'),
 
   chaos: () =>
     request<ChaosSnapshotPayload>('GET', '/api/market/chaos'),
+
+  termProducts: () =>
+    request<TermProductsPayload>('GET', '/api/market/term-structure/products'),
+
+  termStructure: (params?: { product?: string; window?: string; slots?: number }) => {
+    const qs = toQuery({
+      product: params?.product,
+      window: params?.window,
+      slots: params?.slots,
+    })
+    return request<TermStructurePayload>('GET', `/api/market/term-structure${qs}`)
+  },
 
   options: () =>
     request<{ items: OptionItem[]; updated_at: string }>('GET', '/api/market/options'),

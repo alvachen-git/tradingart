@@ -2,8 +2,8 @@
  * HTTP request helpers for uni-app mobile client.
  */
 
-const ENV_API_BASE = (import.meta as any)?.env?.VITE_API_BASE || ''
-const ENV_MODE = (import.meta as any)?.env?.MODE || ''
+const ENV_API_BASE = import.meta.env.VITE_API_BASE || ''
+const ENV_MODE = import.meta.env.MODE || ''
 
 function normalizeBase(base: string): string {
   return String(base || '').trim().replace(/\/+$/, '')
