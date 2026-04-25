@@ -118,6 +118,26 @@ class AgentState(TypedDict):
 
 
 AUTHORITATIVE_PRICE_CONFLICT_THRESHOLD = 0.01
+GENERALIST_SMART_KEYWORDS = (
+    "回测",
+    "胜率",
+    "盈亏比",
+    "最大回撤",
+    "相关性",
+    "对冲",
+    "beta",
+    "收益率曲线",
+    "宏观",
+    "美联储",
+    "通胀",
+    "cpi",
+    "非农",
+    "利率",
+    "美元",
+    "价差图",
+    "压力测试",
+    "情景分析",
+)
 
 
 # 期权合约乘数表（每张期权对应的标的数量）
@@ -1137,6 +1157,29 @@ def _wants_chart(query: str) -> bool:
     q = str(query or "")
     q_lower = q.lower()
     return any(keyword.lower() in q_lower for keyword in CHART_REQUEST_KEYWORDS)
+
+
+def _select_generalist_model_tier(state: AgentState) -> Literal["mid", "smart"]:
+    """
+    为 generalist 做轻量分级：
+    - 常规对比、估值、单一综合问题 -> mid
+    - 画图、回测、对冲/相关性、宏观深分析、复杂承接 -> smart
+    """
+    query = str(state.get("user_query", "") or "").strip()
+    lowered = query.lower()
+
+    if _wants_chart(query):
+        return "smart"
+
+    if any(keyword in lowered for keyword in GENERALIST_SMART_KEYWORDS):
+        return "smart"
+
+    is_followup = bool(state.get("is_followup", False))
+    has_context = bool(str(state.get("recent_context", "") or "").strip() or str(state.get("memory_context", "") or "").strip())
+    if is_followup and has_context:
+        return "smart"
+
+    return "mid"
 
 
 NEWS_IMPACT_DIRECT_PATTERNS = (
@@ -3894,15 +3937,27 @@ def build_trading_graph(fast_llm, mid_llm, smart_llm):
     """
     workflow = StateGraph(AgentState)
 
+    def _run_generalist(state: AgentState):
+        chosen_tier = _select_generalist_model_tier(state)
+        chosen_llm = smart_llm if chosen_tier == "smart" else mid_llm
+        query_preview = str(state.get("user_query", "") or "").strip().replace("\n", " ")[:120]
+        print(
+            f"[generalist-tier] tier={chosen_tier} "
+            f"is_followup={bool(state.get('is_followup', False))} "
+            f"wants_chart={_wants_chart(state.get('user_query', ''))} "
+            f"query={query_preview}"
+        )
+        return generalist_node(state, chosen_llm)
+
     # 1. 注册节点
     # 主管 -> 用 Turbo (快)
     workflow.add_node("supervisor", lambda state: supervisor_node(state, fast_llm))
     # 分析师 -> 用 Plus (均衡)
     workflow.add_node("analyst", lambda state: analyst_node(state, mid_llm))
-    # 策略员 -> 用 Max (聪明)
-    workflow.add_node("strategist", lambda state: strategist_node(state, smart_llm))
-    # 王牌 -> 用 Max (聪明)
-    workflow.add_node("generalist", lambda state: generalist_node(state, smart_llm))
+    # 策略员 -> 用 Plus (均衡，优先提速)
+    workflow.add_node("strategist", lambda state: strategist_node(state, mid_llm))
+    # 王牌 -> 按场景分级选模型
+    workflow.add_node("generalist", _run_generalist)
     # CIO -> 用 Max (聪明)
     workflow.add_node("finalizer", lambda state: finalizer_node(state, mid_llm))
     # 其他工具人 (不需要 LLM，或者随便给一个)

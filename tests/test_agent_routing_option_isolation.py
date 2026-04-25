@@ -27,6 +27,36 @@ def test_option_position_query_detection():
     assert not agent_core._is_option_position_query("创业板指数今天涨跌多少")
 
 
+def test_generalist_uses_mid_tier_for_simple_compare():
+    tier = agent_core._select_generalist_model_tier({
+        "user_query": "比较一下宁德时代和阳光电源谁更强",
+        "is_followup": False,
+        "recent_context": "",
+        "memory_context": "",
+    })
+    assert tier == "mid"
+
+
+def test_generalist_uses_smart_tier_for_chart_requests():
+    tier = agent_core._select_generalist_model_tier({
+        "user_query": "帮我画一下黄金和白银的价差图",
+        "is_followup": False,
+        "recent_context": "",
+        "memory_context": "",
+    })
+    assert tier == "smart"
+
+
+def test_generalist_uses_smart_tier_for_followup_with_context():
+    tier = agent_core._select_generalist_model_tier({
+        "user_query": "那为什么",
+        "is_followup": True,
+        "recent_context": "用户: 比较黄金和白银\nAI: 黄金强于白银，主因在宏观预期差。",
+        "memory_context": "",
+    })
+    assert tier == "smart"
+
+
 def test_strip_stock_portfolio_sections_for_option_priority():
     raw = "【技术分析】趋势偏强\n【持仓分析】股票组合风险中等\n- 前3大持仓...\n【期权策略】建议牛市价差"
     out = agent_core._strip_stock_portfolio_sections(raw)
