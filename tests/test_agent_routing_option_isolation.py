@@ -682,6 +682,8 @@ def test_compose_option_sections_filters_non_core_intel_sections():
 def test_news_impact_query_detection():
     assert agent_core._is_news_impact_query("黄金为什么涨？")
     assert agent_core._is_news_impact_query("美联储鹰派表态对A股有什么影响？")
+    assert agent_core._is_news_impact_query("日本央行如果突然收紧，对美股和黄金会怎么传导？")
+    assert agent_core._is_news_impact_query("美国如果非农大超预期，纳指一般先交易什么？")
     assert not agent_core._is_news_impact_query("请全面分析黄金")
 
 
@@ -736,6 +738,60 @@ def test_finalizer_uses_news_flash_template_for_news_queries(monkeypatch):
     assert "### 交易台一句话" in content
     assert "### 主线" in content
     assert "### 接下来盯什么" in content
+    assert "Executive Summary" not in content
+
+
+def test_finalizer_uses_news_flash_template_for_transmission_style_queries(monkeypatch):
+    class _DummyResp:
+        content = """> 📅 日期：2026年04月26日 12:20
+> ✍️ 签发：交易台CIO | 🎯 模式：事件快评
+
+### 交易台一句话
+- 日本央行突然收紧，先冲击全球套息和流动性，再传到美股，黄金通常先压后稳。
+
+### 主线
+- 市场先交易日元套息平仓和风险资产去杠杆。
+
+### 盘面验证
+- 先看日元、美债和美股期货有没有同步波动放大。
+
+### 反向风险
+- 如果只是口头偏鹰、没有真正落地，回吐会很快。
+
+### 接下来盯什么
+- 盯 USDJPY、10Y 美债和纳指期货。
+
+### 交易应对
+- 别抢第一脚，先等市场把流动性冲击定价完。"""
+
+    class _DummyLLM:
+        def invoke(self, prompt):
+            assert "事件快评" in prompt
+            return _DummyResp()
+
+    state = {
+        "messages": [
+            agent_core.HumanMessage(
+                content="【情报与舆情】\n日本央行潜在收紧可能触发套息平仓。"
+            )
+        ],
+        "user_query": "日本央行如果突然收紧，对美股和黄金会怎么传导？",
+        "symbol": "NDX",
+        "symbol_name": "纳指",
+        "risk_preference": "稳健型",
+        "macro_view": "美元流动性偏紧，长端利率高位震荡。",
+        "trend_signal": "",
+        "key_levels": "",
+        "memory_context": "",
+        "vision_position_domain": "",
+        "vision_position_payload": {},
+    }
+
+    out = agent_core.finalizer_node(state, llm=_DummyLLM())
+    content = out["messages"][0].content
+    assert "### 交易台一句话" in content
+    assert "### 盘面验证" in content
+    assert "### 反向风险" in content
     assert "Executive Summary" not in content
 
 
