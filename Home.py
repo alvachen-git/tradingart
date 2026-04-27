@@ -276,12 +276,12 @@ def _render_pending_chat_task_fragment(task_info_snapshot: Dict[str, Any]) -> No
     task_manager = DeepTaskManager() if use_deep_manager else TaskManager()
     task_status = task_manager.get_task_status(task_id)
     current_status = task_status["status"]
+    chat_mode = str(task_info.get("chat_mode") or task_status.get("chat_mode") or CHAT_MODE_ANALYSIS)
 
     if current_status in ["pending", "processing"]:
         progress_msg = task_status.get("progress", "正在处理...")
         elapsed_sec = int(max(0, time.time() - task_start))
         analysis_mode_label = str(task_info.get("analysis_mode_label", "") or "")
-        chat_mode = str(task_info.get("chat_mode") or task_status.get("chat_mode") or CHAT_MODE_ANALYSIS)
         status_placeholder.markdown(
             _render_chat_waiting_card(
                 chat_mode=chat_mode,
@@ -381,6 +381,7 @@ def _render_pending_chat_task_fragment(task_info_snapshot: Dict[str, Any]) -> No
                 "answer_id": answer_id,
                 "feedback_allowed": feedback_allowed,
                 "intent_domain": intent_domain,
+                "chat_mode": chat_mode,
             }
             st.session_state.messages.append(message_data)
 
@@ -634,7 +635,7 @@ def _get_home_feedback_cache() -> Dict[str, Dict[str, Any]]:
 
 
 def _inject_home_feedback_styles():
-    css_version = "home_feedback_scoped_20260424"
+    css_version = "home_feedback_scoped_20260427"
     if st.session_state.get("_home_feedback_css_version") == css_version:
         return
     st.markdown(
@@ -736,6 +737,9 @@ def _submit_home_chat_feedback(
 
 
 def _render_chat_feedback_controls(msg: Dict[str, Any], index: int):
+    if str(msg.get("chat_mode") or "").strip() == CHAT_MODE_SIMPLE:
+        return
+
     answer_id = str(msg.get("answer_id") or "").strip()
     trace_id = str(msg.get("trace_id") or "").strip()
     if not answer_id or not trace_id or not bool(msg.get("feedback_allowed")):
@@ -767,9 +771,9 @@ def _render_chat_feedback_controls(msg: Dict[str, Any], index: int):
         return
 
     st.caption("这条回答对你有帮助吗？")
-    col_up, col_down = st.columns([0.9, 4.6], gap="small")
+    col_up, col_down = st.columns([0.9, 4.1], gap="small")
     with col_up:
-        if st.button("有帮助", key=f"feedback_up_{answer_id}", type="secondary", use_container_width=True):
+        if st.button("有帮助", key=f"feedback_up_{answer_id}", type="secondary"):
             submit_result = _submit_home_chat_feedback(
                 answer_id=answer_id,
                 trace_id=trace_id,
@@ -2857,20 +2861,6 @@ def process_user_input(
 
             response_placeholder.markdown(simple_response, unsafe_allow_html=True)
 
-        feedback_allowed = False
-        if current_user != "访客" and simple_response:
-            feedback_allowed = save_chat_answer_event(
-                _get_home_feedback_engine(),
-                task_id=f"immediate-{uuid.uuid4()}",
-                user_id=current_user,
-                trace_id=trace_id,
-                answer_id=answer_id,
-                prompt_text=prompt_text,
-                response_text=simple_response,
-                intent_domain=intent_domain,
-                feedback_allowed=True,
-            )
-
         st.session_state.messages.append(
             {
                 "role": "ai",
@@ -2879,8 +2869,9 @@ def process_user_input(
                 "attachments": [],
                 "trace_id": trace_id,
                 "answer_id": answer_id,
-                "feedback_allowed": feedback_allowed,
+                "feedback_allowed": False,
                 "intent_domain": intent_domain,
+                "chat_mode": CHAT_MODE_SIMPLE,
             }
         )
         if current_user != "访客":
