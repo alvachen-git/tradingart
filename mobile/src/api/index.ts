@@ -57,6 +57,33 @@ export interface ChatStatusResponse {
   code?: 'task_timeout' | 'task_stale' | 'task_canceled' | string
 }
 
+export interface ChatSubmitImmediateResponse {
+  delivery_mode: 'immediate'
+  task_id: string
+  message: string
+  chat_mode?: string
+  trace_id?: string
+  answer_id?: string
+  feedback_allowed?: boolean
+  result: {
+    status: 'success' | 'error'
+    response?: string
+    answer?: string
+    chart?: any
+    attachments?: any[]
+    error?: string | null
+  }
+}
+
+export interface ChatSubmitTaskResponse {
+  delivery_mode: 'task'
+  task_id: string
+  message: string
+  chat_mode?: string
+}
+
+export type ChatSubmitResponse = ChatSubmitImmediateResponse | ChatSubmitTaskResponse
+
 export interface ChatPendingResponse {
   has_task: boolean
   task_id?: string
@@ -68,7 +95,7 @@ export interface ChatPendingResponse {
 
 export const chatApi = {
   submit: (prompt: string, history: ChatMessage[] = []) =>
-    request<{ task_id: string }>('POST', '/api/chat/submit', { prompt, history }),
+    request<ChatSubmitResponse>('POST', '/api/chat/submit', { prompt, history }),
 
   status: (taskId: string) =>
     request<ChatStatusResponse>('GET', `/api/chat/status/${taskId}`),
