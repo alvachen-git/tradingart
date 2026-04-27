@@ -222,7 +222,27 @@ async function send() {
     .filter(m => !!m.content)
 
   try {
-    const { task_id } = await chatApi.submit(text, history)
+    const submitRes = await chatApi.submit(text, history)
+    if (submitRes?.delivery_mode === 'immediate') {
+      if (isStaleSession(sessionVersion)) return
+      clearPendingTask()
+      const immediateResult = submitRes?.result || {}
+      const immediateText = String(
+        immediateResult?.response || immediateResult?.answer || immediateResult?.error || 'AI暂时没有返回内容',
+      ).trim()
+      const finalText = immediateResult?.status === 'error'
+        ? markAiContent(immediateText || '网络异常，请稍后重试')
+        : markAiContent(immediateText)
+      replaceLoading(loadingId, finalText)
+      saveHistory()
+      sending.value = false
+      return
+    }
+
+    const task_id = String(submitRes?.task_id || '').trim()
+    if (!task_id) {
+      throw new Error('任务提交失败：未返回 task_id')
+    }
     if (isStaleSession(sessionVersion)) {
       try {
         await chatApi.cancel(task_id, 'clear')
