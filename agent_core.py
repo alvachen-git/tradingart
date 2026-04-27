@@ -18,6 +18,7 @@ from macro_tools import (
 )
 from pydantic import BaseModel, Field
 from langgraph.graph import StateGraph, END
+from langgraph.types import Send
 
 # --- 引入你的工具库 ---
 # 请确保这些文件名和你项目里的一致
@@ -64,9 +65,13 @@ class AgentState(TypedDict):
     # --- 基础信息 ---
     messages: Annotated[List[BaseMessage], operator.add]
     user_query: str
+    completed_steps: Annotated[List[str], operator.add]
+    agent_reports: Annotated[Dict[str, str], operator.or_]
 
     # --- 调度控制 ---
     plan: List[str]  # 任务队列，如 ["analyst", "monitor"]
+    execution_batches: List[List[str]]  # 并行/串行混合执行批次
+    current_batch_index: int  # 当前执行到的批次下标
     current_step: str  # 当前正在执行的步骤
 
     # --- 专家结论 (黑板) ---
@@ -138,6 +143,9 @@ GENERALIST_SMART_KEYWORDS = (
     "压力测试",
     "情景分析",
 )
+
+PARALLEL_BATCH_AGENTS = {"analyst", "monitor", "researcher", "macro_analyst"}
+SERIAL_BATCH_AGENTS = {"strategist", "generalist", "portfolio_analyst", "chatter", "screener", "roaster"}
 
 
 # 期权合约乘数表（每张期权对应的标的数量）
@@ -243,6 +251,50 @@ EXPLICIT_STOCK_PORTFOLIO_COUPLING_KEYWORDS = [
 def _contains_any(text: str, keywords: list) -> bool:
     text_value = str(text or "")
     return any(k in text_value for k in keywords)
+
+
+def _normalize_plan_for_execution_batches(plan: List[str]) -> List[str]:
+    normalized = [str(step) for step in (plan or []) if str(step).strip()]
+    if "strategist" not in normalized:
+        return normalized
+
+    normalized = [step for step in normalized if step != "strategist"]
+    insert_after = -1
+    for dependency in ("analyst", "monitor", "researcher", "macro_analyst"):
+        if dependency in normalized:
+            insert_after = max(insert_after, normalized.index(dependency))
+
+    if insert_after >= 0:
+        normalized.insert(insert_after + 1, "strategist")
+    else:
+        normalized.append("strategist")
+    return normalized
+
+
+def _build_execution_batches(plan: List[str]) -> List[List[str]]:
+    normalized = _normalize_plan_for_execution_batches(plan)
+    batches: List[List[str]] = []
+    pending_parallel: List[str] = []
+
+    def flush_parallel() -> None:
+        nonlocal pending_parallel
+        if pending_parallel:
+            batches.append(pending_parallel[:])
+            pending_parallel = []
+
+    for step in normalized:
+        if step in PARALLEL_BATCH_AGENTS:
+            pending_parallel.append(step)
+            continue
+
+        flush_parallel()
+        if step in SERIAL_BATCH_AGENTS:
+            batches.append([step])
+        else:
+            batches.append([step])
+
+    flush_parallel()
+    return batches
 
 
 def _ensure_analyst_then_strategist(plan: List[str]) -> List[str]:
@@ -3205,12 +3257,31 @@ def finalizer_node(state: AgentState, llm):
         "【王牌分析】", "【闲聊】", "【风控修正】", "【持仓分析】"
     ]
 
-    worker_msgs = [
-        m for m in all_messages
-        if isinstance(m, HumanMessage)
-           and len(m.content) > 10
-           and any(tag in m.content for tag in WORKER_TAGS)
+    agent_reports = state.get("agent_reports") or {}
+    ordered_agent_names = [
+        "macro_analyst",
+        "analyst",
+        "monitor",
+        "researcher",
+        "strategist",
+        "portfolio_analyst",
+        "screener",
+        "generalist",
+        "chatter",
+        "roaster",
     ]
+    worker_msgs = [
+        HumanMessage(content=str(agent_reports[name]).strip())
+        for name in ordered_agent_names
+        if str(agent_reports.get(name, "") or "").strip()
+    ]
+    if not worker_msgs:
+        worker_msgs = [
+            m for m in all_messages
+            if isinstance(m, HumanMessage)
+               and len(m.content) > 10
+               and any(tag in m.content for tag in WORKER_TAGS)
+        ]
 
     # 🔥 [新增] 如果没有有效的 worker 输出，返回友好提示
     if not worker_msgs:
@@ -3958,6 +4029,52 @@ def build_trading_graph(fast_llm, mid_llm, smart_llm):
     """
     workflow = StateGraph(AgentState)
 
+    def _query_preview(state: AgentState, limit: int = 80) -> str:
+        return str(state.get("user_query", "") or "").strip().replace("\n", " ")[:limit]
+
+    def _extract_latest_report(update: Dict[str, Any]) -> str:
+        for msg in reversed(list(update.get("messages", []) or [])):
+            content = str(getattr(msg, "content", "") or "").strip()
+            if content:
+                return content
+        return ""
+
+    def _wrap_worker(name: str, fn):
+        def _runner(state: AgentState):
+            batch_index = int(state.get("current_batch_index", 0) or 0)
+            print(
+                f"[analysis-node-start] batch={batch_index} "
+                f"step={name} query={_query_preview(state)}"
+            )
+            update = fn(state)
+            report = _extract_latest_report(update)
+            wrapped = dict(update)
+            wrapped["completed_steps"] = [name]
+            if report:
+                wrapped["agent_reports"] = {name: report}
+            print(
+                f"[analysis-node-done] batch={batch_index} "
+                f"step={name} report_len={len(report)}"
+            )
+            return wrapped
+
+        return _runner
+
+    def _run_supervisor(state: AgentState):
+        update = supervisor_node(state, fast_llm)
+        plan = list(update.get("plan", []) or [])
+        execution_batches = _build_execution_batches(plan)
+        print(
+            f"[analysis-batches] plan={plan} "
+            f"batches={execution_batches} query={_query_preview(state)}"
+        )
+        wrapped = dict(update)
+        wrapped["execution_batches"] = execution_batches
+        wrapped["current_batch_index"] = 0
+        wrapped["completed_steps"] = []
+        wrapped["agent_reports"] = {}
+        return wrapped
+
     def _run_generalist(state: AgentState):
         chosen_tier = _select_generalist_model_tier(state)
         chosen_llm = smart_llm if chosen_tier == "smart" else mid_llm
@@ -3972,127 +4089,72 @@ def build_trading_graph(fast_llm, mid_llm, smart_llm):
 
     # 1. 注册节点
     # 主管 -> 用 Turbo (快)
-    workflow.add_node("supervisor", lambda state: supervisor_node(state, fast_llm))
+    workflow.add_node("supervisor", _run_supervisor)
     # 分析师 -> 用 Plus (均衡)
-    workflow.add_node("analyst", lambda state: analyst_node(state, mid_llm))
+    workflow.add_node("analyst", _wrap_worker("analyst", lambda state: analyst_node(state, mid_llm)))
     # 策略员 -> 用 Plus (均衡，优先提速)
-    workflow.add_node("strategist", lambda state: strategist_node(state, mid_llm))
+    workflow.add_node("strategist", _wrap_worker("strategist", lambda state: strategist_node(state, mid_llm)))
     # 王牌 -> 按场景分级选模型
-    workflow.add_node("generalist", _run_generalist)
+    workflow.add_node("generalist", _wrap_worker("generalist", _run_generalist))
     # CIO -> 用 Max (聪明)
-    workflow.add_node("finalizer", lambda state: finalizer_node(state, mid_llm))
+    workflow.add_node("finalizer", _wrap_worker("finalizer", lambda state: finalizer_node(state, mid_llm)))
     # 其他工具人 (不需要 LLM，或者随便给一个)
-    workflow.add_node("monitor", lambda state: monitor_node(state, mid_llm))
-    workflow.add_node("researcher", lambda state: researcher_node(state, mid_llm))
-    workflow.add_node("chatter", lambda state: chatter_node(state, mid_llm))
-    workflow.add_node("screener", lambda state: screener_node(state, mid_llm))
-    workflow.add_node("roaster", lambda state: roaster_node(state, mid_llm))
-    workflow.add_node("macro_analyst", lambda state: macro_analyst_node(state, mid_llm))
+    workflow.add_node("monitor", _wrap_worker("monitor", lambda state: monitor_node(state, mid_llm)))
+    workflow.add_node("researcher", _wrap_worker("researcher", lambda state: researcher_node(state, mid_llm)))
+    workflow.add_node("chatter", _wrap_worker("chatter", lambda state: chatter_node(state, mid_llm)))
+    workflow.add_node("screener", _wrap_worker("screener", lambda state: screener_node(state, mid_llm)))
+    workflow.add_node("roaster", _wrap_worker("roaster", lambda state: roaster_node(state, mid_llm)))
+    workflow.add_node("macro_analyst", _wrap_worker("macro_analyst", lambda state: macro_analyst_node(state, mid_llm)))
     # 持仓分析师 -> 用 Plus (均衡)
-    workflow.add_node("portfolio_analyst", lambda state: portfolio_analyst_node(state, mid_llm))
+    workflow.add_node("portfolio_analyst", _wrap_worker("portfolio_analyst", lambda state: portfolio_analyst_node(state, mid_llm)))
 
     # 2. 设置入口
     workflow.set_entry_point("supervisor")
 
-    # 3. 定义动态路由逻辑 (The Router)
-    def route_next_step(state: AgentState):
-        plan = state.get("plan", [])
-        if not plan:
-            return "finalizer"
-
-        # 取出计划中的下一个，并从计划中移除
-        next_node = plan[0]
-        # 更新 plan (这一步其实比较 trick，LangGraph 的 state 是 immutable 的更新流)
-        # 我们需要在节点内部更新 plan，或者在这里只做路由
-        # 简化做法：我们让每个节点跑完后，自己去检查 plan 并路由
-        return next_node
-
-    # ⚠️ LangGraph 的标准做法是：每个节点跑完，返回更新后的 State
-    # 为了实现"流水线"，我们需要一个中间人或者让每个节点都指向 "scheduler"
-    # 这里我们采用 "Scheduler" 模式，即 Supervisor -> Scheduler -> Node -> Scheduler...
-
-    # 但为了简单，我们采用 add_conditional_edges 从 supervisor 直接分发是做不到串行的
-    # 我们需要引入一个名为 "orchestrator" 的隐藏节点，或者修改 supervisor 逻辑
-
-    # --- 修正后的串行逻辑 ---
-    # 我们把 plan 的执行逻辑放在 edge 里
-
-    def executor_router(state: AgentState):
-        plan = state.get("plan", [])
-        if not plan:
-            return "end"  # 这里的 end 指向 finalizer
-        return plan[0]  # 返回 list 中的第一个元素作为节点名
-
-    # 定义每个 Worker 执行完后，都要回到 Router (或者在这里就是直接去下一个)
-    # 为了实现 state['plan'].pop(0)，我们需要在每个 worker 里处理 plan
-    # 这会很繁琐。
-
-    # 🔥 最佳实践：使用一个 "Manager" 节点来循环
     workflow.add_node("manager", lambda state: {"current_step": "managing"})
+
+    def _batch_complete(state: AgentState):
+        current_batch_index = int(state.get("current_batch_index", 0) or 0)
+        execution_batches = state.get("execution_batches") or _build_execution_batches(state.get("plan", []))
+        completed_steps = list(state.get("completed_steps", []) or [])
+        current_batch = execution_batches[current_batch_index] if current_batch_index < len(execution_batches) else []
+        print(
+            f"[analysis-batch-done] batch={current_batch_index} "
+            f"expected={current_batch} completed={completed_steps}"
+        )
+        return {"current_batch_index": current_batch_index + 1}
+
+    workflow.add_node("batch_complete", _batch_complete)
 
     workflow.add_edge("supervisor", "manager")
 
     def manager_router(state: AgentState):
-        plan = state.get("plan", [])
-        if not plan:
+        execution_batches = state.get("execution_batches") or _build_execution_batches(state.get("plan", []))
+        current_batch_index = int(state.get("current_batch_index", 0) or 0)
+        if current_batch_index >= len(execution_batches):
+            print(
+                f"[analysis-batch-next] batch={current_batch_index} "
+                f"next=finalizer query={_query_preview(state)}"
+            )
             return "finalizer"
 
-        # 获取下一个任务
-        next_task = plan[0]
+        current_batch = execution_batches[current_batch_index]
+        print(
+            f"[analysis-batch-start] batch={current_batch_index} "
+            f"steps={current_batch} query={_query_preview(state)}"
+        )
+        base_state = dict(state)
+        return [
+            Send(step, {**base_state, "current_step": step})
+            for step in current_batch
+        ]
 
-        # 这里的关键是：我们需要在路由的同时，把这个任务从 plan 里删掉
-        # 但 router 函数不能修改 state。
-        # 所以必须在 worker 节点里修改 plan，或者有一个专门的 step 节点。
+    workflow.add_conditional_edges("manager", manager_router)
 
-        return next_task
+    for node_name in ["analyst", "monitor", "strategist", "researcher", "generalist", "screener", "roaster", "macro_analyst", "portfolio_analyst", "chatter"]:
+        workflow.add_edge(node_name, "batch_complete")
 
-    # 4. 连接 Edge
-    # Manager 决定去哪
-    workflow.add_conditional_edges(
-        "manager",
-        manager_router,
-        {
-            "analyst": "analyst",
-            "monitor": "monitor",
-            "strategist": "strategist",
-            "researcher": "researcher",
-            "generalist": "generalist",
-            "chatter": "chatter",
-            "roaster": "roaster",
-            "screener": "screener",
-            "macro_analyst": "macro_analyst",
-            "portfolio_analyst": "portfolio_analyst",
-            "finalizer": "finalizer"
-        }
-    )
-
-    # 5. Worker 回流逻辑
-    # 每个 Worker 跑完，必须把自己的名字从 plan 里通过代码删掉 (pop)，然后回到 manager
-    def worker_complete(state):
-        new_plan = state["plan"][1:]  # 移除已完成的第一个
-        return {"plan": new_plan}
-
-    # 我们需要包装一下 worker 节点，让它们能更新 plan
-    # 但上面定义 worker 时已经写死了。
-    # 简便起见，我们在 add_edge 时指定：
-    # Analyst -> Manager (但在进入 Manager 前，State 已经被 Analyst 更新了吗？是的)
-    # 问题是 Analyst 代码里没有 pop plan。
-
-    # 解决方案：修改所有 Worker 节点，或者增加一个通用的后处理节点。
-    # 我们修改上面的 Worker 定义太麻烦，不如在 edge 逻辑里做？不支持。
-
-    # 👉 最终方案：让 Manager 节点负责 POP Plan
-    # 修改 Manager Node 逻辑：
-    workflow.add_node("manager_pop", lambda state: {"plan": state["plan"][1:]})
-
-    # 流程变成：Manager(路由) -> Worker -> Manager_Pop(删除任务) -> Manager(路由)
-
-    # 重新定义 Edge:
-    for node_name in ["analyst", "monitor", "strategist", "researcher", "generalist","screener","roaster", "macro_analyst", "portfolio_analyst"]:
-        workflow.add_edge(node_name, "manager_pop")
-
-    workflow.add_edge("chatter", END)
-    workflow.add_edge("manager_pop", "manager")
+    workflow.add_edge("batch_complete", "manager")
 
     workflow.add_edge("finalizer", END)
 
