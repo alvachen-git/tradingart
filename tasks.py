@@ -768,6 +768,7 @@ def process_ai_query(
         new_messages = messages[input_message_count:]
 
         # 🔥 [修复] 初始化时包含所有可能的键，避免 KeyError
+        agent_reports = final_state.get("agent_reports", {}) or {}
         report_card = {
             "analyst": "",
             "monitor": "",
@@ -782,6 +783,16 @@ def process_ai_query(
             "chatter": "",        # 🔥 [修复] 添加 chatter 键
             "finalizer": ""
         }
+
+        if isinstance(agent_reports, dict):
+            for agent_name, raw_content in agent_reports.items():
+                content = str(raw_content or "")
+                if not content:
+                    continue
+                if agent_name in report_card:
+                    report_card[agent_name] = content
+                if agent_name == "researcher":
+                    report_card["news"] = content
 
         seen_contents = set()
         for msg in new_messages:
