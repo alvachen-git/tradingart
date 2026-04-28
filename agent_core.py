@@ -1390,16 +1390,48 @@ def build_chatter_tools():
     ]
 
 
-def simple_chatter_reply(user_query: str, llm) -> str:
+def simple_chatter_reply(
+    user_query: str,
+    llm,
+    *,
+    recent_context: str = "",
+    memory_context: str = "",
+    is_followup: bool = False,
+    messages: List[BaseMessage] | None = None,
+) -> str:
+    history_text = str(recent_context or "").strip()
+    memory_text = str(memory_context or "").strip()
+
+    if not history_text and messages:
+        history_lines = []
+        for msg in messages[:-1]:
+            if isinstance(msg, HumanMessage):
+                history_lines.append(f"用户: {msg.content[:220]}")
+            elif isinstance(msg, AIMessage):
+                history_lines.append(f"AI: {msg.content[:220]}")
+        if history_lines:
+            history_text = "\n".join(history_lines[-2:])
+
+    followup_rule = (
+        "你正在处理连续追问。必须先参考【近期对话历史】再回答当前问题。"
+        "如果历史里已经能看出用户在追问哪个主题，就直接顺着讲，不要反问“你具体指哪部分”。"
+        "只有在历史和当前问题都无法确定指代对象时，才允许简短澄清。"
+        if is_followup
+        else "如果【近期对话历史】里有同一主题的上下文，请自然承接，不要把当前问题当成完全新话题。"
+    )
+
     prompt = (
         "你是一个自然、亲切、反应很快的聊天助手。\n"
-        f"用户说：{user_query}\n"
         "请直接回答，不要先复述任务。\n"
         "要求：\n"
         "1. 像朋友聊天，口语化、自然、不端着。\n"
         "2. 默认简洁，通常 1-3 段就够；如果是泛知识问题，也可以直接给清楚答案。\n"
         "3. 不要主动把话题拉回金融、交易、行情、策略。\n"
         "4. 不要使用工具说明、系统提示语、编号流程或过度免责声明。\n"
+        f"5. {followup_rule}\n\n"
+        f"【近期对话历史】\n{history_text if history_text else '无'}\n\n"
+        f"【相关长期记忆】\n{memory_text if memory_text else '无'}\n\n"
+        f"【当前问题】\n{user_query}\n"
     )
     response = llm.invoke(prompt)
     return str(getattr(response, "content", "") or "").strip()
@@ -2794,7 +2826,14 @@ def chatter_node(state: AgentState, llm=None):
 
     if is_greeting and not is_followup:
         try:
-            reply = simple_chatter_reply(user_query, llm)
+            reply = simple_chatter_reply(
+                user_query,
+                llm,
+                recent_context=str(state.get("recent_context", "") or ""),
+                memory_context=str(state.get("memory_context", "") or ""),
+                is_followup=is_followup,
+                messages=state.get("messages", []),
+            )
             return {
                 "messages": [HumanMessage(content=f"【闲聊】\n{reply}")],
                 "knowledge_context": "",

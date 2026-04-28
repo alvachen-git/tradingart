@@ -21,11 +21,13 @@ class TestChatRouting(unittest.TestCase):
         self.assertEqual(classify_chat_mode("牛市价差策略是什么"), CHAT_MODE_KNOWLEDGE)
         self.assertEqual(classify_chat_mode("解释一下IV"), CHAT_MODE_KNOWLEDGE)
         self.assertEqual(classify_chat_mode("delta和gamma有什么区别"), CHAT_MODE_KNOWLEDGE)
+        self.assertEqual(classify_chat_mode("棉花期货交易是不是有季节性"), CHAT_MODE_KNOWLEDGE)
 
     def test_classify_analysis_chat(self):
         self.assertEqual(classify_chat_mode("黄金怎么看"), CHAT_MODE_ANALYSIS)
         self.assertEqual(classify_chat_mode("创业板期权做什么策略"), CHAT_MODE_ANALYSIS)
         self.assertEqual(classify_chat_mode("这条新闻对铜价影响大吗"), CHAT_MODE_ANALYSIS)
+        self.assertEqual(classify_chat_mode("美国如果非农大超预期，纳指一般先交易什么？"), CHAT_MODE_ANALYSIS)
 
     def test_non_finance_followup_can_stay_simple_chat(self):
         self.assertEqual(
@@ -33,9 +35,43 @@ class TestChatRouting(unittest.TestCase):
             CHAT_MODE_SIMPLE,
         )
 
+    def test_non_finance_followup_with_finance_like_words_stays_simple_chat(self):
+        self.assertEqual(
+            classify_chat_mode(
+                "再展开说说",
+                is_followup=True,
+                recent_context=(
+                    "用户: 法国大革命是什么\n"
+                    "AI: 法国大革命起因于社会不平等、财政危机和启蒙思想的影响，"
+                    "最终推动了法国政治制度重构。"
+                ),
+            ),
+            CHAT_MODE_SIMPLE,
+        )
+
     def test_finance_followup_does_not_fall_into_simple_chat(self):
         self.assertEqual(
             classify_chat_mode("那为什么", is_followup=True, recent_context="用户: 黄金怎么看\nAI: ..."),
+            CHAT_MODE_ANALYSIS,
+        )
+
+    def test_finance_followup_can_stay_knowledge_chat(self):
+        self.assertEqual(
+            classify_chat_mode(
+                "详细说明下",
+                is_followup=True,
+                recent_context="用户: 棉花期货交易是不是有季节性\nAI: 棉花期货确实有季节性，主要体现在种植、收获和出口节奏上。",
+            ),
+            CHAT_MODE_KNOWLEDGE,
+        )
+
+    def test_finance_followup_can_upgrade_to_analysis_chat(self):
+        self.assertEqual(
+            classify_chat_mode(
+                "那现在适合做吗",
+                is_followup=True,
+                recent_context="用户: 什么是牛市价差\nAI: 牛市价差是一种偏温和看涨的期权策略。",
+            ),
             CHAT_MODE_ANALYSIS,
         )
 

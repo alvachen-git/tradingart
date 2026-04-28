@@ -110,6 +110,8 @@ class TestMobileApiChatMemoryAsync(unittest.TestCase):
         ), patch.object(
             mobile_api, "_detect_mobile_has_portfolio", return_value=False
         ), patch.object(
+            mobile_api, "classify_chat_mode", return_value=mobile_api.CHAT_MODE_ANALYSIS
+        ), patch.object(
             mobile_api.TaskManager, "create_task", return_value="task-2"
         ) as mocked_create:
             out = mobile_api.chat_submit(body=body, username="u1")
@@ -120,7 +122,13 @@ class TestMobileApiChatMemoryAsync(unittest.TestCase):
         self.assertIn("用户: 先看黄金技术面", ctx.get("recent_context", ""))
 
     def test_chat_submit_simple_chat_returns_immediate(self):
-        body = mobile_api.ChatSubmitRequest(prompt="你好", history=[])
+        body = mobile_api.ChatSubmitRequest(
+            prompt="再展开说说",
+            history=[
+                {"role": "user", "content": "法国大革命是什么"},
+                {"role": "assistant", "content": "法国大革命是18世纪末法国发生的政治社会革命。"},
+            ],
+        )
         with patch.object(mobile_api.de, "get_user_profile", return_value={}), patch.object(
             mobile_api, "_detect_mobile_has_portfolio", return_value=False
         ), patch.object(
@@ -142,6 +150,9 @@ class TestMobileApiChatMemoryAsync(unittest.TestCase):
         self.assertEqual(out["chat_mode"], "simple_chat")
         self.assertEqual(out["result"]["response"], "你好呀，我在。")
         mocked_reply.assert_called_once()
+        kwargs = mocked_reply.call_args.kwargs
+        self.assertIn("法国大革命是什么", kwargs.get("recent_context", ""))
+        self.assertTrue(kwargs.get("is_followup"))
         mocked_create.assert_not_called()
         mocked_knowledge.assert_not_called()
 

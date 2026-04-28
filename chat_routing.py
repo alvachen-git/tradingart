@@ -26,7 +26,8 @@ ANALYSIS_INTENT_KEYWORDS = (
     "建议", "怎么做", "怎么办", "怎么看", "能买吗", "能不能买", "分析", "复盘",
     "行情", "走势", "涨跌", "对比", "比较", "宏观", "仓位", "持仓", "调仓", "加仓", "减仓",
     "对冲", "买入", "卖出", "开仓", "平仓", "新闻", "影响", "利好", "利空", "技术面",
-    "基本面", "k线", "图表",
+    "基本面", "k线", "图表", "交易什么", "先交易", "先反应", "怎么传导", "如何传导",
+    "适合做吗", "适合吗", "现在适合",
 )
 
 MARKET_SUBJECT_KEYWORDS = (
@@ -35,11 +36,22 @@ MARKET_SUBJECT_KEYWORDS = (
     "白银", "创业板", "etf", "股票", "指数", "铜价", "原油", "波动率",
 )
 
-FINANCE_DOMAIN_KEYWORDS = (
+FINANCE_BASE_KEYWORDS = (
     "金融", "交易", "投资", "理财", "基金", "债券", "国债", "利率", "通胀", "cpi", "pmi",
     "非农", "美债", "美元", "汇率", "外汇", "a股", "港股", "美股", "期货", "现货",
     "商品", "贵金属", "券商", "财报", "估值", "资产配置",
-) + ANALYSIS_INTENT_KEYWORDS + MARKET_SUBJECT_KEYWORDS
+)
+
+FINANCE_DOMAIN_KEYWORDS = FINANCE_BASE_KEYWORDS + ANALYSIS_INTENT_KEYWORDS + MARKET_SUBJECT_KEYWORDS
+
+RECENT_FINANCE_CONTEXT_HINTS = FINANCE_BASE_KEYWORDS + MARKET_SUBJECT_KEYWORDS
+
+RECENT_ANALYSIS_HINTS = (
+    "怎么看", "怎么做", "怎么办", "能不能买", "能买吗", "策略", "建议", "买入", "卖出",
+    "仓位", "调仓", "加仓", "减仓", "对冲", "开仓", "平仓", "技术面", "基本面",
+    "比较", "对比", "先交易", "交易什么", "先反应", "怎么传导", "如何传导",
+    "适合做吗", "适合吗", "现在适合",
+)
 
 SYMBOL_PATTERN = re.compile(r"\b[A-Z]{1,5}\d{0,4}\b|(?<!\d)\d{6}(?!\d)")
 URL_PATTERN = re.compile(r"https?://|www\.", re.IGNORECASE)
@@ -61,6 +73,29 @@ def is_finance_or_trading_domain(prompt_text: str, *, has_symbol: bool = False) 
     if not text:
         return bool(has_symbol)
     return bool(has_symbol) or any(keyword in text for keyword in FINANCE_DOMAIN_KEYWORDS)
+
+
+def _recent_context_suggests_analysis(recent_context: str) -> bool:
+    text = str(recent_context or "").strip().lower()
+    if not text:
+        return False
+    return any(keyword in text for keyword in RECENT_ANALYSIS_HINTS)
+
+
+def _recent_context_suggests_knowledge(recent_context: str) -> bool:
+    text = str(recent_context or "").strip().lower()
+    if not text:
+        return False
+    return any(keyword in text for keyword in KNOWLEDGE_PREFIXES) or any(
+        phrase in text for phrase in ("什么意思", "是什么", "原理", "举例", "科普", "定义", "区别")
+    )
+
+
+def _recent_context_has_finance_subject(recent_context: str) -> bool:
+    text = str(recent_context or "").strip().lower()
+    if not text:
+        return False
+    return any(keyword in text for keyword in RECENT_FINANCE_CONTEXT_HINTS)
 
 
 def classify_chat_mode(
@@ -90,12 +125,20 @@ def classify_chat_mode(
     has_analysis_intent = any(keyword in text_lower for keyword in ANALYSIS_INTENT_KEYWORDS)
     has_market_subject = any(keyword in text_lower for keyword in MARKET_SUBJECT_KEYWORDS) or has_symbol
     has_finance_subject = is_finance_or_trading_domain(text_lower, has_symbol=has_symbol)
-    recent_has_finance_subject = is_finance_or_trading_domain(recent_context_lower)
+    recent_has_finance_subject = _recent_context_has_finance_subject(recent_context_lower)
+    recent_suggests_analysis = _recent_context_suggests_analysis(recent_context_lower)
+    recent_suggests_knowledge = _recent_context_suggests_knowledge(recent_context_lower)
     has_simple_keyword = any(keyword in text_lower for keyword in SIMPLE_CHAT_KEYWORDS)
 
     if is_followup:
         if recent_has_finance_subject or has_finance_subject:
-            if has_knowledge_prefix and not has_analysis_intent and has_market_subject:
+            if has_analysis_intent:
+                return CHAT_MODE_ANALYSIS
+            if has_knowledge_prefix and not has_analysis_intent:
+                return CHAT_MODE_KNOWLEDGE
+            if recent_suggests_analysis:
+                return CHAT_MODE_ANALYSIS
+            if recent_suggests_knowledge or recent_has_finance_subject:
                 return CHAT_MODE_KNOWLEDGE
             return CHAT_MODE_ANALYSIS
         if has_simple_keyword or not has_finance_subject:
@@ -105,17 +148,17 @@ def classify_chat_mode(
     if has_knowledge_prefix and has_finance_subject and not has_analysis_intent:
         return CHAT_MODE_KNOWLEDGE
 
-    if not has_finance_subject:
-        return CHAT_MODE_SIMPLE
-
     if has_simple_keyword and len(text) <= 24 and not has_finance_subject:
         return CHAT_MODE_SIMPLE
 
     if has_knowledge_prefix and not has_analysis_intent and has_market_subject:
-            return CHAT_MODE_KNOWLEDGE
+        return CHAT_MODE_KNOWLEDGE
 
     if has_analysis_intent or has_market_subject:
         return CHAT_MODE_ANALYSIS
+
+    if has_finance_subject:
+        return CHAT_MODE_KNOWLEDGE
 
     return CHAT_MODE_SIMPLE
 
