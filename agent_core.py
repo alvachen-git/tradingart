@@ -57,6 +57,7 @@ from portfolio_tools import (
     analyze_user_trading_style,
     check_portfolio_risks
 )
+from chat_routing import is_pure_option_data_query
 
 # ==========================================
 # 1. 定义共享记忆 (The State)
@@ -1187,6 +1188,16 @@ def _enforce_margin_monitor_routing(query: str, plan: List[str]) -> List[str]:
     return deduped
 
 
+def _enforce_option_data_monitor_routing(query: str, plan: List[str]) -> List[str]:
+    """
+    纯期权数据问题只派 monitor，避免误上宏观/技术/策略整链路。
+    例如：IV/波动率高低、分位、到期日、剩余天数、保证金、乘数、一手资金占用。
+    """
+    if not is_pure_option_data_query(query):
+        return plan
+    return ["monitor"]
+
+
 CHART_REQUEST_KEYWORDS = (
     "画图",
     "画一下",
@@ -1357,6 +1368,7 @@ def build_monitor_tools():
         get_historical_price,
         get_price_statistics,
         get_recent_price_series,
+        check_option_expiry_status,
         tool_analyze_broker_positions,
         get_futures_oi_ranking,
         query_stock_volume,
@@ -1492,6 +1504,7 @@ def supervisor_node(state: AgentState, llm):
 
     【调度规则 (严格遵守)】
     1. **追求效率**: 问股票成交量就只派 `screener`；只问期货持仓量或价格就只派 `monitor`；只问新闻或热点就只派 `researcher`；只问技术分析就只派`analyst`；只问行情分析就只派`analyst`。
+    1.1 **纯期权数据问题**：只问波动率/IV/IV Rank/到期日/剩余天数/行权价/保证金/合约乘数/一手资金占用，这类问题一律只派 `monitor`，不要派 `macro_analyst`、`analyst`、`strategist`、`researcher`。
     2. **全套服务**: 如果用户问"全面分析"或"详细分析"，默认路径: ["analyst", "monitor", "researcher","strategist"]。
     3. **持仓相关** (仅当用户已上传持仓时): 如果用户提到"我的持仓"、"我的股票"、"仓位"、"持仓风险"、"持仓分析"、"适合我"、"个性化建议"、"我的风格"、"持仓建议"、"调仓"、"加仓"、"减仓"等关键词，**必须**派 `portfolio_analyst`。
     3. **单品种期权问题**: "500ETF适合价差还是裸买"、"推荐白银期权策略" -> 
@@ -1567,6 +1580,7 @@ def supervisor_node(state: AgentState, llm):
 
     final_plan = _enforce_option_portfolio_isolation(query, final_plan)
     final_plan = _enforce_margin_monitor_routing(query, final_plan)
+    final_plan = _enforce_option_data_monitor_routing(query, final_plan)
     if _wants_chart(query) and not any(p in final_plan for p in ("analyst", "generalist")):
         final_plan = ["generalist"] + list(final_plan)
 
@@ -1939,6 +1953,7 @@ def monitor_node(state: AgentState, llm):
     symbol_name = state.get("symbol_name", "")
     current_date = datetime.now().strftime("%Y年%m月%d日 %A")
     latest_trade_date = get_latest_data_date()
+    is_pure_option_data = is_pure_option_data_query(user_q)
 
     # 1. 装备所有数据类工具
     tools = build_monitor_tools()
@@ -1967,6 +1982,19 @@ def monitor_node(state: AgentState, llm):
                 """
     # 2. 定义 Prompt
     # 告诉他只做数据搬运工，不要给建议
+    pure_option_data_instruction = ""
+    if is_pure_option_data:
+        pure_option_data_instruction = """
+    8. 如果是纯期权数据问法（如 IV/波动率/到期日/保证金/乘数/持仓量），必须用短格式回答：
+       - 第一行只写：`结论：...`
+       - 然后最多 4 条数据要点，每条一行，优先回答用户真正问的数据
+       - 禁止展开宏观、技术面、策略、风险偏好、长篇背景
+       - 禁止使用 `【最终决策】`、`Executive Summary`、`市场深度解析`、`交易策略部署`、`签发` 这类长报告标题
+       - 如果缺数据，就直接写“暂无该项数据”
+       - 结尾最多补 1 句：`如果你想结合策略或行情，我再继续展开。`
+    9. 纯数据问法下，整段回答控制在 6 行以内，越短越好。
+        """
+
     prompt = f"""
     你是一位追求效率的市场数据监控官**。。只负责查数据给结果。
     - 今天日期：{current_date}
@@ -2007,6 +2035,7 @@ def monitor_node(state: AgentState, llm):
     5. 商品都有期权，禁止说商品没有场内期权。
     6. 用户要“某天价格”优先用 `get_historical_price`；用户要“区间统计”优先用 `get_price_statistics`。
     7. 用户要“最近N天/最近N个交易日/列表/逐日明细/走势数据表”时，优先用 `get_recent_price_series`，不要只返回 `get_market_snapshot`。
+    {pure_option_data_instruction}
     """
 
     # 3. 创建临时 Agent (ReAct 模式)

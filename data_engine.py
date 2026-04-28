@@ -1269,23 +1269,26 @@ def get_comprehensive_market_data():
             return pd.DataFrame()
 
         today_dt = pd.to_datetime(dates_df.iloc[0]['trade_date'])
-        prev_day_dt = pd.to_datetime(dates_df.iloc[1]['trade_date'])
-        day_5_ago_dt = pd.to_datetime(dates_df.iloc[5]['trade_date'])
-
         today = today_dt.strftime('%Y%m%d')
-        prev_day = prev_day_dt.strftime('%Y%m%d')
-        day_5_ago = day_5_ago_dt.strftime('%Y%m%d')
+        recent_trade_days = [
+            pd.to_datetime(x).strftime('%Y%m%d')
+            for x in dates_df['trade_date'].tolist()
+        ]
 
-        # === 【优化1】合并价格查询 - 一次性获取3天数据 ===
-        sql_price_all = text("""
+        price_date_param_keys = []
+        price_date_params = {}
+        for i, day in enumerate(recent_trade_days):
+            key = f"trade_day_{i}"
+            price_date_param_keys.append(f":{key}")
+            price_date_params[key] = day
+
+        # === 【优化1】合并价格查询 - 一次性获取最近若干交易日数据 ===
+        sql_price_all = text(f"""
         SELECT ts_code, close_price, oi, trade_date
         FROM futures_price 
-        WHERE trade_date IN (:today, :prev_day, :day_5_ago)
+        WHERE REPLACE(trade_date, '-', '') IN ({",".join(price_date_param_keys)})
         """)
-        df_prices_all = read_sql_timed(
-            sql_price_all,
-            params={"today": today, "prev_day": prev_day, "day_5_ago": day_5_ago},
-        )
+        df_prices_all = read_sql_timed(sql_price_all, params=price_date_params)
         if not df_prices_all.empty:
             df_prices_all['close_price'] = pd.to_numeric(df_prices_all['close_price'], errors='coerce').fillna(0.0)
             df_prices_all['oi'] = pd.to_numeric(df_prices_all['oi'], errors='coerce').fillna(0.0)
@@ -1293,13 +1296,37 @@ def get_comprehensive_market_data():
         else:
             df_prices_all['trade_date_key'] = ""
 
-        # 分离数据
-        df_now = df_prices_all[df_prices_all['trade_date_key'] == today].copy()
-        df_hp = df_prices_all[df_prices_all['trade_date_key'].isin([prev_day, day_5_ago])].copy()
+        if not df_prices_all.empty:
+            df_prices_all['join_key'] = df_prices_all['ts_code'].apply(get_join_key)
+            df_prices_all = df_prices_all[df_prices_all['join_key'] != ""].copy()
+            df_prices_all['product'] = df_prices_all['join_key'].apply(
+                lambda x: re.match(r"([a-zA-Z]+)", x).group(1) if re.match(r"([a-zA-Z]+)", x) else ""
+            )
+        else:
+            df_prices_all['join_key'] = ""
+            df_prices_all['product'] = ""
 
-        # 处理join_key
-        df_now['join_key'] = df_now['ts_code'].apply(get_join_key)
-        df_now = df_now[df_now['join_key'] != ""]
+        if df_prices_all.empty:
+            return pd.DataFrame()
+
+        product_trade_dates = (
+            df_prices_all[['product', 'trade_date_key']]
+            .drop_duplicates()
+            .sort_values(['product', 'trade_date_key'], ascending=[True, False])
+        )
+        product_trade_dates['trade_rank'] = product_trade_dates.groupby('product').cumcount()
+        product_date_map = (
+            product_trade_dates[product_trade_dates['trade_rank'].isin([0, 1, 5])]
+            .pivot(index='product', columns='trade_rank', values='trade_date_key')
+            .rename(columns={0: 'latest_date_key', 1: 'prev_date_key', 5: 'day_5_ago_key'})
+            .reset_index()
+        )
+        for col in ['latest_date_key', 'prev_date_key', 'day_5_ago_key']:
+            if col not in product_date_map.columns:
+                product_date_map[col] = None
+
+        df_now = df_prices_all.merge(product_date_map[['product', 'latest_date_key']], on='product', how='left')
+        df_now = df_now[df_now['trade_date_key'] == df_now['latest_date_key']].copy()
 
         # === 【优化2】合并IV查询 - 一次性获取历史和最新数据 ===
         date_7d = (today_dt - pd.Timedelta(days=7)).strftime('%Y%m%d')
@@ -1387,9 +1414,23 @@ def get_comprehensive_market_data():
             df_final = df_selected
             df_final['iv_rank'] = 0
 
-        # === 第6步：历史IV数据（使用已加载的数据）===
-        df_hiv = df_iv_all[df_iv_all['trade_date_key'].isin([prev_day, day_5_ago])].copy()
-        df_hiv = df_hiv.groupby(['join_key', 'trade_date_key'])['iv'].mean().reset_index()
+        # === 第6步：历史IV数据（按合约自身最近日历回退）===
+        df_hiv = df_iv_all.groupby(['join_key', 'trade_date_key'])['iv'].mean().reset_index()
+        iv_trade_dates = (
+            df_hiv[['join_key', 'trade_date_key']]
+            .drop_duplicates()
+            .sort_values(['join_key', 'trade_date_key'], ascending=[True, False])
+        )
+        iv_trade_dates['trade_rank'] = iv_trade_dates.groupby('join_key').cumcount()
+        iv_date_map = (
+            iv_trade_dates[iv_trade_dates['trade_rank'].isin([1, 5])]
+            .pivot(index='join_key', columns='trade_rank', values='trade_date_key')
+            .rename(columns={1: 'prev_iv_date_key', 5: 'iv_5d_date_key'})
+            .reset_index()
+        )
+        for col in ['prev_iv_date_key', 'iv_5d_date_key']:
+            if col not in iv_date_map.columns:
+                iv_date_map[col] = None
 
         # === 【优化3】持仓数据 - 使用IN替代LIKE ===
         date_15d = (today_dt - pd.Timedelta(days=20)).strftime('%Y%m%d')
@@ -1448,13 +1489,19 @@ def get_comprehensive_market_data():
             df_h_final = pd.DataFrame()
 
         # === 第8步：数据合并（优化版）===
-        def get_hist_data(date):
-            p = df_hp[df_hp['trade_date_key'] == date][['ts_code', 'close_price']]
-            i = df_hiv[df_hiv['trade_date_key'] == date][['join_key', 'iv']]
-            return p, i
+        price_date_map = product_date_map[['product', 'prev_date_key', 'day_5_ago_key']].copy()
 
-        p_prev, i_prev = get_hist_data(prev_day)
-        p_5d, i_5d = get_hist_data(day_5_ago)
+        p_prev = df_prices_all.merge(price_date_map[['product', 'prev_date_key']], on='product', how='left')
+        p_prev = p_prev[p_prev['trade_date_key'] == p_prev['prev_date_key']][['ts_code', 'close_price']]
+
+        p_5d = df_prices_all.merge(price_date_map[['product', 'day_5_ago_key']], on='product', how='left')
+        p_5d = p_5d[p_5d['trade_date_key'] == p_5d['day_5_ago_key']][['ts_code', 'close_price']]
+
+        i_prev = df_hiv.merge(iv_date_map[['join_key', 'prev_iv_date_key']], on='join_key', how='left')
+        i_prev = i_prev[i_prev['trade_date_key'] == i_prev['prev_iv_date_key']][['join_key', 'iv']]
+
+        i_5d = df_hiv.merge(iv_date_map[['join_key', 'iv_5d_date_key']], on='join_key', how='left')
+        i_5d = i_5d[i_5d['trade_date_key'] == i_5d['iv_5d_date_key']][['join_key', 'iv']]
 
         df_final = df_final.merge(p_prev, on='ts_code', suffixes=('', '_prev'), how='left')
         df_final = df_final.merge(p_5d, on='ts_code', suffixes=('', '_5d'), how='left')

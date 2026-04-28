@@ -5,6 +5,7 @@ from chat_routing import (
     CHAT_MODE_KNOWLEDGE,
     CHAT_MODE_SIMPLE,
     classify_chat_mode,
+    is_pure_option_data_query,
 )
 
 
@@ -74,6 +75,16 @@ class TestChatRouting(unittest.TestCase):
             ),
             CHAT_MODE_ANALYSIS,
         )
+
+    def test_detect_pure_option_data_query(self):
+        self.assertTrue(is_pure_option_data_query("300ETF期权波动率高吗"))
+        self.assertTrue(is_pure_option_data_query("创业板ETF期权IV现在多少"))
+        self.assertTrue(is_pure_option_data_query("这个期权还有几天到期"))
+
+    def test_option_strategy_or_market_question_is_not_pure_data_query(self):
+        self.assertFalse(is_pure_option_data_query("300ETF期权波动率高吗，适合卖方吗"))
+        self.assertFalse(is_pure_option_data_query("创业板卖认沽如何处理"))
+        self.assertFalse(is_pure_option_data_query("300ETF期权怎么看"))
 
 
 if __name__ == "__main__":

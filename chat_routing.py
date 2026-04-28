@@ -36,6 +36,23 @@ MARKET_SUBJECT_KEYWORDS = (
     "白银", "创业板", "etf", "股票", "指数", "铜价", "原油", "波动率",
 )
 
+OPTION_DATA_SUBJECT_KEYWORDS = (
+    "期权", "认购", "认沽", "波动率", "隐含波动率", "iv", "iv rank", "ivrank",
+    "delta", "gamma", "vega", "theta", "行权价", "到期日", "到期", "剩余天数",
+    "保证金", "合约乘数", "乘数", "一手多少钱", "资金占用", "持仓量", "成交量",
+)
+
+OPTION_DATA_INTENT_KEYWORDS = (
+    "多少", "多高", "高吗", "低吗", "大吗", "小吗", "几天", "多久", "什么水平", "分位",
+    "rank", "几档", "多不多", "够不够", "贵吗", "便宜吗",
+)
+
+OPTION_DATA_EXCLUDED_KEYWORDS = (
+    "策略", "建议", "怎么做", "怎么办", "怎么看", "适合", "能买吗", "能不能买", "买入", "卖出",
+    "开仓", "平仓", "移仓", "调仓", "对冲", "行情", "走势", "技术面", "基本面", "宏观", "新闻",
+    "影响", "利好", "利空", "如何处理",
+)
+
 FINANCE_BASE_KEYWORDS = (
     "金融", "交易", "投资", "理财", "基金", "债券", "国债", "利率", "通胀", "cpi", "pmi",
     "非农", "美债", "美元", "汇率", "外汇", "a股", "港股", "美股", "期货", "现货",
@@ -96,6 +113,22 @@ def _recent_context_has_finance_subject(recent_context: str) -> bool:
     if not text:
         return False
     return any(keyword in text for keyword in RECENT_FINANCE_CONTEXT_HINTS)
+
+
+def is_pure_option_data_query(prompt_text: str) -> bool:
+    text = str(prompt_text or "").strip().lower()
+    if not text:
+        return False
+
+    has_subject = any(keyword in text for keyword in OPTION_DATA_SUBJECT_KEYWORDS)
+    has_intent = any(keyword in text for keyword in OPTION_DATA_INTENT_KEYWORDS)
+    has_excluded = any(keyword in text for keyword in OPTION_DATA_EXCLUDED_KEYWORDS)
+
+    if not has_subject:
+        return False
+    if has_excluded:
+        return False
+    return has_intent
 
 
 def classify_chat_mode(

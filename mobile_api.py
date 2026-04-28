@@ -2322,6 +2322,7 @@ def chat_pending(username: str = Depends(get_current_user)):
 
     # 终态任务只回传一次，避免每次 onShow 重复回放
     if status_name in {"success", "error", "canceled", "timeout"}:
+        TaskManager.clear_user_pending_task(username)
         _clear_mobile_chat_last_task_if_matches(username, task_id)
 
     payload = {

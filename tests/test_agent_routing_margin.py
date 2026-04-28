@@ -20,3 +20,15 @@ def test_non_margin_query_keeps_plan_unchanged():
     plan = ["researcher", "macro_analyst"]
     out = agent_core._enforce_margin_monitor_routing("美联储什么时候降息", plan)
     assert out == plan
+
+
+def test_pure_option_data_query_forces_monitor_only():
+    plan = ["researcher", "macro_analyst", "analyst", "strategist"]
+    out = agent_core._enforce_option_data_monitor_routing("300ETF期权波动率高吗", plan)
+    assert out == ["monitor"]
+
+
+def test_option_data_plus_strategy_query_does_not_force_monitor_only():
+    plan = ["researcher", "macro_analyst", "analyst", "strategist"]
+    out = agent_core._enforce_option_data_monitor_routing("300ETF期权波动率高吗，适合卖方吗", plan)
+    assert out == plan

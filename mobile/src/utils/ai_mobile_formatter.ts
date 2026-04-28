@@ -20,6 +20,30 @@ function normalizeNewline(text: string): string {
   return text.replace(/\r\n?/g, '\n')
 }
 
+function decodeHtmlEntities(text: string): string {
+  return text
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&amp;/gi, '&')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'")
+}
+
+function normalizeHtmlLikeMarkup(text: string): string {
+  return decodeHtmlEntities(String(text || ''))
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/p\s*>/gi, '\n')
+    .replace(/<p[^>]*>/gi, '')
+    .replace(/<\/div\s*>/gi, '\n')
+    .replace(/<div[^>]*>/gi, '')
+    .replace(/<li[^>]*>/gi, '• ')
+    .replace(/<\/li\s*>/gi, '\n')
+    .replace(/<\/?(ul|ol)[^>]*>/gi, '\n')
+    .replace(/<\/?(strong|b|em|i|span)[^>]*>/gi, '')
+    .replace(/<[^>]+>/g, '')
+}
+
 function stripInlineMarkdown(text: string): string {
   return text
     .replace(/\[(.*?)\]\((.*?)\)/g, '$1')
@@ -76,7 +100,7 @@ function convertTableBlock(lines: string[]): string[] {
 }
 
 function normalizeMarkdownToMobile(raw: string): string {
-  const text = normalizeNewline(String(raw || ''))
+  const text = normalizeNewline(normalizeHtmlLikeMarkup(raw))
   const lines = text.split('\n')
   const out: string[] = []
 

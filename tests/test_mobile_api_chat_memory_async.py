@@ -423,6 +423,59 @@ class TestMobileApiChatMemoryAsync(unittest.TestCase):
         self.assertEqual(first.get("result", {}).get("response"), "ok")
         self.assertFalse(second.get("has_task"))
 
+    def test_chat_pending_clears_task_manager_fallback_after_terminal(self):
+        fake_redis = _FakeRedis()
+        task_id = "task-pending-fallback-terminal"
+        fake_redis.setex(
+            mobile_api._mobile_chat_state_key(task_id),
+            86400,
+            json.dumps(
+                {
+                    "task_id": task_id,
+                    "user_id": "u1",
+                    "status": "success",
+                    "created_at": datetime.now().isoformat(),
+                    "updated_at": datetime.now().isoformat(),
+                },
+                ensure_ascii=False,
+            ),
+        )
+        fake_redis.setex(
+            mobile_api._mobile_chat_result_key(task_id),
+            86400,
+            json.dumps(
+                {
+                    "task_id": task_id,
+                    "user_id": "u1",
+                    "result": {"response": "ok"},
+                    "updated_at": datetime.now().isoformat(),
+                },
+                ensure_ascii=False,
+            ),
+        )
+
+        pending_meta = {"task_id": task_id, "user_id": "u1", "status": "pending"}
+        cleared = {"done": False}
+
+        def _get_pending_task(_user_id):
+            return {} if cleared["done"] else pending_meta
+
+        def _clear_pending_task(_user_id):
+            cleared["done"] = True
+
+        with patch.object(mobile_api, "_redis", fake_redis), patch.object(
+            mobile_api.TaskManager, "get_user_pending_task", side_effect=_get_pending_task
+        ), patch.object(
+            mobile_api.TaskManager, "clear_user_pending_task", side_effect=_clear_pending_task
+        ) as mocked_clear:
+            first = mobile_api.chat_pending(username="u1")
+            second = mobile_api.chat_pending(username="u1")
+
+        self.assertTrue(first.get("has_task"))
+        self.assertEqual(first.get("status"), "success")
+        self.assertFalse(second.get("has_task"))
+        mocked_clear.assert_called_with("u1")
+
     def test_chat_cancel_marks_canceled_and_clears_last_task(self):
         fake_redis = _FakeRedis()
         task_id = "task-cancel"
