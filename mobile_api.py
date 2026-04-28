@@ -1237,6 +1237,7 @@ class PayPurchaseRequest(BaseModel):
 _MOBILE_FOLLOWUP_KEYWORDS = (
     "刚刚", "刚才", "上一个", "上一条", "上次", "前面",
     "继续", "接着", "承接", "基于刚才", "刚聊到", "上一轮",
+    "详细说明", "详细说", "展开说", "再展开", "再详细", "那为什么", "为什么呢", "补充一下",
 )
 
 _MOBILE_OPTION_KEYWORDS = (
@@ -2090,7 +2091,13 @@ def chat_submit(
 
     if chat_mode == CHAT_MODE_SIMPLE:
         llm_turbo = ChatTongyi(model="qwen-turbo", streaming=False, temperature=0.1)
-        response_text = simple_chatter_reply(normalized_prompt, llm_turbo)
+        response_text = simple_chatter_reply(
+            normalized_prompt,
+            llm_turbo,
+            recent_context=str(context_payload.get("recent_context") or ""),
+            memory_context=str(context_payload.get("memory_context") or ""),
+            is_followup=bool(context_payload.get("is_followup", False)),
+        )
         feedback_allowed = _save_chat_answer_event(
             task_id=f"immediate-{uuid.uuid4()}",
             user_id=username,

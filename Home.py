@@ -2405,7 +2405,8 @@ def fast_router_check(user_query):
 
 FOLLOWUP_KEYWORDS = (
     "刚刚", "刚才", "上一个", "上一条", "上次", "前面",
-    "继续", "接着", "承接", "基于刚才", "刚聊到", "上一轮"
+    "继续", "接着", "承接", "基于刚才", "刚聊到", "上一轮",
+    "详细说明", "详细说", "展开说", "再展开", "再详细", "那为什么", "为什么呢", "补充一下",
 )
 
 INTENT_OPTION_KEYWORDS = (
@@ -2841,7 +2842,13 @@ def process_user_input(
             typing_placeholder.markdown(_render_simple_chat_typing_indicator(), unsafe_allow_html=True)
             time.sleep(0.08)
             llm_turbo = ChatTongyi(model="qwen-turbo", temperature=0.1)
-            simple_response = simple_chatter_reply(prompt_text, llm_turbo)
+            simple_response = simple_chatter_reply(
+                prompt_text,
+                llm_turbo,
+                recent_context=str(context_payload.get("recent_context") or ""),
+                memory_context=str(context_payload.get("memory_context") or ""),
+                is_followup=bool(context_payload.get("is_followup", False)),
+            )
             typing_placeholder.empty()
             response_placeholder = st.empty()
             full_response = ""
