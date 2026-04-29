@@ -213,6 +213,21 @@ class TestMobileApiChatMemoryAsync(unittest.TestCase):
         self.assertTrue(kwargs.get("strict_topic"))
         self.assertIn("期权", out.get("memory_context", ""))
 
+    def test_mobile_context_extracts_company_focus_slots(self):
+        history = [
+            {"role": "user", "content": "汇川技术最近有什么好消息吗"},
+            {"role": "assistant", "content": "最近我检到两条和机器人业务相关的动态。"},
+        ]
+        out = mobile_api._build_mobile_context_payload(
+            prompt_text="他的机器人或汽车业务",
+            current_user="u1",
+            history=history,
+        )
+        self.assertEqual(out.get("focus_entity"), "汇川技术")
+        self.assertEqual(out.get("focus_topic"), "公司近期动态")
+        self.assertIn("机器人", out.get("focus_aspect", ""))
+        self.assertEqual(out.get("focus_mode_hint"), "company_news")
+
     def test_mobile_context_extracts_account_total_capital_and_upserts_profile(self):
         with patch.object(mobile_api.de, "parse_account_total_capital", return_value=1200000.0), patch.object(
             mobile_api.de, "upsert_user_account_total_capital", return_value=True

@@ -91,6 +91,10 @@ class AgentState(TypedDict):
     is_followup: bool
     recent_context: str
     conversation_id: str
+    focus_entity: str
+    focus_topic: str
+    focus_aspect: str
+    focus_mode_hint: str
 
     news_summary: str  # 情报员填入：新闻摘要 (CPI/非农/美联储)
     macro_view: str  # 宏观分析师填入：宏观定调 (宽松/紧缩)
@@ -1393,13 +1397,28 @@ def build_strategist_tools():
 def build_chatter_tools():
     return [
         search_investment_knowledge,  # 内部知识库
-        get_financial_news,  # 财经新闻
+        search_web,  # 通用联网搜索
         get_market_snapshot,  # 行情快照
         get_futures_margin_profile,  # 保证金/合约乘数
         get_futures_basis_profile,  # 基差/现期结构
         get_futures_inventory_receipt_profile,  # 库存/仓单
         get_futures_delivery_tospot_profile,  # 交割/期转现
     ]
+
+
+def _select_knowledge_chat_strategy(state: AgentState) -> str:
+    focus_mode_hint = str(state.get("focus_mode_hint", "") or "").strip().lower()
+    focus_topic = str(state.get("focus_topic", "") or "").strip()
+    user_query = str(state.get("user_query", "") or "").strip().lower()
+    recent_context = str(state.get("recent_context", "") or "").strip().lower()
+
+    if focus_mode_hint == "company_news" or focus_topic == "公司近期动态":
+        return "company_news"
+    if any(keyword in user_query for keyword in ("最近有什么好消息", "最近有没有好消息", "最近有什么动态", "最近进展", "最近催化")):
+        return "company_news"
+    if any(keyword in recent_context for keyword in ("最近有什么好消息", "最近有没有好消息", "最近有什么动态", "最近进展", "最近催化")):
+        return "company_news"
+    return "concept_explain"
 
 
 def simple_chatter_reply(
@@ -2720,6 +2739,10 @@ def knowledge_chatter_node(state: AgentState, llm=None):
     is_followup = bool(state.get("is_followup", False))
     recent_context = str(state.get("recent_context", "") or "").strip()
     mem_context = str(state.get("memory_context", "") or "").strip()
+    focus_entity = str(state.get("focus_entity", "") or "").strip()
+    focus_topic = str(state.get("focus_topic", "") or "").strip()
+    focus_aspect = str(state.get("focus_aspect", "") or "").strip()
+    knowledge_strategy = _select_knowledge_chat_strategy(state)
     current_date = datetime.now().strftime("%Y年%m月%d日")
     context_parts = []
     if recent_context:
@@ -2737,33 +2760,58 @@ def knowledge_chatter_node(state: AgentState, llm=None):
     # === 🔥 知识问答专用工具集 ===
     tools = build_chatter_tools()
 
-    core_rules = """
+    if knowledge_strategy == "company_news":
+        core_rules = """
+        【⚠️ 核心原则：公司/个股近期动态问答】
+        1. 优先使用 `search_web` 查近期动态、财报、公告、公开报道；必要时再用 `get_market_snapshot` 辅助确认标的或盘面。
+        2. `search_web` 最多只允许调用 3 次；每次都要围绕同一家公司/业务线收窄关键词，不要重复搜同义词。
+        3. 如果第一轮搜索已经拿到清晰答案，禁止继续为了“搜更多”而重复联网。
+        4. 如果用户问的是某条业务线，必须优先围绕该业务线整理信息，不要泛泛介绍整个行业。
+        5. 默认回答结构：
+           - 最近 2-3 条最相关动态
+           - 每条落在哪条业务线
+           - 一句判断：更像常规进展 / 明确催化 / 暂未检到清晰利好
+        6. 如果没查到清晰、近期、可信的利好或催化，要直接明说“目前没检到清晰的近期利好/催化”。
+        7. 禁止用“持续发力”“市场反馈不错”这类行业套话填空。
+        8. 不负责估值高低、基本面优劣、值不值得买、股价影响推演；用户若追问这些，请回答最后补一句“如果你想看对股价、估值、买点的影响，我可以继续从分析角度展开”。
+        """
+        if is_followup:
+            core_rules += """
+        9. 当前是连续追问，必须优先承接上一轮的公司实体和业务线，不要再问“你是说哪个公司/哪块业务”。
+        """
+    else:
+        core_rules = """
         【⚠️ 核心原则：知识库优先】
         1. **第一步必须**：先用 `search_investment_knowledge` 检索内部知识库
-        2. **第二步可选**：如果知识库信息不足或需要最新数据，再用其他工具补充
-           - `get_financial_news`：获取财经新闻
+        2. **第二步可选**：如果知识库信息不足或需要最新公开事实，再用其他工具补充
+           - `search_web`：联网查公开资料（最多 3 次）
            - `get_market_snapshot`：获取实时行情
         3. 如果用户问期货保证金/合约乘数/一手资金占用，优先调用 `get_futures_margin_profile`
         4. 如果用户问基差/现期结构，调用 `get_futures_basis_profile`
         5. 如果用户问库存/仓单，调用 `get_futures_inventory_receipt_profile`
         6. 如果用户问交割/期转现，调用 `get_futures_delivery_tospot_profile`
-    """
-    if is_followup:
-        core_rules = """
+        7. `search_web` 只用于知识库不足时补公开事实，不要把它当成默认第一步。
+        """
+        if is_followup:
+            core_rules = """
         【⚠️ 核心原则：连续承接优先】
         1. 第一段必须先引用上一轮关键结论（1-2句），再回答当前问题。
         2. 承接说明要具体，不得只说“根据上文”。
-        3. 仅在需要补充事实时再调用工具；可以查知识库，但不是必须第一步。
+        3. 仅在需要补充事实时再调用工具；可以查知识库，但不是必须第一步；如需联网，`search_web` 最多使用 3 次。
         4. 禁止把“知识库命中为空”当作默认模板回答。
         """
 
     # === 🔥 ReAct Prompt - 按模式切换规则 ===
     prompt = f"""
-        你是一位热情、博学的**金融导师**，负责解答用户的金融知识问题和闲聊。
+        你是一位热情、博学的**金融导师**，负责解答用户的金融知识问题和资讯问答。
 
         【当前日期】：{current_date}
         【用户问题】：{user_query}
         【连续追问模式】：{"是" if is_followup else "否"}
+        【当前回答策略】：{"公司近期动态" if knowledge_strategy == "company_news" else "概念解释/知识问答"}
+        【当前核心实体】：{focus_entity or "未明确"}
+        【当前核心主题】：{focus_topic or "未明确"}
+        【当前细分维度】：{focus_aspect or "未明确"}
         【历史承接上下文】：
         {combined_context}
 
@@ -2772,8 +2820,9 @@ def knowledge_chatter_node(state: AgentState, llm=None):
         【回答风格】
         1. 语气要轻松、易懂，像朋友聊天一样
         2. 如果是概念解释，用通俗的例子帮助理解
-        3. 如果是策略问题，结合实际场景说明
-        4. 适当引导用户深入探讨相关话题
+        3. 如果是公司近期动态，先给信息，再做一句轻判断，不要越权分析
+        4. 如果是策略问题，结合实际场景说明
+        5. 适当引导用户深入探讨相关话题
 
 
         【禁止事项】
