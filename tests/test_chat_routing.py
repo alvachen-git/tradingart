@@ -23,6 +23,9 @@ class TestChatRouting(unittest.TestCase):
         self.assertEqual(classify_chat_mode("解释一下IV"), CHAT_MODE_KNOWLEDGE)
         self.assertEqual(classify_chat_mode("delta和gamma有什么区别"), CHAT_MODE_KNOWLEDGE)
         self.assertEqual(classify_chat_mode("棉花期货交易是不是有季节性"), CHAT_MODE_KNOWLEDGE)
+        self.assertEqual(classify_chat_mode("什么是真假突破四原则"), CHAT_MODE_KNOWLEDGE)
+        self.assertEqual(classify_chat_mode("什么是支撑位和阻力位"), CHAT_MODE_KNOWLEDGE)
+        self.assertEqual(classify_chat_mode("K线和均线有什么区别"), CHAT_MODE_KNOWLEDGE)
 
     def test_classify_analysis_chat(self):
         self.assertEqual(classify_chat_mode("黄金怎么看"), CHAT_MODE_ANALYSIS)
@@ -30,6 +33,7 @@ class TestChatRouting(unittest.TestCase):
         self.assertEqual(classify_chat_mode("这条新闻对铜价影响大吗"), CHAT_MODE_ANALYSIS)
         self.assertEqual(classify_chat_mode("美国如果非农大超预期，纳指一般先交易什么？"), CHAT_MODE_ANALYSIS)
         self.assertEqual(classify_chat_mode("汇川技术现在估值高不高"), CHAT_MODE_ANALYSIS)
+        self.assertEqual(classify_chat_mode("K线怎么看"), CHAT_MODE_ANALYSIS)
 
     def test_company_recent_news_routes_to_knowledge(self):
         self.assertEqual(classify_chat_mode("汇川技术最近有什么好消息吗"), CHAT_MODE_KNOWLEDGE)
