@@ -2419,6 +2419,30 @@ INTENT_STOCK_PORTFOLIO_KEYWORDS = (
     "股票组合", "股票账户", "前3大持仓", "行业分布",
 )
 
+FOCUS_ENTITY_SUFFIXES = (
+    "股份", "集团", "科技", "技术", "控股", "电子", "电气", "机械", "汽车", "能源",
+    "药业", "银行", "证券", "制造", "动力", "材料", "智能", "软件", "通信", "航空",
+    "医药", "生物", "实业", "新材",
+)
+
+FOCUS_ENTITY_PATTERN = re.compile(
+    r"[一-龥]{2,10}(?:%s)" % "|".join(FOCUS_ENTITY_SUFFIXES)
+)
+
+FOCUS_ASPECT_KEYWORDS = (
+    "机器人业务", "汽车业务", "机器人", "汽车", "工业自动化", "工业软件",
+    "协作机器人", "服务机器人", "工业机器人", "业务线", "这块业务", "这个业务",
+)
+
+COMPANY_NEWS_TOPIC_KEYWORDS = (
+    "最近有什么好消息", "最近有没有好消息", "最近有什么动态", "最近动态", "最近进展",
+    "最近催化", "最近有没有催化", "最近消息", "最新消息", "近期动态", "近期进展",
+    "近期催化", "最近怎么样", "业务最近怎么样", "业务最近如何",
+)
+
+FOCUS_ENTITY_BAD_SUBSTRINGS = ("的", "业务", "或")
+FOCUS_PRONOUN_HINTS = ("他", "她", "它", "他的", "她的", "它的", "这家公司", "这个公司")
+
 
 def _classify_intent_domain(text: str) -> str:
     text_norm = str(text or "").strip().lower()
@@ -2509,6 +2533,40 @@ def _filter_memory_context_by_domain(memory_context: str, intent_domain: str, ma
     return "\n".join(option_chunks)[:max_chars] if option_chunks else ""
 
 
+def _extract_focus_entity(text: str) -> str:
+    raw = str(text or "").strip()
+    if not raw:
+        return ""
+    code_match = re.search(r"(?<!\d)\d{6}(?!\d)", raw)
+    if code_match:
+        return code_match.group(0)
+    company_match = FOCUS_ENTITY_PATTERN.search(raw)
+    if not company_match:
+        return ""
+    candidate = company_match.group(0)
+    if any(bad in candidate for bad in FOCUS_ENTITY_BAD_SUBSTRINGS):
+        return ""
+    return candidate
+
+
+def _extract_focus_aspect(text: str) -> str:
+    raw = str(text or "").strip()
+    if not raw:
+        return ""
+    hits = []
+    for keyword in FOCUS_ASPECT_KEYWORDS:
+        if keyword in raw and keyword not in hits:
+            hits.append(keyword)
+    return "、".join(hits[:2])
+
+
+def _looks_like_company_news_topic(text: str) -> bool:
+    raw = str(text or "").strip().lower()
+    if not raw:
+        return False
+    return any(keyword in raw for keyword in COMPANY_NEWS_TOPIC_KEYWORDS)
+
+
 def _build_memory_record(ai_response: str, max_chars: int = 4000) -> str:
     """将回答压缩成结构化摘要+片段，提升后续召回稳定性"""
     if not ai_response:
@@ -2568,6 +2626,22 @@ def build_context_payload(
     if not should_include_recent_context:
         recent_context = ""
 
+    recent_context_for_focus = recent_context or _build_recent_context_text(recent_turns)
+    pronoun_followup = any(hint in str(prompt_text or "") for hint in FOCUS_PRONOUN_HINTS)
+    explicit_focus_entity = _extract_focus_entity(prompt_text)
+    recent_focus_entity = _extract_focus_entity(recent_context_for_focus)
+    explicit_focus_aspect = _extract_focus_aspect(prompt_text)
+    recent_focus_aspect = _extract_focus_aspect(recent_context_for_focus)
+    should_inherit_focus = is_followup or semantic_related or pronoun_followup or bool(explicit_focus_aspect)
+    focus_entity = explicit_focus_entity or (recent_focus_entity if should_inherit_focus else "")
+    focus_aspect = explicit_focus_aspect or (recent_focus_aspect if should_inherit_focus else "")
+    focus_topic = ""
+    if _looks_like_company_news_topic(prompt_text):
+        focus_topic = "公司近期动态"
+    elif should_inherit_focus and _looks_like_company_news_topic(recent_context_for_focus):
+        focus_topic = "公司近期动态"
+    focus_mode_hint = "company_news" if focus_topic == "公司近期动态" else ""
+
     memory_context = ""
     if current_user != "访客" and should_load_long_memory:
         try:
@@ -2595,6 +2669,10 @@ def build_context_payload(
         "recent_turns": recent_turns,
         "recent_context": recent_context,
         "memory_context": memory_context,
+        "focus_entity": focus_entity,
+        "focus_topic": focus_topic,
+        "focus_aspect": focus_aspect,
+        "focus_mode_hint": focus_mode_hint,
         "semantic_related": bool(semantic_related),
         "conversation_id": conversation_id,
         "account_total_capital": account_total_capital,
@@ -2819,6 +2897,10 @@ def process_user_input(
         prompt_text,
         is_followup=bool(context_payload.get("is_followup", False)),
         recent_context=str(context_payload.get("recent_context") or ""),
+        focus_entity=str(context_payload.get("focus_entity") or ""),
+        focus_topic=str(context_payload.get("focus_topic") or ""),
+        focus_aspect=str(context_payload.get("focus_aspect") or ""),
+        focus_mode_hint=str(context_payload.get("focus_mode_hint") or ""),
         has_uploaded_image=bool(uploaded_image),
         has_structured_payload=has_structured_upload,
         vision_position_domain=vision_position_domain,

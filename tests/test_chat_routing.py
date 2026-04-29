@@ -29,6 +29,51 @@ class TestChatRouting(unittest.TestCase):
         self.assertEqual(classify_chat_mode("创业板期权做什么策略"), CHAT_MODE_ANALYSIS)
         self.assertEqual(classify_chat_mode("这条新闻对铜价影响大吗"), CHAT_MODE_ANALYSIS)
         self.assertEqual(classify_chat_mode("美国如果非农大超预期，纳指一般先交易什么？"), CHAT_MODE_ANALYSIS)
+        self.assertEqual(classify_chat_mode("汇川技术现在估值高不高"), CHAT_MODE_ANALYSIS)
+
+    def test_company_recent_news_routes_to_knowledge(self):
+        self.assertEqual(classify_chat_mode("汇川技术最近有什么好消息吗"), CHAT_MODE_KNOWLEDGE)
+        self.assertEqual(classify_chat_mode("汇川技术的机器人业务，最近有没有好消息"), CHAT_MODE_KNOWLEDGE)
+
+    def test_company_recent_news_followup_can_stay_knowledge(self):
+        self.assertEqual(
+            classify_chat_mode(
+                "他的机器人或汽车业务",
+                is_followup=True,
+                recent_context="用户: 汇川技术最近有什么好消息吗\nAI: 最近我检到两条和机器人业务相关的动态。",
+                focus_entity="汇川技术",
+                focus_topic="公司近期动态",
+                focus_aspect="机器人业务",
+                focus_mode_hint="company_news",
+            ),
+            CHAT_MODE_KNOWLEDGE,
+        )
+        self.assertEqual(
+            classify_chat_mode(
+                "你详细展开",
+                is_followup=True,
+                recent_context="用户: 汇川技术的机器人业务，最近有没有好消息\nAI: 最近有一条机器人业务相关订单动态。",
+                focus_entity="汇川技术",
+                focus_topic="公司近期动态",
+                focus_aspect="机器人业务",
+                focus_mode_hint="company_news",
+            ),
+            CHAT_MODE_KNOWLEDGE,
+        )
+
+    def test_company_recent_news_followup_can_upgrade_to_analysis(self):
+        self.assertEqual(
+            classify_chat_mode(
+                "那对股价影响大吗",
+                is_followup=True,
+                recent_context="用户: 汇川技术最近有什么好消息吗\nAI: 最近有一条机器人业务相关动态。",
+                focus_entity="汇川技术",
+                focus_topic="公司近期动态",
+                focus_aspect="机器人业务",
+                focus_mode_hint="company_news",
+            ),
+            CHAT_MODE_ANALYSIS,
+        )
 
     def test_non_finance_followup_can_stay_simple_chat(self):
         self.assertEqual(

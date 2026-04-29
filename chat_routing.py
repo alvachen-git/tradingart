@@ -11,6 +11,32 @@ FOLLOWUP_HINTS = (
     "然后呢", "接下来", "具体点", "说说看", "讲讲", "进一步", "补充一下",
 )
 
+COMPANY_ENTITY_SUFFIXES = (
+    "股份", "集团", "科技", "技术", "控股", "电子", "电气", "机械", "汽车", "能源",
+    "药业", "银行", "证券", "制造", "动力", "材料", "智能", "软件", "通信", "航空",
+    "医药", "生物", "实业", "新材",
+)
+
+COMPANY_ENTITY_PATTERN = re.compile(
+    r"[一-龥]{2,10}(?:%s)" % "|".join(COMPANY_ENTITY_SUFFIXES)
+)
+
+COMPANY_NEWS_KEYWORDS = (
+    "最近有什么好消息", "最近有没有好消息", "最近有什么动态", "最近动态", "最近进展",
+    "最近催化", "最近有没有催化", "最近有什么消息", "最近消息", "最新消息", "近期动态",
+    "近期进展", "近期催化", "最近公告", "最近怎么样", "业务最近怎么样", "业务最近如何",
+)
+
+COMPANY_ANALYSIS_KEYWORDS = (
+    "估值", "基本面", "值不值得买", "值得买吗", "能不能买", "能买吗", "对股价影响", "影响股价",
+    "怎么看", "会不会涨", "算不算利好", "算不算催化", "股价影响", "业绩弹性", "景气度",
+)
+
+COMPANY_ASPECT_KEYWORDS = (
+    "机器人业务", "汽车业务", "机器人", "汽车", "工业自动化", "工业软件", "协作机器人",
+    "服务机器人", "工业机器人", "业务线", "这块业务", "这个业务",
+)
+
 SIMPLE_CHAT_KEYWORDS = (
     "你好", "您好", "嗨", "hello", "hi", "hey", "哈喽", "早安", "早上好", "下午好", "晚上好",
     "谢谢", "感谢", "thank you", "thanks", "你是谁", "你叫什么", "你是干嘛的", "陪我聊聊",
@@ -115,6 +141,65 @@ def _recent_context_has_finance_subject(recent_context: str) -> bool:
     return any(keyword in text for keyword in RECENT_FINANCE_CONTEXT_HINTS)
 
 
+def _looks_like_company_subject(prompt_text: str, *, has_symbol: bool = False, focus_entity: str = "") -> bool:
+    text = str(prompt_text or "").strip()
+    if not text:
+        return bool(has_symbol or focus_entity)
+    if has_symbol or str(focus_entity or "").strip():
+        return True
+    if "公司" in text or "个股" in text or "业务" in text:
+        return True
+    return bool(COMPANY_ENTITY_PATTERN.search(text))
+
+
+def _is_company_news_query(
+    prompt_text: str,
+    *,
+    has_symbol: bool = False,
+    focus_entity: str = "",
+    focus_mode_hint: str = "",
+    is_followup: bool = False,
+) -> bool:
+    text = str(prompt_text or "").strip().lower()
+    if not text:
+        return False
+    has_company_subject = _looks_like_company_subject(
+        prompt_text,
+        has_symbol=has_symbol,
+        focus_entity=focus_entity,
+    )
+    has_news_intent = any(keyword in text for keyword in COMPANY_NEWS_KEYWORDS)
+    has_aspect_reference = any(keyword in text for keyword in COMPANY_ASPECT_KEYWORDS)
+    if has_company_subject and (has_news_intent or has_aspect_reference):
+        return True
+    if is_followup and str(focus_mode_hint or "").strip().lower() == "company_news":
+        if any(keyword in text for keyword in FOLLOWUP_HINTS):
+            return True
+        if "业务" in text or "消息" in text or "动态" in text or "进展" in text:
+            return True
+    return False
+
+
+def _is_company_analysis_query(
+    prompt_text: str,
+    *,
+    has_symbol: bool = False,
+    focus_entity: str = "",
+    focus_mode_hint: str = "",
+) -> bool:
+    text = str(prompt_text or "").strip().lower()
+    if not text:
+        return False
+    has_company_subject = _looks_like_company_subject(
+        prompt_text,
+        has_symbol=has_symbol,
+        focus_entity=focus_entity,
+    ) or str(focus_mode_hint or "").strip().lower() == "company_news"
+    if not has_company_subject:
+        return False
+    return any(keyword in text for keyword in COMPANY_ANALYSIS_KEYWORDS)
+
+
 def is_pure_option_data_query(prompt_text: str) -> bool:
     text = str(prompt_text or "").strip().lower()
     if not text:
@@ -136,6 +221,10 @@ def classify_chat_mode(
     *,
     is_followup: bool = False,
     recent_context: str = "",
+    focus_entity: str = "",
+    focus_topic: str = "",
+    focus_aspect: str = "",
+    focus_mode_hint: str = "",
     has_uploaded_image: bool = False,
     has_structured_payload: bool = False,
     vision_position_domain: str = "",
@@ -162,8 +251,25 @@ def classify_chat_mode(
     recent_suggests_analysis = _recent_context_suggests_analysis(recent_context_lower)
     recent_suggests_knowledge = _recent_context_suggests_knowledge(recent_context_lower)
     has_simple_keyword = any(keyword in text_lower for keyword in SIMPLE_CHAT_KEYWORDS)
+    has_company_news = _is_company_news_query(
+        text,
+        has_symbol=has_symbol,
+        focus_entity=focus_entity,
+        focus_mode_hint=focus_mode_hint,
+        is_followup=is_followup,
+    )
+    has_company_analysis = _is_company_analysis_query(
+        text,
+        has_symbol=has_symbol,
+        focus_entity=focus_entity,
+        focus_mode_hint=focus_mode_hint,
+    )
 
     if is_followup:
+        if has_company_analysis:
+            return CHAT_MODE_ANALYSIS
+        if has_company_news:
+            return CHAT_MODE_KNOWLEDGE
         if recent_has_finance_subject or has_finance_subject:
             if has_analysis_intent:
                 return CHAT_MODE_ANALYSIS
@@ -183,6 +289,12 @@ def classify_chat_mode(
 
     if has_simple_keyword and len(text) <= 24 and not has_finance_subject:
         return CHAT_MODE_SIMPLE
+
+    if has_company_analysis:
+        return CHAT_MODE_ANALYSIS
+
+    if has_company_news:
+        return CHAT_MODE_KNOWLEDGE
 
     if has_knowledge_prefix and not has_analysis_intent and has_market_subject:
         return CHAT_MODE_KNOWLEDGE
