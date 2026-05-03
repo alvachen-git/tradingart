@@ -34,6 +34,7 @@ class TestChatRouting(unittest.TestCase):
         self.assertEqual(classify_chat_mode("美国如果非农大超预期，纳指一般先交易什么？"), CHAT_MODE_ANALYSIS)
         self.assertEqual(classify_chat_mode("汇川技术现在估值高不高"), CHAT_MODE_ANALYSIS)
         self.assertEqual(classify_chat_mode("K线怎么看"), CHAT_MODE_ANALYSIS)
+        self.assertEqual(classify_chat_mode("为什么今晚英特尔涨这么多？"), CHAT_MODE_ANALYSIS)
 
     def test_company_recent_news_routes_to_knowledge(self):
         self.assertEqual(classify_chat_mode("汇川技术最近有什么好消息吗"), CHAT_MODE_KNOWLEDGE)
@@ -121,6 +122,19 @@ class TestChatRouting(unittest.TestCase):
                 "那现在适合做吗",
                 is_followup=True,
                 recent_context="用户: 什么是牛市价差\nAI: 牛市价差是一种偏温和看涨的期权策略。",
+            ),
+            CHAT_MODE_ANALYSIS,
+        )
+
+    def test_price_move_reason_followup_stays_analysis(self):
+        self.assertEqual(
+            classify_chat_mode(
+                "那你帮我查一下具体是因为什么？",
+                is_followup=True,
+                recent_context="用户: 为什么今晚英特尔涨这么多？\nAI: 可能和业绩超预期或行业消息有关。",
+                focus_entity="英特尔",
+                focus_topic="异动原因",
+                focus_mode_hint="price_move_reason",
             ),
             CHAT_MODE_ANALYSIS,
         )

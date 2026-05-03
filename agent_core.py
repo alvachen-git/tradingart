@@ -1428,6 +1428,9 @@ def simple_chatter_reply(
     recent_context: str = "",
     memory_context: str = "",
     is_followup: bool = False,
+    focus_entity: str = "",
+    focus_topic: str = "",
+    focus_aspect: str = "",
     messages: List[BaseMessage] | None = None,
 ) -> str:
     history_text = str(recent_context or "").strip()
@@ -1460,6 +1463,9 @@ def simple_chatter_reply(
         "3. 不要主动把话题拉回金融、交易、行情、策略。\n"
         "4. 不要使用工具说明、系统提示语、编号流程或过度免责声明。\n"
         f"5. {followup_rule}\n\n"
+        f"【当前核心实体】\n{focus_entity if focus_entity else '未明确'}\n\n"
+        f"【当前核心主题】\n{focus_topic if focus_topic else '未明确'}\n\n"
+        f"【当前细分维度】\n{focus_aspect if focus_aspect else '未明确'}\n\n"
         f"【近期对话历史】\n{history_text if history_text else '无'}\n\n"
         f"【相关长期记忆】\n{memory_text if memory_text else '无'}\n\n"
         f"【当前问题】\n{user_query}\n"
@@ -2910,6 +2916,9 @@ def chatter_node(state: AgentState, llm=None):
                 recent_context=str(state.get("recent_context", "") or ""),
                 memory_context=str(state.get("memory_context", "") or ""),
                 is_followup=is_followup,
+                focus_entity=str(state.get("focus_entity", "") or ""),
+                focus_topic=str(state.get("focus_topic", "") or ""),
+                focus_aspect=str(state.get("focus_aspect", "") or ""),
                 messages=state.get("messages", []),
             )
             return {

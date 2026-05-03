@@ -47,6 +47,23 @@ class TestSimpleChatContext(unittest.TestCase):
         self.assertIn("【相关长期记忆】", fake_llm.last_prompt)
         self.assertIn("法国大革命", fake_llm.last_prompt)
 
+    def test_simple_chatter_reply_includes_focus_slots(self):
+        fake_llm = _FakeLLM()
+        agent_core.simple_chatter_reply(
+            "那你帮我查一下具体是因为什么？",
+            fake_llm,
+            recent_context="用户: 为什么今晚英特尔涨这么多？\nAI: 可能和业绩预期、行业消息或市场情绪有关。",
+            memory_context="",
+            is_followup=True,
+            focus_entity="英特尔",
+            focus_topic="异动原因",
+            focus_aspect="",
+        )
+
+        self.assertIn("【当前核心实体】", fake_llm.last_prompt)
+        self.assertIn("英特尔", fake_llm.last_prompt)
+        self.assertIn("异动原因", fake_llm.last_prompt)
+
 
 if __name__ == "__main__":
     unittest.main()

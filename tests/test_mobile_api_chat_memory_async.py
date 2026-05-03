@@ -228,6 +228,22 @@ class TestMobileApiChatMemoryAsync(unittest.TestCase):
         self.assertIn("机器人", out.get("focus_aspect", ""))
         self.assertEqual(out.get("focus_mode_hint"), "company_news")
 
+    def test_mobile_context_preserves_price_move_reason_followup(self):
+        history = [
+            {"role": "user", "content": "为什么今晚英特尔涨这么多？"},
+            {"role": "assistant", "content": "可能和业绩预期、行业消息或市场情绪有关。"},
+        ]
+        out = mobile_api._build_mobile_context_payload(
+            prompt_text="那你帮我查一下具体是因为什么？",
+            current_user="u1",
+            history=history,
+        )
+        self.assertTrue(out.get("is_followup"))
+        self.assertIn("英特尔", out.get("recent_context", ""))
+        self.assertEqual(out.get("focus_entity"), "英特尔")
+        self.assertEqual(out.get("focus_topic"), "异动原因")
+        self.assertEqual(out.get("focus_mode_hint"), "price_move_reason")
+
     def test_mobile_context_extracts_account_total_capital_and_upserts_profile(self):
         with patch.object(mobile_api.de, "parse_account_total_capital", return_value=1200000.0), patch.object(
             mobile_api.de, "upsert_user_account_total_capital", return_value=True

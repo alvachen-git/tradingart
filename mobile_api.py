@@ -82,6 +82,15 @@ from chat_routing import (
     classify_chat_mode,
     default_progress_for_chat_mode,
 )
+from chat_context_utils import (
+    extract_focus_aspect as _shared_extract_focus_aspect,
+    extract_focus_entity as _shared_extract_focus_entity,
+    infer_followup_intent as _infer_followup_intent,
+    infer_focus_topic as _infer_focus_topic,
+    infer_lookup_followup_intent as _infer_lookup_followup_intent,
+    is_semantically_related as _shared_is_semantically_related,
+    should_preserve_recent_context as _should_preserve_recent_context,
+)
 import subscription_service as sub_svc
 import payment_service as pay_svc
 import data_engine as de
@@ -1301,47 +1310,15 @@ def _extract_similarity_tokens(text: str) -> set[str]:
 
 
 def _is_semantically_related(prompt_text: str, recent_turns: List[dict], threshold: float = 0.18) -> bool:
-    current_tokens = _extract_similarity_tokens(prompt_text)
-    if not current_tokens:
-        return False
-    best_score = 0.0
-    for turn in recent_turns:
-        turn_tokens = _extract_similarity_tokens(str(turn.get("content", "")))
-        if not turn_tokens:
-            continue
-        union = current_tokens | turn_tokens
-        if not union:
-            continue
-        score = len(current_tokens & turn_tokens) / len(union)
-        best_score = max(best_score, score)
-    return best_score >= threshold
+    return _shared_is_semantically_related(prompt_text, recent_turns, threshold=threshold)
 
 
 def _extract_mobile_focus_entity(text: str) -> str:
-    raw = str(text or "").strip()
-    if not raw:
-        return ""
-    code_match = re.search(r"(?<!\d)\d{6}(?!\d)", raw)
-    if code_match:
-        return code_match.group(0)
-    company_match = _MOBILE_FOCUS_ENTITY_PATTERN.search(raw)
-    if not company_match:
-        return ""
-    candidate = company_match.group(0)
-    if any(bad in candidate for bad in _MOBILE_FOCUS_ENTITY_BAD_SUBSTRINGS):
-        return ""
-    return candidate
+    return _shared_extract_focus_entity(text)
 
 
 def _extract_mobile_focus_aspect(text: str) -> str:
-    raw = str(text or "").strip()
-    if not raw:
-        return ""
-    hits: List[str] = []
-    for keyword in _MOBILE_FOCUS_ASPECT_KEYWORDS:
-        if keyword in raw and keyword not in hits:
-            hits.append(keyword)
-    return "、".join(hits[:2])
+    return _shared_extract_focus_aspect(text)
 
 
 def _looks_like_mobile_company_news_topic(text: str) -> bool:
@@ -1418,11 +1395,24 @@ def _build_mobile_context_payload(
     intent_domain = _classify_mobile_intent_domain(prompt_text)
     latest_user_content = _get_latest_mobile_user_turn_content(recent_turns)
     recent_domain = _classify_mobile_intent_domain(latest_user_content)
-    recent_context = _build_recent_context_text(recent_turns)
-    is_followup = any(kw in prompt_text for kw in _MOBILE_FOLLOWUP_KEYWORDS)
+    recent_context_full = _build_recent_context_text(recent_turns)
+    recent_context = recent_context_full
+    is_followup = _infer_followup_intent(prompt_text)
+    lookup_followup = _infer_lookup_followup_intent(prompt_text)
     semantic_related = _is_semantically_related(prompt_text, recent_turns)
     is_same_domain = intent_domain == recent_domain
-    should_include_recent_context = is_followup or (semantic_related and is_same_domain)
+    recent_context_for_focus = recent_context_full
+    recent_focus_entity = _extract_mobile_focus_entity(recent_context_for_focus) or _extract_mobile_focus_entity(latest_user_content)
+    recent_focus_topic, recent_focus_mode_hint = _infer_focus_topic(recent_context_for_focus)
+    should_include_recent_context = _should_preserve_recent_context(
+        prompt_text,
+        is_followup=is_followup,
+        semantic_related=semantic_related,
+        is_same_domain=is_same_domain,
+        recent_turns=recent_turns,
+        recent_focus_entity=recent_focus_entity,
+        recent_focus_topic=recent_focus_topic,
+    )
     should_load_long_memory = should_include_recent_context
     account_total_capital = None
 
@@ -1447,21 +1437,22 @@ def _build_mobile_context_payload(
     if not should_include_recent_context:
         recent_context = ""
 
-    recent_context_for_focus = recent_context or _build_recent_context_text(recent_turns)
     pronoun_followup = any(hint in str(prompt_text or "") for hint in _MOBILE_FOCUS_PRONOUN_HINTS)
     explicit_focus_entity = _extract_mobile_focus_entity(prompt_text)
-    recent_focus_entity = _extract_mobile_focus_entity(recent_context_for_focus)
     explicit_focus_aspect = _extract_mobile_focus_aspect(prompt_text)
     recent_focus_aspect = _extract_mobile_focus_aspect(recent_context_for_focus)
-    should_inherit_focus = is_followup or semantic_related or pronoun_followup or bool(explicit_focus_aspect)
+    should_inherit_focus = (
+        should_include_recent_context
+        or lookup_followup
+        or pronoun_followup
+        or bool(explicit_focus_aspect)
+        or bool(recent_focus_entity)
+    )
     focus_entity = explicit_focus_entity or (recent_focus_entity if should_inherit_focus else "")
     focus_aspect = explicit_focus_aspect or (recent_focus_aspect if should_inherit_focus else "")
-    focus_topic = ""
-    if _looks_like_mobile_company_news_topic(prompt_text):
-        focus_topic = "公司近期动态"
-    elif should_inherit_focus and _looks_like_mobile_company_news_topic(recent_context_for_focus):
-        focus_topic = "公司近期动态"
-    focus_mode_hint = "company_news" if focus_topic == "公司近期动态" else ""
+    focus_topic, focus_mode_hint = _infer_focus_topic(prompt_text)
+    if not focus_topic and should_inherit_focus:
+        focus_topic, focus_mode_hint = recent_focus_topic, recent_focus_mode_hint
 
     memory_context = ""
     if current_user and current_user != "访客" and should_load_long_memory:
@@ -2179,6 +2170,9 @@ def chat_submit(
             recent_context=str(context_payload.get("recent_context") or ""),
             memory_context=str(context_payload.get("memory_context") or ""),
             is_followup=bool(context_payload.get("is_followup", False)),
+            focus_entity=str(context_payload.get("focus_entity") or ""),
+            focus_topic=str(context_payload.get("focus_topic") or ""),
+            focus_aspect=str(context_payload.get("focus_aspect") or ""),
         )
         feedback_allowed = _save_chat_answer_event(
             task_id=f"immediate-{uuid.uuid4()}",
