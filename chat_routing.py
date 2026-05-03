@@ -9,6 +9,7 @@ CHAT_MODE_ANALYSIS: Final[str] = "analysis_chat"
 FOLLOWUP_HINTS = (
     "继续", "展开", "详细说", "详细讲", "再说", "那为什么", "为什么呢",
     "然后呢", "接下来", "具体点", "说说看", "讲讲", "进一步", "补充一下",
+    "查一下", "帮我查", "具体原因", "到底为什么", "详细原因", "那具体呢",
 )
 
 COMPANY_ENTITY_SUFFIXES = (
@@ -46,6 +47,10 @@ SIMPLE_CHAT_KEYWORDS = (
 KNOWLEDGE_PREFIXES = (
     "什么是", "解释", "解释一下", "科普一下", "说说", "讲讲", "区别", "原理", "举例",
     "通俗说", "什么意思", "是什么", "怎么理解",
+)
+
+CONVERSATIONAL_KNOWLEDGE_PREFIXES = (
+    "你知道", "你了解", "听过", "有没有听过", "知道", "了解",
 )
 
 ANALYSIS_INTENT_KEYWORDS = (
@@ -99,7 +104,7 @@ RECENT_ANALYSIS_HINTS = (
     "怎么看", "怎么做", "怎么办", "能不能买", "能买吗", "策略", "建议", "买入", "卖出",
     "仓位", "调仓", "加仓", "减仓", "对冲", "开仓", "平仓", "技术面", "基本面",
     "比较", "对比", "先交易", "交易什么", "先反应", "怎么传导", "如何传导",
-    "适合做吗", "适合吗", "现在适合",
+    "适合做吗", "适合吗", "现在适合", "涨这么多", "跌这么多", "异动原因", "上涨原因", "下跌原因",
 )
 
 SYMBOL_PATTERN = re.compile(r"\b[A-Z]{1,5}\d{0,4}\b|(?<!\d)\d{6}(?!\d)")
@@ -206,6 +211,28 @@ def _is_company_analysis_query(
     return any(keyword in text for keyword in COMPANY_ANALYSIS_KEYWORDS)
 
 
+def _is_price_move_reason_query(
+    prompt_text: str,
+    *,
+    focus_topic: str = "",
+    focus_mode_hint: str = "",
+    is_followup: bool = False,
+) -> bool:
+    text = str(prompt_text or "").strip().lower()
+    if not text:
+        return False
+    if ("为什么" in text or "原因" in text) and any(
+        keyword in text for keyword in ("涨", "跌", "拉升", "跳水", "异动", "大涨", "大跌")
+    ):
+        return True
+    if str(focus_mode_hint or "").strip().lower() == "price_move_reason" or str(focus_topic or "").strip() == "异动原因":
+        if is_followup and any(keyword in text for keyword in FOLLOWUP_HINTS):
+            return True
+        if any(keyword in text for keyword in ("查", "找", "具体", "原因", "为什么")):
+            return True
+    return False
+
+
 def is_pure_option_data_query(prompt_text: str) -> bool:
     text = str(prompt_text or "").strip().lower()
     if not text:
@@ -250,6 +277,9 @@ def classify_chat_mode(
         return CHAT_MODE_ANALYSIS
 
     has_knowledge_prefix = any(keyword in text_lower for keyword in KNOWLEDGE_PREFIXES)
+    has_conversational_knowledge_prefix = any(
+        keyword in text_lower for keyword in CONVERSATIONAL_KNOWLEDGE_PREFIXES
+    )
     has_analysis_intent = any(keyword in text_lower for keyword in ANALYSIS_INTENT_KEYWORDS)
     has_market_subject = any(keyword in text_lower for keyword in MARKET_SUBJECT_KEYWORDS) or has_symbol
     has_finance_subject = is_finance_or_trading_domain(text_lower, has_symbol=has_symbol)
@@ -270,8 +300,16 @@ def classify_chat_mode(
         focus_entity=focus_entity,
         focus_mode_hint=focus_mode_hint,
     )
+    has_price_move_reason = _is_price_move_reason_query(
+        text,
+        focus_topic=focus_topic,
+        focus_mode_hint=focus_mode_hint,
+        is_followup=is_followup,
+    )
 
     if is_followup:
+        if has_price_move_reason:
+            return CHAT_MODE_ANALYSIS
         if has_company_analysis:
             return CHAT_MODE_ANALYSIS
         if has_company_news:
@@ -293,6 +331,9 @@ def classify_chat_mode(
     if has_knowledge_prefix and has_finance_subject and not has_analysis_intent:
         return CHAT_MODE_KNOWLEDGE
 
+    if has_conversational_knowledge_prefix and has_finance_subject and not has_analysis_intent:
+        return CHAT_MODE_KNOWLEDGE
+
     if has_simple_keyword and len(text) <= 24 and not has_finance_subject:
         return CHAT_MODE_SIMPLE
 
@@ -301,6 +342,9 @@ def classify_chat_mode(
 
     if has_company_news:
         return CHAT_MODE_KNOWLEDGE
+
+    if has_price_move_reason:
+        return CHAT_MODE_ANALYSIS
 
     if has_knowledge_prefix and not has_analysis_intent and has_market_subject:
         return CHAT_MODE_KNOWLEDGE

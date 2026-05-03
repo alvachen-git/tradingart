@@ -19,7 +19,7 @@ _bootstrap_env()
 
 import streamlit as st
 import hashlib
-from task_manager import TaskManager
+from task_manager import TaskManager, UserTaskQueueFullError
 import time
 import pandas as pd
 import data_engine as de
@@ -29,6 +29,7 @@ import plotly.io as pio
 import json
 import random
 import markdown
+import html
 from typing import Optional, Dict, Any
 import auth_utils as auth
 import memory_utils as mem
@@ -41,6 +42,15 @@ from chat_routing import (
     CHAT_MODE_KNOWLEDGE,
     CHAT_MODE_SIMPLE,
     classify_chat_mode,
+)
+from chat_context_utils import (
+    extract_focus_aspect as _shared_extract_focus_aspect,
+    extract_focus_entity as _shared_extract_focus_entity,
+    infer_followup_intent as _infer_followup_intent,
+    infer_focus_topic as _infer_focus_topic,
+    infer_lookup_followup_intent as _infer_lookup_followup_intent,
+    is_semantically_related as _shared_is_semantically_related,
+    should_preserve_recent_context as _should_preserve_recent_context,
 )
 from vision_tools import analyze_financial_image, analyze_position_image
 from data_engine import get_commodity_iv_info
@@ -251,21 +261,224 @@ def _render_chat_waiting_card(
     """
 
 
+def _normalize_home_pending_task(task_meta: Dict[str, Any], overrides: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    data = dict(task_meta or {})
+    if overrides:
+        data.update({k: v for k, v in overrides.items() if v is not None})
+    return {
+        "task_id": str(data.get("task_id") or "").strip(),
+        "prompt": str(data.get("prompt") or "").strip(),
+        "raw_prompt": str(data.get("raw_prompt") or data.get("prompt") or "").strip(),
+        "image_context": str(data.get("image_context") or ""),
+        "mode": str(data.get("mode") or "normal"),
+        "risk": str(data.get("risk_preference") or data.get("risk") or "稳健型"),
+        "context_payload": data.get("context_payload") or {},
+        "start_time": float(data.get("start_time") or 0.0),
+        "analysis_mode_label": str(data.get("analysis_mode_label") or ""),
+        "trace_id": str(data.get("trace_id") or "").strip(),
+        "answer_id": str(data.get("answer_id") or "").strip(),
+        "intent_domain": str(data.get("intent_domain") or "general").strip() or "general",
+        "chat_mode": str(data.get("chat_mode") or CHAT_MODE_ANALYSIS),
+        "queue_state": str(data.get("queue_state") or "active"),
+        "queue_ahead": int(data.get("queue_ahead") or 0),
+    }
+
+
+def _build_task_placeholder_message(
+    *,
+    task_id: str,
+    prompt_text: str,
+    trace_id: str = "",
+    answer_id: str = "",
+    intent_domain: str = "general",
+    chat_mode: str = CHAT_MODE_ANALYSIS,
+) -> Dict[str, Any]:
+    return {
+        "role": "ai",
+        "content": "",
+        "chart": "",
+        "attachments": [],
+        "trace_id": str(trace_id or "").strip(),
+        "answer_id": str(answer_id or "").strip(),
+        "feedback_allowed": False,
+        "intent_domain": str(intent_domain or "general").strip() or "general",
+        "chat_mode": str(chat_mode or CHAT_MODE_ANALYSIS),
+        "linked_task_id": str(task_id or "").strip(),
+        "linked_prompt": str(prompt_text or "").strip(),
+        "is_task_placeholder": True,
+    }
+
+
+def _find_message_index_by_task_id(task_id: str, *, placeholder_only: bool = False) -> int:
+    target = str(task_id or "").strip()
+    if not target:
+        return -1
+    for idx, msg in enumerate(st.session_state.get("messages") or []):
+        if str(msg.get("linked_task_id") or "").strip() != target:
+            continue
+        if placeholder_only and not bool(msg.get("is_task_placeholder")):
+            continue
+        return idx
+    return -1
+
+
+def _replace_task_placeholder_message(task_id: str, message_data: Dict[str, Any]) -> None:
+    idx = _find_message_index_by_task_id(task_id, placeholder_only=True)
+    payload = dict(message_data or {})
+    payload["linked_task_id"] = str(task_id or "").strip()
+    payload.pop("is_task_placeholder", None)
+    if idx >= 0:
+        st.session_state.messages[idx] = payload
+    else:
+        st.session_state.messages.append(payload)
+
+
+def _replace_task_placeholder_with_text(
+    task_id: str,
+    content: str,
+    *,
+    chat_mode: str = CHAT_MODE_ANALYSIS,
+    intent_domain: str = "general",
+) -> None:
+    _replace_task_placeholder_message(
+        task_id,
+        {
+            "role": "ai",
+            "content": str(content or "").strip(),
+            "chart": "",
+            "attachments": [],
+            "feedback_allowed": False,
+            "trace_id": "",
+            "answer_id": "",
+            "intent_domain": str(intent_domain or "general").strip() or "general",
+            "chat_mode": str(chat_mode or CHAT_MODE_ANALYSIS),
+        },
+    )
+
+
+def _collect_home_task_overrides() -> Dict[str, Dict[str, Any]]:
+    overrides: Dict[str, Dict[str, Any]] = {}
+    for task_info in st.session_state.get("pending_tasks") or []:
+        task_id = str(task_info.get("task_id") or "").strip()
+        if not task_id:
+            continue
+        overrides[task_id] = {
+            "raw_prompt": task_info.get("raw_prompt"),
+            "trace_id": task_info.get("trace_id"),
+            "answer_id": task_info.get("answer_id"),
+            "intent_domain": task_info.get("intent_domain"),
+            "analysis_mode_label": task_info.get("analysis_mode_label"),
+        }
+    return overrides
+
+
+def _refresh_home_pending_tasks(current_user: str, extra_overrides: Optional[Dict[str, Dict[str, Any]]] = None) -> list[Dict[str, Any]]:
+    if not current_user or current_user == "访客":
+        st.session_state.pending_tasks = []
+        st.session_state.pending_task = None
+        return []
+
+    overrides = _collect_home_task_overrides()
+    if extra_overrides:
+        overrides.update(extra_overrides)
+
+    normalized_tasks = []
+    for task_meta in TaskManager().get_user_task_queue(current_user):
+        task_id = str(task_meta.get("task_id") or "").strip()
+        normalized_tasks.append(
+            _normalize_home_pending_task(
+                task_meta,
+                overrides=overrides.get(task_id),
+            )
+        )
+
+    st.session_state.pending_tasks = normalized_tasks
+    st.session_state.pending_task = normalized_tasks[0] if normalized_tasks else None
+    return normalized_tasks
+
+
+def _render_queued_chat_task_card(task_info: Dict[str, Any]) -> str:
+    prompt = html.escape(str(task_info.get("raw_prompt") or task_info.get("prompt") or "排队中的问题"))
+    queue_ahead = int(task_info.get("queue_ahead") or 0)
+    queue_msg = f"排队中，前面还有 {queue_ahead} 个问题" if queue_ahead > 0 else "排队中，等待开始处理"
+    return f"""
+    <style>
+    .queued-task-wrap {{
+        border-radius: 14px;
+        border: 1px solid rgba(255,255,255,0.08);
+        background: rgba(255,255,255,0.03);
+        padding: 14px 16px;
+        margin-top: 10px;
+        color: #E5E7EB;
+    }}
+    .queued-task-title {{
+        font-weight: 700;
+        font-size: 15px;
+        margin-bottom: 6px;
+    }}
+    .queued-task-sub {{
+        color: #A7B2C7;
+        font-size: 13px;
+        line-height: 1.5;
+    }}
+    </style>
+    <div class="queued-task-wrap">
+        <div class="queued-task-title">🕒 排队中的问题</div>
+        <div class="queued-task-sub">{prompt}</div>
+        <div class="queued-task-sub" style="margin-top: 6px;">{queue_msg}</div>
+    </div>
+    """
+
+
+def _render_inline_queued_chat_task_hint(task_info: Dict[str, Any]) -> str:
+    queue_ahead = int(task_info.get("queue_ahead") or 0)
+    queue_msg = f"排队中，前面还有 {queue_ahead} 个问题" if queue_ahead > 0 else "排队中，等待开始处理"
+    return f"""
+    <style>
+    .queued-inline-wrap {{
+        margin-top: 8px;
+        color: #E5E7EB;
+    }}
+    .queued-inline-title {{
+        font-weight: 700;
+        font-size: 14px;
+        margin-bottom: 2px;
+    }}
+    .queued-inline-sub {{
+        color: #A7B2C7;
+        font-size: 13px;
+        line-height: 1.5;
+    }}
+    </style>
+    <div class="queued-inline-wrap">
+        <div class="queued-inline-title">🕒 排队中</div>
+        <div class="queued-inline-sub">{queue_msg}</div>
+    </div>
+    """
+
+
 @st.fragment(run_every=1.5)
 def _render_pending_chat_task_fragment(task_info_snapshot: Dict[str, Any]) -> None:
-    task_info = st.session_state.get("pending_task") or task_info_snapshot
+    pending_tasks = st.session_state.get("pending_tasks") or []
+    task_info = pending_tasks[0] if pending_tasks else (st.session_state.get("pending_task") or task_info_snapshot)
     if not task_info:
         return
 
     task_id = task_info["task_id"]
-    task_start = task_info["start_time"]
+    task_start = float(task_info.get("start_time") or 0.0) or time.time()
     task_mode = task_info.get("mode", "normal")
     current_user = st.session_state.get("user_id", "访客")
 
     if time.time() - task_start >= 1800:
         st.warning("⏱️ 任务处理超时，请重新提问。")
-        st.session_state.pending_task = None
-        TaskManager().clear_user_pending_task(current_user)
+        _replace_task_placeholder_with_text(
+            task_id,
+            "⏱️ 这条问题处理超时了，请稍后重试，或把问题拆得更具体一些。",
+            chat_mode=chat_mode if 'chat_mode' in locals() else CHAT_MODE_ANALYSIS,
+            intent_domain=str(task_info.get("intent_domain") or "general").strip() or "general",
+        )
+        TaskManager().complete_user_task(current_user, task_id)
+        _refresh_home_pending_tasks(current_user)
         st.rerun()
         return
 
@@ -383,7 +596,7 @@ def _render_pending_chat_task_fragment(task_info_snapshot: Dict[str, Any]) -> No
                 "intent_domain": intent_domain,
                 "chat_mode": chat_mode,
             }
-            st.session_state.messages.append(message_data)
+            _replace_task_placeholder_message(task_id, message_data)
 
             if current_user != "访客":
                 try:
@@ -397,8 +610,8 @@ def _render_pending_chat_task_fragment(task_info_snapshot: Dict[str, Any]) -> No
                 except Exception as e:
                     print(f"记忆存储失败: {e}")
 
-        st.session_state.pending_task = None
-        task_manager.clear_user_pending_task(current_user)
+        task_manager.complete_user_task(current_user, task_id)
+        _refresh_home_pending_tasks(current_user)
         st.rerun()
         return
 
@@ -406,9 +619,15 @@ def _render_pending_chat_task_fragment(task_info_snapshot: Dict[str, Any]) -> No
         status_placeholder.error("❌ 分析失败")
         error_msg = task_status.get("error", "未知错误")
         content_placeholder.error(f"抱歉，分析过程出现问题：{error_msg[:100]}")
+        _replace_task_placeholder_with_text(
+            task_id,
+            f"❌ 这条问题处理失败了：{str(error_msg or '未知错误')[:120]}",
+            chat_mode=chat_mode,
+            intent_domain=str(task_info.get("intent_domain") or "general").strip() or "general",
+        )
 
-        st.session_state.pending_task = None
-        task_manager.clear_user_pending_task(current_user)
+        task_manager.complete_user_task(current_user, task_id)
+        _refresh_home_pending_tasks(current_user)
         if task_mode == "deep":
             st.session_state.deep_mode_enabled = False
             fallback_prompt = str(task_info.get("prompt") or "").strip()
@@ -423,9 +642,15 @@ def _render_pending_chat_task_fragment(task_info_snapshot: Dict[str, Any]) -> No
     if current_status == "timeout":
         status_placeholder.warning("⏱️ Deep 报告超时")
         content_placeholder.warning("Deep 报告在预算与时限内未完成，建议缩小问题范围或切换普通分析。")
+        _replace_task_placeholder_with_text(
+            task_id,
+            "⏱️ 这条问题处理超时了，建议缩小问题范围，或切换普通分析后再试一次。",
+            chat_mode=chat_mode,
+            intent_domain=str(task_info.get("intent_domain") or "general").strip() or "general",
+        )
 
-        st.session_state.pending_task = None
-        task_manager.clear_user_pending_task(current_user)
+        task_manager.complete_user_task(current_user, task_id)
+        _refresh_home_pending_tasks(current_user)
         st.session_state.deep_mode_enabled = False
         fallback_prompt = str(task_info.get("prompt") or "").strip()
         if fallback_prompt and st.button("一键转普通分析", key=f"deep_fallback_timeout_{task_id}"):
@@ -2043,6 +2268,8 @@ if ENABLE_HOME_ANNOUNCEMENT:
 # 初始化待处理任务状态
 if "pending_task" not in st.session_state:
     st.session_state.pending_task = None
+if "pending_tasks" not in st.session_state:
+    st.session_state.pending_tasks = []
 if "deep_mode_enabled" not in st.session_state:
     st.session_state.deep_mode_enabled = False
 if "pending_portfolio_task" not in st.session_state:
@@ -2143,24 +2370,26 @@ def _restore_pending_tasks_after_auto_login_once():
         pending_task_data = pending_deep_task_data
 
     restored_any = False
-    if pending_task_data and not st.session_state.get("pending_task"):
-        st.session_state.pending_task = {
-            "task_id": pending_task_data["task_id"],
-            "prompt": pending_task_data["prompt"],
-            "raw_prompt": pending_task_data["prompt"],
-            "image_context": pending_task_data.get("image_context", ""),
-            "mode": pending_task_data.get("mode", "normal"),
-            "risk": pending_task_data.get("risk_preference", "稳健型"),
-            "start_time": pending_task_data["start_time"],
-            "trace_id": generate_chat_trace_id(),
-            "answer_id": generate_chat_answer_id(),
-            "intent_domain": "general",
-            "chat_mode": str(pending_task_data.get("chat_mode") or CHAT_MODE_ANALYSIS),
-        }
-        if not st.session_state.get("messages"):
-            st.session_state.messages = [{"role": "user", "content": pending_task_data["prompt"]}]
-        restored_any = True
-        print(f"✅ 自动登录后恢复任务: {pending_task_data['task_id']}")
+    if pending_task_data and not st.session_state.get("pending_tasks"):
+        restored_tasks = _refresh_home_pending_tasks(c_user)
+        if restored_tasks and not st.session_state.get("messages"):
+            restored_task = restored_tasks[0]
+            restored_prompt = str(restored_task.get("raw_prompt") or restored_task.get("prompt") or "")
+            restored_task_id = str(restored_task.get("task_id") or "")
+            st.session_state.messages = [
+                {"role": "user", "content": restored_prompt, "linked_task_id": restored_task_id},
+                _build_task_placeholder_message(
+                    task_id=restored_task_id,
+                    prompt_text=restored_prompt,
+                    trace_id=str(restored_task.get("trace_id") or ""),
+                    answer_id=str(restored_task.get("answer_id") or ""),
+                    intent_domain=str(restored_task.get("intent_domain") or "general"),
+                    chat_mode=str(restored_task.get("chat_mode") or CHAT_MODE_ANALYSIS),
+                ),
+            ]
+        restored_any = bool(restored_tasks)
+        if restored_tasks:
+            print(f"✅ 自动登录后恢复任务队列: {restored_tasks[0]['task_id']}")
 
     if pending_portfolio_data and not st.session_state.get("pending_portfolio_task"):
         st.session_state.pending_portfolio_task = {
@@ -2472,21 +2701,7 @@ def _extract_similarity_tokens(text: str):
 
 def _is_semantically_related(prompt_text: str, recent_turns, threshold: float = 0.18) -> bool:
     """基于 Jaccard 的轻量语义相关判定"""
-    current_tokens = _extract_similarity_tokens(prompt_text)
-    if not current_tokens:
-        return False
-
-    best_score = 0.0
-    for turn in recent_turns:
-        turn_tokens = _extract_similarity_tokens(turn.get("content", ""))
-        if not turn_tokens:
-            continue
-        union = current_tokens | turn_tokens
-        if not union:
-            continue
-        score = len(current_tokens & turn_tokens) / len(union)
-        best_score = max(best_score, score)
-    return best_score >= threshold
+    return _shared_is_semantically_related(prompt_text, recent_turns, threshold=threshold)
 
 
 def _build_recent_context_text(recent_turns, max_chars: int = 1200) -> str:
@@ -2534,30 +2749,11 @@ def _filter_memory_context_by_domain(memory_context: str, intent_domain: str, ma
 
 
 def _extract_focus_entity(text: str) -> str:
-    raw = str(text or "").strip()
-    if not raw:
-        return ""
-    code_match = re.search(r"(?<!\d)\d{6}(?!\d)", raw)
-    if code_match:
-        return code_match.group(0)
-    company_match = FOCUS_ENTITY_PATTERN.search(raw)
-    if not company_match:
-        return ""
-    candidate = company_match.group(0)
-    if any(bad in candidate for bad in FOCUS_ENTITY_BAD_SUBSTRINGS):
-        return ""
-    return candidate
+    return _shared_extract_focus_entity(text)
 
 
 def _extract_focus_aspect(text: str) -> str:
-    raw = str(text or "").strip()
-    if not raw:
-        return ""
-    hits = []
-    for keyword in FOCUS_ASPECT_KEYWORDS:
-        if keyword in raw and keyword not in hits:
-            hits.append(keyword)
-    return "、".join(hits[:2])
+    return _shared_extract_focus_aspect(text)
 
 
 def _looks_like_company_news_topic(text: str) -> bool:
@@ -2595,12 +2791,25 @@ def build_context_payload(
     intent_domain = _classify_intent_domain(prompt_text)
     latest_user_content = _get_latest_user_turn_content(recent_turns)
     recent_domain = _classify_intent_domain(latest_user_content)
-    recent_context = _build_recent_context_text(recent_turns)
+    recent_context_full = _build_recent_context_text(recent_turns)
+    recent_context = recent_context_full
 
-    is_followup = any(kw in prompt_text for kw in FOLLOWUP_KEYWORDS)
+    is_followup = _infer_followup_intent(prompt_text)
+    lookup_followup = _infer_lookup_followup_intent(prompt_text)
     semantic_related = _is_semantically_related(prompt_text, recent_turns)
     is_same_domain = intent_domain == recent_domain
-    should_include_recent_context = is_followup or (semantic_related and is_same_domain)
+    recent_context_for_focus = recent_context_full
+    recent_focus_entity = _extract_focus_entity(recent_context_for_focus) or _extract_focus_entity(latest_user_content)
+    recent_focus_topic, recent_focus_mode_hint = _infer_focus_topic(recent_context_for_focus)
+    should_include_recent_context = _should_preserve_recent_context(
+        prompt_text,
+        is_followup=is_followup,
+        semantic_related=semantic_related,
+        is_same_domain=is_same_domain,
+        recent_turns=recent_turns,
+        recent_focus_entity=recent_focus_entity,
+        recent_focus_topic=recent_focus_topic,
+    )
     should_load_long_memory = should_include_recent_context
     account_total_capital = None
 
@@ -2626,21 +2835,22 @@ def build_context_payload(
     if not should_include_recent_context:
         recent_context = ""
 
-    recent_context_for_focus = recent_context or _build_recent_context_text(recent_turns)
     pronoun_followup = any(hint in str(prompt_text or "") for hint in FOCUS_PRONOUN_HINTS)
     explicit_focus_entity = _extract_focus_entity(prompt_text)
-    recent_focus_entity = _extract_focus_entity(recent_context_for_focus)
     explicit_focus_aspect = _extract_focus_aspect(prompt_text)
     recent_focus_aspect = _extract_focus_aspect(recent_context_for_focus)
-    should_inherit_focus = is_followup or semantic_related or pronoun_followup or bool(explicit_focus_aspect)
+    should_inherit_focus = (
+        should_include_recent_context
+        or lookup_followup
+        or pronoun_followup
+        or bool(explicit_focus_aspect)
+        or bool(recent_focus_entity)
+    )
     focus_entity = explicit_focus_entity or (recent_focus_entity if should_inherit_focus else "")
     focus_aspect = explicit_focus_aspect or (recent_focus_aspect if should_inherit_focus else "")
-    focus_topic = ""
-    if _looks_like_company_news_topic(prompt_text):
-        focus_topic = "公司近期动态"
-    elif should_inherit_focus and _looks_like_company_news_topic(recent_context_for_focus):
-        focus_topic = "公司近期动态"
-    focus_mode_hint = "company_news" if focus_topic == "公司近期动态" else ""
+    focus_topic, focus_mode_hint = _infer_focus_topic(prompt_text)
+    if not focus_topic and should_inherit_focus:
+        focus_topic, focus_mode_hint = recent_focus_topic, recent_focus_mode_hint
 
     memory_context = ""
     if current_user != "访客" and should_load_long_memory:
@@ -2910,7 +3120,7 @@ def process_user_input(
     context_payload["chat_mode"] = chat_mode
 
     # --- 2. 显示用户提问 (保留) ---
-    st.session_state.messages.append({"role": "user", "content": prompt_text})
+    st.session_state.messages.append({"role": "user", "content": prompt_text, "linked_task_id": ""})
 
     # 构造最终 Prompt
     final_prompt = image_context + prompt_text
@@ -2930,6 +3140,9 @@ def process_user_input(
                 recent_context=str(context_payload.get("recent_context") or ""),
                 memory_context=str(context_payload.get("memory_context") or ""),
                 is_followup=bool(context_payload.get("is_followup", False)),
+                focus_entity=str(context_payload.get("focus_entity") or ""),
+                focus_topic=str(context_payload.get("focus_topic") or ""),
+                focus_aspect=str(context_payload.get("focus_aspect") or ""),
             )
             typing_placeholder.empty()
             response_placeholder = st.empty()
@@ -3025,33 +3238,39 @@ def process_user_input(
     recent_history = history_msgs[-4:] if len(history_msgs) > 4 else history_msgs
     history_for_task = [{"role": msg["role"], "content": msg["content"]} for msg in recent_history]
 
-    if deep_mode:
-        deep_risk = "balanced"
-        task_id = task_manager.create_task(
-            user_id=current_user,
-            prompt=final_prompt,
-            risk_preference=deep_risk,
-            history_messages=history_for_task,
-            context_payload=context_payload,
-        )
-    elif chat_mode == CHAT_MODE_KNOWLEDGE:
-        task_id = task_manager.create_knowledge_task(
-            user_id=current_user,
-            prompt=prompt_text,
-            risk_preference=risk,
-            history_messages=history_for_task,
-            context_payload=context_payload,
-        )
-    else:
-        task_id = task_manager.create_task(
-            user_id=current_user,
-            prompt=final_prompt,
-            image_context=image_context,
-            risk_preference=risk,
-            history_messages=history_for_task,
-            context_payload=context_payload,
-            has_portfolio=has_portfolio
-        )
+    try:
+        if deep_mode:
+            deep_risk = "balanced"
+            task_id = task_manager.create_task(
+                user_id=current_user,
+                prompt=final_prompt,
+                risk_preference=deep_risk,
+                history_messages=history_for_task,
+                context_payload=context_payload,
+            )
+        elif chat_mode == CHAT_MODE_KNOWLEDGE:
+            task_id = task_manager.create_knowledge_task(
+                user_id=current_user,
+                prompt=prompt_text,
+                risk_preference=risk,
+                history_messages=history_for_task,
+                context_payload=context_payload,
+            )
+        else:
+            task_id = task_manager.create_task(
+                user_id=current_user,
+                prompt=final_prompt,
+                image_context=image_context,
+                risk_preference=risk,
+                history_messages=history_for_task,
+                context_payload=context_payload,
+                has_portfolio=has_portfolio
+            )
+    except UserTaskQueueFullError as e:
+        if st.session_state.messages and st.session_state.messages[-1].get("role") == "user":
+            st.session_state.messages.pop()
+        st.warning(f"⏳ 你前面已有 {e.active_count} 个处理中、{e.queued_count} 个排队问题，请等前面的结果回来后再继续提问。")
+        return
 
     # 🔥 [新增] 异步更新用户画像（带防重复机制）
     if current_user != "访客" and len(prompt_text) > 5:
@@ -3115,21 +3334,36 @@ def process_user_input(
                 pass
 
     # 🔥 [新增] 保存任务信息
-    st.session_state.pending_task = {
-        "task_id": task_id,
-        "prompt": final_prompt,
-        "raw_prompt": prompt_text,
-        "image_context": image_context,
-        "mode": "deep" if deep_mode else "normal",
-        "risk": "balanced" if deep_mode else risk,
-        "context_payload": context_payload,
-        "start_time": time.time(),
-        "analysis_mode_label": str(analysis_mode_label or ""),
-        "trace_id": trace_id,
-        "answer_id": answer_id,
-        "intent_domain": intent_domain,
-        "chat_mode": chat_mode,
+    task_overrides = {
+        task_id: {
+            "raw_prompt": prompt_text,
+            "trace_id": trace_id,
+            "answer_id": answer_id,
+            "intent_domain": intent_domain,
+            "analysis_mode_label": str(analysis_mode_label or ""),
+            "mode": "deep" if deep_mode else "normal",
+            "risk": "balanced" if deep_mode else risk,
+            "image_context": image_context,
+            "context_payload": context_payload,
+            "chat_mode": chat_mode,
+            "prompt": final_prompt,
+        }
     }
+    pending_tasks = _refresh_home_pending_tasks(current_user, extra_overrides=task_overrides)
+    if st.session_state.messages and st.session_state.messages[-1].get("role") == "user":
+        st.session_state.messages[-1]["linked_task_id"] = task_id
+        st.session_state.messages.append(
+            _build_task_placeholder_message(
+                task_id=task_id,
+                prompt_text=prompt_text,
+                trace_id=trace_id,
+                answer_id=answer_id,
+                intent_domain=intent_domain,
+                chat_mode=chat_mode,
+            )
+        )
+    if not pending_tasks:
+        st.session_state.pending_task = None
 
 
 # ==========================================
@@ -3701,6 +3935,7 @@ with st.sidebar:
             st.session_state['user_id'] = None
             st.session_state['just_logged_out'] = True
             st.session_state['pending_task'] = None
+            st.session_state['pending_tasks'] = []
             st.session_state['pending_portfolio_task'] = None
             st.session_state['portfolio_last_attempt_hash'] = None
             st.session_state['home_post_login_restore_needed'] = False
@@ -3765,12 +4000,32 @@ _restore_pending_tasks_after_auto_login_once()
 # ==========================================
 #  B. 界面显示逻辑
 # ==========================================
+rendered_pending_task_ids = set()
 if not st.session_state.messages:
     show_welcome_screen()
 else:
     st.markdown('<div style="height: 20px;"></div>', unsafe_allow_html=True)
+    pending_tasks = st.session_state.get("pending_tasks") or []
+    pending_task_map = {
+        str(task_info.get("task_id") or "").strip(): task_info
+        for task_info in pending_tasks
+        if str(task_info.get("task_id") or "").strip()
+    }
     for i, msg in enumerate(st.session_state.messages):
+        linked_task_id = str(msg.get("linked_task_id") or msg.get("task_id") or "").strip()
+        linked_task = pending_task_map.get(linked_task_id)
+        is_task_placeholder = bool(msg.get("is_task_placeholder"))
         with st.chat_message(msg["role"]):
+            if is_task_placeholder and not linked_task:
+                continue
+            if is_task_placeholder and linked_task:
+                rendered_pending_task_ids.add(linked_task_id)
+                if str(linked_task.get("queue_state") or "active") == "active":
+                    _render_pending_chat_task_fragment(linked_task)
+                else:
+                    st.markdown(_render_inline_queued_chat_task_hint(linked_task), unsafe_allow_html=True)
+                continue
+
             inline_state = {"has_inline": False, "used_indices": set()}
             msg_attachments = msg.get("attachments", [])
 
@@ -3893,9 +4148,26 @@ if "pending_portfolio_task" in st.session_state and st.session_state.pending_por
             TaskManager().clear_user_pending_portfolio_task(current_user)
 
 # ==========================================
-# 🔥 [新增] 任务恢复机制（正确位置）
+# 🔥 [新增] 任务恢复机制（兜底未绑定消息的任务）
 # ==========================================
-if "pending_task" in st.session_state and st.session_state.pending_task:
+pending_tasks = st.session_state.get("pending_tasks") or []
+orphan_pending_tasks = [
+    task_info
+    for task_info in pending_tasks
+    if str(task_info.get("task_id") or "").strip() not in rendered_pending_task_ids
+]
+if orphan_pending_tasks:
+    active_orphan = next(
+        (task_info for task_info in orphan_pending_tasks if str(task_info.get("queue_state") or "active") == "active"),
+        None,
+    )
+    if active_orphan:
+        _render_pending_chat_task_fragment(active_orphan)
+    for queued_task in orphan_pending_tasks:
+        if active_orphan and str(queued_task.get("task_id") or "").strip() == str(active_orphan.get("task_id") or "").strip():
+            continue
+        st.markdown(_render_queued_chat_task_card(queued_task), unsafe_allow_html=True)
+elif "pending_task" in st.session_state and st.session_state.pending_task and not st.session_state.get("messages"):
     _render_pending_chat_task_fragment(st.session_state.pending_task)
 
 
