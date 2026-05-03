@@ -177,6 +177,19 @@ class TestMobileApiChatMemoryAsync(unittest.TestCase):
         mocked_create.assert_not_called()
         self.assertEqual(fake_redis.get(mobile_api._mobile_chat_prompt_key("task-kg")), "什么是牛市价差")
 
+    def test_chat_submit_rejects_when_user_queue_is_full(self):
+        body = mobile_api.ChatSubmitRequest(prompt="为什么今晚英特尔涨这么多？", history=[])
+        with patch.object(mobile_api.de, "get_user_profile", return_value={}), patch.object(
+            mobile_api, "_detect_mobile_has_portfolio", return_value=False
+        ), patch.object(
+            mobile_api.TaskManager, "create_task", side_effect=mobile_api.UserTaskQueueFullError(1, 2, 2)
+        ):
+            with self.assertRaises(mobile_api.HTTPException) as ctx:
+                mobile_api.chat_submit(body=body, username="u1")
+
+        self.assertEqual(ctx.exception.status_code, 429)
+        self.assertIn("排队问题", str(ctx.exception.detail))
+
     def test_mobile_context_cross_domain_does_not_inject_recent_or_memory(self):
         history = [
             {"role": "user", "content": "我的股票持仓要不要调仓"},
@@ -300,7 +313,7 @@ class TestMobileApiChatMemoryAsync(unittest.TestCase):
         with patch.object(mobile_api, "_redis", fake_redis), patch.object(
             mobile_api.TaskManager, "get_task_status", return_value=success_status
         ), patch.object(
-            mobile_api.TaskManager, "clear_user_pending_task"
+            mobile_api.TaskManager, "complete_user_task"
         ) as mocked_clear, patch.object(
             mobile_api, "_dispatch_mobile_chat_memory_task"
         ) as mocked_dispatch:
@@ -320,7 +333,7 @@ class TestMobileApiChatMemoryAsync(unittest.TestCase):
         with patch.object(mobile_api, "_redis", fake_redis), patch.object(
             mobile_api.TaskManager, "get_task_status", return_value=success_status
         ), patch.object(
-            mobile_api.TaskManager, "clear_user_pending_task"
+            mobile_api.TaskManager, "complete_user_task"
         ) as mocked_clear, patch.object(
             mobile_api, "_dispatch_mobile_chat_memory_task", side_effect=RuntimeError("queue down")
         ):
@@ -328,7 +341,7 @@ class TestMobileApiChatMemoryAsync(unittest.TestCase):
 
         self.assertEqual(out["status"], "success")
         self.assertEqual(fake_redis.get(prompt_key), "原始问题")
-        mocked_clear.assert_called_once_with("u1")
+        mocked_clear.assert_called_once_with("u1", "task-4")
 
     def test_chat_status_uses_cached_success_even_if_celery_pending(self):
         fake_redis = _FakeRedis()
@@ -364,7 +377,7 @@ class TestMobileApiChatMemoryAsync(unittest.TestCase):
         with patch.object(mobile_api, "_redis", fake_redis), patch.object(
             mobile_api.TaskManager, "get_task_status", return_value={"status": "pending"}
         ), patch.object(
-            mobile_api.TaskManager, "clear_user_pending_task"
+            mobile_api.TaskManager, "complete_user_task"
         ) as mocked_clear, patch.object(
             mobile_api, "_dispatch_mobile_chat_memory_task"
         ) as mocked_dispatch:
@@ -373,7 +386,7 @@ class TestMobileApiChatMemoryAsync(unittest.TestCase):
         self.assertEqual(out["status"], "success")
         self.assertEqual(out["result"]["response"], "缓存回答")
         self.assertEqual(mocked_dispatch.call_count, 0)  # 无 prompt 时不入记忆队列
-        mocked_clear.assert_called_once_with("u1")
+        mocked_clear.assert_called_once_with("u1", task_id)
 
     def test_chat_status_turns_timeout_when_pending_too_long(self):
         fake_redis = _FakeRedis()
@@ -397,7 +410,7 @@ class TestMobileApiChatMemoryAsync(unittest.TestCase):
         with patch.object(mobile_api, "_redis", fake_redis), patch.object(
             mobile_api, "_MOBILE_CHAT_MAX_PENDING_SECONDS", 1
         ), patch.object(
-            mobile_api.TaskManager, "clear_user_pending_task"
+            mobile_api.TaskManager, "complete_user_task"
         ) as mocked_clear:
             out = mobile_api.chat_status(task_id=task_id, username="u1")
 
@@ -405,7 +418,7 @@ class TestMobileApiChatMemoryAsync(unittest.TestCase):
         self.assertEqual(out.get("code"), "task_timeout")
         state = json.loads(fake_redis.get(mobile_api._mobile_chat_state_key(task_id)))
         self.assertEqual(state.get("status"), "timeout")
-        mocked_clear.assert_called_with("u1")
+        mocked_clear.assert_called_with("u1", task_id)
 
     def test_chat_pending_returns_terminal_once(self):
         fake_redis = _FakeRedis()
@@ -491,13 +504,13 @@ class TestMobileApiChatMemoryAsync(unittest.TestCase):
         def _get_pending_task(_user_id):
             return {} if cleared["done"] else pending_meta
 
-        def _clear_pending_task(_user_id):
+        def _clear_pending_task(_user_id, _task_id):
             cleared["done"] = True
 
         with patch.object(mobile_api, "_redis", fake_redis), patch.object(
             mobile_api.TaskManager, "get_user_pending_task", side_effect=_get_pending_task
         ), patch.object(
-            mobile_api.TaskManager, "clear_user_pending_task", side_effect=_clear_pending_task
+            mobile_api.TaskManager, "complete_user_task", side_effect=_clear_pending_task
         ) as mocked_clear:
             first = mobile_api.chat_pending(username="u1")
             second = mobile_api.chat_pending(username="u1")
@@ -505,7 +518,7 @@ class TestMobileApiChatMemoryAsync(unittest.TestCase):
         self.assertTrue(first.get("has_task"))
         self.assertEqual(first.get("status"), "success")
         self.assertFalse(second.get("has_task"))
-        mocked_clear.assert_called_with("u1")
+        mocked_clear.assert_called_with("u1", task_id)
 
     def test_chat_cancel_marks_canceled_and_clears_last_task(self):
         fake_redis = _FakeRedis()
@@ -513,7 +526,7 @@ class TestMobileApiChatMemoryAsync(unittest.TestCase):
         fake_redis.setex(mobile_api._mobile_chat_last_task_key("u1"), 86400, task_id)
 
         with patch.object(mobile_api, "_redis", fake_redis), patch.object(
-            mobile_api.TaskManager, "clear_user_pending_task"
+            mobile_api.TaskManager, "remove_user_task"
         ) as mocked_clear, patch("celery.result.AsyncResult") as mocked_async_result:
             mocked_async_result.return_value.revoke.return_value = None
             out = mobile_api.chat_cancel(
@@ -525,7 +538,7 @@ class TestMobileApiChatMemoryAsync(unittest.TestCase):
         state = json.loads(fake_redis.get(mobile_api._mobile_chat_state_key(task_id)))
         self.assertEqual(state.get("status"), "canceled")
         self.assertIsNone(fake_redis.get(mobile_api._mobile_chat_last_task_key("u1")))
-        mocked_clear.assert_called_once_with("u1")
+        mocked_clear.assert_called_once_with("u1", task_id)
 
     def test_chat_status_success_includes_feedback_meta_and_persists_answer_event(self):
         fake_redis = _FakeRedis()

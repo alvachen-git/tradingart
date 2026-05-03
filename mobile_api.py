@@ -73,7 +73,7 @@ from llm_compat import ChatTongyiCompat as ChatTongyi
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import auth_utils as auth
-from task_manager import TaskManager
+from task_manager import TaskManager, UserTaskQueueFullError
 from agent_core import simple_chatter_reply
 from chat_routing import (
     CHAT_MODE_ANALYSIS,
@@ -1957,7 +1957,7 @@ def _build_mobile_chat_runtime_snapshot(task_id: str, username: str) -> dict:
                 error="AI思考太久，请重新提问。",
                 finished=True,
             )
-            TaskManager.clear_user_pending_task(username)
+            TaskManager.complete_user_task(username, task_id)
             _clear_mobile_chat_last_task_if_matches(username, task_id)
             return _build_mobile_chat_error_response("AI思考太久，请重新提问。", code="task_timeout")
 
@@ -2207,27 +2207,45 @@ def chat_submit(
             },
         }
 
-    if chat_mode == CHAT_MODE_KNOWLEDGE:
-        task_id = TaskManager.create_knowledge_task(
-            user_id=username,
-            prompt=normalized_prompt,
-            risk_preference=risk,
-            history_messages=history_for_task,
-            context_payload=context_payload,
+    try:
+        if chat_mode == CHAT_MODE_KNOWLEDGE:
+            task_id = TaskManager.create_knowledge_task(
+                user_id=username,
+                prompt=normalized_prompt,
+                risk_preference=risk,
+                history_messages=history_for_task,
+                context_payload=context_payload,
+            )
+        else:
+            task_id = TaskManager.create_task(
+                user_id=username,
+                prompt=normalized_prompt,
+                risk_preference=risk,
+                history_messages=history_for_task,
+                context_payload=context_payload,
+                has_portfolio=has_portfolio,
+            )
+    except UserTaskQueueFullError as e:
+        raise HTTPException(
+            status_code=429,
+            detail=f"你前面已有 {e.active_count} 个处理中、{e.queued_count} 个排队问题，请等待结果后再继续提问。",
         )
-    else:
-        task_id = TaskManager.create_task(
-            user_id=username,
-            prompt=normalized_prompt,
-            risk_preference=risk,
-            history_messages=history_for_task,
-            context_payload=context_payload,
-            has_portfolio=has_portfolio,
-        )
+
+    task_meta = TaskManager.get_task_meta(task_id)
+    task_state = str(task_meta.get("status") or "pending").strip().lower()
+    progress_text = str(task_meta.get("progress") or default_progress_for_chat_mode(chat_mode, status="pending"))
+    if task_state == "queued":
+        queue_ahead = 0
+        for meta in TaskManager.get_user_task_queue(username):
+            if str(meta.get("task_id") or "").strip() == task_id:
+                queue_ahead = int(meta.get("queue_ahead") or 0)
+                break
+        progress_text = f"排队中，前面还有 {queue_ahead} 个问题" if queue_ahead > 0 else "排队中，等待开始处理..."
+
     _write_mobile_chat_state(
         task_id=task_id,
         user_id=username,
-        status="pending",
+        status=task_state or "pending",
         error="",
         finished=False,
         extra_fields={
@@ -2237,7 +2255,7 @@ def chat_submit(
             "intent_domain": intent_domain,
             "feedback_allowed": False,
             "chat_mode": chat_mode,
-            "progress": default_progress_for_chat_mode(chat_mode, status="pending"),
+            "progress": progress_text,
         },
     )
     _set_mobile_chat_last_task(username, task_id)
@@ -2246,7 +2264,10 @@ def chat_submit(
             _redis.setex(_mobile_chat_prompt_key(task_id), _MOBILE_CHAT_PROMPT_TTL, raw_prompt)
     except Exception as e:
         print(f"[mobile-memory] prompt cache failed task_id={task_id} err={e}")
-    submit_message = "任务已提交，正在整理知识回答..." if chat_mode == CHAT_MODE_KNOWLEDGE else "任务已提交，正在分析..."
+    if task_state == "queued":
+        submit_message = progress_text
+    else:
+        submit_message = "任务已提交，正在整理知识回答..." if chat_mode == CHAT_MODE_KNOWLEDGE else "任务已提交，正在分析..."
     return {
         "delivery_mode": "task",
         "task_id": task_id,
@@ -2289,11 +2310,11 @@ def chat_status(task_id: str, username: str = Depends(get_current_user)):
                 except Exception as e:
                     print(f"[mobile-memory] prompt cleanup failed task_id={task_id} err={e}")
 
-            TaskManager.clear_user_pending_task(username)
+            TaskManager.complete_user_task(username, task_id)
             _clear_mobile_chat_last_task_if_matches(username, task_id)
             return runtime_snapshot
         elif status_name == "error":
-            TaskManager.clear_user_pending_task(username)
+            TaskManager.complete_user_task(username, task_id)
             _clear_mobile_chat_last_task_if_matches(username, task_id)
             return runtime_snapshot
 
@@ -2340,12 +2361,12 @@ def chat_status(task_id: str, username: str = Depends(get_current_user)):
                 _redis.delete(prompt_key)
             except Exception as e:
                 print(f"[mobile-memory] prompt cleanup failed task_id={task_id} err={e}")
-        TaskManager.clear_user_pending_task(username)
+        TaskManager.complete_user_task(username, task_id)
         _clear_mobile_chat_last_task_if_matches(username, task_id)
     elif status_name == "error":
         err_msg = str(status.get("error") or "分析失败，请稍后重试。")
         _write_mobile_chat_state(task_id=task_id, user_id=username, status="error", error=err_msg, finished=True)
-        TaskManager.clear_user_pending_task(username)
+        TaskManager.complete_user_task(username, task_id)
         _clear_mobile_chat_last_task_if_matches(username, task_id)
     elif status_name in {"pending", "processing"}:
         # 兼容旧任务（尚未写入 state），根据用户 pending 元信息做超时兜底
@@ -2359,7 +2380,7 @@ def chat_status(task_id: str, username: str = Depends(get_current_user)):
                 error="AI思考太久，请重新提问。",
                 finished=True,
             )
-            TaskManager.clear_user_pending_task(username)
+            TaskManager.complete_user_task(username, task_id)
             _clear_mobile_chat_last_task_if_matches(username, task_id)
             return _build_mobile_chat_error_response("AI思考太久，请重新提问。", code="task_timeout")
     if status_name == "success":
@@ -2398,7 +2419,7 @@ def chat_pending(username: str = Depends(get_current_user)):
 
     # 终态任务只回传一次，避免每次 onShow 重复回放
     if status_name in {"success", "error", "canceled", "timeout"}:
-        TaskManager.clear_user_pending_task(username)
+        TaskManager.complete_user_task(username, task_id)
         _clear_mobile_chat_last_task_if_matches(username, task_id)
 
     payload = {
@@ -2466,7 +2487,7 @@ def chat_cancel(
         error=err_msg,
         finished=True,
     )
-    TaskManager.clear_user_pending_task(username)
+    TaskManager.remove_user_task(username, task_id)
     _clear_mobile_chat_last_task_if_matches(username, task_id)
     try:
         _redis.delete(_mobile_chat_prompt_key(task_id))

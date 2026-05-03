@@ -49,6 +49,10 @@ KNOWLEDGE_PREFIXES = (
     "通俗说", "什么意思", "是什么", "怎么理解",
 )
 
+CONVERSATIONAL_KNOWLEDGE_PREFIXES = (
+    "你知道", "你了解", "听过", "有没有听过", "知道", "了解",
+)
+
 ANALYSIS_INTENT_KEYWORDS = (
     "建议", "怎么做", "怎么办", "怎么看", "能买吗", "能不能买", "分析", "复盘",
     "行情", "走势", "涨跌", "对比", "比较", "宏观", "仓位", "持仓", "调仓", "加仓", "减仓",
@@ -273,6 +277,9 @@ def classify_chat_mode(
         return CHAT_MODE_ANALYSIS
 
     has_knowledge_prefix = any(keyword in text_lower for keyword in KNOWLEDGE_PREFIXES)
+    has_conversational_knowledge_prefix = any(
+        keyword in text_lower for keyword in CONVERSATIONAL_KNOWLEDGE_PREFIXES
+    )
     has_analysis_intent = any(keyword in text_lower for keyword in ANALYSIS_INTENT_KEYWORDS)
     has_market_subject = any(keyword in text_lower for keyword in MARKET_SUBJECT_KEYWORDS) or has_symbol
     has_finance_subject = is_finance_or_trading_domain(text_lower, has_symbol=has_symbol)
@@ -322,6 +329,9 @@ def classify_chat_mode(
         return CHAT_MODE_ANALYSIS
 
     if has_knowledge_prefix and has_finance_subject and not has_analysis_intent:
+        return CHAT_MODE_KNOWLEDGE
+
+    if has_conversational_knowledge_prefix and has_finance_subject and not has_analysis_intent:
         return CHAT_MODE_KNOWLEDGE
 
     if has_simple_keyword and len(text) <= 24 and not has_finance_subject:
