@@ -153,8 +153,18 @@ class TestMobileApiChatMemoryAsync(unittest.TestCase):
         kwargs = mocked_reply.call_args.kwargs
         self.assertIn("法国大革命是什么", kwargs.get("recent_context", ""))
         self.assertTrue(kwargs.get("is_followup"))
+        runtime_context = kwargs.get("runtime_context") or {}
+        self.assertEqual(runtime_context.get("product_identity"), "你是爱波塔AI，由交易艺术汇团队开发")
+        self.assertEqual(runtime_context.get("site_specialty"), "本站更擅长期权、K线、交易知识和市场分析")
+        self.assertEqual(runtime_context.get("timezone_label"), "北京时间（Asia/Shanghai）")
         mocked_create.assert_not_called()
         mocked_knowledge.assert_not_called()
+
+    def test_mobile_simple_runtime_context_builder_uses_identity_contract(self):
+        out = mobile_api._build_mobile_simple_runtime_context("mike0919")
+        self.assertEqual(out["assistant_name"], "爱波塔AI")
+        self.assertEqual(out["product_identity"], "你是爱波塔AI，由交易艺术汇团队开发")
+        self.assertEqual(out["current_user_label"], "mike0919")
 
     def test_chat_submit_knowledge_chat_uses_knowledge_task(self):
         fake_redis = _FakeRedis()

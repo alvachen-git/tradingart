@@ -1,6 +1,8 @@
 import unittest
+from datetime import datetime
 
 import agent_core
+from simple_chat_runtime import build_simple_runtime_context
 
 
 class _FakeResponse:
@@ -11,9 +13,11 @@ class _FakeResponse:
 class _FakeLLM:
     def __init__(self):
         self.last_prompt = ""
+        self.invoke_count = 0
 
     def invoke(self, prompt: str):
         self.last_prompt = prompt
+        self.invoke_count += 1
         return _FakeResponse("好的，我继续展开说明。")
 
 
@@ -46,6 +50,34 @@ class TestSimpleChatContext(unittest.TestCase):
 
         self.assertIn("【相关长期记忆】", fake_llm.last_prompt)
         self.assertIn("法国大革命", fake_llm.last_prompt)
+
+    def test_simple_chatter_reply_includes_runtime_context(self):
+        fake_llm = _FakeLLM()
+        runtime_context = build_simple_runtime_context(current_user_label="访客")
+        agent_core.simple_chatter_reply(
+            "你是谁",
+            fake_llm,
+            recent_context="",
+            memory_context="",
+            is_followup=False,
+            runtime_context=runtime_context,
+        )
+
+        self.assertIn("【运行时上下文】", fake_llm.last_prompt)
+        self.assertIn("你是爱波塔AI，由交易艺术汇团队开发", fake_llm.last_prompt)
+        self.assertIn("本站更擅长期权、K线、交易知识和市场分析", fake_llm.last_prompt)
+
+    def test_simple_chatter_reply_answers_time_without_llm_guessing(self):
+        fake_llm = _FakeLLM()
+        runtime_context = build_simple_runtime_context(now=datetime(2026, 5, 5, 13, 28))
+        out = agent_core.simple_chatter_reply(
+            "今天几号",
+            fake_llm,
+            runtime_context=runtime_context,
+        )
+
+        self.assertEqual(out, "今天是北京时间（Asia/Shanghai）2026年5月5日。")
+        self.assertEqual(fake_llm.invoke_count, 0)
 
 
 if __name__ == "__main__":

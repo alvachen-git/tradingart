@@ -121,6 +121,7 @@ from chat_feedback_service import (
 )
 from vision_tools import analyze_portfolio_image, analyze_position_image
 from mobile_trading_day import enrich_prices_payload_with_trading_day
+from simple_chat_runtime import build_simple_runtime_context
 
 # ── Redis ─────────────────────────────────────────────────────
 _REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
@@ -258,6 +259,11 @@ def _safe_text(v, default: str = "") -> str:
     except Exception:
         text = ""
     return text or default
+
+
+def _build_mobile_simple_runtime_context(current_user: str) -> Dict[str, str]:
+    user_label = str(current_user or "").strip() or "访客"
+    return build_simple_runtime_context(current_user_label=user_label)
 
 
 _CHAOS_BAND_LABELS = {
@@ -2173,12 +2179,14 @@ def chat_submit(
 
     if chat_mode == CHAT_MODE_SIMPLE:
         llm_turbo = ChatTongyi(model="qwen-turbo", streaming=False, temperature=0.1)
+        runtime_context = _build_mobile_simple_runtime_context(username)
         response_text = simple_chatter_reply(
             normalized_prompt,
             llm_turbo,
             recent_context=str(context_payload.get("recent_context") or ""),
             memory_context=str(context_payload.get("memory_context") or ""),
             is_followup=bool(context_payload.get("is_followup", False)),
+            runtime_context=runtime_context,
         )
         feedback_allowed = _save_chat_answer_event(
             task_id=f"immediate-{uuid.uuid4()}",
