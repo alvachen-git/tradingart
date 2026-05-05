@@ -144,6 +144,54 @@ class TestChatRouting(unittest.TestCase):
             CHAT_MODE_ANALYSIS,
         )
 
+    def test_simple_followup_numeric_request_upgrades_to_analysis(self):
+        self.assertEqual(
+            classify_chat_mode(
+                "我要详细数值",
+                is_followup=True,
+                recent_context="用户: 澜起科技跟科创50的相关度有多少\nAI: 澜起科技和科创50有一定关联。",
+                focus_entity="澜起科技",
+                focus_topic="相关度",
+                followup_goal="fetch_numeric",
+            ),
+            CHAT_MODE_ANALYSIS,
+        )
+        self.assertEqual(
+            classify_chat_mode(
+                "对，要澜起科技和科创50的具体相关度数值",
+                is_followup=True,
+                recent_context="用户: 澜起科技跟科创50的相关度有多少\nAI: 澜起科技和科创50有一定关联。",
+                focus_entity="澜起科技",
+                focus_topic="相关度",
+                followup_goal="fetch_numeric",
+            ),
+            CHAT_MODE_ANALYSIS,
+        )
+
+    def test_non_finance_fact_followup_can_upgrade_to_knowledge(self):
+        self.assertEqual(
+            classify_chat_mode(
+                "我要详细年份和关键节点",
+                is_followup=True,
+                recent_context="用户: 法国大革命是什么\nAI: 法国大革命是18世纪末法国发生的政治社会革命。",
+                focus_topic="概念解释",
+                followup_goal="fetch_facts",
+            ),
+            CHAT_MODE_KNOWLEDGE,
+        )
+
+    def test_explain_more_followup_can_stay_knowledge(self):
+        self.assertEqual(
+            classify_chat_mode(
+                "再举个例子",
+                is_followup=True,
+                recent_context="用户: 什么是牛市价差\nAI: 牛市价差是一种偏温和看涨的期权策略。",
+                focus_topic="概念解释",
+                followup_goal="explain_more",
+            ),
+            CHAT_MODE_KNOWLEDGE,
+        )
+
     def test_detect_pure_option_data_query(self):
         self.assertTrue(is_pure_option_data_query("300ETF期权波动率高吗"))
         self.assertTrue(is_pure_option_data_query("创业板ETF期权IV现在多少"))

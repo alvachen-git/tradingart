@@ -100,6 +100,7 @@ class AgentState(TypedDict):
     focus_topic: str
     focus_aspect: str
     focus_mode_hint: str
+    followup_goal: str
 
     news_summary: str  # 情报员填入：新闻摘要 (CPI/非农/美联储)
     macro_view: str  # 宏观分析师填入：宏观定调 (宽松/紧缩)
@@ -2761,6 +2762,7 @@ def knowledge_chatter_node(state: AgentState, llm=None):
     focus_entity = str(state.get("focus_entity", "") or "").strip()
     focus_topic = str(state.get("focus_topic", "") or "").strip()
     focus_aspect = str(state.get("focus_aspect", "") or "").strip()
+    followup_goal = str(state.get("followup_goal", "") or "").strip()
     knowledge_strategy = _select_knowledge_chat_strategy(state)
     current_date = datetime.now().strftime("%Y年%m月%d日")
     context_parts = []
@@ -2831,6 +2833,7 @@ def knowledge_chatter_node(state: AgentState, llm=None):
         【当前核心实体】：{focus_entity or "未明确"}
         【当前核心主题】：{focus_topic or "未明确"}
         【当前细分维度】：{focus_aspect or "未明确"}
+        【当前追问目标】：{followup_goal or "未明确"}
         【历史承接上下文】：
         {combined_context}
 

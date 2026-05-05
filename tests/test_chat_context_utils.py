@@ -8,6 +8,15 @@ class TestChatContextUtils(unittest.TestCase):
         self.assertTrue(ctx.infer_followup_intent("那你帮我查一下具体是因为什么？"))
         self.assertTrue(ctx.infer_lookup_followup_intent("那你帮我查一下具体是因为什么？"))
 
+    def test_infer_followup_goal_for_numeric_and_fact_requests(self):
+        self.assertEqual(ctx.infer_followup_goal("我要详细数值"), "fetch_numeric")
+        self.assertEqual(ctx.infer_followup_goal("给我具体来源"), "fetch_facts")
+        self.assertEqual(ctx.infer_followup_goal("那这意味着什么"), "analyze_reason")
+        self.assertEqual(ctx.infer_followup_goal("再举个例子"), "explain_more")
+
+    def test_short_numeric_followup_is_recognized_as_followup(self):
+        self.assertTrue(ctx.infer_followup_intent("我要详细数值"))
+
     def test_preserve_recent_context_for_short_pronoun_followup(self):
         self.assertTrue(
             ctx.should_preserve_recent_context(

@@ -13,6 +13,18 @@ FOLLOWUP_CONNECTOR_HINTS = ("那", "这", "它", "他", "她", "这个", "这波
 FOLLOWUP_ACTION_HINTS = ("查", "看", "找", "解释", "展开", "说明", "讲", "说")
 FOLLOWUP_DETAIL_HINTS = ("具体", "详细", "原因", "为什么", "怎么回事", "到底", "再", "继续")
 FOLLOWUP_LOOKUP_HINTS = ("查一下", "帮我查", "具体原因", "到底为什么", "详细原因", "为什么会这样", "查查")
+FOLLOWUP_NUMERIC_HINTS = (
+    "详细数值", "具体数值", "具体数据", "具体是多少", "数值", "数据", "相关系数", "相关度",
+    "权重", "占比", "比例", "区间", "指标", "统计", "历史统计", "窗口", "近20天", "近60天",
+    "列出来", "具体点位",
+)
+FOLLOWUP_FACT_HINTS = (
+    "来源", "名单", "公告", "时间", "日期", "年份", "关键节点", "成分股", "大类", "出处", "口径",
+)
+FOLLOWUP_ANALYZE_REASON_HINTS = ("为什么会这样", "背后原因", "这意味着什么", "原因是什么", "为什么")
+FOLLOWUP_ANALYZE_IMPACT_HINTS = ("影响大吗", "值不值得", "那该怎么做", "怎么看", "哪个更强", "适合做吗")
+FOLLOWUP_EXPLAIN_HINTS = ("再展开", "再详细", "举个例子", "展开讲", "详细说明", "具体讲讲", "继续说说")
+FOLLOWUP_REQUEST_PREFIXES = ("我要", "给我", "我想", "想看", "对，", "对,", "那", "再", "继续")
 
 FOCUS_ENTITY_SUFFIXES = (
     "股份", "集团", "科技", "技术", "控股", "电子", "电气", "机械", "汽车", "能源",
@@ -54,6 +66,48 @@ MARKET_ANALYSIS_KEYWORDS = (
 )
 
 
+def infer_followup_goal(prompt_text: str, *, recent_context: str = "", recent_focus_topic: str = "") -> str:
+    text = str(prompt_text or "").strip().lower()
+    if not text:
+        return ""
+    recent_text = str(recent_context or "").strip().lower()
+    topic = str(recent_focus_topic or "").strip()
+
+    if any(keyword in text for keyword in FOLLOWUP_ANALYZE_IMPACT_HINTS):
+        return "analyze_impact"
+    if any(keyword in text for keyword in FOLLOWUP_ANALYZE_REASON_HINTS):
+        return "analyze_reason"
+    if any(keyword in text for keyword in FOLLOWUP_NUMERIC_HINTS):
+        return "fetch_numeric"
+    if any(keyword in text for keyword in FOLLOWUP_FACT_HINTS):
+        return "fetch_facts"
+    if any(keyword in text for keyword in FOLLOWUP_LOOKUP_HINTS):
+        return "fetch_facts"
+    if any(keyword in text for keyword in FOLLOWUP_EXPLAIN_HINTS):
+        return "explain_more"
+
+    if "查" in text or "找" in text:
+        return "fetch_facts"
+    if "多少" in text and ("相关" in text or "权重" in text or "占比" in text or "比例" in text):
+        return "fetch_numeric"
+    if "具体" in text and ("数据" in text or "数值" in text or "指标" in text):
+        return "fetch_numeric"
+    if "详细" in text and ("年份" in text or "时间" in text or "节点" in text):
+        return "fetch_facts"
+
+    if topic in ("异动原因", "盘面分析"):
+        if "为什么" in text or "原因" in text:
+            return "analyze_reason"
+        if "影响" in text or "怎么做" in text or "怎么看" in text:
+            return "analyze_impact"
+    if topic in ("概念解释", "公司近期动态") and ("详细" in text or "展开" in text or "举例" in text):
+        return "explain_more"
+    if recent_text and ("相关度" in recent_text or "相关系数" in recent_text) and ("多少" in text or "数值" in text):
+        return "fetch_numeric"
+
+    return ""
+
+
 def extract_similarity_tokens(text: str) -> set[str]:
     if not text:
         return set()
@@ -90,14 +144,18 @@ def infer_followup_intent(prompt_text: str) -> bool:
     text = str(prompt_text or "").strip().lower()
     if not text:
         return False
+    followup_goal = infer_followup_goal(text)
     if any(keyword in text for keyword in FOLLOWUP_KEYWORDS):
         return True
     has_connector = any(hint in text for hint in FOLLOWUP_CONNECTOR_HINTS)
     has_action = any(hint in text for hint in FOLLOWUP_ACTION_HINTS)
     has_detail = any(hint in text for hint in FOLLOWUP_DETAIL_HINTS)
+    has_request_prefix = text.startswith(FOLLOWUP_REQUEST_PREFIXES)
     if has_connector and (has_action or has_detail):
         return True
     if len(text) <= 16 and has_action and has_detail:
+        return True
+    if followup_goal and (has_request_prefix or len(text) <= 18):
         return True
     return False
 
@@ -127,7 +185,8 @@ def should_preserve_recent_context(
     text = str(prompt_text or "").strip()
     if not text:
         return False
-    if is_followup or infer_lookup_followup_intent(text):
+    followup_goal = infer_followup_goal(text, recent_focus_topic=recent_focus_topic)
+    if is_followup or infer_lookup_followup_intent(text) or bool(followup_goal):
         return True
     if semantic_related and is_same_domain:
         return True

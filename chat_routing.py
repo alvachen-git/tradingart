@@ -1,6 +1,8 @@
 import re
 from typing import Final
 
+from chat_context_utils import infer_followup_goal
+
 
 CHAT_MODE_SIMPLE: Final[str] = "simple_chat"
 CHAT_MODE_KNOWLEDGE: Final[str] = "knowledge_chat"
@@ -94,6 +96,7 @@ FINANCE_BASE_KEYWORDS = (
     "金融", "交易", "投资", "理财", "基金", "债券", "国债", "利率", "通胀", "cpi", "pmi",
     "非农", "美债", "美元", "汇率", "外汇", "a股", "港股", "美股", "期货", "现货",
     "商品", "贵金属", "券商", "财报", "估值", "资产配置",
+    "科创50", "上证50", "沪深300", "中证500", "创业板指", "科创板", "纳斯达克100",
 )
 
 FINANCE_DOMAIN_KEYWORDS = FINANCE_BASE_KEYWORDS + ANALYSIS_INTENT_KEYWORDS + MARKET_SUBJECT_KEYWORDS
@@ -258,6 +261,7 @@ def classify_chat_mode(
     focus_topic: str = "",
     focus_aspect: str = "",
     focus_mode_hint: str = "",
+    followup_goal: str = "",
     has_uploaded_image: bool = False,
     has_structured_payload: bool = False,
     vision_position_domain: str = "",
@@ -287,6 +291,11 @@ def classify_chat_mode(
     recent_suggests_analysis = _recent_context_suggests_analysis(recent_context_lower)
     recent_suggests_knowledge = _recent_context_suggests_knowledge(recent_context_lower)
     has_simple_keyword = any(keyword in text_lower for keyword in SIMPLE_CHAT_KEYWORDS)
+    effective_followup_goal = str(followup_goal or "").strip().lower() or infer_followup_goal(
+        text,
+        recent_context=recent_context_lower,
+        recent_focus_topic=focus_topic,
+    )
     has_company_news = _is_company_news_query(
         text,
         has_symbol=has_symbol,
@@ -314,6 +323,22 @@ def classify_chat_mode(
             return CHAT_MODE_ANALYSIS
         if has_company_news:
             return CHAT_MODE_KNOWLEDGE
+        if effective_followup_goal == "fetch_numeric":
+            if recent_has_finance_subject or has_finance_subject or has_market_subject:
+                return CHAT_MODE_ANALYSIS
+            return CHAT_MODE_KNOWLEDGE
+        if effective_followup_goal in {"analyze_reason", "analyze_impact"}:
+            return CHAT_MODE_ANALYSIS
+        if effective_followup_goal == "fetch_facts":
+            return CHAT_MODE_KNOWLEDGE
+        if effective_followup_goal == "explain_more":
+            if recent_has_finance_subject or has_finance_subject:
+                if str(focus_topic or "").strip() == "概念解释" or recent_suggests_knowledge:
+                    return CHAT_MODE_KNOWLEDGE
+                if recent_suggests_analysis or has_analysis_intent:
+                    return CHAT_MODE_ANALYSIS
+                return CHAT_MODE_KNOWLEDGE
+            return CHAT_MODE_SIMPLE
         if recent_has_finance_subject or has_finance_subject:
             if has_analysis_intent:
                 return CHAT_MODE_ANALYSIS
