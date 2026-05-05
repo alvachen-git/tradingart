@@ -65,6 +65,7 @@ from sidebar_footer_menu import render_sidebar_footer_menu, _resolve_scheme
 from invite_landing import render_invite_register_landing
 from sqlalchemy import text
 from zoneinfo import ZoneInfo
+from simple_chat_runtime import build_simple_runtime_context
 import requests
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.outputs import LLMResult
@@ -699,6 +700,11 @@ ANNOUNCEMENT_RERUN_HOLDOFF_SECONDS = 6.0
 def get_shanghai_today_str():
     """Return today's date string in Asia/Shanghai."""
     return datetime.now(ASIA_SHANGHAI_TZ).strftime("%Y-%m-%d")
+
+
+def build_simple_runtime_context_payload(current_user: str) -> Dict[str, str]:
+    user_label = str(current_user or "").strip() or "访客"
+    return build_simple_runtime_context(current_user_label=user_label)
 
 
 def _persist_announcement_shown_date(date_str: str) -> bool:
@@ -3134,6 +3140,7 @@ def process_user_input(
             typing_placeholder.markdown(_render_simple_chat_typing_indicator(), unsafe_allow_html=True)
             time.sleep(0.08)
             llm_turbo = ChatTongyi(model="qwen-turbo", temperature=0.1)
+            runtime_context = build_simple_runtime_context_payload(current_user)
             simple_response = simple_chatter_reply(
                 prompt_text,
                 llm_turbo,
@@ -3143,6 +3150,7 @@ def process_user_input(
                 focus_entity=str(context_payload.get("focus_entity") or ""),
                 focus_topic=str(context_payload.get("focus_topic") or ""),
                 focus_aspect=str(context_payload.get("focus_aspect") or ""),
+                runtime_context=runtime_context,
             )
             typing_placeholder.empty()
             response_placeholder = st.empty()

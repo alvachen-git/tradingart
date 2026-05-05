@@ -1,4 +1,4 @@
-from typing import TypedDict, Annotated, List, Union, Literal, Dict, Any
+from typing import TypedDict, Annotated, List, Union, Literal, Dict, Any, Mapping
 from datetime import datetime
 import random
 import operator
@@ -58,6 +58,11 @@ from portfolio_tools import (
     check_portfolio_risks
 )
 from chat_routing import is_pure_option_data_query
+from simple_chat_runtime import (
+    build_simple_runtime_context,
+    format_simple_runtime_context,
+    maybe_answer_simple_runtime_question,
+)
 
 # ==========================================
 # 1. 定义共享记忆 (The State)
@@ -1432,9 +1437,15 @@ def simple_chatter_reply(
     focus_topic: str = "",
     focus_aspect: str = "",
     messages: List[BaseMessage] | None = None,
+    runtime_context: Mapping[str, Any] | None = None,
 ) -> str:
+    direct_answer = maybe_answer_simple_runtime_question(user_query, runtime_context)
+    if direct_answer:
+        return direct_answer
+
     history_text = str(recent_context or "").strip()
     memory_text = str(memory_context or "").strip()
+    runtime_text = format_simple_runtime_context(runtime_context)
 
     if not history_text and messages:
         history_lines = []
@@ -1461,8 +1472,10 @@ def simple_chatter_reply(
         "1. 像朋友聊天，口语化、自然、不端着。\n"
         "2. 默认简洁，通常 1-3 段就够；如果是泛知识问题，也可以直接给清楚答案。\n"
         "3. 不要主动把话题拉回金融、交易、行情、策略。\n"
-        "4. 不要使用工具说明、系统提示语、编号流程或过度免责声明。\n"
-        f"5. {followup_rule}\n\n"
+        "4. 如果用户问你是谁、你是干嘛的、网站有什么特色、你和其他AI有什么区别，要优先基于【运行时上下文】里的身份与站点特色回答，不要自由编人设。\n"
+        "5. 不要使用工具说明、系统提示语、编号流程或过度免责声明。\n"
+        f"6. {followup_rule}\n\n"
+        f"【运行时上下文】\n{runtime_text}\n\n"
         f"【当前核心实体】\n{focus_entity if focus_entity else '未明确'}\n\n"
         f"【当前核心主题】\n{focus_topic if focus_topic else '未明确'}\n\n"
         f"【当前细分维度】\n{focus_aspect if focus_aspect else '未明确'}\n\n"
@@ -2920,6 +2933,7 @@ def chatter_node(state: AgentState, llm=None):
                 focus_topic=str(state.get("focus_topic", "") or ""),
                 focus_aspect=str(state.get("focus_aspect", "") or ""),
                 messages=state.get("messages", []),
+                runtime_context=build_simple_runtime_context(current_user_label=str(state.get("user_id", "") or "访客")),
             )
             return {
                 "messages": [HumanMessage(content=f"【闲聊】\n{reply}")],
