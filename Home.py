@@ -47,6 +47,7 @@ from chat_context_utils import (
     extract_focus_aspect as _shared_extract_focus_aspect,
     extract_focus_entity as _shared_extract_focus_entity,
     infer_followup_intent as _infer_followup_intent,
+    infer_followup_goal as _infer_followup_goal,
     infer_focus_topic as _infer_focus_topic,
     infer_lookup_followup_intent as _infer_lookup_followup_intent,
     is_semantically_related as _shared_is_semantically_related,
@@ -2857,6 +2858,11 @@ def build_context_payload(
     focus_topic, focus_mode_hint = _infer_focus_topic(prompt_text)
     if not focus_topic and should_inherit_focus:
         focus_topic, focus_mode_hint = recent_focus_topic, recent_focus_mode_hint
+    followup_goal = _infer_followup_goal(
+        prompt_text,
+        recent_context=recent_context_for_focus,
+        recent_focus_topic=focus_topic,
+    )
 
     memory_context = ""
     if current_user != "访客" and should_load_long_memory:
@@ -2889,6 +2895,7 @@ def build_context_payload(
         "focus_topic": focus_topic,
         "focus_aspect": focus_aspect,
         "focus_mode_hint": focus_mode_hint,
+        "followup_goal": followup_goal,
         "semantic_related": bool(semantic_related),
         "conversation_id": conversation_id,
         "account_total_capital": account_total_capital,
@@ -3117,6 +3124,7 @@ def process_user_input(
         focus_topic=str(context_payload.get("focus_topic") or ""),
         focus_aspect=str(context_payload.get("focus_aspect") or ""),
         focus_mode_hint=str(context_payload.get("focus_mode_hint") or ""),
+        followup_goal=str(context_payload.get("followup_goal") or ""),
         has_uploaded_image=bool(uploaded_image),
         has_structured_payload=has_structured_upload,
         vision_position_domain=vision_position_domain,

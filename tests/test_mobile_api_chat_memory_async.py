@@ -251,6 +251,19 @@ class TestMobileApiChatMemoryAsync(unittest.TestCase):
         self.assertIn("机器人", out.get("focus_aspect", ""))
         self.assertEqual(out.get("focus_mode_hint"), "company_news")
 
+    def test_mobile_context_infers_numeric_followup_goal(self):
+        history = [
+            {"role": "user", "content": "澜起科技跟科创50的相关度有多少"},
+            {"role": "assistant", "content": "澜起科技和科创50有一定关联，但需要看具体口径。"},
+        ]
+        out = mobile_api._build_mobile_context_payload(
+            prompt_text="我要详细数值",
+            current_user="u1",
+            history=history,
+        )
+        self.assertTrue(out.get("is_followup"))
+        self.assertEqual(out.get("followup_goal"), "fetch_numeric")
+
     def test_mobile_context_preserves_price_move_reason_followup(self):
         history = [
             {"role": "user", "content": "为什么今晚英特尔涨这么多？"},
