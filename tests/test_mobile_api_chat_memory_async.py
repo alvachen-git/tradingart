@@ -264,6 +264,25 @@ class TestMobileApiChatMemoryAsync(unittest.TestCase):
         self.assertTrue(out.get("is_followup"))
         self.assertEqual(out.get("followup_goal"), "fetch_numeric")
 
+    def test_mobile_context_prefers_latest_completed_topic_anchor_for_short_numeric_followup(self):
+        history = [
+            {"role": "user", "content": "澜起科技跟科创50的相关度有多少"},
+            {"role": "assistant", "content": "澜起科技和科创50存在一定相关性。"},
+            {"role": "user", "content": "黄金跟白银的相关性高吗"},
+            {"role": "assistant", "content": "黄金和白银通常呈现较高相关性。"},
+        ]
+        out = mobile_api._build_mobile_context_payload(
+            prompt_text="我要详细数值",
+            current_user="u1",
+            history=history,
+        )
+        self.assertTrue(out.get("is_followup"))
+        self.assertEqual(out.get("followup_goal"), "fetch_numeric")
+        self.assertIn("黄金跟白银的相关性高吗", out.get("recent_context", ""))
+        self.assertNotIn("澜起科技跟科创50的相关度有多少", out.get("recent_context", ""))
+        self.assertEqual(out.get("target_anchor_id"), "anchor_3")
+        self.assertFalse(out.get("followup_anchor_ambiguous"))
+
     def test_mobile_context_preserves_price_move_reason_followup(self):
         history = [
             {"role": "user", "content": "为什么今晚英特尔涨这么多？"},
