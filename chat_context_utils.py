@@ -1,5 +1,5 @@
 import re
-from typing import Iterable
+from typing import Any, Iterable
 
 
 FOLLOWUP_KEYWORDS = (
@@ -247,3 +247,178 @@ def infer_focus_topic(text: str) -> tuple[str, str]:
     if any(keyword in raw for keyword in MARKET_ANALYSIS_KEYWORDS):
         return "盘面分析", "market_analysis"
     return "", ""
+
+
+def summarize_anchor_text(text: str, max_chars: int = 120) -> str:
+    raw = re.sub(r"\s+", " ", str(text or "")).strip()
+    return raw[:max_chars]
+
+
+def build_topic_anchors(messages: Iterable[dict], max_anchors: int = 3) -> list[dict[str, Any]]:
+    anchors: list[dict[str, Any]] = []
+    pending_user: dict[str, Any] | None = None
+
+    for idx, raw_msg in enumerate(messages):
+        if not isinstance(raw_msg, dict):
+            continue
+        if bool(raw_msg.get("is_task_placeholder")):
+            continue
+
+        role = str(raw_msg.get("role", "")).strip().lower()
+        content = str(raw_msg.get("content", "")).strip()
+        if not content:
+            continue
+
+        if role == "user":
+            pending_user = {
+                "index": idx,
+                "content": content,
+                "linked_task_id": str(raw_msg.get("linked_task_id") or "").strip(),
+            }
+            continue
+
+        if role not in {"assistant", "ai"} or not pending_user:
+            continue
+
+        user_query = str(pending_user.get("content") or "").strip()
+        assistant_text = content
+        combined_text = f"{user_query}\n{assistant_text}"
+        focus_entity = extract_focus_entity(user_query) or extract_focus_entity(assistant_text)
+        focus_aspect = extract_focus_aspect(user_query) or extract_focus_aspect(assistant_text)
+        focus_topic, focus_mode_hint = infer_focus_topic(user_query)
+        if not focus_topic:
+            focus_topic, focus_mode_hint = infer_focus_topic(assistant_text)
+
+        anchor_id = str(pending_user.get("linked_task_id") or "").strip() or f"anchor_{idx}"
+        anchors.append(
+            {
+                "anchor_id": anchor_id,
+                "user_query": user_query,
+                "assistant_summary": summarize_anchor_text(assistant_text, max_chars=180),
+                "context_text": f"用户: {user_query[:260]}\nAI: {assistant_text[:260]}",
+                "focus_entity": focus_entity,
+                "focus_topic": focus_topic,
+                "focus_aspect": focus_aspect,
+                "focus_mode_hint": focus_mode_hint,
+                "source_user_index": int(pending_user.get("index") or 0),
+            }
+        )
+        pending_user = None
+
+    if max_anchors <= 0:
+        return []
+    return anchors[-max_anchors:]
+
+
+def _anchor_topic_signature(anchor: dict[str, Any]) -> str:
+    entity = str(anchor.get("focus_entity") or "").strip()
+    topic = str(anchor.get("focus_topic") or "").strip()
+    aspect = str(anchor.get("focus_aspect") or "").strip()
+    user_query = summarize_anchor_text(anchor.get("user_query") or "", max_chars=40)
+    return "|".join(part for part in (entity, topic, aspect, user_query) if part)
+
+
+def _anchor_goal_score(anchor: dict[str, Any], followup_goal: str) -> float:
+    goal = str(followup_goal or "").strip().lower()
+    if not goal:
+        return 0.0
+    text = f"{anchor.get('user_query', '')}\n{anchor.get('assistant_summary', '')}".lower()
+    if goal == "fetch_numeric":
+        return 0.22 if any(keyword in text for keyword in ("相关", "数值", "数据", "区间", "权重", "占比", "比例", "系数", "统计")) else 0.0
+    if goal == "fetch_facts":
+        return 0.18 if any(keyword in text for keyword in ("年份", "时间", "日期", "节点", "来源", "公告", "成分")) else 0.0
+    if goal == "explain_more":
+        return 0.15 if any(keyword in text for keyword in ("什么是", "解释", "原理", "概念", "举例")) else 0.0
+    if goal in {"analyze_reason", "analyze_impact"}:
+        return 0.18 if any(keyword in text for keyword in ("为什么", "原因", "怎么看", "策略", "影响", "走势")) else 0.0
+    return 0.0
+
+
+def select_target_anchor(
+    prompt_text: str,
+    anchors: Iterable[dict[str, Any]],
+    *,
+    followup_goal: str = "",
+    is_followup: bool = False,
+) -> dict[str, Any]:
+    anchor_list = list(anchors or [])
+    if not anchor_list:
+        return {
+            "target_anchor": None,
+            "candidate_anchors": [],
+            "recent_topic_anchor": None,
+            "anchor_confidence": 0.0,
+            "followup_anchor_ambiguous": False,
+            "followup_anchor_clarify": "",
+        }
+
+    prompt_raw = str(prompt_text or "").strip()
+    prompt_text_lower = prompt_raw.lower()
+    explicit_entity = extract_focus_entity(prompt_raw)
+    explicit_aspect = extract_focus_aspect(prompt_raw)
+    prompt_tokens = extract_similarity_tokens(prompt_raw)
+    low_info_prompt = len(prompt_raw) <= 12 and not explicit_entity and not explicit_aspect
+
+    scored: list[tuple[float, dict[str, Any]]] = []
+    for reverse_idx, anchor in enumerate(reversed(anchor_list)):
+        recency_score = max(0.25, 0.90 - reverse_idx * 0.20)
+        score = recency_score
+
+        anchor_entity = str(anchor.get("focus_entity") or "").strip()
+        anchor_aspect = str(anchor.get("focus_aspect") or "").strip()
+        anchor_blob = f"{anchor.get('user_query', '')}\n{anchor.get('assistant_summary', '')}"
+        anchor_tokens = extract_similarity_tokens(anchor_blob)
+
+        if explicit_entity:
+            if explicit_entity == anchor_entity or explicit_entity.lower() in anchor_blob.lower():
+                score += 0.75
+            else:
+                score -= 0.18
+
+        if explicit_aspect:
+            if explicit_aspect and explicit_aspect in anchor_aspect:
+                score += 0.45
+            else:
+                score -= 0.10
+
+        if prompt_tokens and anchor_tokens:
+            union = prompt_tokens | anchor_tokens
+            if union:
+                overlap = len(prompt_tokens & anchor_tokens) / len(union)
+                score += min(0.35, overlap * 1.2)
+
+        score += _anchor_goal_score(anchor, followup_goal)
+
+        if is_followup and not explicit_entity and not explicit_aspect and reverse_idx == 0:
+            score += 0.10
+
+        scored.append((score, anchor))
+
+    scored.sort(key=lambda item: item[0], reverse=True)
+    top_score, top_anchor = scored[0]
+    candidate_anchors = anchor_list[-3:]
+    recent_topic_anchor = anchor_list[-1]
+
+    ambiguous = False
+    clarify = ""
+    if low_info_prompt and len(scored) >= 2 and followup_goal in {"fetch_numeric", "fetch_facts", "explain_more"}:
+        second_score, second_anchor = scored[1]
+        topic_changed = _anchor_topic_signature(top_anchor) != _anchor_topic_signature(second_anchor)
+        ambiguous_gap = 0.18 if followup_goal == "fetch_numeric" else 0.32
+        if topic_changed and (top_score - second_score) < ambiguous_gap:
+            ambiguous = True
+            latest = recent_topic_anchor
+            previous = candidate_anchors[-2] if len(candidate_anchors) >= 2 else second_anchor
+            clarify = (
+                f"你是要“{summarize_anchor_text(latest.get('user_query', ''), 18)}”这题的详细信息，"
+                f"还是前面“{summarize_anchor_text(previous.get('user_query', ''), 18)}”那题？"
+            )
+
+    return {
+        "target_anchor": top_anchor,
+        "candidate_anchors": candidate_anchors,
+        "recent_topic_anchor": recent_topic_anchor,
+        "anchor_confidence": round(float(top_score), 3),
+        "followup_anchor_ambiguous": ambiguous,
+        "followup_anchor_clarify": clarify,
+    }

@@ -37,6 +37,42 @@ class TestChatContextUtils(unittest.TestCase):
     def test_infer_focus_topic_supports_price_move_reason(self):
         self.assertEqual(ctx.infer_focus_topic("为什么今晚英特尔涨这么多？"), ("异动原因", "price_move_reason"))
 
+    def test_select_target_anchor_prefers_latest_completed_topic_for_short_numeric_followup(self):
+        messages = [
+            {"role": "user", "content": "澜起科技跟科创50的相关度有多少"},
+            {"role": "assistant", "content": "澜起科技和科创50存在一定相关性。"},
+            {"role": "user", "content": "黄金跟白银的相关性高吗"},
+            {"role": "assistant", "content": "黄金和白银通常呈现较高相关性。"},
+        ]
+        anchors = ctx.build_topic_anchors(messages, max_anchors=3)
+        out = ctx.select_target_anchor(
+            "我要详细数值",
+            anchors,
+            followup_goal="fetch_numeric",
+            is_followup=True,
+        )
+        target = out.get("target_anchor") or {}
+        self.assertEqual(target.get("user_query"), "黄金跟白银的相关性高吗")
+        self.assertFalse(out.get("followup_anchor_ambiguous"))
+
+    def test_select_target_anchor_asks_to_clarify_for_low_info_multi_topic_followup(self):
+        messages = [
+            {"role": "user", "content": "法国大革命是什么"},
+            {"role": "assistant", "content": "法国大革命是18世纪末法国发生的政治社会革命。"},
+            {"role": "user", "content": "第一次世界大战是什么"},
+            {"role": "assistant", "content": "第一次世界大战是1914年至1918年间的全球战争。"},
+        ]
+        anchors = ctx.build_topic_anchors(messages, max_anchors=3)
+        out = ctx.select_target_anchor(
+            "详细一点",
+            anchors,
+            followup_goal="explain_more",
+            is_followup=True,
+        )
+        self.assertTrue(out.get("followup_anchor_ambiguous"))
+        self.assertIn("法国大革命", out.get("followup_anchor_clarify", ""))
+        self.assertIn("第一次世界大战", out.get("followup_anchor_clarify", ""))
+
 
 if __name__ == "__main__":
     unittest.main()

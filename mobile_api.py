@@ -83,6 +83,7 @@ from chat_routing import (
     default_progress_for_chat_mode,
 )
 from chat_context_utils import (
+    build_topic_anchors as _build_topic_anchors,
     extract_focus_aspect as _shared_extract_focus_aspect,
     extract_focus_entity as _shared_extract_focus_entity,
     infer_followup_intent as _infer_followup_intent,
@@ -90,6 +91,7 @@ from chat_context_utils import (
     infer_focus_topic as _infer_focus_topic,
     infer_lookup_followup_intent as _infer_lookup_followup_intent,
     is_semantically_related as _shared_is_semantically_related,
+    select_target_anchor as _select_target_anchor,
     should_preserve_recent_context as _should_preserve_recent_context,
 )
 import subscription_service as sub_svc
@@ -1408,9 +1410,33 @@ def _build_mobile_context_payload(
     lookup_followup = _infer_lookup_followup_intent(prompt_text)
     semantic_related = _is_semantically_related(prompt_text, recent_turns)
     is_same_domain = intent_domain == recent_domain
-    recent_context_for_focus = recent_context_full
-    recent_focus_entity = _extract_mobile_focus_entity(recent_context_for_focus) or _extract_mobile_focus_entity(latest_user_content)
-    recent_focus_topic, recent_focus_mode_hint = _infer_focus_topic(recent_context_for_focus)
+    initial_followup_goal = _infer_followup_goal(
+        prompt_text,
+        recent_context=recent_context_full,
+    )
+    topic_anchors = _build_topic_anchors(history or [], max_anchors=3)
+    anchor_info = _select_target_anchor(
+        prompt_text,
+        topic_anchors,
+        followup_goal=initial_followup_goal,
+        is_followup=bool(is_followup),
+    )
+    target_anchor = anchor_info.get("target_anchor") or {}
+    recent_topic_anchor = anchor_info.get("recent_topic_anchor") or {}
+    candidate_topic_anchors = anchor_info.get("candidate_anchors") or []
+    recent_context_for_focus = str(target_anchor.get("context_text") or recent_context_full)
+    recent_focus_entity = (
+        str(target_anchor.get("focus_entity") or "")
+        or str(recent_topic_anchor.get("focus_entity") or "")
+        or _extract_mobile_focus_entity(recent_context_for_focus)
+        or _extract_mobile_focus_entity(latest_user_content)
+    )
+    recent_focus_topic = str(target_anchor.get("focus_topic") or recent_topic_anchor.get("focus_topic") or "")
+    recent_focus_mode_hint = str(
+        target_anchor.get("focus_mode_hint") or recent_topic_anchor.get("focus_mode_hint") or ""
+    )
+    if not recent_focus_topic:
+        recent_focus_topic, recent_focus_mode_hint = _infer_focus_topic(recent_context_for_focus)
     should_include_recent_context = _should_preserve_recent_context(
         prompt_text,
         is_followup=is_followup,
@@ -1443,11 +1469,13 @@ def _build_mobile_context_payload(
 
     if not should_include_recent_context:
         recent_context = ""
+    else:
+        recent_context = recent_context_for_focus
 
     pronoun_followup = any(hint in str(prompt_text or "") for hint in _MOBILE_FOCUS_PRONOUN_HINTS)
     explicit_focus_entity = _extract_mobile_focus_entity(prompt_text)
     explicit_focus_aspect = _extract_mobile_focus_aspect(prompt_text)
-    recent_focus_aspect = _extract_mobile_focus_aspect(recent_context_for_focus)
+    recent_focus_aspect = str(target_anchor.get("focus_aspect") or "") or _extract_mobile_focus_aspect(recent_context_for_focus)
     should_inherit_focus = (
         should_include_recent_context
         or lookup_followup
@@ -1495,6 +1523,12 @@ def _build_mobile_context_payload(
         "focus_aspect": focus_aspect,
         "focus_mode_hint": focus_mode_hint,
         "followup_goal": followup_goal,
+        "recent_topic_anchor": recent_topic_anchor,
+        "candidate_topic_anchors": candidate_topic_anchors,
+        "target_anchor_id": str(target_anchor.get("anchor_id") or ""),
+        "anchor_confidence": float(anchor_info.get("anchor_confidence") or 0.0),
+        "followup_anchor_ambiguous": bool(anchor_info.get("followup_anchor_ambiguous")),
+        "followup_anchor_clarify": str(anchor_info.get("followup_anchor_clarify") or ""),
         "semantic_related": bool(semantic_related),
         "conversation_id": f"mobile-{current_user}-{uuid.uuid4()}",
         "account_total_capital": account_total_capital,
@@ -2160,6 +2194,40 @@ def chat_submit(
         history=history_for_task,
         profile=profile,
     )
+    trace_id = _generate_chat_trace_id()
+    answer_id = _generate_chat_answer_id()
+    intent_domain = str(context_payload.get("intent_domain") or "general")
+    if context_payload.get("followup_anchor_ambiguous") and context_payload.get("followup_anchor_clarify"):
+        response_text = str(context_payload.get("followup_anchor_clarify") or "").strip()
+        feedback_allowed = _save_chat_answer_event(
+            task_id=f"immediate-{uuid.uuid4()}",
+            user_id=username,
+            trace_id=trace_id,
+            answer_id=answer_id,
+            prompt_text=raw_prompt or normalized_prompt,
+            response_text=response_text,
+            intent_domain=intent_domain,
+            feedback_allowed=True,
+        )
+        _queue_mobile_chat_memory_persist(
+            task_id=f"immediate-memory-{uuid.uuid4()}",
+            username=username,
+            user_prompt=raw_prompt or normalized_prompt,
+            ai_response=response_text,
+        )
+        return {
+            "delivery_mode": "immediate",
+            "task_id": "",
+            "message": "需要确认追问对象",
+            "chat_mode": CHAT_MODE_SIMPLE,
+            "trace_id": trace_id,
+            "answer_id": answer_id,
+            "feedback_allowed": feedback_allowed,
+            "result": {
+                "status": "success",
+                "response": response_text,
+            },
+        }
     chat_mode = classify_chat_mode(
         normalized_prompt,
         is_followup=bool(context_payload.get("is_followup", False)),
@@ -2172,9 +2240,6 @@ def chat_submit(
     )
     context_payload["chat_mode"] = chat_mode
     has_portfolio = _detect_mobile_has_portfolio(username)
-    trace_id = _generate_chat_trace_id()
-    answer_id = _generate_chat_answer_id()
-    intent_domain = str(context_payload.get("intent_domain") or "general")
 
     if chat_mode == CHAT_MODE_SIMPLE:
         llm_turbo = ChatTongyi(model="qwen-turbo", streaming=False, temperature=0.1)
