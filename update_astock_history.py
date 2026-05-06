@@ -110,20 +110,100 @@ def fetch_and_save_data(ts_code, start_date, end_date, asset_type='E'):
 # --- 4. 批量運行 ---
 if __name__ == "__main__":
     today = datetime.now().strftime('%Y%m%d')
-    start = (datetime.now() - timedelta(days=600)).strftime('%Y%m%d')
+    start = (datetime.now() - timedelta(days=1000)).strftime('%Y%m%d')
 
     print(f"=== 開始抓取 ({start} - {today}) ===")
 
     # 1. ETF
-    # ETF_TARGETS = ["510050.SH", "159915.SZ", "588000.SH", "510300.SH", "510500.SH"]
-    #for code in ETF_TARGETS:
-    # fetch_and_save_data(code, start, today, asset_type='E')
-    # time.sleep(0.3)
+    # Keep this selected ETF pool in sync with update_astock_daily.py.
+    ETF_TARGETS = ["510050.SH", "159915.SZ", "588000.SH", "510300.SH", "510500.SH",
+                   "159901.SZ",
+                   # === Broad-market supplements: A500 / CSI 1000 / A50 ===
+                   "159338.SZ", "512050.SH", "563800.SH", "159361.SZ", "560510.SH",
+                   "560610.SH", "563880.SH", "159362.SZ", "159359.SZ", "159357.SZ",
+                   "512100.SH", "560010.SH", "159845.SZ", "159633.SZ", "159629.SZ",
+                   "561750.SH", "512250.SH", "159593.SZ", "159136.SZ",
+
+                   # === ChiNext / STAR Market / chip supplements ===
+                   "159949.SZ", "159967.SZ", "159368.SZ", "159369.SZ", "159383.SZ",
+                   "588200.SH", "588040.SH", "588720.SH", "588870.SH", "588940.SH",
+
+                   # === Hong Kong and overseas supplements ===
+                   "513130.SH", "513010.SH", "513060.SH", "513090.SH", "513730.SH",
+                   "159941.SZ", "159740.SZ", "513520.SH", "159605.SZ", "159607.SZ",
+
+                   # === Sector, commodity and thematic supplements ===
+                   "159611.SZ", "159828.SZ", "516010.SH", "515700.SH", "512980.SH",
+                   "159870.SZ", "159930.SZ", "159937.SZ", "159980.SZ", "159981.SZ",
+                   "518800.SH", "159934.SZ",
+                   "510880.SH",  # 绾㈠埄ETF (楂樿偂鎭槻瀹?
+                   "588080.SH",  # 绉戝垱100 (绉戝垱涓皬鐩?
+                   # === B. 绉戞妧鎴愰暱 (鏈€娲昏穬) ===
+                   "512480.SH",  # 鍗婂浣?(鍥借仈瀹? - 琛屼笟瑙勬ā鏈€澶?
+                   "512760.SH",  # 鑺墖ETF (鍥芥嘲) - 鍙︿竴鍙法澶?
+                   "515050.SH",  # 5G閫氫俊ETF
+                   "512720.SH",  # 璁＄畻鏈篍TF
+                   "515250.SH",  # 鏅鸿兘娑堣垂 (AI/浜哄伐鏅鸿兘姒傚康)
+                   "159819.SZ",  # 浜哄伐鏅鸿兘ETF
+                   "515030.SH",  # 鏂拌兘婧愯溅ETF (榫欏ご)
+                   "515790.SH",  # 鍏変紡ETF
+                   "159755.SZ",  # 鐢垫睜ETF
+                   "512660.SH",  # 鍐涘伐ETF
+                   "516110.SH",  # 姹借溅ETF
+                   "515980.SH",  # 浜哄伐鏅鸿兘ETF (鍗庡瘜)
+                   "516160.SH",  # 鏂拌兘婧怑TF (榫欏ご)
+                   "513120.SH","159992.SZ",
+
+                   # === C. 澶ф秷璐逛笌鍖昏嵂 (闀跨墰鏉垮潡) ===
+                   "512690.SH",  # 閰扙TF (楣忓崕) - 鐧介厭淇′话
+                   "515170.SH",  # 椋熷搧楗枡ETF
+                   "159928.SZ",  # 娑堣垂ETF (姹囨坊瀵?
+                   "512010.SH",  # 鍖昏嵂ETF (鏄撴柟杈?
+                   "512170.SH",  # 鍖荤枟ETF (鍗庡疂) - CXO/鍖荤枟鍣ㄦ
+                   "512290.SH",  # 鐢熺墿鍖昏嵂
+                   "513360.SH",  # 鏁欒偛ETF (鍗氭椂)
+                   "515000.SH",  # 绉戞妧榫欏ご (鍚秷璐圭數瀛?
+                   "516220.SH",  # 鍖栧伐ETF (涔熷彲浠ョ畻鍛ㄦ湡)
+                   "159996.SZ",  # 瀹剁數ETF
+
+                   # === D. 閲戣瀺涓庡湴浜?(鐗涘競鏃楁墜) ===
+                   "512880.SH",  # 璇佸埜ETF (鍥芥嘲) - 瑙勬ā鏈€澶?
+                   "512070.SH",  # 闈為摱ETF (鍚繚闄?
+                   "512800.SH",  # 閾惰ETF
+                   "512200.SH",  # 鍦颁骇ETF
+                   "515080.SH",  # 涓瘉绾㈠埄
+
+                   # === E. 鍛ㄦ湡涓庤祫婧?(閫氳儉/閬块櫓) ===
+                   "515220.SH",  # 鐓ょ偔ETF (楂樿偂鎭?
+                   "512400.SH",  # 鏈夎壊閲戝睘ETF
+                   "515210.SH",  # 閽㈤搧ETF
+                   "159985.SZ",  # 璞嗙矔ETF (鍟嗗搧)
+                   "518880.SH",  # 榛勯噾ETF (鍟嗗搧)
+                   "511260.SH",  # 鍗佸勾鍥藉€篍TF
+                   "511010.SH",  # 鍥藉€篍TF
+                   "513100.SH",  # 绾虫寚ETF (璺ㄥ)
+                   "513500.SH",  # 鏍囨櫘500 (璺ㄥ)
+                   "513050.SH",  # 鎭掔敓浜掕仈缃?(璺ㄥ)
+                   "513330.SH",  # 鎭掔敓浜掕仈 (璺ㄥ)
+                   "159920.SZ",  # 鎭掔敓ETF
+                   "513180.SH",  # 鎭掔敓绉戞妧
+                   "515400.SH",  # 澶ф暟鎹?
+                   "516510.SH",  # 浜戣绠?
+                   "159938.SZ",  # 鍖昏嵂鍗敓
+                   "159995.SZ",  # 鑺墖
+                   "159869.SZ",  # 娓告垙ETF
+                   "516780.SH",  # 绋€鍦烢TF
+                   "516150.SH",  # 绋€鏈夐噾灞?
+                   "159865.SZ" # 鍏绘畺ETF (鐚倝)
+
+                   ]
+    for code in ETF_TARGETS:
+        fetch_and_save_data(code, start, today, asset_type='E')
+        time.sleep(0.3)
 
     # 2. 個股 (茅台在這裡！)
     STOCK_TARGETS = [
-        "301110.SZ","301111.SZ","301112.SZ","301113.SZ","301115.SZ","301116.SZ","301117.SZ","301118.SZ","301119.SZ","301120.SZ",
-
+        "301525.SZ","301528.SZ","301529.SZ",
     ]
     for code in STOCK_TARGETS:
         fetch_and_save_data(code, start, today, asset_type='S')
