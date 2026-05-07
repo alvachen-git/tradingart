@@ -264,6 +264,32 @@ class TestMobileApiChatMemoryAsync(unittest.TestCase):
         self.assertTrue(out.get("is_followup"))
         self.assertEqual(out.get("followup_goal"), "fetch_numeric")
 
+    def test_mobile_context_marks_correction_intent_for_entity_correction(self):
+        history = [
+            {"role": "user", "content": "中微半导是做什么的，有什么护城河，有什么隐忧，有什么竞争对手"},
+            {"role": "assistant", "content": "中微半导应该是指中微公司吧。"},
+        ]
+        out = mobile_api._build_mobile_context_payload(
+            prompt_text="不是中微公司，就叫中微半导",
+            current_user="u1",
+            history=history,
+        )
+        self.assertTrue(out.get("is_followup"))
+        self.assertTrue(out.get("correction_intent"))
+
+    def test_mobile_context_marks_correction_intent_for_user_challenge(self):
+        history = [
+            {"role": "user", "content": "中微半导是做什么的，有什么护城河，有什么隐忧，有什么竞争对手"},
+            {"role": "assistant", "content": "中微半导应该是指中微公司吧。"},
+        ]
+        out = mobile_api._build_mobile_context_payload(
+            prompt_text="有这家公司，你仔细思考下",
+            current_user="u1",
+            history=history,
+        )
+        self.assertTrue(out.get("is_followup"))
+        self.assertTrue(out.get("correction_intent"))
+
     def test_mobile_context_prefers_latest_completed_topic_anchor_for_short_numeric_followup(self):
         history = [
             {"role": "user", "content": "澜起科技跟科创50的相关度有多少"},

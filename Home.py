@@ -47,6 +47,7 @@ from chat_context_utils import (
     build_topic_anchors as _build_topic_anchors,
     extract_focus_aspect as _shared_extract_focus_aspect,
     extract_focus_entity as _shared_extract_focus_entity,
+    infer_correction_intent as _infer_correction_intent,
     infer_followup_intent as _infer_followup_intent,
     infer_followup_goal as _infer_followup_goal,
     infer_focus_topic as _infer_focus_topic,
@@ -2891,6 +2892,11 @@ def build_context_payload(
         recent_context=recent_context_for_focus,
         recent_focus_topic=focus_topic,
     )
+    correction_intent = _infer_correction_intent(
+        prompt_text,
+        recent_context=recent_context_for_focus,
+        recent_focus_topic=focus_topic,
+    )
 
     memory_context = ""
     if current_user != "访客" and should_load_long_memory:
@@ -2924,6 +2930,7 @@ def build_context_payload(
         "focus_aspect": focus_aspect,
         "focus_mode_hint": focus_mode_hint,
         "followup_goal": followup_goal,
+        "correction_intent": bool(correction_intent),
         "recent_topic_anchor": recent_topic_anchor,
         "candidate_topic_anchors": candidate_topic_anchors,
         "target_anchor_id": str(target_anchor.get("anchor_id") or ""),
@@ -3166,6 +3173,7 @@ def process_user_input(
         focus_aspect=str(context_payload.get("focus_aspect") or ""),
         focus_mode_hint=str(context_payload.get("focus_mode_hint") or ""),
         followup_goal=str(context_payload.get("followup_goal") or ""),
+        correction_intent=bool(context_payload.get("correction_intent", False)),
         has_uploaded_image=bool(uploaded_image),
         has_structured_payload=has_structured_upload,
         vision_position_domain=vision_position_domain,
@@ -3188,7 +3196,7 @@ def process_user_input(
             typing_placeholder = st.empty()
             typing_placeholder.markdown(_render_simple_chat_typing_indicator(), unsafe_allow_html=True)
             time.sleep(0.08)
-            llm_turbo = ChatTongyi(model="qwen-turbo", temperature=0.1)
+            llm_turbo = ChatTongyi(model="qwen-turbo-latest", temperature=0.2)
             runtime_context = build_simple_runtime_context_payload(current_user)
             simple_response = simple_chatter_reply(
                 prompt_text,

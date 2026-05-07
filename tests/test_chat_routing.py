@@ -180,6 +180,62 @@ class TestChatRouting(unittest.TestCase):
             CHAT_MODE_KNOWLEDGE,
         )
 
+    def test_correction_followup_for_entity_or_fact_upgrades_to_knowledge(self):
+        self.assertEqual(
+            classify_chat_mode(
+                "不是中微公司，就叫中微半导",
+                is_followup=True,
+                recent_context=(
+                    "用户: 中微半导是做什么的，有什么护城河，有什么隐忧，有什么竞争对手\n"
+                    "AI: 中微半导应该是指中微公司吧。"
+                ),
+                focus_entity="中微半导",
+                focus_topic="概念解释",
+                correction_intent=True,
+            ),
+            CHAT_MODE_KNOWLEDGE,
+        )
+        self.assertEqual(
+            classify_chat_mode(
+                "有这家公司，你仔细思考下",
+                is_followup=True,
+                recent_context=(
+                    "用户: 中微半导是做什么的，有什么护城河，有什么隐忧，有什么竞争对手\n"
+                    "AI: 中微半导应该是指中微公司吧。"
+                ),
+                focus_entity="中微半导",
+                focus_topic="概念解释",
+                correction_intent=True,
+            ),
+            CHAT_MODE_KNOWLEDGE,
+        )
+
+    def test_correction_followup_for_analysis_judgment_upgrades_to_analysis(self):
+        self.assertEqual(
+            classify_chat_mode(
+                "你这个护城河判断不对",
+                is_followup=True,
+                recent_context=(
+                    "用户: 中微半导是做什么的，有什么护城河，有什么隐忧，有什么竞争对手\n"
+                    "AI: 它的护城河主要来自技术壁垒和客户粘性。"
+                ),
+                focus_entity="中微半导",
+                focus_topic="盘面分析",
+                correction_intent=True,
+            ),
+            CHAT_MODE_ANALYSIS,
+        )
+        self.assertEqual(
+            classify_chat_mode(
+                "你这个年份不对",
+                is_followup=True,
+                recent_context="用户: 法国大革命是什么\nAI: 法国大革命是18世纪末法国发生的政治社会革命。",
+                focus_topic="概念解释",
+                correction_intent=True,
+            ),
+            CHAT_MODE_KNOWLEDGE,
+        )
+
     def test_explain_more_followup_can_stay_knowledge(self):
         self.assertEqual(
             classify_chat_mode(

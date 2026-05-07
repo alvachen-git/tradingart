@@ -1,7 +1,7 @@
 import re
 from typing import Final
 
-from chat_context_utils import infer_followup_goal
+from chat_context_utils import infer_correction_intent, infer_followup_goal
 
 
 CHAT_MODE_SIMPLE: Final[str] = "simple_chat"
@@ -109,6 +109,16 @@ RECENT_ANALYSIS_HINTS = (
     "比较", "对比", "先交易", "交易什么", "先反应", "怎么传导", "如何传导",
     "适合做吗", "适合吗", "现在适合", "涨这么多", "跌这么多", "异动原因", "上涨原因", "下跌原因",
 )
+CORRECTION_ANALYSIS_HINTS = (
+    "护城河", "隐忧", "竞争对手", "竞争格局", "竞争", "逻辑", "影响", "估值", "比较", "对比",
+    "相关度", "相关系数", "权重", "占比", "比例", "数值", "数据", "统计", "指标", "判断",
+    "为什么", "意味着", "怎么做", "适合做吗", "值不值得", "哪个更强",
+)
+CORRECTION_FACT_HINTS = (
+    "公司名", "名称", "名字", "全称", "简称", "实体", "有这家公司", "有这个公司", "不是中微公司",
+    "定义", "意思", "是什么", "来源", "出处", "日期", "年份", "时间", "公告", "名单", "板块",
+)
+RUNTIME_FACT_HINTS = ("时间", "几点", "几号", "日期", "星期", "周几")
 
 SYMBOL_PATTERN = re.compile(r"\b[A-Z]{1,5}\d{0,4}\b|(?<!\d)\d{6}(?!\d)")
 URL_PATTERN = re.compile(r"https?://|www\.", re.IGNORECASE)
@@ -153,6 +163,16 @@ def _recent_context_has_finance_subject(recent_context: str) -> bool:
     if not text:
         return False
     return any(keyword in text for keyword in RECENT_FINANCE_CONTEXT_HINTS)
+
+
+def _looks_like_runtime_fact_correction(prompt_text: str, recent_context: str) -> bool:
+    text = str(prompt_text or "").strip().lower()
+    recent = str(recent_context or "").strip().lower()
+    if not text or not recent:
+        return False
+    if not any(keyword in text for keyword in RUNTIME_FACT_HINTS):
+        return False
+    return any(keyword in recent for keyword in ("北京时间", "现在是", "今天是", "星期"))
 
 
 def _looks_like_company_subject(prompt_text: str, *, has_symbol: bool = False, focus_entity: str = "") -> bool:
@@ -262,6 +282,7 @@ def classify_chat_mode(
     focus_aspect: str = "",
     focus_mode_hint: str = "",
     followup_goal: str = "",
+    correction_intent: bool = False,
     has_uploaded_image: bool = False,
     has_structured_payload: bool = False,
     vision_position_domain: str = "",
@@ -296,6 +317,11 @@ def classify_chat_mode(
         recent_context=recent_context_lower,
         recent_focus_topic=focus_topic,
     )
+    effective_correction_intent = bool(correction_intent) or infer_correction_intent(
+        text,
+        recent_context=recent_context_lower,
+        recent_focus_topic=focus_topic,
+    )
     has_company_news = _is_company_news_query(
         text,
         has_symbol=has_symbol,
@@ -315,8 +341,50 @@ def classify_chat_mode(
         focus_mode_hint=focus_mode_hint,
         is_followup=is_followup,
     )
+    correction_signal_text = "\n".join(
+        part
+        for part in (
+            text_lower,
+            recent_context_lower,
+            str(focus_topic or "").strip().lower(),
+            str(focus_aspect or "").strip().lower(),
+        )
+        if part
+    )
+    correction_prompt_text = "\n".join(
+        part
+        for part in (
+            text_lower,
+            str(focus_aspect or "").strip().lower(),
+        )
+        if part
+    )
+    correction_suggests_analysis = (
+        effective_followup_goal in {"fetch_numeric", "analyze_reason", "analyze_impact"}
+        or any(keyword in correction_signal_text for keyword in CORRECTION_ANALYSIS_HINTS)
+    )
+    correction_suggests_facts = any(keyword in correction_signal_text for keyword in CORRECTION_FACT_HINTS)
+    correction_prompt_suggests_facts = any(keyword in correction_prompt_text for keyword in CORRECTION_FACT_HINTS)
+    correction_prompt_suggests_analysis = any(keyword in correction_prompt_text for keyword in CORRECTION_ANALYSIS_HINTS)
 
     if is_followup:
+        if effective_correction_intent:
+            if _looks_like_runtime_fact_correction(text, recent_context_lower):
+                return CHAT_MODE_SIMPLE
+            if correction_prompt_suggests_facts and not correction_prompt_suggests_analysis:
+                return CHAT_MODE_KNOWLEDGE
+            if correction_suggests_analysis:
+                return CHAT_MODE_ANALYSIS
+            if (
+                correction_suggests_facts
+                or recent_has_finance_subject
+                or has_finance_subject
+                or has_market_subject
+                or bool(focus_topic)
+                or bool(focus_entity)
+            ):
+                return CHAT_MODE_KNOWLEDGE
+            return CHAT_MODE_SIMPLE
         if has_price_move_reason:
             return CHAT_MODE_ANALYSIS
         if has_company_analysis:
