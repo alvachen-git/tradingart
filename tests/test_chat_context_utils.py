@@ -14,6 +14,11 @@ class TestChatContextUtils(unittest.TestCase):
         self.assertEqual(ctx.infer_followup_goal("那这意味着什么"), "analyze_reason")
         self.assertEqual(ctx.infer_followup_goal("再举个例子"), "explain_more")
 
+    def test_infer_correction_intent_for_fact_and_challenge_phrases(self):
+        self.assertTrue(ctx.infer_correction_intent("不是中微公司，就叫中微半导"))
+        self.assertTrue(ctx.infer_correction_intent("有这家公司，你仔细思考下"))
+        self.assertFalse(ctx.infer_correction_intent("再举个例子"))
+
     def test_short_numeric_followup_is_recognized_as_followup(self):
         self.assertTrue(ctx.infer_followup_intent("我要详细数值"))
 
