@@ -98,6 +98,7 @@ from chat_context_utils import (
 import subscription_service as sub_svc
 import payment_service as pay_svc
 import data_engine as de
+from user_profile_memory import build_profile_memory_context
 from ai_simulation_service import (
     OFFICIAL_PORTFOLIO_ID,
     get_daily_review as ai_get_daily_review,
@@ -1517,6 +1518,24 @@ def _build_mobile_context_payload(
         except Exception as e:
             print(f"[mobile-chat] memory retrieval failed user={current_user} err={e}")
 
+    profile_memory_payload = {
+        "profile_context": "",
+        "memory_action": "guest_skip" if not current_user or current_user == "访客" else "context",
+        "confirmation": "",
+        "should_short_circuit": False,
+        "temporary_overrides": {},
+    }
+    if current_user and current_user != "访客":
+        try:
+            profile_memory_payload = build_profile_memory_context(
+                de.engine,
+                user_id=current_user,
+                prompt_text=prompt_text,
+                portfolio_snapshot_loader=de.get_user_portfolio_snapshot,
+            )
+        except Exception as e:
+            print(f"[mobile-chat] profile memory context failed user={current_user} err={e}")
+
     return {
         "is_followup": bool(is_followup),
         "intent_domain": intent_domain,
@@ -1524,6 +1543,11 @@ def _build_mobile_context_payload(
         "recent_turns": recent_turns,
         "recent_context": recent_context,
         "memory_context": memory_context,
+        "profile_context": str(profile_memory_payload.get("profile_context") or ""),
+        "profile_memory_action": str(profile_memory_payload.get("memory_action") or ""),
+        "profile_memory_confirmation": str(profile_memory_payload.get("confirmation") or ""),
+        "profile_memory_should_short_circuit": bool(profile_memory_payload.get("should_short_circuit", False)),
+        "profile_memory_temporary_overrides": profile_memory_payload.get("temporary_overrides") or {},
         "focus_entity": focus_entity,
         "focus_topic": focus_topic,
         "focus_aspect": focus_aspect,
@@ -2204,7 +2228,9 @@ def chat_submit(
     trace_id = _generate_chat_trace_id()
     answer_id = _generate_chat_answer_id()
     intent_domain = str(context_payload.get("intent_domain") or "general")
-    if context_payload.get("followup_anchor_ambiguous") and context_payload.get("followup_anchor_clarify"):
+    if bool(context_payload.get("profile_memory_should_short_circuit", False)):
+        chat_mode = CHAT_MODE_SIMPLE
+    elif context_payload.get("followup_anchor_ambiguous") and context_payload.get("followup_anchor_clarify"):
         response_text = str(context_payload.get("followup_anchor_clarify") or "").strip()
         feedback_allowed = _save_chat_answer_event(
             task_id=f"immediate-{uuid.uuid4()}",
@@ -2235,18 +2261,49 @@ def chat_submit(
                 "response": response_text,
             },
         }
-    chat_mode = classify_chat_mode(
-        normalized_prompt,
-        is_followup=bool(context_payload.get("is_followup", False)),
-        recent_context=str(context_payload.get("recent_context") or ""),
-        focus_entity=str(context_payload.get("focus_entity") or ""),
-        focus_topic=str(context_payload.get("focus_topic") or ""),
-        focus_aspect=str(context_payload.get("focus_aspect") or ""),
-        focus_mode_hint=str(context_payload.get("focus_mode_hint") or ""),
-        followup_goal=str(context_payload.get("followup_goal") or ""),
-        correction_intent=bool(context_payload.get("correction_intent", False)),
-    )
+    else:
+        chat_mode = classify_chat_mode(
+            normalized_prompt,
+            is_followup=bool(context_payload.get("is_followup", False)),
+            recent_context=str(context_payload.get("recent_context") or ""),
+            focus_entity=str(context_payload.get("focus_entity") or ""),
+            focus_topic=str(context_payload.get("focus_topic") or ""),
+            focus_aspect=str(context_payload.get("focus_aspect") or ""),
+            focus_mode_hint=str(context_payload.get("focus_mode_hint") or ""),
+            followup_goal=str(context_payload.get("followup_goal") or ""),
+            correction_intent=bool(context_payload.get("correction_intent", False)),
+        )
     context_payload["chat_mode"] = chat_mode
+
+    if bool(context_payload.get("profile_memory_should_short_circuit", False)):
+        response_text = str(context_payload.get("profile_memory_confirmation") or "好，我记住了。")
+        feedback_allowed = _save_chat_answer_event(
+            task_id=f"immediate-{uuid.uuid4()}",
+            user_id=username,
+            trace_id=trace_id,
+            answer_id=answer_id,
+            prompt_text=raw_prompt or normalized_prompt,
+            response_text=response_text,
+            intent_domain=intent_domain,
+            feedback_allowed=False,
+        )
+        return {
+            "delivery_mode": "immediate",
+            "task_id": "",
+            "message": "已更新记忆",
+            "chat_mode": CHAT_MODE_SIMPLE,
+            "trace_id": trace_id,
+            "answer_id": answer_id,
+            "feedback_allowed": feedback_allowed,
+            "result": {
+                "status": "success",
+                "response": response_text,
+                "chart": None,
+                "attachments": [],
+                "error": None,
+            },
+        }
+
     has_portfolio = _detect_mobile_has_portfolio(username)
 
     if chat_mode == CHAT_MODE_SIMPLE:
@@ -2257,6 +2314,7 @@ def chat_submit(
             llm_turbo,
             recent_context=str(context_payload.get("recent_context") or ""),
             memory_context=str(context_payload.get("memory_context") or ""),
+            profile_context=str(context_payload.get("profile_context") or ""),
             is_followup=bool(context_payload.get("is_followup", False)),
             focus_entity=str(context_payload.get("focus_entity") or ""),
             focus_topic=str(context_payload.get("focus_topic") or ""),

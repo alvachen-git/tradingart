@@ -63,6 +63,20 @@ ANALYSIS_INTENT_KEYWORDS = (
     "适合做吗", "适合吗", "现在适合",
 )
 
+PORTFOLIO_META_QUERY_KEYWORDS = (
+    "你记得我持仓吗",
+    "你记得我的持仓吗",
+    "你有我的持仓吗",
+    "我上传过持仓吗",
+    "你知道我现在持仓吗",
+    "你知道我的持仓吗",
+    "你记住我持仓了吗",
+)
+
+PORTFOLIO_META_QUERY_EXCLUDED_KEYWORDS = (
+    "分析", "判断", "建议", "风险大吗", "调仓", "加仓", "减仓", "怎么做", "怎么办",
+)
+
 TECHNICAL_KNOWLEDGE_KEYWORDS = (
     "k线", "均线", "图表", "技术面", "技术分析", "真假突破", "假突破", "假跌破",
     "支撑位", "阻力位", "成交量", "回踩", "趋势线", "多头陷阱", "空头陷阱",
@@ -292,6 +306,10 @@ def classify_chat_mode(
         return CHAT_MODE_ANALYSIS
 
     text_lower = text.lower()
+    if any(keyword in text for keyword in PORTFOLIO_META_QUERY_KEYWORDS) and not any(
+        keyword in text for keyword in PORTFOLIO_META_QUERY_EXCLUDED_KEYWORDS
+    ):
+        return CHAT_MODE_SIMPLE
     recent_context_lower = str(recent_context or "").strip().lower()
     has_url = has_url_like_text(text)
     has_symbol = bool(SYMBOL_PATTERN.search(text.upper()))

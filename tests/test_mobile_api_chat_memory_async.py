@@ -130,6 +130,8 @@ class TestMobileApiChatMemoryAsync(unittest.TestCase):
             ],
         )
         with patch.object(mobile_api.de, "get_user_profile", return_value={}), patch.object(
+            mobile_api, "build_profile_memory_context", return_value={"profile_context": "- 风险偏好：偏保守"}
+        ), patch.object(
             mobile_api, "_detect_mobile_has_portfolio", return_value=False
         ), patch.object(
             mobile_api, "ChatTongyi", return_value=object()
@@ -153,10 +155,124 @@ class TestMobileApiChatMemoryAsync(unittest.TestCase):
         kwargs = mocked_reply.call_args.kwargs
         self.assertIn("法国大革命是什么", kwargs.get("recent_context", ""))
         self.assertTrue(kwargs.get("is_followup"))
+        self.assertIn("偏保守", kwargs.get("profile_context", ""))
         runtime_context = kwargs.get("runtime_context") or {}
         self.assertEqual(runtime_context.get("product_identity"), "你是爱波塔AI，由交易艺术汇团队开发")
         self.assertEqual(runtime_context.get("site_specialty"), "本站更擅长期权、K线、交易知识和市场分析")
         self.assertEqual(runtime_context.get("timezone_label"), "北京时间（Asia/Shanghai）")
+        mocked_create.assert_not_called()
+        mocked_knowledge.assert_not_called()
+
+    def test_chat_submit_memory_update_short_circuits_to_confirmation(self):
+        body = mobile_api.ChatSubmitRequest(prompt="把我的风险偏好改成偏激进", history=[])
+        memory_payload = {
+            "profile_context": "- 风险偏好：偏激进",
+            "memory_action": "updated",
+            "confirmation": "好，我记住了。之后我会按这个画像辅助回答：风险偏好：偏激进。",
+            "should_short_circuit": True,
+            "temporary_overrides": {},
+        }
+        with patch.object(mobile_api.de, "get_user_profile", return_value={}), patch.object(
+            mobile_api, "build_profile_memory_context", return_value=memory_payload
+        ), patch.object(
+            mobile_api, "_detect_mobile_has_portfolio", return_value=False
+        ), patch.object(
+            mobile_api, "_save_chat_answer_event", return_value=False
+        ), patch.object(
+            mobile_api.TaskManager, "create_task"
+        ) as mocked_create, patch.object(
+            mobile_api.TaskManager, "create_knowledge_task"
+        ) as mocked_knowledge:
+            out = mobile_api.chat_submit(body=body, username="u1")
+
+        self.assertEqual(out["delivery_mode"], "immediate")
+        self.assertEqual(out["message"], "已更新记忆")
+        self.assertIn("偏激进", out["result"]["response"])
+        mocked_create.assert_not_called()
+        mocked_knowledge.assert_not_called()
+
+    def test_chat_submit_memory_query_short_circuits_to_confirmation(self):
+        body = mobile_api.ChatSubmitRequest(prompt="我的风险偏好是什么", history=[])
+        memory_payload = {
+            "profile_context": "- 风险偏好：偏保守",
+            "memory_action": "query",
+            "confirmation": "你当前记录的风险偏好是：偏保守。",
+            "should_short_circuit": True,
+            "temporary_overrides": {},
+        }
+        with patch.object(mobile_api.de, "get_user_profile", return_value={}), patch.object(
+            mobile_api, "build_profile_memory_context", return_value=memory_payload
+        ), patch.object(
+            mobile_api, "_detect_mobile_has_portfolio", return_value=False
+        ), patch.object(
+            mobile_api, "_save_chat_answer_event", return_value=False
+        ), patch.object(
+            mobile_api.TaskManager, "create_task"
+        ) as mocked_create, patch.object(
+            mobile_api.TaskManager, "create_knowledge_task"
+        ) as mocked_knowledge:
+            out = mobile_api.chat_submit(body=body, username="u1")
+
+        self.assertEqual(out["delivery_mode"], "immediate")
+        self.assertIn("偏保守", out["result"]["response"])
+        mocked_create.assert_not_called()
+        mocked_knowledge.assert_not_called()
+
+    def test_chat_submit_memory_challenge_short_circuits_to_confirmation(self):
+        body = mobile_api.ChatSubmitRequest(prompt="我什么时候做了卖认购3.6", history=[])
+        memory_payload = {
+            "profile_context": "- 风险偏好：偏保守",
+            "memory_action": "challenge",
+            "confirmation": "你说得对，我不应该把未确认内容当成你的历史操作。",
+            "should_short_circuit": True,
+            "temporary_overrides": {},
+        }
+        with patch.object(mobile_api.de, "get_user_profile", return_value={}), patch.object(
+            mobile_api, "build_profile_memory_context", return_value=memory_payload
+        ), patch.object(
+            mobile_api, "_detect_mobile_has_portfolio", return_value=False
+        ), patch.object(
+            mobile_api, "_save_chat_answer_event", return_value=False
+        ), patch.object(
+            mobile_api.TaskManager, "create_task"
+        ) as mocked_create, patch.object(
+            mobile_api.TaskManager, "create_knowledge_task"
+        ) as mocked_knowledge:
+            out = mobile_api.chat_submit(body=body, username="u1")
+
+        self.assertEqual(out["delivery_mode"], "immediate")
+        self.assertIn("未确认内容", out["result"]["response"])
+        mocked_create.assert_not_called()
+        mocked_knowledge.assert_not_called()
+
+    def test_chat_submit_portfolio_status_short_circuits_before_routing(self):
+        body = mobile_api.ChatSubmitRequest(prompt="你记得我持仓吗", history=[])
+        memory_payload = {
+            "profile_context": "",
+            "memory_action": "portfolio_status_query",
+            "confirmation": "我记得你有一份结构化持仓记录，最近一次识别到 3 只。你要我分析或判断时再展开。",
+            "should_short_circuit": True,
+            "temporary_overrides": {},
+        }
+        with patch.object(mobile_api.de, "get_user_profile", return_value={}), patch.object(
+            mobile_api, "build_profile_memory_context", return_value=memory_payload
+        ), patch.object(
+            mobile_api, "classify_chat_mode"
+        ) as mocked_router, patch.object(
+            mobile_api, "_detect_mobile_has_portfolio"
+        ) as mocked_has_portfolio, patch.object(
+            mobile_api, "_save_chat_answer_event", return_value=False
+        ), patch.object(
+            mobile_api.TaskManager, "create_task"
+        ) as mocked_create, patch.object(
+            mobile_api.TaskManager, "create_knowledge_task"
+        ) as mocked_knowledge:
+            out = mobile_api.chat_submit(body=body, username="u1")
+
+        self.assertEqual(out["delivery_mode"], "immediate")
+        self.assertIn("结构化持仓记录", out["result"]["response"])
+        mocked_router.assert_not_called()
+        mocked_has_portfolio.assert_not_called()
         mocked_create.assert_not_called()
         mocked_knowledge.assert_not_called()
 

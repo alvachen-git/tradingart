@@ -33,6 +33,7 @@ import html
 from typing import Optional, Dict, Any
 import auth_utils as auth
 import memory_utils as mem
+from user_profile_memory import build_profile_memory_context
 import threading
 from datetime import datetime, timedelta
 from auth_ui import show_auth_dialog, sidebar_user_menu
@@ -2913,6 +2914,24 @@ def build_context_payload(
         except Exception as e:
             print(f"❌ 长期记忆检索失败: {e}")
 
+    profile_memory_payload = {
+        "profile_context": "",
+        "memory_action": "guest_skip" if current_user == "访客" else "context",
+        "confirmation": "",
+        "should_short_circuit": False,
+        "temporary_overrides": {},
+    }
+    if current_user != "访客":
+        try:
+            profile_memory_payload = build_profile_memory_context(
+                de.engine,
+                user_id=current_user,
+                prompt_text=prompt_text,
+                portfolio_snapshot_loader=de.get_user_portfolio_snapshot,
+            )
+        except Exception as e:
+            print(f"⚠️ 交易画像记忆构建失败: {e}")
+
     conversation_id = st.session_state.get("conversation_id")
     if not conversation_id:
         conversation_id = str(uuid.uuid4())
@@ -2925,6 +2944,11 @@ def build_context_payload(
         "recent_turns": recent_turns,
         "recent_context": recent_context,
         "memory_context": memory_context,
+        "profile_context": str(profile_memory_payload.get("profile_context") or ""),
+        "profile_memory_action": str(profile_memory_payload.get("memory_action") or ""),
+        "profile_memory_confirmation": str(profile_memory_payload.get("confirmation") or ""),
+        "profile_memory_should_short_circuit": bool(profile_memory_payload.get("should_short_circuit", False)),
+        "profile_memory_temporary_overrides": profile_memory_payload.get("temporary_overrides") or {},
         "focus_entity": focus_entity,
         "focus_topic": focus_topic,
         "focus_aspect": focus_aspect,
@@ -3157,33 +3181,56 @@ def process_user_input(
         vision_position_payload=vision_position_payload,
         vision_position_domain=vision_position_domain,
     )
-    if context_payload.get("followup_anchor_ambiguous") and context_payload.get("followup_anchor_clarify"):
+    if bool(context_payload.get("profile_memory_should_short_circuit", False)):
+        chat_mode = CHAT_MODE_SIMPLE
+    elif context_payload.get("followup_anchor_ambiguous") and context_payload.get("followup_anchor_clarify"):
         st.session_state.messages.append({"role": "user", "content": prompt_text, "linked_task_id": ""})
         clarify_text = str(context_payload.get("followup_anchor_clarify") or "").strip()
         with st.chat_message("ai"):
             st.markdown(clarify_text)
         st.session_state.messages.append({"role": "ai", "content": clarify_text})
         return
-    chat_mode = classify_chat_mode(
-        prompt_text,
-        is_followup=bool(context_payload.get("is_followup", False)),
-        recent_context=str(context_payload.get("recent_context") or ""),
-        focus_entity=str(context_payload.get("focus_entity") or ""),
-        focus_topic=str(context_payload.get("focus_topic") or ""),
-        focus_aspect=str(context_payload.get("focus_aspect") or ""),
-        focus_mode_hint=str(context_payload.get("focus_mode_hint") or ""),
-        followup_goal=str(context_payload.get("followup_goal") or ""),
-        correction_intent=bool(context_payload.get("correction_intent", False)),
-        has_uploaded_image=bool(uploaded_image),
-        has_structured_payload=has_structured_upload,
-        vision_position_domain=vision_position_domain,
-    )
+    else:
+        chat_mode = classify_chat_mode(
+            prompt_text,
+            is_followup=bool(context_payload.get("is_followup", False)),
+            recent_context=str(context_payload.get("recent_context") or ""),
+            focus_entity=str(context_payload.get("focus_entity") or ""),
+            focus_topic=str(context_payload.get("focus_topic") or ""),
+            focus_aspect=str(context_payload.get("focus_aspect") or ""),
+            focus_mode_hint=str(context_payload.get("focus_mode_hint") or ""),
+            followup_goal=str(context_payload.get("followup_goal") or ""),
+            correction_intent=bool(context_payload.get("correction_intent", False)),
+            has_uploaded_image=bool(uploaded_image),
+            has_structured_payload=has_structured_upload,
+            vision_position_domain=vision_position_domain,
+        )
     if deep_mode:
         chat_mode = CHAT_MODE_ANALYSIS
     context_payload["chat_mode"] = chat_mode
 
     # --- 2. 显示用户提问 (保留) ---
     st.session_state.messages.append({"role": "user", "content": prompt_text, "linked_task_id": ""})
+
+    if bool(context_payload.get("profile_memory_should_short_circuit", False)):
+        confirmation = str(context_payload.get("profile_memory_confirmation") or "好，我记住了。")
+        with st.chat_message("ai"):
+            st.markdown(confirmation, unsafe_allow_html=True)
+        st.session_state.messages.append(
+            {
+                "role": "ai",
+                "content": confirmation,
+                "chart": "",
+                "attachments": [],
+                "trace_id": generate_chat_trace_id(),
+                "answer_id": generate_chat_answer_id(),
+                "feedback_allowed": False,
+                "intent_domain": str(context_payload.get("intent_domain") or "general"),
+                "chat_mode": CHAT_MODE_SIMPLE,
+            }
+        )
+        st.rerun()
+        return
 
     # 构造最终 Prompt
     final_prompt = image_context + prompt_text
@@ -3203,6 +3250,7 @@ def process_user_input(
                 llm_turbo,
                 recent_context=str(context_payload.get("recent_context") or ""),
                 memory_context=str(context_payload.get("memory_context") or ""),
+                profile_context=str(context_payload.get("profile_context") or ""),
                 is_followup=bool(context_payload.get("is_followup", False)),
                 focus_entity=str(context_payload.get("focus_entity") or ""),
                 focus_topic=str(context_payload.get("focus_topic") or ""),

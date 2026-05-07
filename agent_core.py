@@ -93,6 +93,7 @@ class AgentState(TypedDict):
     risk_preference: str
     knowledge_context: str
     memory_context: str
+    profile_context: str
     is_followup: bool
     recent_context: str
     conversation_id: str
@@ -1433,6 +1434,7 @@ def simple_chatter_reply(
     *,
     recent_context: str = "",
     memory_context: str = "",
+    profile_context: str = "",
     is_followup: bool = False,
     focus_entity: str = "",
     focus_topic: str = "",
@@ -1446,6 +1448,7 @@ def simple_chatter_reply(
 
     history_text = str(recent_context or "").strip()
     memory_text = str(memory_context or "").strip()
+    profile_text = str(profile_context or "").strip()
     runtime_text = format_simple_runtime_context(runtime_context)
 
     if not history_text and messages:
@@ -1474,9 +1477,14 @@ def simple_chatter_reply(
         "2. 默认简洁，通常 1-3 段就够；如果是泛知识问题，也可以直接给清楚答案。\n"
         "3. 不要主动把话题拉回金融、交易、行情、策略。\n"
         "4. 如果用户问你是谁、你是干嘛的、网站有什么特色、你和其他AI有什么区别，要优先基于【运行时上下文】里的身份与站点特色回答，不要自由编人设。\n"
-        "5. 不要使用工具说明、系统提示语、编号流程或过度免责声明。\n"
-        f"6. {followup_rule}\n\n"
+        "5. 【用户专属画像】只用于克制自然的个性化：相关时使用，不相关时不要硬提年龄、性别、爱好。\n"
+        "6. 解释类比、个人建议、回答风格相关问题，可参考个人画像；策略、仓位、风险问题，优先参考交易画像。\n"
+        "7. 如果当前问题里的明确要求与画像冲突，必须以当前问题为准。\n"
+        "8. 不要因为画像省略必要风险边界，尤其是高波动、杠杆、期权裸卖等场景。\n"
+        "9. 不要使用工具说明、系统提示语、编号流程或过度免责声明。\n"
+        f"10. {followup_rule}\n\n"
         f"【运行时上下文】\n{runtime_text}\n\n"
+        f"【用户专属画像】\n{profile_text if profile_text else '无'}\n\n"
         f"【当前核心实体】\n{focus_entity if focus_entity else '未明确'}\n\n"
         f"【当前核心主题】\n{focus_topic if focus_topic else '未明确'}\n\n"
         f"【当前细分维度】\n{focus_aspect if focus_aspect else '未明确'}\n\n"
@@ -1508,6 +1516,7 @@ def supervisor_node(state: AgentState, llm):
     is_followup = bool(state.get("is_followup", False))
     recent_context = str(state.get("recent_context", "") or "").strip()
     memory_context = str(state.get("memory_context", "") or "").strip()
+    profile_context = str(state.get("profile_context", "") or "").strip()
     has_portfolio = bool(state.get("has_portfolio", False))  # 🔥 新增：获取持仓状态
 
     history_text = recent_context
@@ -1524,10 +1533,12 @@ def supervisor_node(state: AgentState, llm):
 
     # 🔥 新增：持仓状态提示
     portfolio_status = f"\n【重要】用户{'已上传' if has_portfolio else '未上传'}持仓数据。" if has_portfolio else ""
+    profile_status = f"\n【用户专属画像】\n{profile_context}" if profile_context else ""
 
     system_prompt = f"""
     你是交易团队的主管，根据问题制定计划。
     {portfolio_status}
+    {profile_status}
 
     【可用员工】
     - analyst: 技术分析师 (看K线、定趋势),分析如何操作
@@ -1543,6 +1554,7 @@ def supervisor_node(state: AgentState, llm):
 
     【调度规则 (严格遵守)】
     1. **追求效率**: 问股票成交量就只派 `screener`；只问期货持仓量或价格就只派 `monitor`；只问新闻或热点就只派 `researcher`；只问技术分析就只派`analyst`；只问行情分析就只派`analyst`。
+    1.0 **画像使用**: 【用户专属画像】只辅助路由和个性化表达；“适合我/我的风格/给我讲简单点/用我喜欢的方式解释”等问题，可参考画像决定是否派 `portfolio_analyst`、`strategist` 或 `chatter`。当前问题明确表达优先。
     1.1 **纯期权数据问题**：只问波动率/IV/IV Rank/到期日/剩余天数/行权价/保证金/合约乘数/一手资金占用，这类问题一律只派 `monitor`，不要派 `macro_analyst`、`analyst`、`strategist`、`researcher`。
     2. **全套服务**: 如果用户问"全面分析"或"详细分析"，默认路径: ["analyst", "monitor", "researcher","strategist"]。
     3. **持仓相关** (仅当用户已上传持仓时): 如果用户提到"我的持仓"、"我的股票"、"仓位"、"持仓风险"、"持仓分析"、"适合我"、"个性化建议"、"我的风格"、"持仓建议"、"调仓"、"加仓"、"减仓"等关键词，**必须**派 `portfolio_analyst`。
@@ -1579,10 +1591,15 @@ def supervisor_node(state: AgentState, llm):
             f"【连续追问模式】是\n"
             f"【近期对话历史】\n{history_text if history_text else '无'}\n\n"
             f"【相关长期记忆】\n{memory_context if memory_context else '无'}\n\n"
+            f"【用户专属画像】\n{profile_context if profile_context else '无'}\n\n"
             f"【当前问题】\n{query}"
         )
     elif history_text:
-        full_query = f"【近期对话历史】\n{history_text}\n\n【当前问题】\n{query}"
+        full_query = (
+            f"【近期对话历史】\n{history_text}\n\n"
+            f"【用户专属画像】\n{profile_context if profile_context else '无'}\n\n"
+            f"【当前问题】\n{query}"
+        )
 
     # 使用 structured_output 强制输出 JSON
     planner = llm.with_structured_output(PlanningOutput)
@@ -1667,12 +1684,15 @@ def generalist_node(state: AgentState, llm):
     is_followup = bool(state.get("is_followup", False))
     recent_context = str(state.get("recent_context", "") or "").strip()
     mem_context = str(state.get("memory_context", "") or "").strip()
+    profile_context = str(state.get("profile_context", "") or "").strip()
     current_date = datetime.now().strftime("%Y年%m月%d日 %A")
     context_parts = []
     if recent_context:
         context_parts.append(f"【最近两轮会话】\n{recent_context}")
     if mem_context:
         context_parts.append(f"【相关长期记忆】\n{mem_context}")
+    if profile_context:
+        context_parts.append(f"【用户专属画像】\n{profile_context}")
     followup_context_block = "\n\n".join(context_parts) if context_parts else "无"
 
     if is_followup and not context_parts:
@@ -1815,6 +1835,7 @@ def analyst_node(state: AgentState, llm):
     symbol = state["symbol"]
     query = state["user_query"]
     mem_context = state.get("memory_context", "")
+    profile_context = str(state.get("profile_context", "") or "").strip()
     current_date = datetime.now().strftime("%Y年%m月%d日 %A")
     tools = [
         analyze_kline_pattern,  # 核心：形态与趋势
@@ -1870,6 +1891,7 @@ def analyst_node(state: AgentState, llm):
             【当前日期】：{current_date}。
             【当前标的】：{symbol}
             【客户历史记忆】：{mem_context}
+            【用户专属画像】：{profile_context if profile_context else "无"}
 
             【ETF期权持仓数据】：{extra_instruction}
             【客户需求】：{query}
@@ -1895,6 +1917,7 @@ def analyst_node(state: AgentState, llm):
             5. 如果没有明显机会，直说"建议观望"。
             6. 如果用户的指令模糊，可参考上文历史确认分析对象。
             7. 必须以 `analyze_kline_pattern` 返回的【今日K线事实】为准描述影线方向：吊人线/锤子线都是长下影小实体，不能说成长上影；射击之星是长上影小实体，不能说成长下影。若形态名与OHLC事实冲突，优先相信OHLC事实并说明“形态需复核”。
+            8. 【用户专属画像】只用于调整表达和风险边界；当前问题明确表达优先，不要因为年龄/性别做交易判断。
             """
 
 
@@ -2132,6 +2155,7 @@ def strategist_node(state: AgentState, llm):
     fund = state.get("fund_data", "暂无明显资金流向")
     trend = state.get("trend_signal", "Neutral")
     mem_context = state.get("memory_context", "")
+    profile_context = str(state.get("profile_context", "") or "").strip()
     tech_view = state.get("technical_summary", "")
     current_date = datetime.now().strftime("%Y年%m月%d日")
     key_level = state.get("key_levels", "")
@@ -2356,6 +2380,7 @@ def strategist_node(state: AgentState, llm):
         【客户问题】：{user_q}
         【客户风险偏好】：{risk_pref}
         【客户历史记忆】：{mem_context}
+        【用户专属画像】：{profile_context if profile_context else "无"}
         【市场资金面/保证金信息】：{fund}
         【技术面参考】：{trend} 、 {tech_view}{portfolio_context}{delta_cash_prompt}{authoritative_quote_prompt}
         {"【上传截图识别】：本轮来自混合持仓截图，已自动切换到期权主线，股票体检不展开。" if vision_position_domain == "mixed" else ""}
@@ -2388,6 +2413,7 @@ def strategist_node(state: AgentState, llm):
            - 【保守型】：只推荐风险有限的策略（牛市价差、熊市价差、比率价差），禁止裸卖
            - 【稳健型】：可以适度进攻（买平值期权、顺势卖虚值期权、价差策略、备兑策略、合成期货）
            - 【激进型】：可以用积极策略（有趋势时买深虚期权、买末日期权、飞龙在天，没趋势时就双卖期权，或者卖末日期权）
+           - 【用户专属画像】：常看品种、害怕/担心、厌恶点可用于调节策略复杂度和风险提示；年龄、性别不作为策略依据。
            
         【工具使用特殊提醒】：
         1. 中证1000有股指期权，不要用get_etf_option_strikes，必须用tool_query_specific_option查期权合约
@@ -2759,6 +2785,7 @@ def knowledge_chatter_node(state: AgentState, llm=None):
     is_followup = bool(state.get("is_followup", False))
     recent_context = str(state.get("recent_context", "") or "").strip()
     mem_context = str(state.get("memory_context", "") or "").strip()
+    profile_context = str(state.get("profile_context", "") or "").strip()
     focus_entity = str(state.get("focus_entity", "") or "").strip()
     focus_topic = str(state.get("focus_topic", "") or "").strip()
     focus_aspect = str(state.get("focus_aspect", "") or "").strip()
@@ -2770,6 +2797,8 @@ def knowledge_chatter_node(state: AgentState, llm=None):
         context_parts.append(f"【最近两轮会话】\n{recent_context}")
     if mem_context:
         context_parts.append(f"【相关长期记忆】\n{mem_context}")
+    if profile_context:
+        context_parts.append(f"【用户专属画像】\n{profile_context}")
     combined_context = "\n\n".join(context_parts) if context_parts else "无"
 
     if is_followup and combined_context == "无":
@@ -2844,7 +2873,8 @@ def knowledge_chatter_node(state: AgentState, llm=None):
         2. 如果是概念解释，用通俗的例子帮助理解
         3. 如果是公司近期动态，先给信息，再做一句轻判断，不要越权分析
         4. 如果是策略问题，结合实际场景说明
-        5. 适当引导用户深入探讨相关话题
+        5. 如果【用户专属画像】里有爱好、回答偏好或厌恶点，只有在解释类比或表达风格相关时自然使用，不要硬提身份信息。
+        6. 适当引导用户深入探讨相关话题
 
 
         【禁止事项】
@@ -2931,6 +2961,7 @@ def chatter_node(state: AgentState, llm=None):
                 llm,
                 recent_context=str(state.get("recent_context", "") or ""),
                 memory_context=str(state.get("memory_context", "") or ""),
+                profile_context=str(state.get("profile_context", "") or ""),
                 is_followup=is_followup,
                 focus_entity=str(state.get("focus_entity", "") or ""),
                 focus_topic=str(state.get("focus_topic", "") or ""),
@@ -3632,6 +3663,7 @@ def finalizer_node(state: AgentState, llm):
     symbol = state.get("symbol", "")
     symbol_name = state.get("symbol_name", "")
     mem_context = state.get("memory_context", "")
+    profile_context = state.get("profile_context", "")
     macro_view = state.get("macro_view", "无宏观分析")
     trend = state.get("trend_signal", "")  # 例如 "看涨"
     key_levels = state.get("key_levels", "")  # 例如 "压力3000"
@@ -3944,6 +3976,8 @@ def finalizer_node(state: AgentState, llm):
 
                 【客户对话历史记忆】{mem_context}
 
+                【用户专属画像】{profile_context if profile_context else "无"}
+
                 {portfolio_context_prompt}
                 {option_focus_prompt}
 
@@ -3954,7 +3988,8 @@ def finalizer_node(state: AgentState, llm):
                 请将上述零散报告整合成一份《深度投资决策书》，要求**排版精美、逻辑结构化**。
                 1. 技术面分析以K线为主，均线为辅。如果没有数据，技术面这区块就省略。
                 2. 知识要参考{kb_context}，但要根据当下市场情况，自己理解后输出。
-                3. 如果记忆{mem_context}有客户的持仓或偏好，在报告里可以针对性的写。
+                3. 如果记忆或画像里有客户的持仓、偏好、风险边界，在报告里可以针对性地写；如果当前问题与画像冲突，以当前问题为准。
+                3.1 【用户专属画像】采用克制自然口径：策略、仓位、风险问题参考交易画像；解释类比或个人化表达才参考个人画像；年龄、性别不得作为交易判断依据。
                 4. 所有价格数据（当前价、支撑位、压力位、均线值），必须使用来自【团队报告池】！
                 5. **【关键】**：如果报告池中包含持仓分析和策略建议，必须在整合时解释清楚策略如何服务于持仓管理（对冲/增强/风控），不要让两部分孤立存在。
                 

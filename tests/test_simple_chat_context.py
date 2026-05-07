@@ -51,6 +51,20 @@ class TestSimpleChatContext(unittest.TestCase):
         self.assertIn("【相关长期记忆】", fake_llm.last_prompt)
         self.assertIn("法国大革命", fake_llm.last_prompt)
 
+    def test_simple_chatter_reply_supports_profile_context(self):
+        fake_llm = _FakeLLM()
+        agent_core.simple_chatter_reply(
+            "创业板期权怎么看",
+            fake_llm,
+            profile_context="- 风险偏好：偏保守\n- 常看品种：ETF期权",
+        )
+
+        self.assertIn("【用户专属画像】", fake_llm.last_prompt)
+        self.assertIn("偏保守", fake_llm.last_prompt)
+        self.assertIn("克制自然的个性化", fake_llm.last_prompt)
+        self.assertIn("相关时使用，不相关时不要硬提年龄、性别、爱好", fake_llm.last_prompt)
+        self.assertIn("当前问题里的明确要求与画像冲突，必须以当前问题为准", fake_llm.last_prompt)
+
     def test_simple_chatter_reply_includes_focus_slots(self):
         fake_llm = _FakeLLM()
         agent_core.simple_chatter_reply(
