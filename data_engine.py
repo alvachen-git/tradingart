@@ -11,7 +11,6 @@ import sys
 import threading
 import time
 from sqlalchemy import create_engine, text
-from kline_tools import analyze_kline_pattern
 from dotenv import load_dotenv
 from pathlib import Path
 from langchain_core.tools import tool
@@ -39,6 +38,16 @@ from risk_index_service import (
 # --- AI 模块 ---
 from langchain_community.chat_models import ChatTongyi
 from langchain_core.messages import HumanMessage
+
+
+@tool
+def analyze_kline_pattern(query: str, trade_date: str = None) -> str:
+    """Lazy proxy for K-line analysis so unrelated pages can load without importing kline_tools."""
+    try:
+        from kline_tools import analyze_kline_pattern as _analyze_kline_pattern
+    except Exception as exc:
+        return f"K线分析工具暂时不可用：{exc}"
+    return _analyze_kline_pattern.invoke({"query": query, "trade_date": trade_date})
 
 # Tushare 初始化 (确保已配置 Token)
 pro = None

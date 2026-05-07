@@ -1,6 +1,7 @@
 ﻿from datetime import datetime
 
 import streamlit as st
+import streamlit.components.v1 as components
 import extra_streamlit_components as stx
 
 import auth_utils as auth
@@ -560,6 +561,13 @@ st.markdown(
         justify-content: space-between;
         gap: 12px;
     }
+    .product-head.featured-package {
+        border-color: rgba(245, 197, 102, 0.66);
+        background:
+            linear-gradient(135deg, rgba(62, 45, 18, 0.5), rgba(12, 24, 50, 0.82) 42%),
+            rgba(12, 24, 50, 0.78);
+        box-shadow: 0 10px 28px rgba(245, 179, 74, 0.12), inset 0 1px 0 rgba(255, 226, 154, 0.08);
+    }
     .product-main {
         flex: 1;
         min-width: 0;
@@ -608,6 +616,32 @@ st.markdown(
         font-size: 13px;
         line-height: 1.5;
         margin-top: 6px;
+    }
+    .package-saving-row {
+        display: flex;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin-top: 8px;
+    }
+    .package-saving-badge {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        padding: 4px 9px;
+        border-radius: 999px;
+        border: 1px solid rgba(255, 216, 131, 0.7);
+        background: linear-gradient(135deg, rgba(255, 197, 74, 0.22), rgba(255, 119, 74, 0.16));
+        color: #ffe2a4;
+        font-size: 12px;
+        font-weight: 800;
+        white-space: nowrap;
+    }
+    .package-saving-text {
+        color: #f5c96f;
+        font-size: 13px;
+        font-weight: 700;
+        line-height: 1.35;
     }
     .sub-chip {
         display: inline-flex;
@@ -748,6 +782,10 @@ if "points_last_order" not in st.session_state:
     st.session_state.points_last_order = None
 if "points_pending_purchase" not in st.session_state:
     st.session_state.points_pending_purchase = None
+if "points_scroll_to_confirm" not in st.session_state:
+    st.session_state.points_scroll_to_confirm = False
+if "points_scroll_nonce" not in st.session_state:
+    st.session_state.points_scroll_nonce = 0
 
 is_mobile_client = _is_mobile_client()
 
@@ -1080,6 +1118,8 @@ with shop_paid_tab:
                             "months": int(months),
                             "total_cost": total_cost,
                         }
+                        st.session_state.points_scroll_to_confirm = True
+                        st.session_state.points_scroll_nonce += 1
             else:
                 include_names = product.get("includes_names", [])
                 include_codes = product.get("includes", [])
@@ -1097,6 +1137,17 @@ with shop_paid_tab:
                 months = int(product.get("months_options", [1])[0])
                 total_cost = ppm * months
                 include_text = "、".join(include_names) if include_names else "暂无"
+                standalone_cost = sum(int(row.get("points_monthly") or 0) for row in include_rows)
+                saving_points = max(standalone_cost - ppm, 0)
+                discount_text = ""
+                if standalone_cost > 0 and saving_points > 0:
+                    discount_rate = ppm / standalone_cost * 10
+                    discount_text = (
+                        f'<div class="package-saving-row">'
+                        f'<span class="package-saving-badge">组合优惠</span>'
+                        f'<span class="package-saving-text">单买 {standalone_cost} 点/月，套餐约 {discount_rate:.1f} 折，每月省 {saving_points} 点</span>'
+                        f'</div>'
+                    )
                 covered_all = len(include_codes) > 0 and active_cnt == len(include_codes)
                 package_status_label = "已全覆盖" if covered_all else "套餐权益"
                 package_status_cls = "active" if covered_all else "none"
@@ -1106,11 +1157,12 @@ with shop_paid_tab:
                     desc_text = product_desc_map.get(code, "")
                     desc_html = f'<div class="product-desc">{desc_text}</div>' if desc_text else ""
                     card_html = (
-                        '<div class="product-head">'
+                        '<div class="product-head featured-package">'
                         '<div class="product-main">'
                         f'<div class="product-name">{common_icon_html} {name}</div>'
                         f'<div class="product-meta">包含：{include_text}</div>'
                         f'<div class="product-meta">价格：{ppm} 点 / 月</div>'
+                        f"{discount_text}"
                         f"{desc_html}"
                         '</div>'
                         '<div class="product-side">'
@@ -1145,11 +1197,34 @@ with shop_paid_tab:
                             "months": int(months),
                             "total_cost": total_cost,
                         }
+                        st.session_state.points_scroll_to_confirm = True
+                        st.session_state.points_scroll_nonce += 1
 
             st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
 
     pending = st.session_state.get("points_pending_purchase")
     if pending:
+        st.markdown('<div id="points-confirm-area"></div>', unsafe_allow_html=True)
+        if st.session_state.get("points_scroll_to_confirm"):
+            scroll_nonce = int(st.session_state.get("points_scroll_nonce") or 0)
+            components.html(
+                """
+                <script>
+                const scrollNonce = """
+                + str(scroll_nonce)
+                + """;
+                const doc = window.parent.document;
+                const target = doc.getElementById("points-confirm-area");
+                if (target) {
+                    setTimeout(() => {
+                        target.scrollIntoView({ behavior: "smooth", block: "center" });
+                    }, 80);
+                }
+                </script>
+                """,
+                height=0,
+            )
+            st.session_state.points_scroll_to_confirm = False
         enough = points_balance >= int(pending["total_cost"])
         st.warning(
             f"确认购买：{pending['channel_name']} {pending['months']} 个月\n"
