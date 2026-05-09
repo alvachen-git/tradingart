@@ -51,6 +51,23 @@ class TestSimpleChatContext(unittest.TestCase):
         self.assertIn("【相关长期记忆】", fake_llm.last_prompt)
         self.assertIn("法国大革命", fake_llm.last_prompt)
 
+    def test_simple_chatter_reply_conversation_memory_query_has_strict_rule(self):
+        fake_llm = _FakeLLM()
+        agent_core.simple_chatter_reply(
+            "记得我们昨天聊了什么吗",
+            fake_llm,
+            memory_context="【未检索到历史对话记录】没有查到昨天可用的历史对话记录。",
+            profile_context="- 常看品种：ETF期权",
+            conversation_memory_query=True,
+            conversation_memory_label="昨天",
+        )
+
+        self.assertIn("【历史查询范围】", fake_llm.last_prompt)
+        self.assertIn("昨天", fake_llm.last_prompt)
+        self.assertIn("只能基于【近期对话历史】和【相关长期记忆】自然总结", fake_llm.last_prompt)
+        self.assertIn("不要用【用户专属画像】替代聊天记录", fake_llm.last_prompt)
+        self.assertIn("【未检索到历史对话记录】", fake_llm.last_prompt)
+
     def test_simple_chatter_reply_supports_profile_context(self):
         fake_llm = _FakeLLM()
         agent_core.simple_chatter_reply(

@@ -1,4 +1,5 @@
 import re
+from datetime import datetime, timedelta
 from typing import Any, Iterable
 
 
@@ -72,6 +73,74 @@ MARKET_ANALYSIS_KEYWORDS = (
     "怎么看", "怎么做", "怎么办", "分析", "走势", "盘面", "行情", "对股价影响", "影响大吗",
     "值不值得买", "能不能买", "能买吗", "会不会涨", "适合做吗", "适合吗",
 )
+CONVERSATION_MEMORY_TIME_HINTS = (
+    "昨天", "前天", "今天", "上次", "之前", "以前", "最近", "前面", "前几天", "上一轮", "上一个", "上一条",
+)
+CONVERSATION_MEMORY_RECENT_ONLY_HINTS = ("刚刚", "刚才", "刚聊", "刚说")
+CONVERSATION_MEMORY_CONTENT_HINTS = ("聊", "聊天", "对话", "说", "问", "回答", "讨论")
+CONVERSATION_MEMORY_ACTION_HINTS = ("记得", "记住", "还记得", "回忆", "想起", "讲过", "说过", "问过", "聊过")
+
+
+def is_conversation_memory_query(prompt_text: str) -> bool:
+    text = str(prompt_text or "").strip()
+    if not text:
+        return False
+    if "你记得我什么" in text or "你记住了我什么" in text or "你记得我持仓" in text:
+        return False
+    if "风险偏好" in text or "画像" in text:
+        return False
+
+    has_content = any(keyword in text for keyword in CONVERSATION_MEMORY_CONTENT_HINTS)
+    has_action = any(keyword in text for keyword in CONVERSATION_MEMORY_ACTION_HINTS)
+    has_time = any(keyword in text for keyword in CONVERSATION_MEMORY_TIME_HINTS + CONVERSATION_MEMORY_RECENT_ONLY_HINTS)
+    asks_content = any(word in text for word in ("什么", "啥", "哪", "内容", "主题", "东西"))
+    return (has_action and has_content) or (has_time and has_content and asks_content)
+
+
+def infer_conversation_memory_window(prompt_text: str, *, now: datetime | None = None) -> dict[str, Any]:
+    text = str(prompt_text or "").strip()
+    if not is_conversation_memory_query(text):
+        return {"is_query": False, "source": "", "label": "", "since": "", "until": "", "limit": 0}
+
+    now_dt = now or datetime.now()
+    source = "long"
+    label = "最近"
+    since = ""
+    until = ""
+    limit = 6
+
+    if "昨天" in text:
+        day = now_dt.date() - timedelta(days=1)
+        label = "昨天"
+        since = f"{day.isoformat()} 00:00:00"
+        until = f"{day.isoformat()} 23:59:59"
+        limit = 8
+    elif "前天" in text:
+        day = now_dt.date() - timedelta(days=2)
+        label = "前天"
+        since = f"{day.isoformat()} 00:00:00"
+        until = f"{day.isoformat()} 23:59:59"
+        limit = 8
+    elif "今天" in text:
+        day = now_dt.date()
+        label = "今天"
+        since = f"{day.isoformat()} 00:00:00"
+        until = f"{day.isoformat()} 23:59:59"
+        limit = 8
+    elif any(keyword in text for keyword in CONVERSATION_MEMORY_RECENT_ONLY_HINTS) and not any(
+        keyword in text for keyword in ("上次", "之前", "以前", "最近", "前几天")
+    ):
+        source = "recent"
+        label = "刚才"
+        limit = 0
+    elif "上次" in text or "上一轮" in text or "上一个" in text or "上一条" in text:
+        label = "上次"
+        limit = 5
+    elif "之前" in text or "以前" in text or "前面" in text or "前几天" in text:
+        label = "之前"
+        limit = 8
+
+    return {"is_query": True, "source": source, "label": label, "since": since, "until": until, "limit": limit}
 
 
 def infer_followup_goal(prompt_text: str, *, recent_context: str = "", recent_focus_topic: str = "") -> str:

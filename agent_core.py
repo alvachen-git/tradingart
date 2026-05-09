@@ -94,6 +94,8 @@ class AgentState(TypedDict):
     knowledge_context: str
     memory_context: str
     profile_context: str
+    conversation_memory_query: bool
+    conversation_memory_label: str
     is_followup: bool
     recent_context: str
     conversation_id: str
@@ -1439,6 +1441,8 @@ def simple_chatter_reply(
     focus_entity: str = "",
     focus_topic: str = "",
     focus_aspect: str = "",
+    conversation_memory_query: bool = False,
+    conversation_memory_label: str = "",
     messages: List[BaseMessage] | None = None,
     runtime_context: Mapping[str, Any] | None = None,
 ) -> str:
@@ -1468,6 +1472,13 @@ def simple_chatter_reply(
         if is_followup
         else "如果【近期对话历史】里有同一主题的上下文，请自然承接，不要把当前问题当成完全新话题。"
     )
+    memory_query_rule = (
+        "当前用户在问历史对话/聊天记录。只能基于【近期对话历史】和【相关长期记忆】自然总结；"
+        "如果两者为空，或【相关长期记忆】提示未检索到历史对话记录，必须直接说没查到可用历史对话记录；"
+        "不要用【用户专属画像】替代聊天记录，也不要编造未出现的历史操作。"
+        if conversation_memory_query
+        else "如果【相关长期记忆】与当前问题相关，可以自然承接；不相关时不要硬引用。"
+    )
 
     prompt = (
         "你是一个自然、亲切、反应很快的聊天助手。\n"
@@ -1482,7 +1493,9 @@ def simple_chatter_reply(
         "7. 如果当前问题里的明确要求与画像冲突，必须以当前问题为准。\n"
         "8. 不要因为画像省略必要风险边界，尤其是高波动、杠杆、期权裸卖等场景。\n"
         "9. 不要使用工具说明、系统提示语、编号流程或过度免责声明。\n"
-        f"10. {followup_rule}\n\n"
+        f"10. {memory_query_rule}\n"
+        f"11. {followup_rule}\n\n"
+        f"【历史查询范围】\n{conversation_memory_label if conversation_memory_query and conversation_memory_label else '非历史查询'}\n\n"
         f"【运行时上下文】\n{runtime_text}\n\n"
         f"【用户专属画像】\n{profile_text if profile_text else '无'}\n\n"
         f"【当前核心实体】\n{focus_entity if focus_entity else '未明确'}\n\n"
@@ -2966,6 +2979,8 @@ def chatter_node(state: AgentState, llm=None):
                 focus_entity=str(state.get("focus_entity", "") or ""),
                 focus_topic=str(state.get("focus_topic", "") or ""),
                 focus_aspect=str(state.get("focus_aspect", "") or ""),
+                conversation_memory_query=bool(state.get("conversation_memory_query", False)),
+                conversation_memory_label=str(state.get("conversation_memory_label", "") or ""),
                 messages=state.get("messages", []),
                 runtime_context=build_simple_runtime_context(current_user_label=str(state.get("user_id", "") or "访客")),
             )

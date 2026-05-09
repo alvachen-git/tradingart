@@ -163,6 +163,51 @@ class TestMobileApiChatMemoryAsync(unittest.TestCase):
         mocked_create.assert_not_called()
         mocked_knowledge.assert_not_called()
 
+    def test_chat_submit_conversation_memory_query_reads_history_without_task(self):
+        fake_mem = types.SimpleNamespace()
+        fake_mem.retrieve_recent_conversation_memory = Mock(
+            return_value="【对话历史记忆】昨天用户问过网球类比，AI用网球解释牛市价差。"
+        )
+        fake_mem.retrieve_relevant_memory = Mock(return_value="")
+        body = mobile_api.ChatSubmitRequest(prompt="记得我们昨天聊了什么吗", history=[])
+
+        with patch.dict("sys.modules", {"memory_utils": fake_mem}), patch.object(
+            mobile_api.de, "get_user_profile", return_value={}
+        ), patch.object(
+            mobile_api, "build_profile_memory_context", return_value={"profile_context": "- 常看品种：ETF期权"}
+        ), patch.object(
+            mobile_api, "_detect_mobile_has_portfolio", return_value=False
+        ), patch.object(
+            mobile_api, "ChatTongyi", return_value=object()
+        ), patch.object(
+            mobile_api, "simple_chatter_reply", return_value="昨天我们主要聊了网球类比。"
+        ) as mocked_reply, patch.object(
+            mobile_api, "_save_chat_answer_event", return_value=True
+        ), patch.object(
+            mobile_api, "_queue_mobile_chat_memory_persist", return_value="queued"
+        ), patch.object(
+            mobile_api, "classify_chat_mode"
+        ) as mocked_classify, patch.object(
+            mobile_api.TaskManager, "create_task"
+        ) as mocked_create, patch.object(
+            mobile_api.TaskManager, "create_knowledge_task"
+        ) as mocked_knowledge:
+            out = mobile_api.chat_submit(body=body, username="u1")
+
+        self.assertEqual(out["delivery_mode"], "immediate")
+        self.assertEqual(out["chat_mode"], mobile_api.CHAT_MODE_SIMPLE)
+        self.assertIn("网球类比", out["result"]["response"])
+        mocked_reply.assert_called_once()
+        kwargs = mocked_reply.call_args.kwargs
+        self.assertTrue(kwargs.get("conversation_memory_query"))
+        self.assertEqual(kwargs.get("conversation_memory_label"), "昨天")
+        self.assertIn("网球类比", kwargs.get("memory_context", ""))
+        fake_mem.retrieve_recent_conversation_memory.assert_called_once()
+        fake_mem.retrieve_relevant_memory.assert_not_called()
+        mocked_classify.assert_not_called()
+        mocked_create.assert_not_called()
+        mocked_knowledge.assert_not_called()
+
     def test_chat_submit_memory_update_short_circuits_to_confirmation(self):
         body = mobile_api.ChatSubmitRequest(prompt="把我的风险偏好改成偏激进", history=[])
         memory_payload = {
@@ -351,6 +396,46 @@ class TestMobileApiChatMemoryAsync(unittest.TestCase):
         self.assertEqual(kwargs.get("query_topic"), "option")
         self.assertTrue(kwargs.get("strict_topic"))
         self.assertIn("期权", out.get("memory_context", ""))
+
+    def test_mobile_context_conversation_memory_query_reads_long_memory(self):
+        fake_mem = types.SimpleNamespace()
+        fake_mem.retrieve_recent_conversation_memory = Mock(
+            return_value="【对话历史记忆】昨天我们聊了用网球解释牛市价差。"
+        )
+        fake_mem.retrieve_relevant_memory = Mock(return_value="")
+
+        with patch.dict("sys.modules", {"memory_utils": fake_mem}), patch.object(
+            mobile_api, "build_profile_memory_context", return_value={"profile_context": "- 常看品种：ETF期权"}
+        ):
+            out = mobile_api._build_mobile_context_payload(
+                prompt_text="记得我们昨天聊了什么吗",
+                current_user="u1",
+                history=[],
+            )
+
+        self.assertTrue(out.get("conversation_memory_query"))
+        self.assertEqual(out.get("conversation_memory_source"), "long")
+        self.assertIn("网球", out.get("memory_context", ""))
+        fake_mem.retrieve_recent_conversation_memory.assert_called_once()
+        self.assertNotEqual(fake_mem.retrieve_recent_conversation_memory.call_args.kwargs.get("since"), "")
+        fake_mem.retrieve_relevant_memory.assert_not_called()
+
+    def test_mobile_context_conversation_memory_missing_does_not_use_profile_as_history(self):
+        fake_mem = types.SimpleNamespace()
+        fake_mem.retrieve_recent_conversation_memory = Mock(return_value="")
+        fake_mem.retrieve_relevant_memory = Mock(return_value="")
+
+        with patch.dict("sys.modules", {"memory_utils": fake_mem}), patch.object(
+            mobile_api, "build_profile_memory_context", return_value={"profile_context": "- 常看品种：ETF期权"}
+        ):
+            out = mobile_api._build_mobile_context_payload(
+                prompt_text="记得我们昨天聊了什么吗",
+                current_user="u1",
+                history=[],
+            )
+
+        self.assertIn("【未检索到历史对话记录】", out.get("memory_context", ""))
+        self.assertNotIn("ETF期权", out.get("memory_context", ""))
 
     def test_mobile_context_extracts_company_focus_slots(self):
         history = [

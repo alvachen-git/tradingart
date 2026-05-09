@@ -1,6 +1,7 @@
 import os
+import re
 import warnings
-from typing import Optional
+from typing import Any, Optional
 from langchain_community.embeddings import DashScopeEmbeddings
 from langchain_core.documents import Document
 from datetime import datetime
@@ -101,6 +102,121 @@ def _normalize_topic(topic: str, fallback_text: str = "") -> str:
         return topic_norm
     inferred = classify_memory_topic(fallback_text)
     return inferred if inferred else TOPIC_GENERAL
+
+
+def _parse_memory_timestamp(value: Any) -> datetime | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(raw, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def _parse_memory_qa(content: str) -> tuple[str, str]:
+    text = str(content or "")
+    question = ""
+    answer = ""
+    if "用户问:" in text and "AI回答:" in text:
+        try:
+            left, right = text.split("AI回答:", 1)
+            question = left.split("用户问:", 1)[1].strip()
+            answer = right.strip()
+        except Exception:
+            question = ""
+            answer = ""
+    if "【回答片段】" in answer:
+        answer = answer.split("【回答片段】", 1)[1].strip()
+    elif "【结构化摘要】" in answer:
+        answer = answer.split("【结构化摘要】", 1)[1].strip()
+    if not question:
+        question = text[:160].strip()
+    if not answer:
+        answer = text[:260].strip()
+    question = re.sub(r"\s+", " ", question).strip()
+    answer = re.sub(r"\s+", " ", answer).strip()
+    return question, answer
+
+
+def _get_collection_getter(vector_store):
+    collection = getattr(vector_store, "_collection", None)
+    if collection is not None and hasattr(collection, "get"):
+        return collection.get
+    if hasattr(vector_store, "get"):
+        return vector_store.get
+    raise RuntimeError("向量库对象不支持 get() 拉取")
+
+
+def _build_conversation_memory_where(user_id: str) -> dict:
+    return {"user_id": str(user_id)}
+
+
+def _memory_timestamp_in_window(timestamp: str, since: str = "", until: str = "") -> bool:
+    ts = _parse_memory_timestamp(timestamp)
+    if since:
+        since_ts = _parse_memory_timestamp(since)
+        if since_ts and (ts is None or ts < since_ts):
+            return False
+    if until:
+        until_ts = _parse_memory_timestamp(until)
+        if until_ts and (ts is None or ts > until_ts):
+            return False
+    return True
+
+
+def retrieve_recent_conversation_memory(
+    user_id: str,
+    *,
+    limit: int = 6,
+    since: str = "",
+    until: str = "",
+) -> str:
+    """按用户与时间窗口读取最近对话记录，用于“昨天聊了什么/上次说过什么”这类问题。"""
+    if not user_id:
+        return ""
+    try:
+        max_limit = max(int(limit or 6), 1)
+        vector_store = get_vector_store()
+        getter = _get_collection_getter(vector_store)
+        where = _build_conversation_memory_where(user_id)
+        data = getter(limit=max(max_limit * 20, 200), where=where)
+        docs = data.get("documents") or []
+        metas = data.get("metadatas") or []
+
+        rows = []
+        for i in range(max(len(docs), len(metas))):
+            doc = str(docs[i] if i < len(docs) else "")
+            meta = metas[i] if i < len(metas) and isinstance(metas[i], dict) else {}
+            timestamp = str(meta.get("timestamp") or "")
+            if not _memory_timestamp_in_window(timestamp, since=since, until=until):
+                continue
+            question, answer = _parse_memory_qa(doc)
+            rows.append(
+                {
+                    "timestamp": timestamp,
+                    "ts": _parse_memory_timestamp(timestamp) or datetime.min,
+                    "question": question,
+                    "answer": answer,
+                }
+            )
+
+        rows.sort(key=lambda item: item["ts"], reverse=True)
+        selected = rows[:max_limit]
+        if not selected:
+            return ""
+
+        lines = ["【对话历史记忆】以下是检索到的历史对话记录，请自然总结，不要编造未出现的信息。"]
+        for item in selected:
+            answer = item["answer"][:260]
+            question = item["question"][:180]
+            lines.append(f"- [{item['timestamp'] or '时间未知'}] 用户问: {question}\n  AI回答片段: {answer}")
+        return "\n".join(lines)
+    except Exception as e:
+        print(f"⚠️ [记忆检索] 按时间读取对话记录出错: {e}")
+        return ""
 
 
 def save_interaction(user_id: str, user_input: str, ai_response: str, topic: str = "", source: str = ""):

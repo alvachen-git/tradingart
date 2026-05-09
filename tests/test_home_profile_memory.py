@@ -58,6 +58,59 @@ class TestHomeProfileMemory(unittest.TestCase):
         self.assertEqual(out.get("profile_memory_action"), "portfolio_status_query")
         self.assertIn("结构化持仓记录", out.get("profile_memory_confirmation", ""))
 
+    def test_build_context_payload_conversation_memory_query_reads_long_memory(self):
+        profile_payload = {
+            "profile_context": "- 风险偏好：偏积极",
+            "memory_action": "context",
+            "confirmation": "",
+            "should_short_circuit": False,
+            "temporary_overrides": {},
+        }
+        with patch.object(Home.st, "session_state", {"messages": [], "conversation_id": "test-conv"}), patch.object(
+            Home, "build_profile_memory_context", return_value=profile_payload
+        ), patch.object(
+            Home.de, "parse_account_total_capital", return_value=None
+        ), patch.object(
+            Home.de, "get_user_profile", return_value={}
+        ), patch.object(
+            Home.mem,
+            "retrieve_recent_conversation_memory",
+            return_value="【对话历史记忆】用户昨天问过网球类比，AI用网球解释牛市价差。",
+        ) as mocked_recent, patch.object(
+            Home.mem, "retrieve_relevant_memory"
+        ) as mocked_relevant:
+            out = Home.build_context_payload("记得我们昨天聊了什么吗", "u1")
+
+        self.assertTrue(out.get("conversation_memory_query"))
+        self.assertEqual(out.get("conversation_memory_source"), "long")
+        self.assertIn("网球类比", out.get("memory_context", ""))
+        self.assertFalse(out.get("profile_memory_should_short_circuit"))
+        mocked_recent.assert_called_once()
+        self.assertNotEqual(mocked_recent.call_args.kwargs.get("since"), "")
+        mocked_relevant.assert_not_called()
+
+    def test_build_context_payload_conversation_memory_query_missing_has_explicit_marker(self):
+        profile_payload = {
+            "profile_context": "- 常看品种：ETF期权",
+            "memory_action": "context",
+            "confirmation": "",
+            "should_short_circuit": False,
+            "temporary_overrides": {},
+        }
+        with patch.object(Home.st, "session_state", {"messages": [], "conversation_id": "test-conv"}), patch.object(
+            Home, "build_profile_memory_context", return_value=profile_payload
+        ), patch.object(
+            Home.de, "parse_account_total_capital", return_value=None
+        ), patch.object(
+            Home.de, "get_user_profile", return_value={}
+        ), patch.object(
+            Home.mem, "retrieve_recent_conversation_memory", return_value=""
+        ):
+            out = Home.build_context_payload("记得我们昨天聊了什么吗", "u1")
+
+        self.assertIn("【未检索到历史对话记录】", out.get("memory_context", ""))
+        self.assertNotIn("ETF期权", out.get("memory_context", ""))
+
 
 if __name__ == "__main__":
     unittest.main()

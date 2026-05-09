@@ -87,6 +87,7 @@ from chat_context_utils import (
     extract_focus_aspect as _shared_extract_focus_aspect,
     extract_focus_entity as _shared_extract_focus_entity,
     infer_correction_intent as _infer_correction_intent,
+    infer_conversation_memory_window as _infer_conversation_memory_window,
     infer_followup_intent as _infer_followup_intent,
     infer_followup_goal as _infer_followup_goal,
     infer_focus_topic as _infer_focus_topic,
@@ -1448,7 +1449,14 @@ def _build_mobile_context_payload(
         recent_focus_entity=recent_focus_entity,
         recent_focus_topic=recent_focus_topic,
     )
-    should_load_long_memory = should_include_recent_context
+    conversation_memory_window = _infer_conversation_memory_window(prompt_text)
+    conversation_memory_query = bool(conversation_memory_window.get("is_query"))
+    conversation_memory_source = str(conversation_memory_window.get("source") or "")
+    if conversation_memory_query and conversation_memory_source == "recent":
+        should_include_recent_context = True
+    should_load_long_memory = should_include_recent_context or (
+        conversation_memory_query and conversation_memory_source == "long"
+    )
     account_total_capital = None
 
     if current_user and current_user != "访客":
@@ -1506,13 +1514,24 @@ def _build_mobile_context_payload(
         try:
             import memory_utils as mem
 
-            found = mem.retrieve_relevant_memory(
-                user_id=current_user,
-                query=prompt_text,
-                k=2,
-                query_topic=intent_domain,
-                strict_topic=(intent_domain == "option"),
-            )
+            if conversation_memory_query and conversation_memory_source == "long":
+                found = mem.retrieve_recent_conversation_memory(
+                    user_id=current_user,
+                    limit=int(conversation_memory_window.get("limit") or 6),
+                    since=str(conversation_memory_window.get("since") or ""),
+                    until=str(conversation_memory_window.get("until") or ""),
+                )
+                if not found:
+                    label = str(conversation_memory_window.get("label") or "相关时间")
+                    found = f"【未检索到历史对话记录】没有查到{label}可用的历史对话记录。"
+            else:
+                found = mem.retrieve_relevant_memory(
+                    user_id=current_user,
+                    query=prompt_text,
+                    k=2,
+                    query_topic=intent_domain,
+                    strict_topic=(intent_domain == "option"),
+                )
             if found:
                 memory_context = _filter_mobile_memory_context_by_domain(found, intent_domain=intent_domain)
         except Exception as e:
@@ -1543,6 +1562,9 @@ def _build_mobile_context_payload(
         "recent_turns": recent_turns,
         "recent_context": recent_context,
         "memory_context": memory_context,
+        "conversation_memory_query": conversation_memory_query,
+        "conversation_memory_label": str(conversation_memory_window.get("label") or ""),
+        "conversation_memory_source": conversation_memory_source,
         "profile_context": str(profile_memory_payload.get("profile_context") or ""),
         "profile_memory_action": str(profile_memory_payload.get("memory_action") or ""),
         "profile_memory_confirmation": str(profile_memory_payload.get("confirmation") or ""),
@@ -2230,6 +2252,8 @@ def chat_submit(
     intent_domain = str(context_payload.get("intent_domain") or "general")
     if bool(context_payload.get("profile_memory_should_short_circuit", False)):
         chat_mode = CHAT_MODE_SIMPLE
+    elif bool(context_payload.get("conversation_memory_query", False)):
+        chat_mode = CHAT_MODE_SIMPLE
     elif context_payload.get("followup_anchor_ambiguous") and context_payload.get("followup_anchor_clarify"):
         response_text = str(context_payload.get("followup_anchor_clarify") or "").strip()
         feedback_allowed = _save_chat_answer_event(
@@ -2319,6 +2343,8 @@ def chat_submit(
             focus_entity=str(context_payload.get("focus_entity") or ""),
             focus_topic=str(context_payload.get("focus_topic") or ""),
             focus_aspect=str(context_payload.get("focus_aspect") or ""),
+            conversation_memory_query=bool(context_payload.get("conversation_memory_query", False)),
+            conversation_memory_label=str(context_payload.get("conversation_memory_label") or ""),
             runtime_context=runtime_context,
         )
         feedback_allowed = _save_chat_answer_event(
