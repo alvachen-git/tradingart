@@ -21,13 +21,13 @@ _SUB_SOURCE_COLUMNS = {"source_type", "source_ref", "source_note", "granted_at",
 _HAS_SUB_SOURCE_COLUMNS: Optional[bool] = None
 _TRIAL_TABLE_READY: bool = False
 
-DEFAULT_NEW_USER_TRIAL_DAYS = int(str(os.getenv("NEW_USER_TRIAL_DAYS", "7")).strip() or 7)
+DEFAULT_NEW_USER_TRIAL_DAYS = int(str(os.getenv("NEW_USER_TRIAL_DAYS", "10")).strip() or 10)
 DEFAULT_NEW_USER_TRIAL_CHANNEL_CODES = [
     item.strip()
     for item in str(
         os.getenv(
             "NEW_USER_TRIAL_CHANNEL_CODES",
-            "daily_report,expiry_option_radar,broker_position_report,fund_flow_report,macro_risk_radar",
+            "daily_report,expiry_option_radar,broker_position_report,fund_flow_report,macro_risk_radar,safe_stock_report",
         )
     ).split(",")
     if item.strip()
