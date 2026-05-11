@@ -120,11 +120,12 @@ class TestPaymentService(unittest.TestCase):
                     """
                     INSERT INTO content_channels(id, code, name, icon, is_active, is_premium, sort_order, price_points_monthly)
                     VALUES
-                    (1, 'daily_report', '复盘晚报', '📪', 1, 1, 1, 500),
-                    (2, 'expiry_option_radar', '末日期权晚报', '📅', 1, 1, 2, 500),
-                    (3, 'broker_position_report', '持仓密报', '🔥', 1, 1, 3, 500),
-                    (4, 'fund_flow_report', '资金流晚报', '💰', 1, 1, 4, 500),
-                    (5, 'macro_risk_radar', '宏观周报', '🌍', 1, 1, 5, 500)
+                    (1, 'safe_stock_report', '小爱抄底选股晚报', '', 1, 1, 0, 800),
+                    (2, 'daily_report', '复盘晚报', '📪', 1, 1, 1, 500),
+                    (3, 'expiry_option_radar', '末日期权晚报', '📅', 1, 1, 2, 500),
+                    (4, 'broker_position_report', '持仓密报', '🔥', 1, 1, 3, 500),
+                    (5, 'fund_flow_report', '资金流晚报', '💰', 1, 1, 4, 500),
+                    (6, 'macro_risk_radar', '宏观周报', '🌍', 1, 1, 5, 500)
                     """
                 )
             )
@@ -310,6 +311,35 @@ class TestPaymentService(unittest.TestCase):
         self.assertIsNotNone(spend)
         self.assertEqual(int(spend[0]), -800)
 
+    def test_paid_products_start_with_safe_stock_report_at_800_points(self):
+        products = pay.get_paid_products()
+        channels = [
+            item
+            for item in products
+            if str(item.get("product_type") or "") == "channel"
+        ]
+        self.assertGreaterEqual(len(channels), 1)
+        self.assertEqual(str(channels[0].get("code") or ""), "safe_stock_report")
+        self.assertEqual(int(channels[0].get("points_monthly") or 0), 800)
+
+    def test_safe_stock_report_uses_800_even_when_db_has_old_price(self):
+        with self.engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    UPDATE content_channels
+                    SET price_points_monthly = 500
+                    WHERE code = 'safe_stock_report'
+                    """
+                )
+            )
+
+        products = pay.get_paid_products()
+        safe_stock = next(
+            item for item in products if str(item.get("code") or "") == "safe_stock_report"
+        )
+        self.assertEqual(int(safe_stock.get("points_monthly") or 0), 800)
+
     def test_paid_products_include_macro_radar_and_package_includes_it(self):
         products = pay.get_paid_products()
         channel_codes = [
@@ -317,6 +347,7 @@ class TestPaymentService(unittest.TestCase):
             for item in products
             if str(item.get("product_type") or "") == "channel"
         ]
+        self.assertIn("safe_stock_report", channel_codes)
         self.assertIn("macro_risk_radar", channel_codes)
 
         package = next(
@@ -330,6 +361,7 @@ class TestPaymentService(unittest.TestCase):
         )
         self.assertIsNotNone(package)
         include_codes = [str(x or "") for x in (package.get("includes") or [])]
+        self.assertIn("safe_stock_report", include_codes)
         self.assertIn("macro_risk_radar", include_codes)
 
     def test_purchase_intel_package_rolls_back_on_partial_failure(self):

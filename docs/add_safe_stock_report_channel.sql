@@ -1,5 +1,5 @@
 -- Add/upgrade channel: safe_stock_report
--- Target price: 500 points / month
+-- Target price: 800 points / month
 
 INSERT INTO content_channels (
     code,
@@ -19,9 +19,9 @@ SELECT
     '跟踪资金回流与底部转折机会，筛选可买、观察和已买跟踪标的。',
     1,
     1,
-    5,
+    0,
     NULL,
-    500
+    800
 FROM content_channels
 ON DUPLICATE KEY UPDATE
     name = VALUES(name),
@@ -30,4 +30,4 @@ ON DUPLICATE KEY UPDATE
     is_active = 1,
     is_premium = 1,
     sort_order = VALUES(sort_order),
-    price_points_monthly = 500;
+    price_points_monthly = 800;

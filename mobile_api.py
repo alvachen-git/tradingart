@@ -2868,6 +2868,7 @@ _FORCE_PAID_CHANNEL_CODES = {
     "broker_position_report",
     "fund_flow_report",
     "macro_risk_radar",
+    "safe_stock_report",
 }
 _EFFECTIVE_FREE_CHANNEL_CODES = _FREE_CHANNEL_CODES - _FORCE_PAID_CHANNEL_CODES
 _INTEL_SELF_SUBSCRIBE_API_ENABLED = (
@@ -3290,12 +3291,13 @@ def pay_products(username: str = Depends(get_current_user)):
                 })
 
         channel_order = {
-            "daily_report": 0,
-            "expiry_option_radar": 1,
-            "broker_position_report": 2,
-            "fund_flow_report": 3,
-            "macro_risk_radar": 4,
-            "trade_signal": 5,
+            "safe_stock_report": 0,
+            "daily_report": 1,
+            "expiry_option_radar": 2,
+            "broker_position_report": 3,
+            "fund_flow_report": 4,
+            "macro_risk_radar": 5,
+            "trade_signal": 6,
         }
 
         def _sort_key(item: dict):
