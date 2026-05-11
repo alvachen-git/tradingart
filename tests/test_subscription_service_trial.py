@@ -65,7 +65,7 @@ class TestSubscriptionTrial(unittest.TestCase):
                     (3, 'broker_position_report', '持仓密报', 1, 1),
                     (4, 'fund_flow_report', '资金流晚报', 1, 1),
                     (5, 'macro_risk_radar', '宏观周报', 1, 1),
-                    (6, 'safe_stock_report', '小爱抄底选股晚报', 1, 1)
+                    (6, 'safe_stock_report', '小爱选股晚报', 1, 1)
                     """
                 )
             )

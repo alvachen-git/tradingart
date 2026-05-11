@@ -759,7 +759,7 @@ def draft_safe_stock_report(data: Dict[str, Any]) -> str:
 <body>
 <div class="wrap">
   <section class="hero">
-    <h1>小爱抄底选股晚报</h1>
+    <h1>小爱选股晚报</h1>
     <div class="muted">交易日：{_esc(td)} · 生成时间：{_esc(generated_at)}</div>
     <div class="market-note">{_esc(market_note)}</div>
   </section>
@@ -788,13 +788,13 @@ def draft_safe_stock_report(data: Dict[str, Any]) -> str:
 def extract_summary_from_html(html_content: str) -> str:
     plain = html.unescape(str(html_content or ""))
     plain = " ".join(plain.replace("<", " <").split())
-    return plain[:180] or "小爱抄底选股晚报"
+    return plain[:180] or "小爱选股晚报"
 
 
 def validate_safe_stock_report(html_content: str, data: Dict[str, Any]) -> List[str]:
     errors: List[str] = []
     text_value = str(html_content or "")
-    for required in ["小爱抄底选股晚报", "资金回流", "可买标的", "观察标的", "已买跟踪"]:
+    for required in ["小爱选股晚报", "资金回流", "可买标的", "观察标的", "已买跟踪"]:
         if required not in text_value:
             errors.append(f"missing section: {required}")
     if len(text_value) < 800:
@@ -887,7 +887,7 @@ def publish_safe_stock_report(html_content: str, data: Dict[str, Any]) -> Tuple[
         return False, "; ".join(errors)
     ensure_safe_stock_tables()
     td = str(data.get("trade_date") or "")
-    title = f"{td} 小爱抄底选股晚报"
+    title = f"{td} 小爱选股晚报"
     summary = extract_summary_from_html(html_content)
     success, result = sub_svc.publish_content(
         channel_code=CHANNEL_CODE,

@@ -40,7 +40,7 @@ _PACKAGES_MAP = {item["name"]: item for item in POINTS_PACKAGES}
 
 # 晚报类付费产品（频道）
 REPORT_PRODUCTS = [
-    {"code": "safe_stock_report", "name": "小爱抄底选股晚报", "icon": "", "points_monthly": 800},
+    {"code": "safe_stock_report", "name": "小爱选股晚报", "icon": "", "points_monthly": 800},
     {"code": "daily_report", "name": "复盘晚报", "icon": "📊", "points_monthly": 500},
     {"code": "expiry_option_radar", "name": "末日期权晚报", "icon": "🗓️", "points_monthly": 500},
     {"code": "broker_position_report", "name": "期货商持仓晚报", "icon": "🏦", "points_monthly": 500},

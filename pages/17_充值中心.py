@@ -1038,7 +1038,7 @@ with shop_paid_tab:
         "trade_signal": "每天下午2点半，全市场扫描判断突破品种。",
     }
     product_name_map = {
-        "safe_stock_report": "小爱抄底选股晚报",
+        "safe_stock_report": "小爱选股晚报",
         "trade_signal": "突破信号",
     }
 

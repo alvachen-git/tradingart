@@ -120,7 +120,7 @@ class TestPaymentService(unittest.TestCase):
                     """
                     INSERT INTO content_channels(id, code, name, icon, is_active, is_premium, sort_order, price_points_monthly)
                     VALUES
-                    (1, 'safe_stock_report', '小爱抄底选股晚报', '', 1, 1, 0, 800),
+                    (1, 'safe_stock_report', '小爱选股晚报', '', 1, 1, 0, 800),
                     (2, 'daily_report', '复盘晚报', '📪', 1, 1, 1, 500),
                     (3, 'expiry_option_radar', '末日期权晚报', '📅', 1, 1, 2, 500),
                     (4, 'broker_position_report', '持仓密报', '🔥', 1, 1, 3, 500),

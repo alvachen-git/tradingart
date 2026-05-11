@@ -14,7 +14,7 @@ INSERT INTO content_channels (
 )
 SELECT
     'safe_stock_report',
-    '小爱抄底选股晚报',
+    '小爱选股晚报',
     '📉',
     '跟踪资金回流与底部转折机会，筛选可买、观察和已买跟踪标的。',
     1,
