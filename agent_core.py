@@ -57,7 +57,7 @@ from portfolio_tools import (
     analyze_user_trading_style,
     check_portfolio_risks
 )
-from chat_routing import is_pure_option_data_query
+from chat_routing import is_market_data_query, is_pure_option_data_query
 from simple_chat_runtime import (
     build_simple_runtime_context,
     format_simple_runtime_context,
@@ -1203,10 +1203,10 @@ def _enforce_margin_monitor_routing(query: str, plan: List[str]) -> List[str]:
 
 def _enforce_option_data_monitor_routing(query: str, plan: List[str]) -> List[str]:
     """
-    纯期权数据问题只派 monitor，避免误上宏观/技术/策略整链路。
-    例如：IV/波动率高低、分位、到期日、剩余天数、保证金、乘数、一手资金占用。
+    明确的数据查询问题只派 monitor，避免误上知识解释或宏观/技术/策略整链路。
+    例如：IV/波动率高低、分位、到期日、保证金、乘数、价格、最新价。
     """
-    if not is_pure_option_data_query(query):
+    if not is_market_data_query(query):
         return plan
     return ["monitor"]
 

@@ -5,6 +5,7 @@ from chat_routing import (
     CHAT_MODE_KNOWLEDGE,
     CHAT_MODE_SIMPLE,
     classify_chat_mode,
+    is_market_data_query,
     is_pure_option_data_query,
 )
 
@@ -40,6 +41,8 @@ class TestChatRouting(unittest.TestCase):
         self.assertEqual(classify_chat_mode("为什么今晚英特尔涨这么多？"), CHAT_MODE_ANALYSIS)
         self.assertEqual(classify_chat_mode("牛市价差怎么做"), CHAT_MODE_ANALYSIS)
         self.assertEqual(classify_chat_mode("牛市价差适合做吗"), CHAT_MODE_ANALYSIS)
+        self.assertEqual(classify_chat_mode("查看甲醇2609的iv波动率"), CHAT_MODE_ANALYSIS)
+        self.assertEqual(classify_chat_mode("甲醇2609价格多少"), CHAT_MODE_ANALYSIS)
 
     def test_company_recent_news_routes_to_knowledge(self):
         self.assertEqual(classify_chat_mode("汇川技术最近有什么好消息吗"), CHAT_MODE_KNOWLEDGE)
@@ -257,6 +260,13 @@ class TestChatRouting(unittest.TestCase):
         self.assertFalse(is_pure_option_data_query("300ETF期权波动率高吗，适合卖方吗"))
         self.assertFalse(is_pure_option_data_query("创业板卖认沽如何处理"))
         self.assertFalse(is_pure_option_data_query("300ETF期权怎么看"))
+
+    def test_detect_market_data_query(self):
+        self.assertTrue(is_market_data_query("查看甲醇2609的iv波动率"))
+        self.assertTrue(is_market_data_query("甲醇2609价格多少"))
+        self.assertTrue(is_market_data_query("白银最新价多少"))
+        self.assertFalse(is_market_data_query("甲醇2609波动率高吗，适合卖方吗"))
+        self.assertFalse(is_market_data_query("解释一下IV"))
 
 
 if __name__ == "__main__":
