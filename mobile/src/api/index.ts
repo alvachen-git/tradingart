@@ -35,6 +35,17 @@ export const authApi = {
   }) =>
     request<{ token: string; username: string; message: string }>('POST', '/api/auth/register', payload),
 
+  passwordResetSendPhoneCode: (phone: string) =>
+    request<{ message: string }>('POST', '/api/auth/password-reset/send-phone-code', { phone }),
+
+  passwordReset: (payload: {
+    phone: string
+    sms_code: string
+    new_password: string
+    new_password_confirm: string
+  }) =>
+    request<{ message: string; username: string }>('POST', '/api/auth/password-reset', payload),
+
   logout: () =>
     request<{ message: string }>('POST', '/api/auth/logout'),
 

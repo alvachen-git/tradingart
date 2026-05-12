@@ -201,6 +201,11 @@ def send_login_phone_code(phone: str, client_ip: str = None):
     return send_login_sms_code(phone, client_ip=client_ip)
 
 
+def send_reset_password_phone_code(phone: str, client_ip: str = None):
+    """Send password-reset SMS code, reusing the existing login SMS template."""
+    return send_login_sms_code(phone, client_ip=client_ip)
+
+
 def validate_register_step1(username: str, password: str, password_confirm: str):
     """Step-1 validation for account registration (username + password)."""
     username = str(username or "").strip()
@@ -629,6 +634,39 @@ def reset_password_with_email(email: str, email_code: str, new_password: str):
     except Exception as e:
         print(f"reset_password_with_email failed: {e}")
         return False, "重置密码失败"
+
+
+def reset_password_with_phone(phone: str, sms_code: str, new_password: str):
+    ok, normalized_phone, phone_msg = normalize_cn_phone(phone)
+    if not ok:
+        return False, phone_msg, ""
+
+    if len(str(new_password or "")) < 6:
+        return False, "新密码长度不能少于6位", ""
+
+    code_ok, code_msg = verify_login_sms_code(normalized_phone, sms_code)
+    if not code_ok:
+        return False, code_msg, ""
+
+    try:
+        with engine.begin() as conn:
+            check = conn.execute(
+                text("SELECT username FROM users WHERE phone = :p"),
+                {"p": normalized_phone},
+            ).fetchone()
+            if not check:
+                return False, "该手机号未注册", ""
+
+            username = str(check[0] or "").strip()
+            conn.execute(
+                text("UPDATE users SET password_hash = :h WHERE phone = :p"),
+                {"h": hash_password(new_password), "p": normalized_phone},
+            )
+            conn.execute(text("DELETE FROM user_sessions WHERE username = :u"), {"u": username})
+            return True, f"密码重置成功，请使用账号 {username} 和新密码登录", username
+    except Exception as e:
+        print(f"reset_password_with_phone failed: {e}")
+        return False, "重置密码失败", ""
 
 
 def bind_email(username: str, email: str, email_code: str):
