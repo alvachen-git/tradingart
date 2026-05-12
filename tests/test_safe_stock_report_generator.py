@@ -95,6 +95,21 @@ def test_draft_safe_stock_report_contains_required_sections():
     assert "中国资产" in html
 
 
+def test_draft_safe_stock_report_renders_moneyflow_fields_when_score_fields_missing():
+    data = _sample_data()
+    data["sectors"] = [
+        {
+            "industry": "AI",
+            "sector_type": "行业",
+            "pct_change": 2.34,
+            "main_net_inflow": 123.4567,
+        }
+    ]
+    html = gen.draft_safe_stock_report(data)
+    assert "123.4567" in html
+    assert "+2.34%" in html
+
+
 def test_validate_blocks_buy_recommendations_when_gate_blocked():
     data = _sample_data(gate="blocked", buy_slots=0)
     html = gen.draft_safe_stock_report(data)
@@ -122,6 +137,85 @@ def test_select_new_recommendations_respects_gate_slots_and_sector_rank():
     blocked_buys, blocked_watches = gen._select_new_recommendations(candidates, {"gate": "blocked", "buy_slots": 0}, pd.DataFrame())
     assert blocked_buys == []
     assert len(blocked_watches) > 0
+
+
+def test_v2_candidate_pool_attaches_sector_rank_used_by_safe_stock_selection(monkeypatch):
+    class DummyConn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class DummyEngine:
+        def connect(self):
+            return DummyConn()
+
+    monkeypatch.setattr(gen.sim, "engine", DummyEngine())
+    monkeypatch.setattr(gen.sim, "_latest_screener_date", lambda trade_date: "20260512")
+    monkeypatch.setattr(
+        gen.sim,
+        "_get_v2_top_sectors",
+        lambda trade_date, limit=3: [{"industry": "AI", "pct_change": 2.34}],
+    )
+    monkeypatch.setattr(
+        gen.sim.pd,
+        "read_sql",
+        lambda *args, **kwargs: pd.DataFrame(
+            [
+                {
+                    "ts_code": "600001.SH",
+                    "name": "Sample A",
+                    "industry": "AI",
+                    "score": 88.0,
+                    "close": 10.0,
+                    "pct_chg": 2.0,
+                    "pattern": "突破",
+                    "ma_trend": "多头",
+                }
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        gen.sim,
+        "_fetch_price_snapshot",
+        lambda symbols, trade_date: {"600001.SH": {"name": "Sample A", "close": 10.5, "amount": 2e8, "vol": 1000}},
+    )
+    monkeypatch.setattr(gen.sim, "_fetch_recent_price_history", lambda symbols, trade_date, lookback=100: pd.DataFrame())
+    monkeypatch.setattr(gen.sim, "_is_v2_breakout_candidate", lambda pattern, ma_trend, score: True)
+
+    candidates, _ = gen.sim._build_candidate_pool_v2("20260512", {})
+    assert int(candidates.iloc[0]["sector_rank"]) == 1
+
+    candidates = candidates.assign(
+        bottom_turn_score=88.0,
+        bottom_stage_score=60.0,
+        reversal_signal_score=35.0,
+        anti_chase_flag=0,
+        right_confirm=1,
+        ret20=0.02,
+        ret60=-0.08,
+        drawdown_120d_high=0.25,
+        position_pct_120d=0.35,
+    )
+    buys, _ = gen._select_new_recommendations(candidates, {"gate": "open", "buy_slots": 1}, pd.DataFrame())
+    assert [x["symbol"] for x in buys] == ["600001.SH"]
+
+
+def test_v2_fallback_candidate_pool_keeps_sector_rank():
+    fallback = pd.DataFrame(
+        [
+            {
+                "symbol": "600001.SH",
+                "name": "Sample A",
+                "industry": "AI",
+                "score": 88.0,
+            }
+        ]
+    )
+    ranked = gen.sim._apply_v2_sector_rank(fallback, {"AI": 2})
+    ensured = gen.sim._ensure_v2_candidate_columns(ranked, "20260512")
+    assert int(ensured.iloc[0]["sector_rank"]) == 2
 
 
 def test_select_new_recommendations_excludes_chase_from_buy_but_keeps_watch():

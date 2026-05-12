@@ -662,7 +662,8 @@ def _get_v2_top_sectors(trade_date: str, limit: int = 3) -> List[Dict[str, Any]]
         return []
     sql = text(
         """
-        SELECT industry, pct_change, main_net_inflow
+        SELECT industry, sector_type, pct_change, main_net_inflow, medium_net_inflow,
+               small_net_inflow, total_turnover, net_rate
         FROM sector_moneyflow
         WHERE trade_date = :td
           AND sector_type IN ('行业', '琛屼笟')
@@ -679,11 +680,23 @@ def _get_v2_top_sectors(trade_date: str, limit: int = 3) -> List[Dict[str, Any]]
         name = str(row.get("industry") or "").strip()
         if not name:
             continue
+        main_flow = _to_float(row.get("main_net_inflow"), 0.0)
+        pct_change = _to_float(row.get("pct_change"), 0.0)
         out.append(
             {
+                "rank": int(len(out) + 1),
                 "industry": name,
-                "pct_change": _to_float(row.get("pct_change"), 0.0),
-                "main_net_inflow": _to_float(row.get("main_net_inflow"), 0.0),
+                "sector_type": str(row.get("sector_type") or "行业"),
+                "score": pct_change,
+                "improvement": main_flow,
+                "positive_days": 1 if main_flow > 0 else 0,
+                "recent_pct_change": pct_change,
+                "pct_change": pct_change,
+                "main_net_inflow": main_flow,
+                "medium_net_inflow": _to_float(row.get("medium_net_inflow"), 0.0),
+                "small_net_inflow": _to_float(row.get("small_net_inflow"), 0.0),
+                "total_turnover": _to_float(row.get("total_turnover"), 0.0),
+                "net_rate": _to_float(row.get("net_rate"), 0.0),
                 "trade_date": sec_date,
             }
         )
@@ -825,6 +838,7 @@ def _ensure_v2_candidate_columns(df: pd.DataFrame, trade_date: str) -> pd.DataFr
                 "symbol",
                 "name",
                 "industry",
+                "sector_rank",
                 "score",
                 "close",
                 "pct_chg",
@@ -851,6 +865,7 @@ def _ensure_v2_candidate_columns(df: pd.DataFrame, trade_date: str) -> pd.DataFr
     defaults: Dict[str, Any] = {
         "pattern": "",
         "ma_trend": "",
+        "sector_rank": 999,
         "signal_active": 0,
         "breakout_date": trade_date,
         "breakout_price": out.get("close", 0),
@@ -870,6 +885,22 @@ def _ensure_v2_candidate_columns(df: pd.DataFrame, trade_date: str) -> pd.DataFr
     return out
 
 
+def _apply_v2_sector_rank(df: pd.DataFrame, sector_rank_map: Dict[str, int]) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df
+    out = df.copy()
+
+    def _rank_for(row: pd.Series) -> int:
+        current = _to_float(row.get("sector_rank"), 0.0)
+        if current > 0:
+            return int(current)
+        industry = str(row.get("industry") or "").strip()
+        return int(sector_rank_map.get(industry, 999))
+
+    out["sector_rank"] = out.apply(_rank_for, axis=1)
+    return out
+
+
 def _build_candidate_pool_v2(
     trade_date: str,
     current_positions: Dict[str, Dict[str, Any]],
@@ -878,6 +909,7 @@ def _build_candidate_pool_v2(
     screener_date = _latest_screener_date(trade_date)
     top_sectors = _get_v2_top_sectors(trade_date, limit=3)
     sector_names = [str(x.get("industry") or "").strip() for x in top_sectors if str(x.get("industry") or "").strip()]
+    sector_rank_map = {name: i + 1 for i, name in enumerate(sector_names)}
     sector_notes = [
         f"{x['industry']}({x['pct_change']:+.2f}%)" for x in top_sectors if str(x.get("industry") or "").strip()
     ]
@@ -916,6 +948,7 @@ def _build_candidate_pool_v2(
 
     if base_df.empty:
         fallback = _build_candidate_pool(trade_date, current_positions, limit=limit)
+        fallback = _apply_v2_sector_rank(fallback, sector_rank_map)
         return _ensure_v2_candidate_columns(fallback, trade_date), sector_notes
 
     base_df["symbol"] = base_df["ts_code"].apply(_normalize_symbol)
@@ -954,6 +987,7 @@ def _build_candidate_pool_v2(
             continue
 
         score = _to_float(r.get("score"), 0.0)
+        industry = str(r.get("industry") or "")
         pattern = str(r.get("pattern") or "")
         ma_trend = str(r.get("ma_trend") or "")
         signal_active = int(_is_v2_breakout_candidate(pattern, ma_trend, score))
@@ -965,7 +999,8 @@ def _build_candidate_pool_v2(
             {
                 "symbol": symbol,
                 "name": name,
-                "industry": str(r.get("industry") or ""),
+                "industry": industry,
+                "sector_rank": int(sector_rank_map.get(industry, 999)),
                 "score": score,
                 "close": close,
                 "pct_chg": _to_float(r.get("pct_chg"), 0.0),
@@ -1000,6 +1035,7 @@ def _build_candidate_pool_v2(
                 "symbol": symbol,
                 "name": pos.get("name") or p.get("name") or "",
                 "industry": "",
+                "sector_rank": 999,
                 "score": -1.0,
                 "close": _to_float(p.get("close")),
                 "pct_chg": 0.0,
@@ -1024,6 +1060,7 @@ def _build_candidate_pool_v2(
 
     if not rows:
         fallback = _build_candidate_pool(trade_date, current_positions, limit=limit)
+        fallback = _apply_v2_sector_rank(fallback, sector_rank_map)
         return _ensure_v2_candidate_columns(fallback, trade_date), sector_notes
 
     df = pd.DataFrame(rows).drop_duplicates(subset=["symbol"], keep="first")

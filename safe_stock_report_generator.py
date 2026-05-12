@@ -674,10 +674,10 @@ def draft_safe_stock_report(data: Dict[str, Any]) -> str:
             int(s.get("rank") or i + 1),
             s.get("industry", ""),
             s.get("sector_type", ""),
-            _fmt_num(s.get("score"), 2),
-            _fmt_num(s.get("improvement"), 4),
+            _fmt_num(s.get("score", s.get("pct_change")), 2),
+            _fmt_num(s.get("improvement", s.get("main_net_inflow")), 4),
             int(_safe_float(s.get("positive_days"), 0)),
-            f"{_safe_float(s.get('recent_pct_change'), 0.0):+.2f}%",
+            f"{_safe_float(s.get('recent_pct_change', s.get('pct_change')), 0.0):+.2f}%",
         ]
         for i, s in enumerate(sectors)
     ]
