@@ -12,7 +12,7 @@ import safe_stock_report_generator as gen
 
 
 SECTION_NAMES = [
-    "\u5c0f\u7231\u6284\u5e95\u9009\u80a1\u665a\u62a5",
+    "\u5c0f\u7231\u9009\u80a1\u665a\u62a5",
     "\u8d44\u91d1\u56de\u6d41",
     "\u53ef\u4e70\u6807\u7684",
     "\u89c2\u5bdf\u6807\u7684",
@@ -21,6 +21,7 @@ SECTION_NAMES = [
 
 OLD_SECTION_NAMES = [
     "\u5b89\u5168\u9009\u80a1\u6a21\u578b\u62a5\u544a",
+    "\u5c0f\u7231\u6284\u5e95\u9009\u80a1\u665a\u62a5",
     "\u8fb9\u9645\u8d44\u91d1\u56de\u6d41\u677f\u5757",
     "\u6a21\u578b\u4e70\u5165\u8ddf\u8e2a",
     "\u89c2\u5bdf\u540d\u5355",
@@ -99,6 +100,17 @@ def test_validate_blocks_buy_recommendations_when_gate_blocked():
     html = gen.draft_safe_stock_report(data)
     errors = gen.validate_safe_stock_report(html, data)
     assert any("blocked gate" in err for err in errors)
+
+
+def test_safe_stock_v2_thresholds_are_exported_by_simulation_service():
+    for name in [
+        "V2_BOTTOM_BUY_SCORE",
+        "V2_BOTTOM_WATCH_SCORE",
+        "V2_MIN_REVERSAL_SIGNAL_SCORE",
+        "V2_SECTOR_BUY_RANK_LIMIT",
+        "V2_SECTOR_WATCH_RANK_LIMIT",
+    ]:
+        assert hasattr(gen.sim, name)
 
 
 def test_select_new_recommendations_respects_gate_slots_and_sector_rank():
