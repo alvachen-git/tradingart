@@ -3771,10 +3771,10 @@ def show_welcome_screen():
         st.session_state.pending_prompt = text
 
     with col1:
-        st.button("比较宁德时代和阳光电源",
+        st.button("半导体有什么股票推荐",
                      use_container_width=True,
                      on_click=set_prompt_callback,
-                     args=("比较宁德时代和阳光电源的基本面和技术面",)
+                     args=("推荐有潜力的半导体股票，最好不要涨太多的",)
          )
 
     with col2:
@@ -3785,10 +3785,10 @@ def show_welcome_screen():
          )
 
     with col3:
-        st.button("创业板期权做什么策略？",
+        st.button("500ETF现在能卖期权吗？",
                      use_container_width=True,
                      on_click=set_prompt_callback,
-                     args=("创业板期权做什么策略好",)
+                     args=("500ETF卖期权如何操作",)
          )
 
 # ==========================================
