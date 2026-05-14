@@ -59,6 +59,7 @@ FORCE_PAID_CHANNEL_CODES = {
     "broker_position_report",
     "fund_flow_report",
     "macro_risk_radar",
+    "safe_stock_report",
 }
 EFFECTIVE_FREE_CHANNEL_CODES = FREE_SELF_SUBSCRIBE_CHANNEL_CODES - FORCE_PAID_CHANNEL_CODES
 with st.sidebar:
@@ -507,6 +508,75 @@ st.markdown("""
         color: #ffffff !important;
         transform: translateY(-2px);
     }
+
+    /* ========== 情报站频道筛选：去图标、高级胶囊按钮 ========== */
+    [data-testid="stMain"] div[data-testid="stHorizontalBlock"]:has(.intel-channel-status) {
+        gap: 14px !important;
+        align-items: flex-start;
+        margin: 2px 0 34px;
+    }
+    [data-testid="stMain"] div[data-testid="stHorizontalBlock"]:has(.intel-channel-status) [data-testid="column"] {
+        min-width: 122px;
+    }
+    [data-testid="stMain"] div[data-testid="stHorizontalBlock"]:has(.intel-channel-status) div.stButton > button {
+        min-height: 48px;
+        padding: 0 18px !important;
+        border-radius: 14px !important;
+        border: 1px solid rgba(148, 163, 184, 0.18) !important;
+        background:
+            linear-gradient(180deg, rgba(255,255,255,0.045), rgba(255,255,255,0.018)),
+            rgba(15, 23, 42, 0.72) !important;
+        color: #d9e4f2 !important;
+        box-shadow:
+            inset 0 1px 0 rgba(255,255,255,0.07),
+            0 10px 28px rgba(0,0,0,0.16) !important;
+        font-size: 15px !important;
+        font-weight: 700 !important;
+        letter-spacing: 0 !important;
+        white-space: nowrap !important;
+    }
+    [data-testid="stMain"] div[data-testid="stHorizontalBlock"]:has(.intel-channel-status) div.stButton > button p {
+        white-space: nowrap !important;
+        word-break: keep-all !important;
+        line-height: 1 !important;
+    }
+    [data-testid="stMain"] div[data-testid="stHorizontalBlock"]:has(.intel-channel-status) div.stButton > button:hover {
+        transform: translateY(-1px) !important;
+        border-color: rgba(125, 211, 252, 0.48) !important;
+        background:
+            linear-gradient(180deg, rgba(56,189,248,0.11), rgba(255,255,255,0.02)),
+            rgba(15, 23, 42, 0.86) !important;
+        box-shadow:
+            inset 0 1px 0 rgba(255,255,255,0.1),
+            0 14px 34px rgba(14, 165, 233, 0.12) !important;
+    }
+    [data-testid="stMain"] div[data-testid="stHorizontalBlock"]:has(.intel-channel-status) div.stButton > button[kind="primary"] {
+        border-color: rgba(96, 165, 250, 0.62) !important;
+        background:
+            linear-gradient(180deg, rgba(96,165,250,0.22), rgba(37,99,235,0.1)),
+            rgba(15, 23, 42, 0.9) !important;
+        color: #f8fbff !important;
+        box-shadow:
+            inset 0 1px 0 rgba(255,255,255,0.14),
+            0 12px 32px rgba(37, 99, 235, 0.22) !important;
+    }
+    .intel-channel-status {
+        text-align: center;
+        margin-top: -4px;
+        min-height: 28px;
+    }
+    .intel-channel-status .status-badge {
+        padding: 4px 11px;
+        border-radius: 999px;
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0;
+        box-shadow: inset 0 1px 0 rgba(255,255,255,0.08);
+    }
+    .intel-channel-status-placeholder {
+        opacity: 0;
+        pointer-events: none;
+    }
     /* 1. 闅愯棌鍘熺敓涓戦檵鐨勪笁瑙掑舰 */
     details > summary {
         list-style: none;
@@ -853,8 +923,8 @@ user_sub_map = {s['channel_id']: s for s in user_subs}
 
 # 频道筛选：手机端下拉，桌面端保持原按钮样式
 if is_mobile():
-    channel_options = [('all', '📋 全部')] + [
-        (channel['code'], f"{channel['icon']} {channel['name']}") for channel in channels
+    channel_options = [('all', '全部')] + [
+        (channel['code'], str(channel['name'])) for channel in channels
     ]
     option_codes = [code for code, _ in channel_options]
     option_labels = {code: label for code, label in channel_options}
@@ -894,7 +964,7 @@ if is_mobile():
                 status_class = "none"
 
             st.markdown(
-                f'<div style="text-align:right;margin-top:-2px;"><span class="status-badge status-{status_class}">{status}</span></div>',
+                f'<div class="intel-channel-status" style="text-align:right;margin-top:-2px;"><span class="status-badge status-{status_class}">{status}</span></div>',
                 unsafe_allow_html=True,
             )
 else:
@@ -902,9 +972,13 @@ else:
 
     with cols[0]:
         is_all_active = st.session_state.selected_channel == 'all'
-        if st.button("📋 全部", key="ch_all", type="primary" if is_all_active else "secondary", use_container_width=True):
+        if st.button("全部", key="ch_all", type="primary" if is_all_active else "secondary", use_container_width=True):
             st.session_state.selected_channel = 'all'
             st.rerun()
+        st.markdown(
+            '<div class="intel-channel-status intel-channel-status-placeholder"><span class="status-badge status-free">占位</span></div>',
+            unsafe_allow_html=True,
+        )
 
     for i, channel in enumerate(channels):
         with cols[i + 1]:
@@ -925,13 +999,13 @@ else:
                 status = "未订阅"
                 status_class = "none"
 
-            if st.button(f"{channel['icon']} {channel['name']}", key=f"ch_{channel['code']}",
+            if st.button(str(channel['name']), key=f"ch_{channel['code']}",
                          type="primary" if is_active else "secondary", use_container_width=True):
                 st.session_state.selected_channel = channel['code']
                 st.rerun()
 
             st.markdown(
-                f'<div style="text-align:center;margin-top:-8px;"><span class="status-badge status-{status_class}">{status}</span></div>',
+                f'<div class="intel-channel-status"><span class="status-badge status-{status_class}">{status}</span></div>',
                 unsafe_allow_html=True)
 
 st.markdown("<br>", unsafe_allow_html=True)
@@ -940,7 +1014,7 @@ st.markdown("<br>", unsafe_allow_html=True)
 # 馃搫 鍐呭鍒楄〃
 # ==========================================
 st.markdown(
-    '<div class="section-header"><div class="section-icon"></div><h3 class="section-title">📋 最新内容</h3></div>',
+    '<div class="section-header"><div class="section-icon"></div><h3 class="section-title">最新内容</h3></div>',
     unsafe_allow_html=True)
 
 # 鑾峰彇鍐呭

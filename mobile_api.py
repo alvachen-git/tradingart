@@ -14,6 +14,8 @@ mobile_api.py — 爱波塔手机端专用 FastAPI 后端
   POST   /api/auth/register/send-phone-code    注册短信验证码
   POST   /api/auth/register/verify-phone-code  校验注册短信验证码
   POST   /api/auth/register                    账号注册（手机号验证）
+  POST   /api/auth/password-reset/send-phone-code  忘记密码短信验证码
+  POST   /api/auth/password-reset                  手机号重置密码
   POST   /api/auth/logout               登出当前设备
   GET    /api/auth/verify               验证 Token
 
@@ -1205,6 +1207,17 @@ class RegisterRequest(BaseModel):
     sms_code: str
 
 
+class PasswordResetSendPhoneCodeRequest(BaseModel):
+    phone: str
+
+
+class PasswordResetRequest(BaseModel):
+    phone: str
+    sms_code: str
+    new_password: str
+    new_password_confirm: str
+
+
 class ChatSubmitRequest(BaseModel):
     prompt: str
     history: List[dict] = []    # [{role: "user"/"assistant", content: "..."}]
@@ -2181,6 +2194,41 @@ def register_account(body: RegisterRequest):
     }
 
 
+@app.post("/api/auth/password-reset/send-phone-code", tags=["认证"])
+def password_reset_send_phone_code(body: PasswordResetSendPhoneCodeRequest, request: Request):
+    """忘记密码：发送手机号短信验证码，复用登录验证码模板。"""
+    client_ip = ""
+    try:
+        client_ip = (request.client.host if request and request.client else "") or ""
+    except Exception:
+        client_ip = ""
+    try:
+        success, msg = auth.send_reset_password_phone_code(body.phone, client_ip=client_ip)
+        if not success:
+            raise HTTPException(status_code=400, detail=msg)
+        return {"message": msg}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"验证码发送失败: {e}")
+
+
+@app.post("/api/auth/password-reset", tags=["认证"])
+def password_reset(body: PasswordResetRequest):
+    """忘记密码：通过手机号验证码重置密码。"""
+    if body.new_password != body.new_password_confirm:
+        raise HTTPException(status_code=400, detail="两次密码不一致")
+
+    success, msg, username = auth.reset_password_with_phone(
+        body.phone,
+        body.sms_code,
+        body.new_password,
+    )
+    if not success:
+        raise HTTPException(status_code=400, detail=msg)
+    return {"message": msg, "username": username}
+
+
 @app.post("/api/auth/login", tags=["认证"])
 def login(body: LoginRequest):
     """用户名或邮箱 + 密码登录，返回 token 和 username。"""
@@ -2868,6 +2916,7 @@ _FORCE_PAID_CHANNEL_CODES = {
     "broker_position_report",
     "fund_flow_report",
     "macro_risk_radar",
+    "safe_stock_report",
 }
 _EFFECTIVE_FREE_CHANNEL_CODES = _FREE_CHANNEL_CODES - _FORCE_PAID_CHANNEL_CODES
 _INTEL_SELF_SUBSCRIBE_API_ENABLED = (
@@ -3290,12 +3339,13 @@ def pay_products(username: str = Depends(get_current_user)):
                 })
 
         channel_order = {
-            "daily_report": 0,
-            "expiry_option_radar": 1,
-            "broker_position_report": 2,
-            "fund_flow_report": 3,
-            "macro_risk_radar": 4,
-            "trade_signal": 5,
+            "safe_stock_report": 0,
+            "daily_report": 1,
+            "expiry_option_radar": 2,
+            "broker_position_report": 3,
+            "fund_flow_report": 4,
+            "macro_risk_radar": 5,
+            "trade_signal": 6,
         }
 
         def _sort_key(item: dict):

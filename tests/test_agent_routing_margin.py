@@ -183,3 +183,21 @@ class UnspecifiedOptionStrategyRoutingTest(unittest.TestCase):
         )
         self.assertEqual(plan, ["chatter"])
         self.assertEqual(symbol, "")
+
+
+def test_market_data_query_forces_monitor_only():
+    plan = ["researcher", "analyst", "strategist"]
+    out = agent_core._enforce_option_data_monitor_routing("查看甲醇2609的iv波动率", plan)
+    assert out == ["monitor"]
+
+
+def test_market_price_query_forces_monitor_only():
+    plan = ["chatter", "generalist"]
+    out = agent_core._enforce_option_data_monitor_routing("甲醇2609价格多少", plan)
+    assert out == ["monitor"]
+
+
+def test_market_data_query_with_strategy_keeps_original_plan():
+    plan = ["researcher", "macro_analyst", "analyst", "strategist"]
+    out = agent_core._enforce_option_data_monitor_routing("甲醇2609波动率高吗，适合卖方吗", plan)
+    assert out == plan

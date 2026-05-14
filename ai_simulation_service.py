@@ -57,6 +57,27 @@ V2_PULLBACK_NEAR_PCT = 0.02
 V2_CHASE_LIMIT_PCT = 0.03
 V2_MIN_TRADE_WEIGHT = 0.02
 V2_WATCHLIST_LIMIT = 60
+V2_SECTOR_RECENT_DAYS = 5
+V2_SECTOR_PRIOR_DAYS = 20
+V2_SECTOR_MAX_RECENT_PCT = 10.0
+V2_SECTOR_MAX_LATEST_PCT = 5.0
+V2_SECTOR_BUY_RANK_LIMIT = 3
+V2_SECTOR_WATCH_RANK_LIMIT = 5
+V2_BOTTOM_BUY_SCORE = 75.0
+V2_BOTTOM_WATCH_SCORE = 55.0
+V2_MAX_BUY_RET20 = 0.18
+V2_MAX_BUY_RET60 = 0.35
+V2_MIN_HIGH_DRAWDOWN = 0.15
+V2_MAX_POSITION_PCT_120D = 0.65
+V2_MIN_REVERSAL_SIGNAL_SCORE = 25.0
+CSI500_COMPRESSION_WINDOWS: Tuple[int, ...] = (5, 10, 20, 30, 60)
+CSI500_COMPRESSION_ATR_LIMITS: Dict[int, float] = {
+    5: 2.5,
+    10: 4.0,
+    20: 6.0,
+    30: 10.0,
+    60: 10.0,
+}
 
 
 TOOLS_FOR_SIMULATION = [
@@ -368,6 +389,16 @@ def _to_float(v: Any, default: float = 0.0) -> float:
         return default
 
 
+def _safe_div(a: float, b: float, default: float = 0.0) -> float:
+    try:
+        den = float(b)
+        if abs(den) < 1e-12:
+            return float(default)
+        return float(a) / den
+    except Exception:
+        return float(default)
+
+
 def _load_config(portfolio_id: str) -> Dict[str, Any]:
     sql = text("SELECT * FROM ai_sim_config WHERE portfolio_id = :pid LIMIT 1")
     with engine.connect() as conn:
@@ -651,37 +682,252 @@ def _latest_sector_date(trade_date: str) -> Optional[str]:
     return re.sub(r"[^0-9]", "", str(row[0]))[:8]
 
 
-def _get_v2_top_sectors(trade_date: str, limit: int = 3) -> List[Dict[str, Any]]:
+def _rank_marginal_flow_sectors(
+    flow_df: pd.DataFrame,
+    recent_days: int = V2_SECTOR_RECENT_DAYS,
+    prior_days: int = V2_SECTOR_PRIOR_DAYS,
+    limit: int = V2_SECTOR_WATCH_RANK_LIMIT,
+) -> List[Dict[str, Any]]:
+    if flow_df is None or flow_df.empty:
+        return []
+
+    work = flow_df.copy()
+    for col in ["main_net_inflow", "medium_net_inflow", "total_turnover", "pct_change"]:
+        if col not in work.columns:
+            work[col] = 0.0
+        work[col] = pd.to_numeric(work[col], errors="coerce").fillna(0.0)
+
+    work["trade_date"] = work["trade_date"].astype(str).str.replace(r"\D", "", regex=True).str[:8]
+    work["industry"] = work["industry"].astype(str).str.strip()
+    if "sector_type" not in work.columns:
+        work["sector_type"] = "行业"
+    work["sector_type"] = work["sector_type"].astype(str).str.strip()
+    work = work[(work["trade_date"] != "") & (work["industry"] != "")]
+    if work.empty:
+        return []
+
+    dates = sorted(work["trade_date"].dropna().unique().tolist())
+    need_days = int(max(1, recent_days)) + int(max(1, prior_days))
+    dates = dates[-need_days:]
+    recent_count = int(min(max(1, recent_days), len(dates)))
+    recent_dates = set(dates[-recent_count:])
+    prior_dates = set(dates[: max(0, len(dates) - recent_count)])
+    if not recent_dates or not prior_dates:
+        return []
+
+    work = work[work["trade_date"].isin(set(dates))].copy()
+    work["flow"] = work["main_net_inflow"] + work["medium_net_inflow"]
+    work["flow_strength"] = work.apply(
+        lambda r: _safe_div(_to_float(r.get("flow"), 0.0), max(_to_float(r.get("total_turnover"), 0.0), 1e-9)),
+        axis=1,
+    )
+
+    latest_date = max(recent_dates)
+    rows: List[Dict[str, Any]] = []
+    for (industry, sector_type), g in work.groupby(["industry", "sector_type"], dropna=False):
+        recent = g[g["trade_date"].isin(recent_dates)]
+        prior = g[g["trade_date"].isin(prior_dates)]
+        if recent.empty or prior.empty:
+            continue
+        recent_strength = float(recent["flow_strength"].mean())
+        prior_strength = float(prior["flow_strength"].mean())
+        recent_flow = float(recent["flow"].sum())
+        improvement = recent_strength - prior_strength
+        positive_days = int((recent["flow_strength"] > 0).sum())
+        recent_pct = float(recent["pct_change"].sum())
+        latest_row = recent[recent["trade_date"] == latest_date]
+        latest_pct = float(latest_row["pct_change"].mean()) if not latest_row.empty else 0.0
+        rows.append(
+            {
+                "industry": str(industry),
+                "sector_type": str(sector_type),
+                "recent_strength": recent_strength,
+                "prior_strength": prior_strength,
+                "improvement": improvement,
+                "positive_days": positive_days,
+                "recent_flow": recent_flow,
+                "prior_flow": float(prior["flow"].sum()),
+                "recent_pct_change": recent_pct,
+                "latest_pct_change": latest_pct,
+                "trade_date": latest_date,
+            }
+        )
+
+    if not rows:
+        return []
+
+    ranked_df = pd.DataFrame(rows)
+    ranked_df["prior_strength_rank_pct"] = ranked_df["prior_strength"].rank(pct=True, method="average")
+    min_positive_days = max(1, int((len(recent_dates) + 1) // 2))
+    filtered = ranked_df[
+        (ranked_df["recent_strength"] > 0)
+        & (ranked_df["improvement"] > 0)
+        & (ranked_df["positive_days"] >= min_positive_days)
+        & (ranked_df["recent_pct_change"] <= V2_SECTOR_MAX_RECENT_PCT)
+        & (ranked_df["latest_pct_change"] <= V2_SECTOR_MAX_LATEST_PCT)
+    ].copy()
+    if filtered.empty:
+        return []
+
+    filtered["score"] = (
+        filtered["improvement"].rank(pct=True, method="average") * 0.35
+        + filtered["positive_days"].rank(pct=True, method="average") * 0.25
+        + filtered["recent_strength"].rank(pct=True, method="average") * 0.20
+        + (1.0 - (filtered["recent_pct_change"].clip(lower=0.0) / max(V2_SECTOR_MAX_RECENT_PCT, 1e-9))) * 0.10
+        + filtered["recent_flow"].rank(pct=True, method="average") * 0.10
+    )
+    filtered = filtered.sort_values(
+        ["score", "improvement", "recent_flow", "industry"],
+        ascending=[False, False, False, True],
+    ).head(int(max(1, limit)))
+
+    out: List[Dict[str, Any]] = []
+    for rank, (_, row) in enumerate(filtered.iterrows(), start=1):
+        item = row.to_dict()
+        item["rank"] = rank
+        out.append(item)
+    return out
+
+
+def _get_v2_top_sectors(trade_date: str, limit: int = V2_SECTOR_WATCH_RANK_LIMIT) -> List[Dict[str, Any]]:
     sec_date = _latest_sector_date(trade_date)
     if not sec_date:
         return []
+    lookback_rows = int(V2_SECTOR_RECENT_DAYS + V2_SECTOR_PRIOR_DAYS + 8)
+    with engine.connect() as conn:
+        date_df = pd.read_sql(
+            text(
+                """
+                SELECT DISTINCT trade_date
+                FROM sector_moneyflow
+                WHERE trade_date <= :td
+                ORDER BY trade_date DESC
+                LIMIT :lim
+                """
+            ),
+            conn,
+            params={"td": sec_date, "lim": lookback_rows},
+        )
+    if date_df.empty:
+        return []
+    dates = sorted(date_df["trade_date"].astype(str).tolist())
+    placeholders = ",".join([f":d{i}" for i in range(len(dates))])
+    params: Dict[str, Any] = {f"d{i}": d for i, d in enumerate(dates)}
     sql = text(
-        """
-        SELECT industry, pct_change, main_net_inflow
+        f"""
+        SELECT trade_date, industry, sector_type, pct_change, main_net_inflow, medium_net_inflow, total_turnover
         FROM sector_moneyflow
-        WHERE trade_date = :td
-          AND sector_type IN ('行业', '琛屼笟')
-        ORDER BY pct_change DESC, main_net_inflow DESC, industry ASC
-        LIMIT :lim
+        WHERE trade_date IN ({placeholders})
+          AND sector_type IN ('行业', '概念')
         """
     )
     with engine.connect() as conn:
-        df = pd.read_sql(sql, conn, params={"td": sec_date, "lim": int(max(1, limit))})
-    out: List[Dict[str, Any]] = []
+        df = pd.read_sql(sql, conn, params=params)
+    return _rank_marginal_flow_sectors(df, limit=int(max(1, limit)))
+
+
+def _normalize_sector_key(name: Any) -> str:
+    value = str(name or "").strip()
+    if not value:
+        return ""
+    value = re.sub(r"\s+", "", value)
+    value = re.sub(
+        r"(?:[ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩ]+|II|III|IV|VI|VII|VIII|IX|I|V|X)$",
+        "",
+        value,
+        flags=re.IGNORECASE,
+    )
+    return value
+
+
+def _sector_keyword_candidates(name: Any) -> List[str]:
+    key = _normalize_sector_key(name)
+    if not key:
+        return []
+    cleaned = re.sub(r"(?:概念|指数|板块|产业链|主题)$", "", key)
+    tokens = [key]
+    if cleaned and cleaned != key:
+        tokens.append(cleaned)
+    if len(cleaned) >= 4:
+        tokens.extend([cleaned[:2], cleaned[-2:]])
+    return list(dict.fromkeys([x for x in tokens if len(x) >= 2]))
+
+
+def _build_v2_sector_matchers(top_sectors: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    matchers: List[Dict[str, Any]] = []
+    for idx, item in enumerate(top_sectors):
+        key = _normalize_sector_key(item.get("industry"))
+        if not key:
+            continue
+        matchers.append(
+            {
+                "key": key,
+                "rank": int(item.get("rank") or idx + 1),
+                "sector_type": str(item.get("sector_type") or ""),
+                "keywords": _sector_keyword_candidates(item.get("industry")),
+            }
+        )
+    return matchers
+
+
+def _match_v2_sector_rank(industry: Any, sector_matchers: List[Dict[str, Any]], text_values: Optional[List[Any]] = None) -> int:
+    key = _normalize_sector_key(industry)
+    if not key:
+        key = ""
+    for item in sector_matchers:
+        sec_key = str(item.get("key") or "")
+        rank = int(item.get("rank") or 999)
+        if not sec_key:
+            continue
+        if len(key) >= 2 and len(sec_key) >= 2 and (key in sec_key or sec_key in key):
+            return int(rank)
+
+    haystack = _normalize_sector_key(" ".join(str(x or "") for x in (text_values or [])))
+    if haystack:
+        for item in sector_matchers:
+            rank = int(item.get("rank") or 999)
+            for kw in item.get("keywords") or []:
+                if len(str(kw)) >= 2 and str(kw) in haystack:
+                    return rank
+    return 999
+
+
+def _fetch_profile_match_text(symbols: List[str]) -> Dict[str, str]:
+    cleaned = sorted({_normalize_symbol(s) for s in symbols if _normalize_symbol(s)})
+    if not cleaned:
+        return {}
+    placeholders = ",".join([f":s{i}" for i in range(len(cleaned))])
+    params: Dict[str, Any] = {f"s{i}": s for i, s in enumerate(cleaned)}
+    sql = text(
+        f"""
+        SELECT ts_code, company_name, main_business, business_scope, domain_tags,
+               domain_insight_text, tech_highlights, customer_profile
+        FROM stock_company_profile_cache
+        WHERE ts_code IN ({placeholders})
+        """
+    )
+    try:
+        with engine.connect() as conn:
+            df = pd.read_sql(sql, conn, params=params)
+    except Exception:
+        return {}
+    out: Dict[str, str] = {}
     if df.empty:
         return out
     for _, row in df.iterrows():
-        name = str(row.get("industry") or "").strip()
-        if not name:
+        symbol = _normalize_symbol(row.get("ts_code", ""))
+        if not symbol:
             continue
-        out.append(
-            {
-                "industry": name,
-                "pct_change": _to_float(row.get("pct_change"), 0.0),
-                "main_net_inflow": _to_float(row.get("main_net_inflow"), 0.0),
-                "trade_date": sec_date,
-            }
-        )
+        parts = [
+            row.get("company_name"),
+            row.get("main_business"),
+            row.get("business_scope"),
+            row.get("domain_tags"),
+            row.get("domain_insight_text"),
+            row.get("tech_highlights"),
+            row.get("customer_profile"),
+        ]
+        out[symbol] = " ".join(str(x or "") for x in parts)
     return out
 
 
@@ -741,18 +987,33 @@ def _is_v2_breakout_candidate(pattern: str, ma_trend: str, score: float) -> bool
     return any(tok in p for tok in positive_tokens)
 
 
+def _pct_change_between(current: float, base: float) -> float:
+    return (current / base - 1.0) if current > 0 and base > 0 else 0.0
+
+
 def _compute_v2_symbol_features(hist_df: pd.DataFrame) -> Dict[str, Any]:
     out = {
         "ma10": 0.0,
         "ma20": 0.0,
+        "ma60": 0.0,
         "breakout_date": "",
         "breakout_price": 0.0,
         "breakout_candle_low": 0.0,
         "has_platform": 0,
+        "platform_high": 0.0,
         "platform_low": 0.0,
         "stop_price": 0.0,
         "pullback_ready": 0,
         "chase_ok": 1,
+        "ret20": 0.0,
+        "ret60": 0.0,
+        "drawdown_120d_high": 0.0,
+        "position_pct_120d": 0.5,
+        "ma10_slope": 0.0,
+        "right_confirm": 0,
+        "lows_stabilized": 0,
+        "bottom_box_breakout": 0,
+        "big_up_count_3": 0,
     }
     if hist_df.empty:
         return out
@@ -760,6 +1021,8 @@ def _compute_v2_symbol_features(hist_df: pd.DataFrame) -> Dict[str, Any]:
     d = hist_df.sort_values("trade_date").reset_index(drop=True)
     for c in ["open_price", "high_price", "low_price", "close_price"]:
         d[c] = pd.to_numeric(d[c], errors="coerce")
+    if "amount" in d.columns:
+        d["amount"] = pd.to_numeric(d["amount"], errors="coerce").fillna(0.0)
     d = d.dropna(subset=["close_price", "high_price", "low_price"])
     if d.empty:
         return out
@@ -768,8 +1031,37 @@ def _compute_v2_symbol_features(hist_df: pd.DataFrame) -> Dict[str, Any]:
     close_now = _to_float(last.get("close_price"), 0.0)
     ma10 = _to_float(d["close_price"].tail(10).mean(), 0.0)
     ma20 = _to_float(d["close_price"].tail(20).mean(), 0.0)
+    ma60 = _to_float(d["close_price"].tail(60).mean(), 0.0)
     out["ma10"] = ma10
     out["ma20"] = ma20
+    out["ma60"] = ma60
+
+    closes = d["close_price"]
+    lows = d["low_price"]
+    highs = d["high_price"]
+    out["ret20"] = _pct_change_between(close_now, _to_float(closes.iloc[-21], 0.0)) if len(d) >= 21 else 0.0
+    out["ret60"] = _pct_change_between(close_now, _to_float(closes.iloc[-61], 0.0)) if len(d) >= 61 else 0.0
+    high_120 = _to_float(highs.tail(120).max(), close_now)
+    low_120 = _to_float(lows.tail(120).min(), close_now)
+    out["drawdown_120d_high"] = max(0.0, 1.0 - close_now / high_120) if high_120 > 0 else 0.0
+    out["position_pct_120d"] = _safe_div(close_now - low_120, high_120 - low_120, 0.5)
+    if len(d) >= 15:
+        prev_ma10 = _to_float(closes.iloc[-15:-5].mean(), 0.0)
+        out["ma10_slope"] = _pct_change_between(ma10, prev_ma10)
+
+    prev_close = _to_float(closes.iloc[-2], 0.0) if len(d) >= 2 else 0.0
+    prev_ma10 = _to_float(closes.iloc[-11:-1].mean(), 0.0) if len(d) >= 11 else ma10
+    prev_ma20 = _to_float(closes.iloc[-21:-1].mean(), 0.0) if len(d) >= 21 else ma20
+    above_ma = (ma10 > 0 and close_now >= ma10) or (ma20 > 0 and close_now >= ma20)
+    crossed_ma = (
+        (ma10 > 0 and prev_ma10 > 0 and prev_close < prev_ma10 and close_now >= ma10)
+        or (ma20 > 0 and prev_ma20 > 0 and prev_close < prev_ma20 and close_now >= ma20)
+    )
+    out["right_confirm"] = int(crossed_ma or above_ma or out["ma10_slope"] > 0)
+    if len(d) >= 13:
+        recent_low = _to_float(lows.tail(3).min(), 0.0)
+        previous_low = _to_float(lows.iloc[-13:-3].min(), 0.0)
+        out["lows_stabilized"] = int(recent_low >= previous_low)
 
     breakout_date = re.sub(r"[^0-9]", "", str(last.get("trade_date") or ""))[:8]
     breakout_price = close_now
@@ -792,14 +1084,25 @@ def _compute_v2_symbol_features(hist_df: pd.DataFrame) -> Dict[str, Any]:
 
     box = d.tail(16).iloc[:-1].copy() if len(d) >= 12 else pd.DataFrame()
     has_platform = 0
+    platform_high = 0.0
     platform_low = 0.0
     if not box.empty:
         box_high = _to_float(box["high_price"].max(), 0.0)
+        platform_high = box_high
         platform_low = _to_float(box["low_price"].min(), 0.0)
         width = (box_high - platform_low) / max(1e-9, close_now)
         if width <= 0.18:
             has_platform = 1
+        amount_now = _to_float(last.get("amount"), 0.0)
+        amount20 = _to_float(d["amount"].tail(20).mean(), 0.0) if "amount" in d.columns else 0.0
+        out["bottom_box_breakout"] = int(
+            has_platform
+            and close_now > box_high
+            and amount_now > max(amount20 * 1.1, 0.0)
+            and _to_float(out.get("position_pct_120d"), 1.0) <= V2_MAX_POSITION_PCT_120D
+        )
     out["has_platform"] = has_platform
+    out["platform_high"] = platform_high
     out["platform_low"] = platform_low
     out["breakout_date"] = breakout_date
     out["breakout_price"] = breakout_price
@@ -810,7 +1113,103 @@ def _compute_v2_symbol_features(hist_df: pd.DataFrame) -> Dict[str, Any]:
     near_ma20 = ma20 > 0 and abs(close_now - ma20) / ma20 <= V2_PULLBACK_NEAR_PCT
     out["pullback_ready"] = int(near_ma10 or near_ma20)
     out["chase_ok"] = int(close_now <= max(1e-9, breakout_price) * (1.0 + V2_CHASE_LIMIT_PCT))
+    if len(d) >= 4:
+        ret = closes.pct_change().tail(3)
+        out["big_up_count_3"] = int((ret >= 0.05).sum())
     return out
+
+
+def _score_v2_bottom_turn(pattern: str, ma_trend: str, feat: Dict[str, Any]) -> Dict[str, Any]:
+    p = str(pattern or "")
+    t = str(ma_trend or "")
+    ret20 = _to_float(feat.get("ret20"), 0.0)
+    ret60 = _to_float(feat.get("ret60"), 0.0)
+    drawdown = _to_float(feat.get("drawdown_120d_high"), 0.0)
+    pos120 = _to_float(feat.get("position_pct_120d"), 0.5)
+    ma10 = _to_float(feat.get("ma10"), 0.0)
+    ma60 = _to_float(feat.get("ma60"), 0.0)
+    ma10_slope = _to_float(feat.get("ma10_slope"), 0.0)
+    right_confirm = int(_to_float(feat.get("right_confirm"), 0.0))
+    lows_stabilized = int(_to_float(feat.get("lows_stabilized"), 0.0))
+    bottom_box_breakout = int(_to_float(feat.get("bottom_box_breakout"), 0.0))
+
+    bottom_stage_score = 0.0
+    if drawdown >= 0.30:
+        bottom_stage_score += 25.0
+    elif drawdown >= 0.20:
+        bottom_stage_score += 20.0
+    elif drawdown >= V2_MIN_HIGH_DRAWDOWN:
+        bottom_stage_score += 12.0
+    if pos120 <= 0.35:
+        bottom_stage_score += 25.0
+    elif pos120 <= 0.50:
+        bottom_stage_score += 18.0
+    elif pos120 <= V2_MAX_POSITION_PCT_120D:
+        bottom_stage_score += 10.0
+    if ma10 > 0 and ma60 > 0 and ma10 < ma60:
+        bottom_stage_score += 8.0
+    if ret20 <= 0.05:
+        bottom_stage_score += 6.0
+    if ret60 <= 0.10:
+        bottom_stage_score += 6.0
+    bottom_stage_score = min(60.0, bottom_stage_score)
+
+    reversal_signal_score = 0.0
+    signal_parts: List[str] = []
+    if "破底翻" in p:
+        reversal_signal_score += 35.0
+        signal_parts.append("破底翻")
+    if "晨星" in p:
+        reversal_signal_score += 35.0
+        signal_parts.append("晨星")
+    if "多头吞噬" in p or "看涨吞噬" in p:
+        reversal_signal_score += 35.0
+        signal_parts.append("多头吞噬")
+    if "锤子" in p and right_confirm:
+        reversal_signal_score += 25.0
+        signal_parts.append("锤子线确认")
+    if bottom_box_breakout:
+        reversal_signal_score += 30.0
+        signal_parts.append("底部箱体放量突破")
+    if "反转" in p:
+        reversal_signal_score += 18.0
+        signal_parts.append("反转")
+    reversal_signal_score = min(50.0, reversal_signal_score)
+
+    confirm_score = 0.0
+    if right_confirm:
+        confirm_score += 12.0
+    if ma10_slope > 0:
+        confirm_score += 8.0
+    if lows_stabilized:
+        confirm_score += 8.0
+
+    anti_chase_reasons: List[str] = []
+    if ret20 > V2_MAX_BUY_RET20:
+        anti_chase_reasons.append(f"20日涨幅{ret20:.1%}")
+    if ret60 > V2_MAX_BUY_RET60:
+        anti_chase_reasons.append(f"60日涨幅{ret60:.1%}")
+    if drawdown < V2_MIN_HIGH_DRAWDOWN and pos120 > V2_MAX_POSITION_PCT_120D:
+        anti_chase_reasons.append("接近120日高位")
+    if "创新高" in p:
+        anti_chase_reasons.append("创新高信号")
+    if "平台突破" in p and pos120 > V2_MAX_POSITION_PCT_120D:
+        anti_chase_reasons.append("高位平台突破")
+    if int(_to_float(feat.get("big_up_count_3"), 0.0)) >= 2:
+        anti_chase_reasons.append("连续大阳追涨")
+    if "空头" in t and not signal_parts:
+        anti_chase_reasons.append("空头趋势未确认转折")
+
+    bottom_turn_score = min(100.0, bottom_stage_score + reversal_signal_score + confirm_score)
+    return {
+        "bottom_stage_score": bottom_stage_score,
+        "reversal_signal_score": reversal_signal_score,
+        "anti_chase_flag": int(bool(anti_chase_reasons)),
+        "bottom_turn_score": bottom_turn_score,
+        "anti_chase_reasons": "；".join(anti_chase_reasons),
+        "reversal_signal_desc": "、".join(dict.fromkeys(signal_parts)) or "底部观察",
+        "right_confirm": right_confirm,
+    }
 
 
 def _ensure_v2_candidate_columns(df: pd.DataFrame, trade_date: str) -> pd.DataFrame:
@@ -820,6 +1219,7 @@ def _ensure_v2_candidate_columns(df: pd.DataFrame, trade_date: str) -> pd.DataFr
                 "symbol",
                 "name",
                 "industry",
+                "sector_rank",
                 "score",
                 "close",
                 "pct_chg",
@@ -827,17 +1227,32 @@ def _ensure_v2_candidate_columns(df: pd.DataFrame, trade_date: str) -> pd.DataFr
                 "vol",
                 "pattern",
                 "ma_trend",
+                "sector_rank",
                 "signal_active",
                 "breakout_date",
                 "breakout_price",
                 "stop_price",
                 "ma10",
                 "ma20",
+                "ma60",
                 "pullback_ready",
                 "chase_ok",
                 "has_platform",
+                "platform_high",
                 "platform_low",
                 "breakout_candle_low",
+                "ret20",
+                "ret60",
+                "drawdown_120d_high",
+                "position_pct_120d",
+                "ma10_slope",
+                "bottom_stage_score",
+                "reversal_signal_score",
+                "anti_chase_flag",
+                "bottom_turn_score",
+                "anti_chase_reasons",
+                "reversal_signal_desc",
+                "right_confirm",
                 "from_holdings_fallback",
             ]
         )
@@ -846,22 +1261,67 @@ def _ensure_v2_candidate_columns(df: pd.DataFrame, trade_date: str) -> pd.DataFr
     defaults: Dict[str, Any] = {
         "pattern": "",
         "ma_trend": "",
+        "sector_rank": 999,
         "signal_active": 0,
         "breakout_date": trade_date,
         "breakout_price": out.get("close", 0),
         "stop_price": 0.0,
         "ma10": 0.0,
         "ma20": 0.0,
+        "ma60": 0.0,
         "pullback_ready": 0,
         "chase_ok": 1,
         "has_platform": 0,
+        "platform_high": 0.0,
         "platform_low": 0.0,
         "breakout_candle_low": 0.0,
+        "ret20": 0.0,
+        "ret60": 0.0,
+        "drawdown_120d_high": 0.0,
+        "position_pct_120d": 0.5,
+        "ma10_slope": 0.0,
+        "bottom_stage_score": 0.0,
+        "reversal_signal_score": 0.0,
+        "anti_chase_flag": 0,
+        "bottom_turn_score": 0.0,
+        "anti_chase_reasons": "",
+        "reversal_signal_desc": "",
+        "right_confirm": 0,
         "from_holdings_fallback": 0,
     }
     for col, dv in defaults.items():
         if col not in out.columns:
             out[col] = dv
+    return out
+
+
+def _apply_v2_sector_rank(df: pd.DataFrame, sector_matchers: Any) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df
+    out = df.copy()
+    if isinstance(sector_matchers, dict):
+        sector_matchers = [
+            {
+                "key": _normalize_sector_key(name),
+                "rank": int(rank),
+                "keywords": _sector_keyword_candidates(name),
+            }
+            for name, rank in sector_matchers.items()
+        ]
+    sector_matchers = list(sector_matchers or [])
+
+    def _rank_for(row: pd.Series) -> int:
+        current = _to_float(row.get("sector_rank"), 0.0)
+        if current > 0:
+            return int(current)
+        text_values = [
+            row.get("name"),
+            row.get("pattern"),
+            row.get("ma_trend"),
+        ]
+        return _match_v2_sector_rank(row.get("industry"), sector_matchers, text_values)
+
+    out["sector_rank"] = out.apply(_rank_for, axis=1)
     return out
 
 
@@ -871,31 +1331,46 @@ def _build_candidate_pool_v2(
     limit: int = 120,
 ) -> Tuple[pd.DataFrame, List[str]]:
     screener_date = _latest_screener_date(trade_date)
-    top_sectors = _get_v2_top_sectors(trade_date, limit=3)
+    top_sectors = _get_v2_top_sectors(trade_date, limit=V2_SECTOR_WATCH_RANK_LIMIT)
     sector_names = [str(x.get("industry") or "").strip() for x in top_sectors if str(x.get("industry") or "").strip()]
+    sector_matchers = _build_v2_sector_matchers(top_sectors)
     sector_notes = [
-        f"{x['industry']}({x['pct_change']:+.2f}%)" for x in top_sectors if str(x.get("industry") or "").strip()
+        f"{int(x.get('rank') or 0)}.{x['industry']}({x.get('sector_type', '')}, score={_to_float(x.get('score'), 0.0):.2f})"
+        for x in top_sectors
+        if str(x.get("industry") or "").strip()
     ]
 
     base_df = pd.DataFrame()
     if screener_date:
         if sector_names:
-            placeholders = ",".join([f":sec{i}" for i in range(len(sector_names))])
-            params: Dict[str, Any] = {"td": screener_date}
-            for i, sec in enumerate(sector_names):
-                params[f"sec{i}"] = sec
             sql = text(
-                f"""
+                """
                 SELECT ts_code, name, industry, score, close, pct_chg, pattern, ma_trend
                 FROM daily_stock_screener
                 WHERE trade_date = :td
-                  AND industry IN ({placeholders})
                 ORDER BY score DESC
-                LIMIT 600
+                LIMIT 8000
                 """
             )
             with engine.connect() as conn:
-                base_df = pd.read_sql(sql, conn, params=params)
+                base_df = pd.read_sql(sql, conn, params={"td": screener_date})
+            if not base_df.empty:
+                base_df["symbol"] = base_df["ts_code"].apply(_normalize_symbol)
+                profile_text_map = _fetch_profile_match_text(base_df["symbol"].tolist())
+                base_df["sector_rank"] = base_df.apply(
+                    lambda r: _match_v2_sector_rank(
+                        r.get("industry"),
+                        sector_matchers,
+                        [
+                            r.get("name"),
+                            r.get("pattern"),
+                            r.get("ma_trend"),
+                            profile_text_map.get(_normalize_symbol(r.get("symbol", "")), ""),
+                        ],
+                    ),
+                    axis=1,
+                )
+                base_df = base_df[base_df["sector_rank"] <= V2_SECTOR_WATCH_RANK_LIMIT].copy()
         else:
             sql = text(
                 """
@@ -911,14 +1386,16 @@ def _build_candidate_pool_v2(
 
     if base_df.empty:
         fallback = _build_candidate_pool(trade_date, current_positions, limit=limit)
+        fallback = _apply_v2_sector_rank(fallback, sector_matchers)
         return _ensure_v2_candidate_columns(fallback, trade_date), sector_notes
 
-    base_df["symbol"] = base_df["ts_code"].apply(_normalize_symbol)
+    if "symbol" not in base_df.columns:
+        base_df["symbol"] = base_df["ts_code"].apply(_normalize_symbol)
     base_df = base_df[base_df["symbol"].astype(bool)]
 
     all_symbols = sorted(set(base_df["symbol"].tolist()) | set(current_positions.keys()))
     price_map = _fetch_price_snapshot(all_symbols, trade_date)
-    hist_df = _fetch_recent_price_history(all_symbols, trade_date, lookback=100)
+    hist_df = _fetch_recent_price_history(all_symbols, trade_date, lookback=140)
     feature_map: Dict[str, Dict[str, Any]] = {}
     if not hist_df.empty:
         hist_df["symbol"] = hist_df["ts_code"].apply(_normalize_symbol)
@@ -943,24 +1420,27 @@ def _build_candidate_pool_v2(
         amount = _to_float(p.get("amount"), 0.0)
         if close <= 0:
             continue
-        if amount < 1e8 and symbol not in current_positions:
+        if amount < 1e5 and symbol not in current_positions:
             continue
         if close < 1.0:
             continue
 
         score = _to_float(r.get("score"), 0.0)
+        industry = str(r.get("industry") or "")
         pattern = str(r.get("pattern") or "")
         ma_trend = str(r.get("ma_trend") or "")
         signal_active = int(_is_v2_breakout_candidate(pattern, ma_trend, score))
-        if signal_active != 1 and symbol not in current_positions:
+        sector_rank = int(_to_float(r.get("sector_rank"), _match_v2_sector_rank(r.get("industry"), sector_matchers)))
+        if signal_active != 1 and sector_rank > V2_SECTOR_WATCH_RANK_LIMIT and symbol not in current_positions:
             continue
 
         feat = feature_map.get(symbol, {})
+        bottom_turn = _score_v2_bottom_turn(pattern, ma_trend, feat)
         rows.append(
             {
                 "symbol": symbol,
                 "name": name,
-                "industry": str(r.get("industry") or ""),
+                "industry": industry,
                 "score": score,
                 "close": close,
                 "pct_chg": _to_float(r.get("pct_chg"), 0.0),
@@ -968,17 +1448,32 @@ def _build_candidate_pool_v2(
                 "vol": _to_float(p.get("vol"), 0.0),
                 "pattern": pattern,
                 "ma_trend": ma_trend,
+                "sector_rank": sector_rank,
                 "signal_active": signal_active,
                 "breakout_date": str(feat.get("breakout_date") or screener_date or trade_date),
                 "breakout_price": _to_float(feat.get("breakout_price"), close),
                 "stop_price": _to_float(feat.get("stop_price"), 0.0),
                 "ma10": _to_float(feat.get("ma10"), 0.0),
                 "ma20": _to_float(feat.get("ma20"), 0.0),
+                "ma60": _to_float(feat.get("ma60"), 0.0),
                 "pullback_ready": int(_to_float(feat.get("pullback_ready"), 0.0)),
                 "chase_ok": int(_to_float(feat.get("chase_ok"), 1.0)),
                 "has_platform": int(_to_float(feat.get("has_platform"), 0.0)),
+                "platform_high": _to_float(feat.get("platform_high"), 0.0),
                 "platform_low": _to_float(feat.get("platform_low"), 0.0),
                 "breakout_candle_low": _to_float(feat.get("breakout_candle_low"), 0.0),
+                "ret20": _to_float(feat.get("ret20"), 0.0),
+                "ret60": _to_float(feat.get("ret60"), 0.0),
+                "drawdown_120d_high": _to_float(feat.get("drawdown_120d_high"), 0.0),
+                "position_pct_120d": _to_float(feat.get("position_pct_120d"), 0.5),
+                "ma10_slope": _to_float(feat.get("ma10_slope"), 0.0),
+                "bottom_stage_score": _to_float(bottom_turn.get("bottom_stage_score"), 0.0),
+                "reversal_signal_score": _to_float(bottom_turn.get("reversal_signal_score"), 0.0),
+                "anti_chase_flag": int(_to_float(bottom_turn.get("anti_chase_flag"), 0.0)),
+                "bottom_turn_score": _to_float(bottom_turn.get("bottom_turn_score"), 0.0),
+                "anti_chase_reasons": str(bottom_turn.get("anti_chase_reasons") or ""),
+                "reversal_signal_desc": str(bottom_turn.get("reversal_signal_desc") or ""),
+                "right_confirm": int(_to_float(bottom_turn.get("right_confirm"), 0.0)),
                 "from_holdings_fallback": 0,
             }
         )
@@ -990,11 +1485,13 @@ def _build_candidate_pool_v2(
         if not p:
             continue
         feat = feature_map.get(symbol, {})
+        bottom_turn = _score_v2_bottom_turn("", "", feat)
         rows.append(
             {
                 "symbol": symbol,
                 "name": pos.get("name") or p.get("name") or "",
                 "industry": "",
+                "sector_rank": 999,
                 "score": -1.0,
                 "close": _to_float(p.get("close")),
                 "pct_chg": 0.0,
@@ -1002,37 +1499,56 @@ def _build_candidate_pool_v2(
                 "vol": _to_float(p.get("vol"), 0.0),
                 "pattern": "",
                 "ma_trend": "",
+                "sector_rank": 999,
                 "signal_active": 0,
                 "breakout_date": str(feat.get("breakout_date") or trade_date),
                 "breakout_price": _to_float(feat.get("breakout_price"), _to_float(p.get("close"), 0.0)),
                 "stop_price": _to_float(feat.get("stop_price"), 0.0),
                 "ma10": _to_float(feat.get("ma10"), 0.0),
                 "ma20": _to_float(feat.get("ma20"), 0.0),
+                "ma60": _to_float(feat.get("ma60"), 0.0),
                 "pullback_ready": int(_to_float(feat.get("pullback_ready"), 0.0)),
                 "chase_ok": int(_to_float(feat.get("chase_ok"), 1.0)),
                 "has_platform": int(_to_float(feat.get("has_platform"), 0.0)),
+                "platform_high": _to_float(feat.get("platform_high"), 0.0),
                 "platform_low": _to_float(feat.get("platform_low"), 0.0),
                 "breakout_candle_low": _to_float(feat.get("breakout_candle_low"), 0.0),
+                "ret20": _to_float(feat.get("ret20"), 0.0),
+                "ret60": _to_float(feat.get("ret60"), 0.0),
+                "drawdown_120d_high": _to_float(feat.get("drawdown_120d_high"), 0.0),
+                "position_pct_120d": _to_float(feat.get("position_pct_120d"), 0.5),
+                "ma10_slope": _to_float(feat.get("ma10_slope"), 0.0),
+                "bottom_stage_score": _to_float(bottom_turn.get("bottom_stage_score"), 0.0),
+                "reversal_signal_score": _to_float(bottom_turn.get("reversal_signal_score"), 0.0),
+                "anti_chase_flag": int(_to_float(bottom_turn.get("anti_chase_flag"), 0.0)),
+                "bottom_turn_score": _to_float(bottom_turn.get("bottom_turn_score"), 0.0),
+                "anti_chase_reasons": str(bottom_turn.get("anti_chase_reasons") or ""),
+                "reversal_signal_desc": str(bottom_turn.get("reversal_signal_desc") or ""),
+                "right_confirm": int(_to_float(bottom_turn.get("right_confirm"), 0.0)),
                 "from_holdings_fallback": 1,
             }
         )
 
     if not rows:
         fallback = _build_candidate_pool(trade_date, current_positions, limit=limit)
+        fallback = _apply_v2_sector_rank(fallback, sector_matchers)
         return _ensure_v2_candidate_columns(fallback, trade_date), sector_notes
 
     df = pd.DataFrame(rows).drop_duplicates(subset=["symbol"], keep="first")
-    df = df.sort_values(["signal_active", "score", "amount"], ascending=[False, False, False]).head(limit).reset_index(drop=True)
+    df = df.sort_values(
+        ["sector_rank", "bottom_turn_score", "reversal_signal_score", "amount"],
+        ascending=[True, False, False, False],
+    ).head(limit).reset_index(drop=True)
     return _ensure_v2_candidate_columns(df, trade_date), sector_notes
 
 
 def _v2_regime_limits(csi500_regime: Dict[str, Any]) -> Dict[str, Any]:
     regime = str(csi500_regime.get("regime") or "neutral").lower()
     if regime == "bull":
-        return {"regime": "bull", "single_cap": 0.10, "total_cap": 0.80, "tiers": [0.10, 0.08, 0.05]}
+        return {"regime": "bull", "single_cap": 0.10, "total_cap": 0.80, "tiers": [0.10, 0.08, 0.05], "buy_slots": 3}
     if regime == "bear":
-        return {"regime": "bear", "single_cap": 0.045, "total_cap": 0.20, "tiers": [0.045, 0.04, 0.035]}
-    return {"regime": "neutral", "single_cap": 0.05, "total_cap": 0.50, "tiers": [0.05, 0.045, 0.04]}
+        return {"regime": "bear", "single_cap": 0.045, "total_cap": 0.20, "tiers": [], "buy_slots": 0}
+    return {"regime": "neutral", "single_cap": 0.05, "total_cap": 0.50, "tiers": [0.05, 0.045, 0.04], "buy_slots": 2}
 
 
 def _v2_build_rule_targets(
@@ -1047,6 +1563,7 @@ def _v2_build_rule_targets(
     single_cap = _to_float(limits.get("single_cap"), 0.05)
     total_cap = _to_float(limits.get("total_cap"), 0.5)
     tiers = list(limits.get("tiers") or [single_cap])
+    buy_slots = max(0, int(csi500_regime.get("buy_slots", limits.get("buy_slots", 2)) or 0))
 
     candidate_rows: Dict[str, Dict[str, Any]] = {}
     for _, row in candidates_df.iterrows():
@@ -1083,20 +1600,35 @@ def _v2_build_rule_targets(
         reasons[symbol] = "未触发止损，继续持有。"
 
     buy_df = candidates_df.copy()
-    if not buy_df.empty:
+    if buy_slots > 0 and not buy_df.empty:
+        for col in ["sector_rank", "bottom_turn_score", "reversal_signal_score", "anti_chase_flag", "right_confirm", "amount"]:
+            if col not in buy_df.columns:
+                buy_df[col] = 0
+            buy_df[col] = pd.to_numeric(buy_df[col], errors="coerce").fillna(0)
+        buy_df["sector_rank"] = buy_df["sector_rank"].replace(0, 999)
         buy_df = buy_df[
-            (buy_df["signal_active"] == 1)
-            & (buy_df["pullback_ready"] == 1)
-            & (buy_df["chase_ok"] == 1)
+            (buy_df["bottom_turn_score"] >= V2_BOTTOM_BUY_SCORE)
+            & (buy_df["reversal_signal_score"] >= V2_MIN_REVERSAL_SIGNAL_SCORE)
+            & (buy_df["anti_chase_flag"] == 0)
+            & (buy_df["right_confirm"] == 1)
+            & (buy_df["sector_rank"] <= V2_SECTOR_BUY_RANK_LIMIT)
         ].copy()
         buy_df = buy_df[~buy_df["symbol"].isin(list(current_positions.keys()))]
-        buy_df = buy_df.sort_values(["score", "amount"], ascending=[False, False])
+        buy_df = buy_df.sort_values(
+            ["sector_rank", "bottom_turn_score", "reversal_signal_score", "amount"],
+            ascending=[True, False, False, False],
+        )
+    elif buy_slots <= 0:
+        buy_df = pd.DataFrame()
 
     tier_idx = 0
+    new_buy_count = 0
     for _, row in buy_df.iterrows() if not buy_df.empty else []:
         symbol = _normalize_symbol(row.get("symbol", ""))
         if not symbol:
             continue
+        if new_buy_count >= buy_slots:
+            break
         buy_eligible.add(symbol)
         if len([x for x, w in targets.items() if w > 1e-8]) >= int(max_positions):
             break
@@ -1110,13 +1642,16 @@ def _v2_build_rule_targets(
             continue
         targets[symbol] = w
         used += w
-        reasons[symbol] = "行业前3中的强势底部突破标的，回踩MA10/MA20附近且未追高，执行买入。"
+        new_buy_count += 1
+        reasons[symbol] = "边际资金回流板块前3中的右侧底部转折标的，具备反转K线、右侧确认且未追高，执行买入。"
 
     for symbol in current_positions.keys():
         if symbol not in targets and symbol not in forced_stop_sell:
             reasons[symbol] = "仓位预算收缩或优先级不足，执行降仓腾挪。"
 
-    notes.append(f"2号仓位规则: 单票<= {single_cap:.2%}，总仓<= {total_cap:.2%}。")
+    notes.append(f"2号仓位规则: 单票<= {single_cap:.2%}，总仓<= {total_cap:.2%}，新增买入槽位={buy_slots}。")
+    if buy_slots <= 0:
+        notes.append("中证500总闸禁买：不新增买入，仅处理已有持仓的止损/跟踪。")
     if forced_stop_sell:
         notes.append(f"收盘止损触发 {len(forced_stop_sell)} 只: {'、'.join(sorted(forced_stop_sell)[:5])}")
     return targets, reasons, notes, forced_stop_sell, buy_eligible
@@ -1392,10 +1927,76 @@ def _build_style_map(candidates_df: pd.DataFrame) -> Dict[str, str]:
     return out
 
 
+def _calc_atr14_from_ohlc(df: pd.DataFrame) -> pd.Series:
+    work = df.copy()
+    work["h_l"] = work["high_price"] - work["low_price"]
+    work["h_pc"] = (work["high_price"] - work["close_price"].shift(1)).abs()
+    work["l_pc"] = (work["low_price"] - work["close_price"].shift(1)).abs()
+    work["tr"] = work[["h_l", "h_pc", "l_pc"]].max(axis=1)
+    return work["tr"].rolling(window=14).mean()
+
+
+def _detect_compression_breakdown(df: pd.DataFrame) -> Dict[str, Any]:
+    detail = {
+        "triggered": False,
+        "period": 0,
+        "box_low": 0.0,
+        "box_high": 0.0,
+        "atr_ratio": 0.0,
+        "body_pct": 0.0,
+    }
+    if df is None or df.empty:
+        return detail
+
+    d = df.copy().sort_values("trade_date").reset_index(drop=True)
+    for col in ["open_price", "high_price", "low_price", "close_price"]:
+        if col not in d.columns:
+            return detail
+        d[col] = pd.to_numeric(d[col], errors="coerce")
+    d = d.dropna(subset=["open_price", "high_price", "low_price", "close_price"]).reset_index(drop=True)
+    if len(d) < 16:
+        return detail
+
+    d["atr"] = _calc_atr14_from_ohlc(d)
+    last = d.iloc[-1]
+    close = _to_float(last.get("close_price"), 0.0)
+    open_p = _to_float(last.get("open_price"), close)
+    high = _to_float(last.get("high_price"), close)
+    low = _to_float(last.get("low_price"), close)
+    total_range = (high - low) if high != low else 0.01
+    body_pct = abs(close - open_p) / max(total_range, 1e-9)
+    ref_atr = _to_float(d["atr"].iloc[-2], 0.0) if len(d) > 2 else 0.0
+    if ref_atr <= 0:
+        detail["body_pct"] = body_pct
+        return detail
+
+    for period in CSI500_COMPRESSION_WINDOWS:
+        if len(d) <= period + 1:
+            continue
+        recent_box = d.iloc[-(period + 1):-1]
+        box_high = _to_float(recent_box["high_price"].max(), 0.0)
+        box_low = _to_float(recent_box["low_price"].min(), 0.0)
+        box_height = box_high - box_low
+        atr_ratio = box_height / ref_atr if ref_atr > 0 else 0.0
+        max_atr_multiple = _to_float(CSI500_COMPRESSION_ATR_LIMITS.get(period), 10.0)
+        if atr_ratio <= max_atr_multiple and close < box_low and body_pct > 0.6:
+            return {
+                "triggered": True,
+                "period": int(period),
+                "box_low": box_low,
+                "box_high": box_high,
+                "atr_ratio": atr_ratio,
+                "body_pct": body_pct,
+            }
+
+    detail["body_pct"] = body_pct
+    return detail
+
+
 def _get_csi500_regime(trade_date: str) -> Dict[str, Any]:
     sql = text(
         """
-        SELECT trade_date, close_price
+        SELECT trade_date, open_price, high_price, low_price, close_price
         FROM index_price
         WHERE ts_code = '000905.SH' AND trade_date <= :td
         ORDER BY trade_date DESC
@@ -1410,16 +2011,44 @@ def _get_csi500_regime(trade_date: str) -> Dict[str, Any]:
             "regime": "neutral",
             "score": 0,
             "close": None,
+            "ma5": None,
             "ma20": None,
             "ma60": None,
             "day_ret": 0.0,
             "ret20": 0.0,
+            "gate": "cautious",
+            "buy_slots": 2,
+            "compression_breakdown": False,
+            "compression_breakdown_detail": {},
+            "bear_ma_stack": False,
             "summary": "中证500技术面数据不足，按中性处理。",
         }
 
     d = df.sort_values("trade_date").reset_index(drop=True)
+    for col in ["open_price", "high_price", "low_price", "close_price"]:
+        d[col] = pd.to_numeric(d[col], errors="coerce")
+    d = d.dropna(subset=["close_price"]).reset_index(drop=True)
+    if d.empty:
+        return {
+            "regime": "neutral",
+            "score": 0,
+            "close": None,
+            "ma5": None,
+            "ma20": None,
+            "ma60": None,
+            "day_ret": 0.0,
+            "ret20": 0.0,
+            "gate": "cautious",
+            "buy_slots": 2,
+            "compression_breakdown": False,
+            "compression_breakdown_detail": {},
+            "bear_ma_stack": False,
+            "summary": "中证500技术面数据不足，按中性处理。",
+        }
+
     close = _to_float(d["close_price"].iloc[-1], 0.0)
     prev_close = _to_float(d["close_price"].iloc[-2], 0.0) if len(d) >= 2 else 0.0
+    ma5 = _to_float(d["close_price"].tail(5).mean(), close)
     ma20 = _to_float(d["close_price"].tail(20).mean(), close)
     ma60 = _to_float(d["close_price"].tail(60).mean(), ma20)
     day_ret = (close / prev_close - 1.0) if prev_close > 0 else 0.0
@@ -1428,32 +2057,49 @@ def _get_csi500_regime(trade_date: str) -> Dict[str, Any]:
     else:
         ret20 = 0.0
 
-    score = 0
-    score += 1 if close >= ma20 else -1
-    score += 1 if ma20 >= ma60 else -1
-    if day_ret >= 0.03:
-        score += 2
-    elif day_ret <= -0.03:
-        score -= 2
-
-    if score >= 2:
-        regime = "bull"
-        summary = "中证500偏多，可适度积极配置。"
-    elif score <= -2:
+    breakdown = _detect_compression_breakdown(d)
+    bear_ma_stack = bool(ma5 < ma20 < ma60)
+    if bool(breakdown.get("triggered")) or bear_ma_stack:
         regime = "bear"
-        summary = "中证500偏空，建议防守或明显降仓。"
+        gate = "blocked"
+        buy_slots = 0
+        score = -3
+        reasons = []
+        if bool(breakdown.get("triggered")):
+            reasons.append(
+                f"区间压缩破位({int(breakdown.get('period') or 0)}日箱体，"
+                f"收盘跌破{_to_float(breakdown.get('box_low'), 0.0):.2f})"
+            )
+        if bear_ma_stack:
+            reasons.append("MA5<MA20<MA60空头排列")
+        summary = "中证500禁买：" + "；".join(reasons) + "。"
+    elif ma5 >= ma20 >= ma60 and close >= ma20:
+        regime = "bull"
+        gate = "open"
+        buy_slots = 3
+        score = 3
+        summary = "中证500开放买入：均线结构偏多，未触发区间压缩破位。"
     else:
         regime = "neutral"
-        summary = "中证500中性震荡，维持均衡仓位。"
+        gate = "cautious"
+        buy_slots = 2
+        score = 0
+        summary = "中证500谨慎买入：未触发禁买，但均线结构不够强。"
 
     return {
         "regime": regime,
         "score": int(score),
         "close": close,
+        "ma5": ma5,
         "ma20": ma20,
         "ma60": ma60,
         "day_ret": day_ret,
         "ret20": ret20,
+        "gate": gate,
+        "buy_slots": int(buy_slots),
+        "compression_breakdown": bool(breakdown.get("triggered")),
+        "compression_breakdown_detail": breakdown,
+        "bear_ma_stack": bool(bear_ma_stack),
         "summary": summary,
     }
 
@@ -2895,7 +3541,7 @@ def run_daily_simulation(
         )
         gate_notes = list(rule_notes)
         if sector_notes:
-            gate_notes.append(f"行业Top3: {'、'.join(sector_notes)}")
+            gate_notes.append(f"边际回流板块Top{min(len(sector_notes), V2_SECTOR_WATCH_RANK_LIMIT)}: {'、'.join(sector_notes)}")
 
         llm_payload, llm_tool_calls, llm_warning = _generate_ai_actions_with_tools(
             portfolio_id=portfolio_id,
@@ -2931,7 +3577,7 @@ def run_daily_simulation(
             override_symbols=override_symbols,
         )
         ai_payload = {
-            "summary": "2号策略：行业前3中选择强势底部突破，回踩MA10/MA20再买入，不追高。",
+            "summary": "2号策略：在边际资金回流板块中选择强势底部突破，回踩MA10/MA20再买入，不追高。",
             "risk_notes": "收盘跌破止损位卖出；仓位按中证500多空状态动态限制。",
             "actions": audited_actions,
             "source": "llm_v2_hybrid" if override_symbols else "rule_v2",

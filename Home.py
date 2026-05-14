@@ -3771,10 +3771,10 @@ def show_welcome_screen():
         st.session_state.pending_prompt = text
 
     with col1:
-        st.button("比较宁德时代和阳光电源",
+        st.button("半导体有什么股票推荐",
                      use_container_width=True,
                      on_click=set_prompt_callback,
-                     args=("比较宁德时代和阳光电源的基本面和技术面",)
+                     args=("推荐有潜力的半导体股票，最好不要涨太多的",)
          )
 
     with col2:
@@ -3785,10 +3785,10 @@ def show_welcome_screen():
          )
 
     with col3:
-        st.button("创业板期权做什么策略？",
+        st.button("500ETF现在能卖期权吗？",
                      use_container_width=True,
                      on_click=set_prompt_callback,
-                     args=("创业板期权做什么策略好",)
+                     args=("500ETF卖期权如何操作",)
          )
 
 # ==========================================
@@ -4000,31 +4000,30 @@ with st.sidebar:
                         else:
                             st.error(msg)
 
-        with st.expander("✉️ 忘记密码", expanded=False):
-            st.caption("当前仅保留邮箱找回密码")
-            reset_email = st.text_input("注册邮箱", key="reset_email", placeholder="your@email.com")
+        with st.expander("📱 忘记密码", expanded=False):
+            st.caption("通过注册手机号接收验证码，重新设置登录密码")
+            reset_phone = st.text_input("注册手机号", key="reset_phone", placeholder="例如 13800138000")
             reset_c1, reset_c2 = st.columns([2, 1])
             with reset_c1:
-                reset_code = st.text_input("验证码", key="reset_code", max_chars=6)
+                reset_code = st.text_input("短信验证码", key="reset_code", max_chars=6)
             with reset_c2:
                 st.write("")
                 if st.button("发送", key="btn_send_reset_code", use_container_width=True):
-                    if reset_email:
-                        from email_utils import send_reset_password_code
-
-                        ok, msg = send_reset_password_code(reset_email)
+                    if reset_phone:
+                        reset_ip, _ = _extract_client_ip_and_device_fingerprint()
+                        ok, msg = auth.send_reset_password_phone_code(reset_phone, client_ip=reset_ip)
                         if ok:
                             st.success("已发送")
                         else:
                             st.error(msg)
                     else:
-                        st.warning("请输入邮箱")
+                        st.warning("请输入手机号")
 
             new_pwd = st.text_input("新密码", type="password", key="reset_new_pwd")
             new_pwd2 = st.text_input("确认密码", type="password", key="reset_new_pwd2")
             if st.button("重置密码", type="primary", use_container_width=True, key="btn_reset_pwd"):
-                if not reset_email:
-                    st.warning("请输入邮箱")
+                if not reset_phone:
+                    st.warning("请输入手机号")
                 elif not reset_code:
                     st.warning("请输入验证码")
                 elif not new_pwd or len(new_pwd) < 6:
@@ -4032,9 +4031,9 @@ with st.sidebar:
                 elif new_pwd != new_pwd2:
                     st.error("两次密码不一致")
                 else:
-                    ok, msg = auth.reset_password_with_email(reset_email, reset_code, new_pwd)
+                    ok, msg, reset_username = auth.reset_password_with_phone(reset_phone, reset_code, new_pwd)
                     if ok:
-                        st.success(msg)
+                        st.success(msg or f"密码重置成功，请使用账号 {reset_username} 和新密码登录")
                         st.balloons()
                     else:
                         st.error(msg)

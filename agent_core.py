@@ -57,7 +57,7 @@ from portfolio_tools import (
     analyze_user_trading_style,
     check_portfolio_risks
 )
-from chat_routing import is_pure_option_data_query
+from chat_routing import is_market_data_query, is_pure_option_data_query
 from simple_chat_runtime import (
     build_simple_runtime_context,
     format_simple_runtime_context,
@@ -1341,10 +1341,10 @@ def _enforce_margin_monitor_routing(query: str, plan: List[str]) -> List[str]:
 
 def _enforce_option_data_monitor_routing(query: str, plan: List[str]) -> List[str]:
     """
-    纯期权数据问题只派 monitor，避免误上宏观/技术/策略整链路。
-    例如：IV/波动率高低、分位、到期日、剩余天数、保证金、乘数、一手资金占用。
+    明确的数据查询问题只派 monitor，避免误上知识解释或宏观/技术/策略整链路。
+    例如：IV/波动率高低、分位、到期日、保证金、乘数、价格、最新价。
     """
-    if not is_pure_option_data_query(query):
+    if not is_market_data_query(query):
         return plan
     return ["monitor"]
 
@@ -3181,6 +3181,48 @@ def chatter_node(state: AgentState, llm=None):
 
 
 # 🟣 =选股员 (Screener)
+_SCREENER_RISK_KEYWORDS = [
+    "危险", "不要买", "别买", "卖掉", "要卖", "卖出",
+    "避开", "规避", "远离", "警惕", "出场",
+    "差的", "最差", "垃圾", "烂股", "坑", "雷", "暴雷",
+    "分数最低", "评分最低", "最弱", "弱势股",
+    "不好", "不行", "别碰", "跑路", "清仓",
+    "下跌", "亏损", "套牢", "割肉", "止损",
+]
+
+_SCREENER_RISK_PATTERNS = [
+    r"风险(?:股票|股|预警|警示|较高|很高|高|大|很大|偏高)",
+    r"(?:有|存在|哪些|哪个|哪只|哪几只).{0,4}风险",
+    r"高风险",
+    r"不要(?:买|买入|碰|追|接|参与|介入)",
+    r"别(?:买|买入|碰|追|接|参与|介入)",
+]
+
+_SCREENER_NON_RISK_CONSTRAINT_PATTERNS = [
+    r"不要(?:涨|涨幅|涨得|上涨|已经涨|累计涨|短期涨)",
+    r"(?:涨幅|涨得|上涨|累计涨幅|短期涨幅).{0,8}(?:不要|别|不).{0,4}(?:太多|过大|过高)",
+    r"(?:低风险|风险低|风险不高|风险较低|风险小|风险可控|控制风险)",
+]
+
+
+def _is_screener_risk_query(query: str) -> bool:
+    """Detect requests for dangerous/avoid-list stocks without catching constraints."""
+    compact_query = re.sub(r"\s+", "", query or "")
+    if not compact_query:
+        return False
+
+    if any(keyword in compact_query for keyword in _SCREENER_RISK_KEYWORDS):
+        return True
+
+    if any(re.search(pattern, compact_query) for pattern in _SCREENER_RISK_PATTERNS):
+        return True
+
+    if any(re.search(pattern, compact_query) for pattern in _SCREENER_NON_RISK_CONSTRAINT_PATTERNS):
+        return False
+
+    return False
+
+
 def screener_node(state: AgentState, llm):
     # --- 1. 获取宏观资金风向 (Sector Flow) ---
     sector_flow_info = ""
@@ -3202,14 +3244,6 @@ def screener_node(state: AgentState, llm):
             print(f"⚠️ 形态统计查询失败: {e}")
             # 失败时继续走正常选股流程
 
-    risk_keywords = [
-        "危险", "风险", "不要买", "别买", "卖掉", "要卖", "卖出",
-        "避开", "规避", "远离", "小心", "警惕", "注意", "出场",
-        "差的", "最差", "垃圾", "烂股", "坑", "雷", "暴雷",
-        "分数最低", "评分最低", "最弱", "弱势股",
-        "不好", "不行", "不要", "别碰", "跑路", "清仓",
-        "下跌", "亏损", "套牢", "割肉", "止损"
-    ]
     pattern_keywords = [
         "红三兵", "三红兵", "连阳", "三连阳", "创新高",
         "金针探底", "锤子", "锤子线", "下影线",
@@ -3250,7 +3284,7 @@ def screener_node(state: AgentState, llm):
         "成交异常", "交易异常活跃", "异常活跃"
     ]
 
-    is_risk_query = any(kw in query for kw in risk_keywords)
+    is_risk_query = _is_screener_risk_query(query)
 
     detected_pattern = None
     for pattern in pattern_keywords:

@@ -1,26 +1,36 @@
 #!/bin/bash
 
-# 1. 进入项目目录
-cd /root/finance_app/future-app
+APP_DIR="/root/finance_app/future-app"
+PYTHON_BIN="${APP_DIR}/venv/bin/python"
+LOG_FILE="${APP_DIR}/update.log"
 
-# 2. 打印开始时间到日志
-echo "" >> update.log
-echo "========================================" >> update.log
-echo "⏰ 任务开始: $(date)" >> update.log
+cd "${APP_DIR}" || exit 1
 
-# ---------------------------------------------------------
-# [核心修改点]：使用 venv 里的 python，而不是 /usr/bin/python3
-# ---------------------------------------------------------
-echo ">>> [1/1] 开始更新晚报..." >> update.log
+echo "" >> "${LOG_FILE}"
+echo "========================================" >> "${LOG_FILE}"
+echo "[START] evening report job: $(date)" >> "${LOG_FILE}"
 
-# 方法 A：直接调用虚拟环境的解释器 (推荐，最稳妥)
-/root/finance_app/future-app/venv/bin/python daily_report_generator.py >> update.log 2>&1
+if [ ! -x "${PYTHON_BIN}" ]; then
+  echo "[ERR] python venv not found: ${PYTHON_BIN}" >> "${LOG_FILE}"
+  echo "========================================" >> "${LOG_FILE}"
+  exit 1
+fi
 
-# 或者 方法 B：先激活环境再运行 (备选)
-# source venv/bin/activate
-# python daily_report_generator.py >> update.log 2>&1
-# ---------------------------------------------------------
+echo ">>> [1/2] START daily report" >> "${LOG_FILE}"
+"${PYTHON_BIN}" daily_report_generator.py >> "${LOG_FILE}" 2>&1
+if [ $? -ne 0 ]; then
+  echo "[ERR] daily report failed: $(date)" >> "${LOG_FILE}"
+  echo "========================================" >> "${LOG_FILE}"
+  exit 1
+fi
 
-# 结束
-echo "✅ 任务结束: $(date)" >> update.log
-echo "========================================" >> update.log
+echo ">>> [2/2] START safe stock report" >> "${LOG_FILE}"
+"${PYTHON_BIN}" safe_stock_report_generator.py --publish >> "${LOG_FILE}" 2>&1
+if [ $? -ne 0 ]; then
+  echo "[ERR] safe stock report failed: $(date)" >> "${LOG_FILE}"
+  echo "========================================" >> "${LOG_FILE}"
+  exit 1
+fi
+
+echo "[END] evening report job success: $(date)" >> "${LOG_FILE}"
+echo "========================================" >> "${LOG_FILE}"

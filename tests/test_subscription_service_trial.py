@@ -64,7 +64,8 @@ class TestSubscriptionTrial(unittest.TestCase):
                     (2, 'expiry_option_radar', '末日期权晚报', 1, 1),
                     (3, 'broker_position_report', '持仓密报', 1, 1),
                     (4, 'fund_flow_report', '资金流晚报', 1, 1),
-                    (5, 'macro_risk_radar', '宏观周报', 1, 1)
+                    (5, 'macro_risk_radar', '宏观周报', 1, 1),
+                    (6, 'safe_stock_report', '小爱选股晚报', 1, 1)
                     """
                 )
             )
@@ -114,7 +115,7 @@ class TestSubscriptionTrial(unittest.TestCase):
                 text(
                     """
                     SELECT COUNT(*) FROM user_subscriptions
-                    WHERE user_id='new_user_all' AND channel_id IN (1,2,3,4,5)
+                    WHERE user_id='new_user_all' AND channel_id IN (1,2,3,4,5,6)
                     """
                 )
             ).scalar_one()
@@ -149,10 +150,10 @@ class TestSubscriptionTrial(unittest.TestCase):
                 )
             ).scalar_one()
 
-        self.assertEqual(int(cnt_sub), 5)
+        self.assertEqual(int(cnt_sub), 6)
         self.assertEqual(int(macro_trial_days), 30)
         self.assertEqual(int(cnt_marker), 1)
-        self.assertEqual(int(cnt_trial_rows), 6)
+        self.assertEqual(int(cnt_trial_rows), 7)
 
 
 if __name__ == "__main__":

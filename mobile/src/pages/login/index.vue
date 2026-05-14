@@ -3,10 +3,9 @@ import { ref } from 'vue'
 import { onShow } from '@dcloudio/uni-app'
 import { authApi } from '../../api/index'
 import { useAuthStore } from '../../store/auth'
-import { request } from '../../utils/request'
 
 const auth = useAuthStore()
-const mode = ref<'login' | 'register'>('login')
+const mode = ref<'login' | 'register' | 'reset'>('login')
 
 const account = ref('')
 const password = ref('')
@@ -20,6 +19,14 @@ const regPhone = ref('')
 const regCode = ref('')
 const codeSending = ref(false)
 const registerLoading = ref(false)
+
+const resetPhone = ref('')
+const resetCode = ref('')
+const resetPassword = ref('')
+const resetPasswordConfirm = ref('')
+const resetCodeSending = ref(false)
+const resetLoading = ref(false)
+const resetMessage = ref('')
 
 const agreed = ref(false)
 const error = ref('')
@@ -35,9 +42,10 @@ onShow(async () => {
   }
 })
 
-function switchMode(nextMode: 'login' | 'register') {
+function switchMode(nextMode: 'login' | 'register' | 'reset') {
   mode.value = nextMode
   error.value = ''
+  resetMessage.value = ''
 }
 
 async function handleLogin() {
@@ -81,9 +89,7 @@ async function sendRegisterCode() {
   if (!regPhone.value.trim()) { error.value = '请先输入手机号'; return }
   codeSending.value = true
   try {
-    const res = await request<{ message: string }>('POST', '/api/auth/register/send-phone-code', {
-      phone: regPhone.value.trim(),
-    })
+    const res = await authApi.registerSendPhoneCode(regPhone.value.trim())
     uni.showToast({ title: res.message || '验证码已发送', icon: 'none' })
   } catch (e: any) {
     error.value = e.message || '验证码发送失败'
@@ -101,17 +107,13 @@ async function handleRegister() {
 
   registerLoading.value = true
   try {
-    const res = await request<{ token: string; username: string; message: string }>(
-      'POST',
-      '/api/auth/register',
-      {
+    const res = await authApi.register({
       username: regUsername.value.trim(),
       password: regPassword.value,
       password_confirm: regPasswordConfirm.value,
       phone: regPhone.value.trim(),
       sms_code: regCode.value.trim(),
-      },
-    )
+    })
     auth.setAuth(res.token, res.username)
     uni.showToast({ title: '注册成功', icon: 'success' })
     uni.reLaunch({ url: '/pages/index/index' })
@@ -119,6 +121,52 @@ async function handleRegister() {
     error.value = e.message || '注册失败'
   } finally {
     registerLoading.value = false
+  }
+}
+
+async function sendResetCode() {
+  error.value = ''
+  resetMessage.value = ''
+  if (!resetPhone.value.trim()) { error.value = '请先输入手机号'; return }
+  resetCodeSending.value = true
+  try {
+    const res = await authApi.passwordResetSendPhoneCode(resetPhone.value.trim())
+    uni.showToast({ title: res.message || '验证码已发送', icon: 'none' })
+  } catch (e: any) {
+    error.value = e.message || '验证码发送失败'
+  } finally {
+    resetCodeSending.value = false
+  }
+}
+
+async function handleResetPassword() {
+  error.value = ''
+  resetMessage.value = ''
+  if (!resetPhone.value.trim()) { error.value = '请填写手机号'; return }
+  if (!resetCode.value.trim()) { error.value = '请输入短信验证码'; return }
+  if (!resetPassword.value || resetPassword.value.length < 6) { error.value = '新密码至少6位'; return }
+  if (resetPassword.value !== resetPasswordConfirm.value) { error.value = '两次密码不一致'; return }
+
+  resetLoading.value = true
+  try {
+    const res = await authApi.passwordReset({
+      phone: resetPhone.value.trim(),
+      sms_code: resetCode.value.trim(),
+      new_password: resetPassword.value,
+      new_password_confirm: resetPasswordConfirm.value,
+    })
+    resetMessage.value = res.message || `密码重置成功，请使用账号 ${res.username} 和新密码登录`
+    account.value = res.username || account.value
+    password.value = ''
+    resetCode.value = ''
+    resetPassword.value = ''
+    resetPasswordConfirm.value = ''
+    mode.value = 'login'
+    uni.showToast({ title: '密码已重置', icon: 'success' })
+  } catch (e: any) {
+    error.value = e.message || '重置密码失败'
+  } finally {
+    resetLoading.value = false
   }
 }
 
@@ -149,6 +197,7 @@ function openProtocol(type: 'terms' | 'privacy') {
     <view class="mode-switch">
       <view class="mode-btn" :class="{ active: mode === 'login' }" @tap="switchMode('login')">登录</view>
       <view class="mode-btn" :class="{ active: mode === 'register' }" @tap="switchMode('register')">注册</view>
+      <view class="mode-btn" :class="{ active: mode === 'reset' }" @tap="switchMode('reset')">忘记密码</view>
     </view>
 
     <view v-if="mode === 'login'" class="form">
@@ -176,7 +225,7 @@ function openProtocol(type: 'terms' | 'privacy') {
       </view>
     </view>
 
-    <view v-else class="form">
+    <view v-else-if="mode === 'register'" class="form">
       <view class="step-title-wrap">
         <text class="step-title">步骤1：账号与密码</text>
       </view>
@@ -261,7 +310,65 @@ function openProtocol(type: 'terms' | 'privacy') {
       </view>
     </view>
 
-    <view class="agree-row">
+    <view v-else class="form">
+      <view class="step-title-wrap">
+        <text class="step-title">通过注册手机号重置密码</text>
+      </view>
+      <view class="field">
+        <text class="field-label">手机号（+86）</text>
+        <input
+          v-model="resetPhone"
+          class="field-input"
+          placeholder="例如 13800138000"
+          placeholder-class="placeholder"
+          :disabled="resetLoading"
+        />
+      </view>
+      <view class="field">
+        <text class="field-label">短信验证码</text>
+        <view class="code-row">
+          <input
+            v-model="resetCode"
+            class="field-input code-input"
+            placeholder="输入6位验证码"
+            placeholder-class="placeholder"
+            :disabled="resetLoading"
+          />
+          <button
+            class="code-btn"
+            :disabled="resetLoading || resetCodeSending"
+            @click="sendResetCode"
+          >
+            {{ resetCodeSending ? '发送中...' : '发验证码' }}
+          </button>
+        </view>
+      </view>
+      <view class="field">
+        <text class="field-label">新密码</text>
+        <input
+          v-model="resetPassword"
+          class="field-input"
+          placeholder="至少6位"
+          placeholder-class="placeholder"
+          password
+          :disabled="resetLoading"
+        />
+      </view>
+      <view class="field">
+        <text class="field-label">确认密码</text>
+        <input
+          v-model="resetPasswordConfirm"
+          class="field-input"
+          placeholder="再次输入新密码"
+          placeholder-class="placeholder"
+          password
+          :disabled="resetLoading"
+          @confirm="handleResetPassword"
+        />
+      </view>
+    </view>
+
+    <view v-if="mode !== 'reset'" class="agree-row">
       <checkbox-group class="agree-check-group" @change="onAgreeChange">
         <checkbox class="agree-checkbox" value="agreed" :checked="agreed" color="#f5c518" />
       </checkbox-group>
@@ -274,6 +381,7 @@ function openProtocol(type: 'terms' | 'privacy') {
     </view>
 
     <!-- 错误提示 -->
+    <view v-if="resetMessage" class="success-msg">{{ resetMessage }}</view>
     <view v-if="error" class="error-msg">{{ error }}</view>
 
     <!-- 登录按钮 -->
@@ -286,17 +394,26 @@ function openProtocol(type: 'terms' | 'privacy') {
       {{ loginLoading ? '登录中...' : '登录' }}
     </button>
     <button
-      v-else
+      v-else-if="mode === 'register'"
       class="btn-primary login-btn"
       :disabled="registerLoading || !regStep1Ready"
       @click="handleRegister"
     >
       {{ registerLoading ? '注册中...' : '完成注册' }}
     </button>
+    <button
+      v-else
+      class="btn-primary login-btn"
+      :disabled="resetLoading"
+      @click="handleResetPassword"
+    >
+      {{ resetLoading ? '重置中...' : '重置密码' }}
+    </button>
 
     <view class="footer-tip">
       <text class="muted-text" v-if="mode === 'login'">还没有账号？切换到“注册”即可开通</text>
-      <text class="muted-text" v-else>注册成功后将自动登录</text>
+      <text class="muted-text" v-else-if="mode === 'register'">注册成功后将自动登录</text>
+      <text class="muted-text" v-else>重置成功后请使用新密码登录</text>
       <text class="contact-text">登录遇到问题可咨询客服：微信 trader-sec ｜ 电话 17521591756</text>
     </view>
   </view>
@@ -478,6 +595,14 @@ function openProtocol(type: 'terms' | 'privacy') {
 .error-msg {
   color: #e84040;
   font-size: 26rpx;
+  margin-bottom: 20rpx;
+  text-align: center;
+}
+
+.success-msg {
+  color: #22c55e;
+  font-size: 26rpx;
+  line-height: 1.5;
   margin-bottom: 20rpx;
   text-align: center;
 }

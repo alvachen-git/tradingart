@@ -102,10 +102,15 @@ def _ensure_sms_table() -> None:
 
 
 def _purpose_template_code(purpose: str) -> str:
+    generic_code = os.getenv("ALIYUN_SMS_TEMPLATE_CODE", "").strip()
     if purpose == "register":
-        return os.getenv("ALIYUN_SMS_TEMPLATE_CODE_REGISTER", "").strip()
+        return os.getenv("ALIYUN_SMS_TEMPLATE_CODE_REGISTER", "").strip() or generic_code
     if purpose == "login":
-        return os.getenv("ALIYUN_SMS_TEMPLATE_CODE_LOGIN", "").strip()
+        return (
+            os.getenv("ALIYUN_SMS_TEMPLATE_CODE_LOGIN", "").strip()
+            or generic_code
+            or os.getenv("ALIYUN_SMS_TEMPLATE_CODE_REGISTER", "").strip()
+        )
     return ""
 
 

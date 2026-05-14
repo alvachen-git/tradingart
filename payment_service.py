@@ -40,6 +40,7 @@ _PACKAGES_MAP = {item["name"]: item for item in POINTS_PACKAGES}
 
 # 晚报类付费产品（频道）
 REPORT_PRODUCTS = [
+    {"code": "safe_stock_report", "name": "小爱选股晚报", "icon": "", "points_monthly": 800},
     {"code": "daily_report", "name": "复盘晚报", "icon": "📊", "points_monthly": 500},
     {"code": "expiry_option_radar", "name": "末日期权晚报", "icon": "🗓️", "points_monthly": 500},
     {"code": "broker_position_report", "name": "期货商持仓晚报", "icon": "🏦", "points_monthly": 500},
@@ -51,8 +52,18 @@ _CHANNEL_PRICE_DEFAULTS = {
     **_REPORT_PRICE_DEFAULTS,
     "trade_signal": 800,
 }
+_FORCED_CHANNEL_PRICE_CODES = {"safe_stock_report"}
 
-# 套餐产品：包含全部四个晚报
+
+def _resolve_channel_points_price(channel_code: str, db_price: Any) -> Optional[int]:
+    if channel_code in _FORCED_CHANNEL_PRICE_CODES and channel_code in _CHANNEL_PRICE_DEFAULTS:
+        return int(_CHANNEL_PRICE_DEFAULTS[channel_code])
+    if db_price is not None:
+        return int(db_price)
+    fallback = _CHANNEL_PRICE_DEFAULTS.get(channel_code)
+    return int(fallback) if fallback is not None else None
+
+# 套餐产品：包含付费晚报频道
 INTEL_PACKAGE_PRODUCT = {
     "code": "intel_package",
     "name": "情报套餐",
@@ -771,7 +782,7 @@ def get_points_channels() -> list[Dict[str, Any]]:
                 "name": display_name,
                 "icon": row[3] or meta_map.get(code, {}).get("icon"),
                 "is_premium": bool(row[4]),
-                "price_points_monthly": int(row[5]) if row[5] is not None else _REPORT_PRICE_DEFAULTS.get(code),
+                "price_points_monthly": _resolve_channel_points_price(code, row[5]),
             }
 
         # 按固定产品顺序输出
@@ -849,12 +860,9 @@ def _legacy_purchase_subscription_with_points(
 
         channel_code = str(row[0] or "")
         channel_name = str(row[1])
-        price_points_monthly = row[2]
+        price_points_monthly = _resolve_channel_points_price(channel_code, row[2])
         if price_points_monthly is None:
-            fallback = _CHANNEL_PRICE_DEFAULTS.get(channel_code)
-            if fallback is None:
-                return False, "该频道不支持点数购买"
-            price_points_monthly = fallback
+            return False, "该频道不支持点数购买"
 
         total_cost = int(price_points_monthly) * int(months)
         ok, reason = deduct_points(
@@ -999,12 +1007,9 @@ def purchase_subscription_with_points(
 
         channel_code = str(row[0] or "")
         channel_name = str(row[1] or channel_code)
-        price_points_monthly = row[2]
+        price_points_monthly = _resolve_channel_points_price(channel_code, row[2])
         if price_points_monthly is None:
-            fallback = _CHANNEL_PRICE_DEFAULTS.get(channel_code)
-            if fallback is None:
-                return False, "该频道不支持点数购买"
-            price_points_monthly = fallback
+            return False, "该频道不支持点数购买"
 
         total_cost = int(price_points_monthly) * int(months)
         ok, reason = deduct_points(

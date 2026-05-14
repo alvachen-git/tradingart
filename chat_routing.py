@@ -134,6 +134,22 @@ OPTION_DATA_EXCLUDED_KEYWORDS = (
     "影响", "利好", "利空", "如何处理",
 )
 
+MARKET_DATA_SUBJECT_KEYWORDS = (
+    "iv", "隐含波动率", "波动率", "iv rank", "ivrank", "价格", "现价", "最新价", "报价", "收盘",
+    "开盘", "昨收", "昨结", "结算价", "成交量", "持仓量", "持仓", "到期", "剩余天数", "到期日",
+    "保证金", "合约乘数", "乘数", "一手", "行权价", "权利金",
+)
+
+MARKET_DATA_INTENT_KEYWORDS = (
+    "查看", "查", "查下", "查一下", "看", "看下", "看一下", "给我", "多少", "多高", "高吗", "低吗",
+    "几天", "多久", "多少点", "多少钱", "是什么水平", "分位", "rank", "报价", "数值",
+)
+
+MARKET_DATA_EXCLUDED_KEYWORDS = OPTION_DATA_EXCLUDED_KEYWORDS + (
+    "解释", "什么是", "什么意思", "原理", "为什么", "原因", "意味着", "举例", "护城河", "竞争对手",
+    "隐忧", "值不值得", "该怎么做",
+)
+
 FINANCE_BASE_KEYWORDS = (
     "金融", "交易", "投资", "理财", "基金", "债券", "国债", "利率", "通胀", "cpi", "pmi",
     "非农", "美债", "美元", "汇率", "外汇", "a股", "港股", "美股", "期货", "现货",
@@ -163,6 +179,7 @@ CORRECTION_FACT_HINTS = (
 RUNTIME_FACT_HINTS = ("时间", "几点", "几号", "日期", "星期", "周几")
 
 SYMBOL_PATTERN = re.compile(r"\b[A-Z]{1,5}\d{0,4}\b|(?<!\d)\d{6}(?!\d)")
+CONTRACT_PATTERN = re.compile(r"[一-龥]{2,8}\d{3,4}|[A-Za-z]{1,4}\d{3,4}")
 URL_PATTERN = re.compile(r"https?://|www\.", re.IGNORECASE)
 
 
@@ -344,6 +361,33 @@ def is_pure_option_data_query(prompt_text: str) -> bool:
     return has_intent
 
 
+def is_market_data_query(prompt_text: str) -> bool:
+    text = str(prompt_text or "").strip().lower()
+    if not text:
+        return False
+
+    if is_pure_option_data_query(prompt_text):
+        return True
+
+    has_subject = any(keyword in text for keyword in MARKET_DATA_SUBJECT_KEYWORDS)
+    has_intent = any(keyword in text for keyword in MARKET_DATA_INTENT_KEYWORDS)
+    has_excluded = any(keyword in text for keyword in MARKET_DATA_EXCLUDED_KEYWORDS)
+    has_contract = bool(CONTRACT_PATTERN.search(str(prompt_text or "")))
+    has_symbol = bool(SYMBOL_PATTERN.search(str(prompt_text or "").upper()))
+
+    if has_excluded:
+        return False
+    if not (has_subject or has_contract or has_symbol):
+        return False
+    if has_subject and has_intent:
+        return True
+    if has_contract and any(keyword in text for keyword in ("iv", "隐含波动率", "波动率", "价格", "现价", "最新价", "报价")):
+        return True
+    if has_symbol and has_subject and has_intent:
+        return True
+    return False
+
+
 def classify_chat_mode(
     prompt_text: str,
     *,
@@ -381,6 +425,9 @@ def classify_chat_mode(
     has_special_input = has_uploaded_image or has_structured_payload or domain in {"stock", "option", "mixed"}
 
     if has_special_input or has_url:
+        return CHAT_MODE_ANALYSIS
+
+    if is_market_data_query(text):
         return CHAT_MODE_ANALYSIS
 
     has_knowledge_prefix = any(keyword in text_lower for keyword in KNOWLEDGE_PREFIXES)
