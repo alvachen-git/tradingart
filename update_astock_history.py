@@ -2,42 +2,62 @@ import tushare as ts
 import pandas as pd
 from sqlalchemy import create_engine, text, types
 import os
+import argparse
 from dotenv import load_dotenv
 from datetime import datetime, timedelta
 import time
 
+from astock_target_supplements import a_share_supplement_targets
+
 # 1. 初始化
 load_dotenv(override=True)
 
-DB_USER = os.getenv("DB_USER")
-DB_PASSWORD = os.getenv("DB_PASSWORD")
-DB_HOST = os.getenv("DB_HOST")
-DB_PORT = os.getenv("DB_PORT")
-DB_NAME = os.getenv("DB_NAME")
+engine = None
+pro = None
+NAME_MAP = None
 
-db_url = f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
-engine = create_engine(db_url)
+DEFAULT_NEW_STOCK_TARGETS = ["301525.SZ", "301528.SZ", "301529.SZ"]
 
-ts_token = os.getenv("TUSHARE_TOKEN")
-ts.set_token(ts_token)
-pro = ts.pro_api()
+
+def get_engine():
+    global engine
+    if engine is None:
+        db_user = os.getenv("DB_USER")
+        db_password = os.getenv("DB_PASSWORD")
+        db_host = os.getenv("DB_HOST")
+        db_port = os.getenv("DB_PORT")
+        db_name = os.getenv("DB_NAME")
+        db_url = f"mysql+pymysql://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}"
+        engine = create_engine(db_url)
+    return engine
+
+
+def get_pro():
+    global pro
+    if pro is None:
+        ts.set_token(os.getenv("TUSHARE_TOKEN"))
+        pro = ts.pro_api()
+    return pro
 
 
 # --- 獲取全市場名稱字典 (用於填補 name) ---
 def get_name_map():
+    global NAME_MAP
+    if NAME_MAP is not None:
+        return NAME_MAP
+
     print("[*] 正在加載名稱字典...")
     try:
         # 股票
-        df_s = pro.stock_basic(exchange='', list_status='L', fields='ts_code,name')
+        ts_pro = get_pro()
+        df_s = ts_pro.stock_basic(exchange='', list_status='L', fields='ts_code,name')
         # 基金/ETF
-        df_f = pro.fund_basic(market='E', status='L', fields='ts_code,name')
+        df_f = ts_pro.fund_basic(market='E', status='L', fields='ts_code,name')
         df_all = pd.concat([df_s, df_f])
-        return dict(zip(df_all['ts_code'], df_all['name']))
+        NAME_MAP = dict(zip(df_all['ts_code'], df_all['name']))
     except:
-        return {}
-
-
-NAME_MAP = get_name_map()
+        NAME_MAP = {}
+    return NAME_MAP
 
 
 # --- 3. 核心抓取邏輯 ---
@@ -46,14 +66,15 @@ def fetch_and_save_data(ts_code, start_date, end_date, asset_type='E'):
     asset_type: 'E' = ETF, 'S' = Stock
     """
     # 嘗試從字典獲取名稱，如果沒有則用代碼
-    code_name = NAME_MAP.get(ts_code, ts_code)
+    code_name = get_name_map().get(ts_code, ts_code)
     print(f"[*] 正在獲取 {code_name} ({ts_code})...", end="")
 
     try:
+        ts_pro = get_pro()
         if asset_type == 'S':
-            df = pro.daily(ts_code=ts_code, start_date=start_date, end_date=end_date)
+            df = ts_pro.daily(ts_code=ts_code, start_date=start_date, end_date=end_date)
         else:
-            df = pro.fund_daily(ts_code=ts_code, start_date=start_date, end_date=end_date)
+            df = ts_pro.fund_daily(ts_code=ts_code, start_date=start_date, end_date=end_date)
 
         if df.empty:
             print(" [-] 無數據")
@@ -89,12 +110,13 @@ def fetch_and_save_data(ts_code, start_date, end_date, asset_type='E'):
         df_save = df[target_cols].copy()
 
         # 入庫 (先刪後寫)
-        with engine.connect() as conn:
+        db_engine = get_engine()
+        with db_engine.connect() as conn:
             del_sql = f"DELETE FROM stock_price WHERE ts_code='{ts_code}' AND trade_date >= '{start_date}' AND trade_date <= '{end_date}'"
             conn.execute(text(del_sql))
             conn.commit()
 
-        df_save.to_sql('stock_price', engine, if_exists='append', index=False, dtype={
+        df_save.to_sql('stock_price', db_engine, if_exists='append', index=False, dtype={
             'trade_date': types.VARCHAR(8),
             'ts_code': types.VARCHAR(10),
             'name': types.VARCHAR(50),
@@ -108,9 +130,35 @@ def fetch_and_save_data(ts_code, start_date, end_date, asset_type='E'):
 
 
 # --- 4. 批量運行 ---
+def parse_args():
+    parser = argparse.ArgumentParser(description="回补 A 股/ETF 历史日线到 stock_price")
+    parser.add_argument(
+        "--target-set",
+        choices=["default", "supplement"],
+        default="default",
+        help="default=原有 ETF+新股名单；supplement=中证2000缺口+强制补充名单",
+    )
+    parser.add_argument("--days", type=int, default=1000, help="从今天往前回补的自然日天数")
+    parser.add_argument("--dry-run", action="store_true", help="只打印目标数量和日期范围，不写数据库")
+    return parser.parse_args()
+
+
+def resolve_stock_targets(target_set):
+    if target_set == "supplement":
+        return a_share_supplement_targets()
+    return list(DEFAULT_NEW_STOCK_TARGETS)
+
+
+def build_date_range(days, now=None):
+    current = now or datetime.now()
+    today = current.strftime('%Y%m%d')
+    start = (current - timedelta(days=days)).strftime('%Y%m%d')
+    return start, today
+
+
 if __name__ == "__main__":
-    today = datetime.now().strftime('%Y%m%d')
-    start = (datetime.now() - timedelta(days=1000)).strftime('%Y%m%d')
+    args = parse_args()
+    start, today = build_date_range(args.days)
 
     print(f"=== 開始抓取 ({start} - {today}) ===")
 
@@ -197,14 +245,22 @@ if __name__ == "__main__":
                    "159865.SZ" # 鍏绘畺ETF (鐚倝)
 
                    ]
-    for code in ETF_TARGETS:
-        fetch_and_save_data(code, start, today, asset_type='E')
-        time.sleep(0.3)
-
     # 2. 個股 (茅台在這裡！)
-    STOCK_TARGETS = [
-        "301525.SZ","301528.SZ","301529.SZ",
-    ]
+    STOCK_TARGETS = resolve_stock_targets(args.target_set)
+    if args.dry_run:
+        print(f"[DRY-RUN] target_set={args.target_set}")
+        print(f"[DRY-RUN] days={args.days} range={start}~{today}")
+        print(f"[DRY-RUN] ETF targets={len(ETF_TARGETS) if args.target_set == 'default' else 0}")
+        print(f"[DRY-RUN] stock targets={len(STOCK_TARGETS)}")
+        print(f"[DRY-RUN] includes_600522={'600522.SH' in STOCK_TARGETS}")
+        print(f"[DRY-RUN] first 10 stocks={STOCK_TARGETS[:10]}")
+        raise SystemExit(0)
+
+    if args.target_set == "default":
+        for code in ETF_TARGETS:
+            fetch_and_save_data(code, start, today, asset_type='E')
+            time.sleep(0.3)
+
     for code in STOCK_TARGETS:
         fetch_and_save_data(code, start, today, asset_type='S')
         time.sleep(0.5)
