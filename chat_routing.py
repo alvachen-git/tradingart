@@ -1,6 +1,11 @@
 import re
 from typing import Final
 
+from agent_prompt_policy import (
+    TASK_TYPE_STOCK_SELECTION,
+    TASK_TYPE_TECHNICAL_CONCEPT,
+    classify_analysis_task_type,
+)
 from chat_context_utils import infer_correction_intent, infer_followup_goal
 
 
@@ -63,6 +68,29 @@ ANALYSIS_INTENT_KEYWORDS = (
     "适合做吗", "适合吗", "现在适合",
 )
 
+STOCK_SELECTION_ACTION_KEYWORDS = (
+    "帮我找", "帮我选", "帮我筛", "推荐", "筛选", "找几只", "选几只", "找一下",
+    "哪些", "有什么", "股票池", "候选股",
+)
+
+STOCK_SELECTION_SUBJECT_KEYWORDS = (
+    "股票", "个股", "概念股", "龙头股", "强势股", "弱势股", "标的",
+)
+
+STOCK_SELECTION_PATTERN_KEYWORDS = (
+    "放量突破", "成交量异常", "成交量放大", "量能异动", "放量", "缩量", "换手率异常",
+    "技术形态", "形态比较强", "形态强", "红三兵", "多头吞噬", "均线多头",
+)
+
+STOCK_SELECTION_CONCEPT_KEYWORDS = (
+    "AI概念股", "ai概念股", "半导体", "芯片", "低空经济", "新能源", "机器人概念股",
+)
+
+STOCK_SELECTION_EXPLAIN_PREFIXES = (
+    "什么是", "解释", "解释一下", "科普", "科普一下", "怎么理解", "什么意思", "是什么",
+    "如何判断", "怎么判断", "怎样判断", "如何识别", "怎么识别", "原理",
+)
+
 PORTFOLIO_META_QUERY_KEYWORDS = (
     "你记得我持仓吗",
     "你记得我的持仓吗",
@@ -80,7 +108,7 @@ PORTFOLIO_META_QUERY_EXCLUDED_KEYWORDS = (
 TECHNICAL_KNOWLEDGE_KEYWORDS = (
     "k线", "均线", "图表", "技术面", "技术分析", "真假突破", "假突破", "假跌破",
     "支撑位", "阻力位", "成交量", "回踩", "趋势线", "多头陷阱", "空头陷阱",
-    "止损", "止盈", "仓位管理", "突破四原则",
+    "止损", "止盈", "仓位管理", "突破四原则", "放量突破",
 )
 
 MARKET_SUBJECT_KEYWORDS = (
@@ -147,6 +175,36 @@ def infer_followup(prompt_text: str) -> bool:
 
 def has_url_like_text(prompt_text: str) -> bool:
     return bool(URL_PATTERN.search(str(prompt_text or "")))
+
+
+def is_stock_selection_query(prompt_text: str) -> bool:
+    text = str(prompt_text or "").strip()
+    if not text:
+        return False
+    lowered = text.lower()
+    if any(prefix in text for prefix in STOCK_SELECTION_EXPLAIN_PREFIXES):
+        return False
+    has_action = any(keyword in text for keyword in STOCK_SELECTION_ACTION_KEYWORDS)
+    has_subject = any(keyword in text for keyword in STOCK_SELECTION_SUBJECT_KEYWORDS)
+    has_pattern = any(keyword in text for keyword in STOCK_SELECTION_PATTERN_KEYWORDS)
+    has_concept = any(keyword in text or keyword in lowered for keyword in STOCK_SELECTION_CONCEPT_KEYWORDS)
+    if has_action and (has_subject or has_pattern or has_concept):
+        return True
+    if has_subject and has_pattern:
+        return True
+    if "概念股有哪些" in text or "相关股票" in text or "相关个股" in text:
+        return True
+    return False
+
+
+def _is_technical_concept_explanation(prompt_text: str) -> bool:
+    text = str(prompt_text or "").strip()
+    if not text:
+        return False
+    has_explain_prefix = any(prefix in text for prefix in STOCK_SELECTION_EXPLAIN_PREFIXES)
+    if not has_explain_prefix:
+        return False
+    return any(keyword in text for keyword in TECHNICAL_KNOWLEDGE_KEYWORDS)
 
 
 def is_finance_or_trading_domain(prompt_text: str, *, has_symbol: bool = False) -> bool:
@@ -311,6 +369,12 @@ def classify_chat_mode(
     ):
         return CHAT_MODE_SIMPLE
     recent_context_lower = str(recent_context or "").strip().lower()
+    analysis_task_policy = classify_analysis_task_type(
+        text,
+        focus_entity=focus_entity,
+        is_followup=is_followup,
+        recent_context=recent_context_lower,
+    )
     has_url = has_url_like_text(text)
     has_symbol = bool(SYMBOL_PATTERN.search(text.upper()))
     domain = str(vision_position_domain or "").strip().lower()
@@ -347,6 +411,7 @@ def classify_chat_mode(
         focus_mode_hint=focus_mode_hint,
         is_followup=is_followup,
     )
+    has_stock_selection = analysis_task_policy.task_type == TASK_TYPE_STOCK_SELECTION
     has_company_analysis = _is_company_analysis_query(
         text,
         has_symbol=has_symbol,
@@ -384,6 +449,12 @@ def classify_chat_mode(
     correction_suggests_facts = any(keyword in correction_signal_text for keyword in CORRECTION_FACT_HINTS)
     correction_prompt_suggests_facts = any(keyword in correction_prompt_text for keyword in CORRECTION_FACT_HINTS)
     correction_prompt_suggests_analysis = any(keyword in correction_prompt_text for keyword in CORRECTION_ANALYSIS_HINTS)
+
+    if has_stock_selection:
+        return CHAT_MODE_ANALYSIS
+
+    if analysis_task_policy.task_type == TASK_TYPE_TECHNICAL_CONCEPT:
+        return CHAT_MODE_KNOWLEDGE
 
     if is_followup:
         if effective_correction_intent:

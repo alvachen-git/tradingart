@@ -41,6 +41,25 @@ class TestChatRouting(unittest.TestCase):
         self.assertEqual(classify_chat_mode("牛市价差怎么做"), CHAT_MODE_ANALYSIS)
         self.assertEqual(classify_chat_mode("牛市价差适合做吗"), CHAT_MODE_ANALYSIS)
 
+    def test_stock_selection_routes_to_analysis(self):
+        self.assertEqual(classify_chat_mode("帮我找放量突破的股票"), CHAT_MODE_ANALYSIS)
+        self.assertEqual(classify_chat_mode("帮我选几只半导体里技术形态比较强的股票"), CHAT_MODE_ANALYSIS)
+        self.assertEqual(classify_chat_mode("AI概念股有哪些"), CHAT_MODE_ANALYSIS)
+
+    def test_stock_selection_followup_routes_to_analysis(self):
+        self.assertEqual(
+            classify_chat_mode(
+                "帮我找放量突破的股票",
+                is_followup=True,
+                recent_context="用户: 澜起科技的基本面和技术面分析下\nAI: 澜起科技基本面和技术面报告。",
+            ),
+            CHAT_MODE_ANALYSIS,
+        )
+
+    def test_stock_selection_does_not_capture_concept_explanation(self):
+        self.assertEqual(classify_chat_mode("什么是放量突破"), CHAT_MODE_KNOWLEDGE)
+        self.assertEqual(classify_chat_mode("如何判断放量突破真假"), CHAT_MODE_KNOWLEDGE)
+
     def test_company_recent_news_routes_to_knowledge(self):
         self.assertEqual(classify_chat_mode("汇川技术最近有什么好消息吗"), CHAT_MODE_KNOWLEDGE)
         self.assertEqual(classify_chat_mode("汇川技术的机器人业务，最近有没有好消息"), CHAT_MODE_KNOWLEDGE)

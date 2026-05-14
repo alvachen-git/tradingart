@@ -63,6 +63,21 @@ from simple_chat_runtime import (
     format_simple_runtime_context,
     maybe_answer_simple_runtime_question,
 )
+from agent_prompt_policy import (
+    TASK_TYPE_OPTION_STRATEGY_NEEDS_SUBJECT,
+    TASK_TYPE_OPTION_STRATEGY_WITH_SUBJECT,
+    TASK_TYPE_SINGLE_STOCK_ANALYSIS,
+    TASK_TYPE_STOCK_SELECTION,
+    TASK_TYPE_TECHNICAL_CONCEPT,
+    build_data_policy_context,
+    build_profile_policy,
+    build_subject_policy,
+    classify_analysis_task_type,
+    has_explicit_option_underlying,
+    is_generic_option_strategy_question,
+    is_option_strategy_question,
+)
+from option_strategy_policy import build_option_strategy_policy
 
 # ==========================================
 # 1. 定义共享记忆 (The State)
@@ -249,12 +264,29 @@ MARGIN_QUERY_KEYWORDS = [
 STRATEGY_QUERY_KEYWORDS = [
     "策略", "建议", "怎么做", "怎么操作", "开仓", "平仓", "做多", "做空", "对冲", "仓位",
 ]
+STOCK_SELECTION_QUERY_KEYWORDS = [
+    "选股", "推荐股票", "精选股票", "股票池", "筛选", "帮我选", "选几只", "哪些股票", "哪只股票",
+    "买什么股", "有什么好股票", "找股票", "挖股票", "龙头股", "概念股有哪些", "帮我找",
+    "帮我筛", "找几只", "找一下", "候选股",
+]
 OPTION_QUERY_KEYWORDS = [
     "期权", "认购", "认沽", "行权价", "波动率", "iv", "delta", "gamma", "vega", "theta",
     "牛市价差", "熊市价差", "跨式", "宽跨", "勒式",
 ]
 OPTION_ACTION_QUERY_KEYWORDS = [
     "策略", "建议", "怎么做", "怎么调", "如何调", "如何做", "怎么操作", "调仓", "仓位", "对冲", "持仓",
+]
+RESEARCH_ROUTE_KEYWORDS = [
+    "基本面", "财报", "公告", "近期动态", "最近动态", "公司动态", "消息面", "新闻", "资讯",
+    "业绩", "一季报", "半年报", "中报", "三季报", "年报", "业绩快报", "业绩预告",
+    "利好", "利空", "催化", "为什么涨", "为什么跌", "为什么大涨", "为什么大跌", "影响什么",
+]
+TECHNICAL_ROUTE_KEYWORDS = [
+    "技术面", "技术分析", "K线", "k线", "均线", "走势", "趋势", "支撑", "压力", "阻力",
+    "突破", "破位", "形态",
+]
+UNAUTHORIZED_TECHNICAL_INDICATOR_KEYWORDS = [
+    "RSI", "MACD", "KDJ", "BOLL", "布林", "量能突破", "放量突破",
 ]
 EXPLICIT_STOCK_PORTFOLIO_COUPLING_KEYWORDS = [
     "结合我的股票持仓", "结合我股票持仓", "结合我的持仓", "结合我持仓", "基于我的股票持仓", "基于我持仓",
@@ -265,6 +297,112 @@ EXPLICIT_STOCK_PORTFOLIO_COUPLING_KEYWORDS = [
 def _contains_any(text: str, keywords: list) -> bool:
     text_value = str(text or "")
     return any(k in text_value for k in keywords)
+
+
+def _dedupe_plan(plan: List[str]) -> List[str]:
+    deduped_plan: List[str] = []
+    for step in plan:
+        if step and step not in deduped_plan:
+            deduped_plan.append(step)
+    return deduped_plan
+
+
+def _enforce_research_analyst_routing(query: str, plan: List[str]) -> List[str]:
+    text = str(query or "")
+    current_plan = list(plan or [])
+    has_research_need = _contains_any(text, RESEARCH_ROUTE_KEYWORDS)
+    has_technical_need = _contains_any(text, TECHNICAL_ROUTE_KEYWORDS)
+    has_option_or_strategy_need = _contains_any(text, OPTION_QUERY_KEYWORDS) or _contains_any(text, STRATEGY_QUERY_KEYWORDS)
+
+    if not has_research_need and not has_technical_need:
+        return current_plan
+
+    if has_research_need and not has_technical_need and not has_option_or_strategy_need and not _wants_chart(text):
+        return ["researcher"]
+
+    if has_technical_need and not has_research_need and not has_option_or_strategy_need and not _wants_chart(text):
+        return ["analyst"]
+
+    enforced: List[str] = []
+    if has_technical_need:
+        enforced.append("analyst")
+    if has_research_need:
+        enforced.append("researcher")
+    enforced.extend(current_plan)
+    return _dedupe_plan(enforced)
+
+
+def _is_stock_selection_query_for_agent(query: str) -> bool:
+    policy = classify_analysis_task_type(query)
+    return policy.task_type == TASK_TYPE_STOCK_SELECTION
+
+
+def _enforce_stock_selection_routing(query: str, plan: List[str]) -> List[str]:
+    policy = classify_analysis_task_type(query)
+    if policy.task_type == TASK_TYPE_STOCK_SELECTION:
+        return list(policy.recommended_plan)
+    return list(plan or [])
+
+
+def _enforce_named_stock_analysis_screener_isolation(query: str, plan: List[str]) -> List[str]:
+    policy = classify_analysis_task_type(query)
+    current_plan = list(plan or [])
+    if policy.task_type == TASK_TYPE_SINGLE_STOCK_ANALYSIS:
+        return [step for step in current_plan if step != "screener"]
+    return current_plan
+
+
+def _apply_analysis_task_policy(query: str, plan: List[str], symbol: str = "") -> tuple[List[str], str]:
+    # 不采信 planner 生成的 symbol 来判定“是否有标的”，它可能正是模型自行补出的默认对象。
+    policy = classify_analysis_task_type(query, symbol_hint="")
+    current_plan = list(plan or [])
+    current_symbol = str(symbol or "").strip()
+
+    if policy.task_type in {TASK_TYPE_STOCK_SELECTION, TASK_TYPE_OPTION_STRATEGY_NEEDS_SUBJECT}:
+        return list(policy.recommended_plan), ""
+
+    if policy.task_type == TASK_TYPE_TECHNICAL_CONCEPT:
+        return ["chatter"], "" if policy.clear_symbol else current_symbol
+
+    if policy.task_type == TASK_TYPE_SINGLE_STOCK_ANALYSIS:
+        filtered = [step for step in current_plan if step != "screener"]
+        if not filtered and policy.recommended_plan:
+            filtered = list(policy.recommended_plan)
+        return filtered, "" if policy.clear_symbol else current_symbol
+
+    if policy.task_type == TASK_TYPE_OPTION_STRATEGY_WITH_SUBJECT and not current_plan:
+        return list(policy.recommended_plan), current_symbol
+
+    return current_plan, "" if policy.clear_symbol else current_symbol
+
+
+def _user_requested_unauthorized_indicator(query: str) -> bool:
+    return _contains_any(str(query or "").upper(), UNAUTHORIZED_TECHNICAL_INDICATOR_KEYWORDS)
+
+
+def _sanitize_unauthorized_technical_indicators(text: str, query: str = "") -> str:
+    lines = str(text or "").splitlines()
+    kept_lines: List[str] = []
+    removed = False
+    requested_indicator = _user_requested_unauthorized_indicator(query)
+    disclaimer_markers = ["不覆盖", "不展开", "不支持", "暂不", "不能", "当前技术分析标准", "当前产品口径"]
+    for line in lines:
+        upper_line = line.upper()
+        if any(keyword in upper_line or keyword in line for keyword in UNAUTHORIZED_TECHNICAL_INDICATOR_KEYWORDS):
+            if requested_indicator and any(marker in line for marker in disclaimer_markers):
+                kept_lines.append(line)
+                continue
+            removed = True
+            continue
+        kept_lines.append(line)
+    cleaned = "\n".join(kept_lines).strip()
+    if removed:
+        if requested_indicator:
+            note = "> 注：当前技术分析标准只覆盖 K 线和均线，暂不展开 RSI、MACD、KDJ、BOLL 等指标。"
+        else:
+            note = "> 注：技术面已按当前产品口径仅保留 K 线与均线信息，未展开非授权技术指标。"
+        cleaned = f"{cleaned}\n\n{note}".strip() if cleaned else note
+    return cleaned
 
 
 def _normalize_plan_for_execution_batches(plan: List[str]) -> List[str]:
@@ -1211,6 +1349,22 @@ def _enforce_option_data_monitor_routing(query: str, plan: List[str]) -> List[st
     return ["monitor"]
 
 
+def _is_option_strategy_question(query: str) -> bool:
+    return is_option_strategy_question(query)
+
+
+def _has_explicit_option_underlying(query: str) -> bool:
+    return has_explicit_option_underlying(query)
+
+
+def _is_generic_option_strategy_question(query: str) -> bool:
+    return is_generic_option_strategy_question(query)
+
+
+def _enforce_unspecified_option_strategy_routing(query: str, plan: List[str], symbol: str = "") -> tuple[List[str], str]:
+    return _apply_analysis_task_policy(query, plan, symbol)
+
+
 CHART_REQUEST_KEYWORDS = (
     "画图",
     "画一下",
@@ -1517,7 +1671,7 @@ class PlanningOutput(BaseModel):
     plan: List[Literal["analyst", "researcher", "monitor", "strategist", "chatter", "generalist", "screener", "macro_analyst","roaster", "portfolio_analyst"]] = Field(
         description="执行步骤列表。注意依赖关系：期权(strategist)必须排在分析(analyst)之后。"
     )
-    symbol: str = Field(description="核心标的代码。如果是对比问题或无法提取单一标的，请留空或填'黄金'", default="")
+    symbol: str = Field(description="核心标的代码。如果是对比问题或无法提取单一标的，请留空", default="")
 
 
 def supervisor_node(state: AgentState, llm):
@@ -1547,11 +1701,14 @@ def supervisor_node(state: AgentState, llm):
     # 🔥 新增：持仓状态提示
     portfolio_status = f"\n【重要】用户{'已上传' if has_portfolio else '未上传'}持仓数据。" if has_portfolio else ""
     profile_status = f"\n【用户专属画像】\n{profile_context}" if profile_context else ""
+    subject_policy = build_subject_policy(query)
+    subject_policy_context = subject_policy.as_prompt_context()
 
     system_prompt = f"""
     你是交易团队的主管，根据问题制定计划。
     {portfolio_status}
     {profile_status}
+    {subject_policy_context}
 
     【可用员工】
     - analyst: 技术分析师 (看K线、定趋势),分析如何操作
@@ -1571,22 +1728,23 @@ def supervisor_node(state: AgentState, llm):
     1.1 **纯期权数据问题**：只问波动率/IV/IV Rank/到期日/剩余天数/行权价/保证金/合约乘数/一手资金占用，这类问题一律只派 `monitor`，不要派 `macro_analyst`、`analyst`、`strategist`、`researcher`。
     2. **全套服务**: 如果用户问"全面分析"或"详细分析"，默认路径: ["analyst", "monitor", "researcher","strategist"]。
     3. **持仓相关** (仅当用户已上传持仓时): 如果用户提到"我的持仓"、"我的股票"、"仓位"、"持仓风险"、"持仓分析"、"适合我"、"个性化建议"、"我的风格"、"持仓建议"、"调仓"、"加仓"、"减仓"等关键词，**必须**派 `portfolio_analyst`。
-    3. **单品种期权问题**: "500ETF适合价差还是裸买"、"推荐白银期权策略" -> 
+    4. **单品种期权问题**: "500ETF适合价差还是裸买"、"推荐白银期权策略" ->
        - 只要标的明确(500ETF)，且涉及期权交易，一律走流水线。
        - Plan: `['analyst', 'strategist']` (必须先分析再出策略)。
-    4. **多品种/对比**: 问"白银和黄金谁强"、"分析一下螺纹和热卷" -> 
+    4.1 **标的上下文**: 遵守【标的上下文策略】；概念题交给 `chatter`，需要落地但缺少交易对象时也先由 `chatter` 澄清。
+    5. **多品种/对比**: 问"白银和黄金谁强"、"分析一下螺纹和热卷" ->
        - symbol 填 "白银,黄金" (用逗号分隔)
        - plan 派 `['generalist']` (让王牌去处理多品种)。
-    5. **宏观/大宗/贵金属**: 
+    6. **宏观/大宗/贵金属**:
        - 问 "现在宏观环境怎么样"、"美联储降息了吗" -> Plan: `['researcher', 'macro_analyst']` (先找新闻，再分析数据)。
        - 问 "黄金/白银/能买吗" -> Plan: `['analyst', 'researcher', 'macro_analyst', 'strategist']` (黄金对宏观极度敏感，必须加宏观分析)。
        - 问 "利率/美元走势" -> Plan: `['researcher', 'macro_analyst']`。
-    6. **客户提到股票**，但没有明确说明标的名字，需要选股时，只 Plan:['screener']
-    7. **知识/百科/闲聊**: 问概念、问人名、问名词 -> 派 ['chatter']。
-    8. 如果用户的问题很模糊 (例如"帮我分析一下"，"黄金怎么看")，要先派chatter去问清楚问题 -> plan=['chatter']。
-    9. 只问K线或技术面分析时，只要派analyst，不要再派其他人
-    10.如果客户要画图，派 `['generalist']` 。
-    11. 用户问保证金/合约乘数/一手资金占用，或基差/库存仓单/交割期转现等数据问题，优先派 `monitor`；若同时要策略建议，可派 `['monitor','strategist']`。
+    7. **客户提到股票**，但没有明确说明标的名字，需要选股时，只 Plan:['screener']
+    8. **知识/百科/闲聊**: 问概念、问人名、问名词 -> 派 ['chatter']。
+    9. 如果用户的问题很模糊 (例如"帮我分析一下"，"黄金怎么看")，要先派chatter去问清楚问题 -> plan=['chatter']。
+    10. 只问K线或技术面分析时，只要派analyst，不要再派其他人
+    11. 如果客户要画图，派 `['generalist']` 。
+    12. 用户问保证金/合约乘数/一手资金占用，或基差/库存仓单/交割期转现等数据问题，优先派 `monitor`；若同时要策略建议，可派 `['monitor','strategist']`。
     """
 
     if is_followup:
@@ -1647,6 +1805,8 @@ def supervisor_node(state: AgentState, llm):
         elif final_plan[0] not in ["generalist", "chatter"]:
             final_plan = ["generalist"] + [p for p in final_plan if p != "generalist"]
 
+    final_symbol = str(result.symbol).strip()
+    final_plan = _enforce_research_analyst_routing(query, final_plan)
     final_plan = _enforce_option_portfolio_isolation(query, final_plan)
     final_plan = _enforce_margin_monitor_routing(query, final_plan)
     final_plan = _enforce_option_data_monitor_routing(query, final_plan)
@@ -1654,12 +1814,9 @@ def supervisor_node(state: AgentState, llm):
         final_plan = ["generalist"] + list(final_plan)
 
     # 去重并保持顺序，避免路由重复
-    deduped_plan = []
-    for p in final_plan:
-        if p not in deduped_plan:
-            deduped_plan.append(p)
-    final_plan = deduped_plan
-    final_symbol = str(result.symbol).strip()
+    final_plan = _dedupe_plan(final_plan)
+    final_plan, final_symbol = _apply_analysis_task_policy(query, final_plan, final_symbol)
+    final_plan = _dedupe_plan(final_plan)
 
     # 简单的正则判断是否为 A 股个股代码 (6开头沪市主板/科创, 0开头深市, 3开头创业板, 8/4开头北交所)
     # ETF 通常是 51, 56, 58, 159 开头
@@ -1896,6 +2053,7 @@ def analyst_node(state: AgentState, llm):
             【回复要求】：
             1. 画完图后，只要简短说明图表关键信息（如当前价格、涨跌幅）。
             2. 绝对不要做冗长的分析！
+            3. 技术面默认只允许引用工具返回的 K 线、均线、OHLC 与价格事实；禁止输出 RSI、MACD、KDJ、BOLL、布林、量能突破等非授权指标。
             """
     else:
         # 正常分析模式
@@ -1923,7 +2081,7 @@ def analyst_node(state: AgentState, llm):
             - 用户没有要求画图时，三个画图工具都不调用
 
             【任务】：
-            1. 描述K线和技术面情况
+            1. 只描述K线和技术面情况；基本面、财报、公告、行业逻辑交给 researcher，不要在技术分析里自行展开。
             2. 发掘突破进场机会。
             3. 如果连续几天累积涨幅过大，要提醒防范突然下跌，如果连续几天累积跌幅过大，要提醒可能突然报复反弹
             4. K线的重要性大于均线，反转或突破要看K线，均线反应会比较慢。
@@ -1931,6 +2089,8 @@ def analyst_node(state: AgentState, llm):
             6. 如果用户的指令模糊，可参考上文历史确认分析对象。
             7. 必须以 `analyze_kline_pattern` 返回的【今日K线事实】为准描述影线方向：吊人线/锤子线都是长下影小实体，不能说成长上影；射击之星是长上影小实体，不能说成长下影。若形态名与OHLC事实冲突，优先相信OHLC事实并说明“形态需复核”。
             8. 【用户专属画像】只用于调整表达和风险边界；当前问题明确表达优先，不要因为年龄/性别做交易判断。
+            9. 【数据采信硬边界】当前价、涨跌幅、支撑/压力、均线值必须来自工具返回；工具未查到时必须写“当前数据源未查到”，禁止用模型记忆补数。
+            10. 【技术指标边界】默认只使用 K 线和均线；禁止输出 RSI、MACD、KDJ、BOLL、布林、量能突破等未授权指标。即使你知道这些概念，本产品当前技术分析也不展开。
             """
 
 
@@ -1955,7 +2115,10 @@ def analyst_node(state: AgentState, llm):
             {"recursion_limit": 30}
         )
 
-        last_response = result["messages"][-1].content
+        last_response = _sanitize_unauthorized_technical_indicators(
+            result["messages"][-1].content,
+            query=query,
+        )
         partial_response = last_response
         # 🔥 提取公司名称（从get_market_snapshot的返回中）
         symbol_name = ""
@@ -2164,12 +2327,25 @@ def strategist_node(state: AgentState, llm):
     """
     symbol = state["symbol"]
     user_q = state.get("user_query", "")
-    risk_pref = state.get("risk_preference", "稳健型")
+    raw_risk_pref = state.get("risk_preference", "稳健型")
     fund = state.get("fund_data", "暂无明显资金流向")
     trend = state.get("trend_signal", "Neutral")
     mem_context = state.get("memory_context", "")
     profile_context = str(state.get("profile_context", "") or "").strip()
     tech_view = state.get("technical_summary", "")
+    profile_policy = build_profile_policy(
+        risk_preference=raw_risk_pref,
+        profile_context=profile_context,
+        user_query=user_q,
+    )
+    option_policy = build_option_strategy_policy(
+        risk_preference=profile_policy.risk_label,
+        profile_context=profile_context,
+        user_query=user_q,
+        trend_signal=trend,
+        technical_summary=tech_view,
+    )
+    risk_pref = option_policy.risk_label
     current_date = datetime.now().strftime("%Y年%m月%d日")
     key_level = state.get("key_levels", "")
     vision_position_domain = str(state.get("vision_position_domain", "") or "").strip().lower()
@@ -2349,6 +2525,8 @@ def strategist_node(state: AgentState, llm):
     authoritative_quote_prompt = ""
     if authoritative_quote_block:
         authoritative_quote_prompt = f"\n        【标的现价（权威数据，仅可引用以下数值）】\n{authoritative_quote_block}"
+    profile_policy_context = profile_policy.as_prompt_context()
+    option_strategy_policy_context = option_policy.as_prompt_context()
 
     option_position_requirements = ""
     if option_position_mode:
@@ -2394,19 +2572,24 @@ def strategist_node(state: AgentState, llm):
         【客户风险偏好】：{risk_pref}
         【客户历史记忆】：{mem_context}
         【用户专属画像】：{profile_context if profile_context else "无"}
+        {profile_policy_context}
         【市场资金面/保证金信息】：{fund}
         【技术面参考】：{trend} 、 {tech_view}{portfolio_context}{delta_cash_prompt}{authoritative_quote_prompt}
+        {option_strategy_policy_context}
         {"【上传截图识别】：本轮来自混合持仓截图，已自动切换到期权主线，股票体检不展开。" if vision_position_domain == "mixed" else ""}
 
         【边界说明】
         - 基差/库存仓单/交割期转现类数据由上游 monitor 汇总后传入，不在本节点直接查询。
 
         【工作流程】
-        **第一步：获取标的价格和波动率**
-        - 用 `get_market_snapshot` 获取现价，用`get_commodity_iv_info` 看IV，用`check_option_expiry_status` 看到期日。
+        **第一步：判断是否需要查数据**
+        - 普通知识解释、概念类比、宽泛讨论，不要为了预检索而查工具。
+        - 只要进入“适合我怎么做 / 推荐策略 / 买卖哪个合约 / 仓位风险 / 具体执行”的回答，必须按需检查三件事：标的现价、IV Rank、距离到期日。
+        - 用 `get_market_snapshot` 获取现价，用 `get_commodity_iv_info` 看IV/IV Rank，用 `check_option_expiry_status` 看到期日；工具失败时改为条件式建议，不编造数据。
 
         **第二步：设计策略**
         - **期权策略**：根据技术面趋势+IV+距离到期日+客户风险偏好来选择策略，可以查知识库辅助`search_investment_knowledge`。
+        - **个性化规则**：遵守【画像优先级】与【个性化期权策略规则】；规则块给边界，未覆盖细节由工具结果和交易常识判断。
         - **策略方向**：如果技术面参考是做多或看涨，就不要给做空策略，如果技术面参考是做空或看跌，就不要给做多策略。
         - **持仓关联**：如果客户有持仓信息（见【客户持仓信息】），且当前标的与持仓相关指数有关，需要明确说明策略如何辅助或对冲现有持仓风险。例如："考虑到您的股票持仓与{portfolio_corr_index if portfolio_corr_index else 'XX指数'}高度相关，建议用该期权策略来..."
         
@@ -2422,22 +2605,21 @@ def strategist_node(state: AgentState, llm):
         - 如果客户问“回测/策略表现”，优先用 `run_option_strategy_backtest` 给出回测结果。
         - 如果客户问“某策略在某时间段的胜率/盈亏比/最大回撤”，必须调用回测工具并传入 `start_date/end_date` 或 `time_expr`，禁止口头估算。
 
-        【风险偏好适配】：
-           - 【保守型】：只推荐风险有限的策略（牛市价差、熊市价差、比率价差），禁止裸卖
-           - 【稳健型】：可以适度进攻（买平值期权、顺势卖虚值期权、价差策略、备兑策略、合成期货）
-           - 【激进型】：可以用积极策略（有趋势时买深虚期权、买末日期权、飞龙在天，没趋势时就双卖期权，或者卖末日期权）
-           - 【用户专属画像】：常看品种、害怕/担心、厌恶点可用于调节策略复杂度和风险提示；年龄、性别不作为策略依据。
+        【策略规则使用】
+        - 【个性化期权策略规则】是本轮期权策略边界，优先于自由发挥。
+        - 工具查到的 IV Rank、DTE、现价和合约价格负责确定执行参数；查不到时只给条件式策略，不编造合约。
            
         【工具使用特殊提醒】：
         1. 中证1000有股指期权，不要用get_etf_option_strikes，必须用tool_query_specific_option查期权合约
 
         【输出要求】
-        1. 给出 1-2 个具体的期权策略建议，行权价必须用工具查过。
+        1. 默认给出“首选策略 + 条件”，只有当你输出具体合约、行权价、权利金或盈亏示例时，相关行权价/价格必须用工具查过。
         2. **计算盈亏示例时，必须乘以合约乘数**
-        3. 解释为什么这个策略适合市场或客户，可以查知识库辅助`search_investment_knowledge`
+        3. 必须说明策略选择依据来自风险偏好、DTE、IV、趋势强弱中的哪些项，可以查知识库辅助`search_investment_knowledge`
         4. 给出止损/止盈建议
         5. 禁止自己编造假数据！
         6. 禁止使用 Long/Short Call/Put 术语，统一使用中文交易口径：买认购/卖认购/买认沽/卖认沽。
+        7. 不允许只给固定模板；必须输出“首选策略 + 不适合策略 + 触发/失效条件”。
         {option_position_requirements}
 
         """
@@ -2804,6 +2986,9 @@ def knowledge_chatter_node(state: AgentState, llm=None):
     focus_aspect = str(state.get("focus_aspect", "") or "").strip()
     followup_goal = str(state.get("followup_goal", "") or "").strip()
     knowledge_strategy = _select_knowledge_chat_strategy(state)
+    subject_policy = build_subject_policy(user_query, symbol_hint=str(state.get("symbol", "") or ""))
+    subject_policy_context = subject_policy.as_prompt_context()
+    data_policy_context = build_data_policy_context(symbol=str(state.get("symbol", "") or ""), mode="chatter")
     current_date = datetime.now().strftime("%Y年%m月%d日")
     context_parts = []
     if recent_context:
@@ -2880,6 +3065,8 @@ def knowledge_chatter_node(state: AgentState, llm=None):
         {combined_context}
 
         {core_rules}
+        {subject_policy_context}
+        {data_policy_context}
 
         【回答风格】
         1. 语气要轻松、易懂，像朋友聊天一样
@@ -2888,7 +3075,6 @@ def knowledge_chatter_node(state: AgentState, llm=None):
         4. 如果是策略问题，结合实际场景说明
         5. 如果【用户专属画像】里有爱好、回答偏好或厌恶点，只有在解释类比或表达风格相关时自然使用，不要硬提身份信息。
         6. 适当引导用户深入探讨相关话题
-
 
         【禁止事项】
         - 不要编造数据或策略
@@ -3647,7 +3833,11 @@ def finalizer_node(state: AgentState, llm):
         context_text = f"{context_text}\n\n{option_delta_cash_report}"
     elif option_delta_cash_gap_note and option_delta_cash_gap_note not in context_text:
         context_text = f"{context_text}\n\n> ⚠️ **Delta数据缺口**：{option_delta_cash_gap_note}"
-    if "【精选股票】" in context_text:
+    is_pure_screener_source = bool(worker_msgs) and all(
+        str(getattr(msg, "content", "") or "").strip().startswith("【精选股票】")
+        for msg in worker_msgs
+    )
+    if "【精选股票】" in context_text and is_pure_screener_source:
         # 直接返回 PASS，不做任何 LLM 思考，毫秒级响应
         return {
             "messages": [HumanMessage(content="PASS")]
@@ -3696,6 +3886,7 @@ def finalizer_node(state: AgentState, llm):
     is_news_impact = _is_news_impact_query(user_query)
 
     display_name = f"{symbol_name}({symbol})" if symbol_name else symbol
+    finalizer_data_policy = build_data_policy_context(symbol=display_name, mode="finalizer")
 
     def _extract_finalizer_chart_img() -> str:
         local_chart_img = state.get("chart_img", "")
@@ -3745,6 +3936,8 @@ def finalizer_node(state: AgentState, llm):
                 【已有的宏观分析报告】：
                 {macro_view}
 
+                {finalizer_data_policy}
+
                 【输出目标】：
                 用交易员风格，给一份短、清楚、能落地的“事件快评”。
                 先说主线，再说盘面验证，再说反向风险，最后说接下来盯什么和怎么应对。
@@ -3779,7 +3972,7 @@ def finalizer_node(state: AgentState, llm):
                 - 给偏稳健的应对方式，讲清楚是不追、等回踩、还是只做轻仓确认。
                 """
         final_verdict = llm.invoke(news_prompt)
-        final_text = f"【最终决策】\n{final_verdict.content}"
+        final_text = f"【最终决策】\n{_sanitize_unauthorized_technical_indicators(final_verdict.content, query=user_query)}"
         lock_result = _lock_option_and_price(final_text)
         return {
             "messages": [HumanMessage(content=str(lock_result.get("text") or final_text))],
@@ -3817,6 +4010,8 @@ def finalizer_node(state: AgentState, llm):
         【待审核报告】：
         {context_text}
 
+        {finalizer_data_policy}
+
         【任务】：
         1. 检查报告是否存在**致命的常识性错误**（如把标的搞错、逻辑完全相反）。
         2. **如果报告无误**：请直接输出四个字 "DIRECT_PASS" (不要输出其他符号)。这意味着直接采用原报告，保留其完美的 Markdown 排版。
@@ -3828,9 +4023,10 @@ def finalizer_node(state: AgentState, llm):
 
         # 如果 LLM 觉得没问题，返回特定标记
         if "DIRECT_PASS" in response.content:
-            lock_result = _lock_option_and_price(context_text)
+            sanitized_context_text = _sanitize_unauthorized_technical_indicators(context_text, query=user_query)
+            lock_result = _lock_option_and_price(sanitized_context_text)
             return {
-                "messages": [HumanMessage(content=str(lock_result.get("text") or context_text))],
+                "messages": [HumanMessage(content=str(lock_result.get("text") or sanitized_context_text))],
                 "canonical_option_legs_block": str(lock_result.get("canonical_option_legs_block") or canonical_option_legs_block),
                 "option_direction_conflict_count": int(lock_result.get("option_direction_conflict_count") or 0),
                 "authoritative_underlying_quotes": authoritative_underlying_quotes,
@@ -3844,15 +4040,17 @@ def finalizer_node(state: AgentState, llm):
                 keep_symbol = any(alias in revised_norm for alias in symbol_aliases)
                 if not keep_symbol:
                     print(f"⚠️ finalizer 审校疑似串标，回退原报告。locked={symbol_aliases}")
-                    lock_result = _lock_option_and_price(context_text)
+                    sanitized_context_text = _sanitize_unauthorized_technical_indicators(context_text, query=user_query)
+                    lock_result = _lock_option_and_price(sanitized_context_text)
                     return {
-                        "messages": [HumanMessage(content=str(lock_result.get("text") or context_text))],
+                        "messages": [HumanMessage(content=str(lock_result.get("text") or sanitized_context_text))],
                         "canonical_option_legs_block": str(lock_result.get("canonical_option_legs_block") or canonical_option_legs_block),
                         "option_direction_conflict_count": int(lock_result.get("option_direction_conflict_count") or 0),
                         "authoritative_underlying_quotes": authoritative_underlying_quotes,
                         "authoritative_quote_block": str(lock_result.get("authoritative_quote_block") or authoritative_quote_block),
                         "price_conflict_count": int(lock_result.get("price_conflict_count") or 0),
                     }
+            revised_text = _sanitize_unauthorized_technical_indicators(revised_text, query=user_query)
             lock_result = _lock_option_and_price(f"【风控修正】\n{revised_text}")
             # 如果有错被重写了，就返回重写的内容
             return {
@@ -3885,10 +4083,12 @@ def finalizer_node(state: AgentState, llm):
                 你是一位数据检查师。
                 【当前日期】：{today_str}
                 【用户问题】：{user_query}
-                【分析标的】: {display_name} 
+                【分析标的】: {display_name}
 
                 【团队收集的数据】：
                 {context_text}
+
+                {finalizer_data_policy}
 
                 【输出要求】：
                 1. **直接回答用户的问题**，不要跑题！用户问持仓就答持仓，问排名就答排名。
@@ -3995,6 +4195,7 @@ def finalizer_node(state: AgentState, llm):
 
                 {portfolio_context_prompt}
                 {option_focus_prompt}
+                {finalizer_data_policy}
 
                 【📚 内部知识库 (基于"{enhanced_query}"检索)】：
                 {kb_context}
@@ -4005,20 +4206,16 @@ def finalizer_node(state: AgentState, llm):
                 2. 知识要参考{kb_context}，但要根据当下市场情况，自己理解后输出。
                 3. 如果记忆或画像里有客户的持仓、偏好、风险边界，在报告里可以针对性地写；如果当前问题与画像冲突，以当前问题为准。
                 3.1 【用户专属画像】采用克制自然口径：策略、仓位、风险问题参考交易画像；解释类比或个人化表达才参考个人画像；年龄、性别不得作为交易判断依据。
-                4. 所有价格数据（当前价、支撑位、压力位、均线值），必须使用来自【团队报告池】！
+                4. 所有价格数据（当前价、涨跌幅、支撑位、压力位、均线值），必须使用来自【团队报告池】；团队报告池没有就写“当前数据源未查到”，禁止补数。
+                4.1 所有基本面事实（财报数字、公告、机构目标价、业务进展）必须来自【情报与舆情】或团队报告池；没有研究员资料时，不得自行编造。
+                4.2 技术面默认只允许 K 线和均线；禁止输出 RSI、MACD、KDJ、BOLL、布林、量能突破等非授权指标。
                 5. **【关键】**：如果报告池中包含持仓分析和策略建议，必须在整合时解释清楚策略如何服务于持仓管理（对冲/增强/风控），不要让两部分孤立存在。
                 
-                【注意事项】：
-                1. 中国的股票没有期权，客户问股票时，不要给期权策略，除非是用ETF期权来对冲股票。
-                2. 商品期货都有期权！禁止说商品没有场内期权。如果遇到数据矛盾，以strategist为主。
-                3. 如果某品种有利好消息但却下跌，要提醒利多不涨，可能反转，而如果有坏消息但却不跌，要提醒利空不跌，可能阶段底部到了。
-                4. 价格数据是每天中午11点半和下午5点后更新。
-                5. 2026年春节长假是2月16日才开始！
-                6. 黄金白银的价格只看analyst给的信息！
-                
-                【必须遵守的数据准则】
-                1. **绝对禁止捏造数据**。如果没有数据就回答不知道。
-                2. 在分析宏观前，要引用【宏观分析报告】的结论。
+                【数据与交易边界】
+                1. 股票自身不展开场内期权策略；若涉及对冲，只能说明可通过相关 ETF 期权表达。
+                2. 商品期货存在期权；如果遇到数据矛盾，以 strategist 与确定性工具结果为主。
+                3. 消息与价格背离时，用“利多不涨/利空不跌”的交易验证框架提醒反向风险。
+                4. 在分析宏观前，要引用【宏观分析报告】的结论。
                 
                 【已有的宏观分析报告】
                 {macro_view}
@@ -4037,7 +4234,7 @@ def finalizer_node(state: AgentState, llm):
                 4. **重要警示**：如果涉及风险，使用 `> ⚠️ **风险提示**：...` 的格式高亮。
                 5. **数据表格**：如果涉及多组数据对比（如支撑压力位、资金流），尽量整理成 Markdown 表格。
                 6. **语气**：专业、自信、干练。不要堆砌废话。
-                7. 报告里不要参考MACD指标！
+                7. 报告里不要参考 RSI、MACD、KDJ、BOLL、布林、量能突破等非授权技术指标！
                 8. 引用知识库内容时，不要把文章标题写出来。
 
                 【报告结构模板】：
@@ -4072,7 +4269,7 @@ def finalizer_node(state: AgentState, llm):
                 chart_img = chart_matches[-1]
                 print(f"📊 finalizer 从报告中提取到图表: {chart_img}")
 
-        final_text = f"【最终决策】\n{final_verdict.content}"
+        final_text = f"【最终决策】\n{_sanitize_unauthorized_technical_indicators(final_verdict.content, query=user_query)}"
         lock_result = _lock_option_and_price(final_text)
         return {
             "messages": [HumanMessage(content=str(lock_result.get("text") or final_text))],

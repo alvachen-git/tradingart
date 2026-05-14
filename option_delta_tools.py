@@ -768,13 +768,22 @@ def _classify_delta_coverage(coverage_ratio: float, has_legs: bool) -> Dict[str,
 
 
 def _normalize_risk_profile(risk_preference: str) -> str:
-    text = str(risk_preference or "")
-    for cn, key in _RISK_PROFILE_MAP.items():
-        if cn in text:
-            return key
+    text = re.sub(
+        r"(不是|并非|不算|别按|不要按|不再按|不是很)\s*(偏?保守|保守型|conservative)",
+        "",
+        str(risk_preference or ""),
+        flags=re.IGNORECASE,
+    )
     text_l = text.lower()
     if "aggress" in text_l:
         return "aggressive"
+    if any(k in text for k in ["偏保守", "保守", "低风险"]):
+        return "conservative"
+    if any(k in text for k in ["偏激进", "偏积极", "激进", "积极", "高风险"]):
+        return "aggressive"
+    for cn, key in _RISK_PROFILE_MAP.items():
+        if cn in text:
+            return key
     if "conserv" in text_l:
         return "conservative"
     return "balanced"
