@@ -54,6 +54,14 @@ except Exception:
     RETRYABLE_REQUEST_EXCEPTIONS = tuple()
 
 
+class RetryableOperationError(Exception):
+    """Error that should be retried within the batch operation budget."""
+
+    def __init__(self, category: str, message: str):
+        super().__init__(message)
+        self.category = category
+
+
 def _read_int_env(name: str, default: int) -> int:
     raw = str(os.getenv(name, str(default))).strip()
     try:
@@ -105,6 +113,9 @@ llm = ChatTongyi(
 
 
 def _classify_retry(exc: Exception) -> tuple[str, bool]:
+    if isinstance(exc, RetryableOperationError):
+        return exc.category, True
+
     message = f"{type(exc).__name__}: {exc}"
     lower = message.lower()
 
@@ -206,6 +217,39 @@ def _write_material_debug(material: str, meta: dict = None) -> None:
             f.write(material or "")
     except Exception as write_err:
         print(f"[debug] failed to write broker_material_debug.txt: {write_err}")
+
+
+MIN_COLLECT_MATERIAL_CHARS = 100
+
+
+def _material_quality_error(material: str) -> str:
+    text = str(material or "").strip()
+    lower = text.lower()
+    if "need more steps" in lower:
+        return "agent returned need_more_steps"
+    if len(text) < MIN_COLLECT_MATERIAL_CHARS:
+        return f"material too short: {len(text)} chars"
+    return ""
+
+
+def _extract_reporter_material(agent_result: Any) -> str:
+    messages = agent_result.get("messages") if isinstance(agent_result, dict) else None
+    if not messages:
+        raise ValueError("missing messages in reporter_agent response")
+
+    content = getattr(messages[-1], "content", "")
+    if not isinstance(content, str):
+        content = str(content or "")
+
+    quality_error = _material_quality_error(content)
+    if quality_error:
+        preview = re.sub(r"\s+", " ", content).strip()[:160]
+        raise RetryableOperationError(
+            "collect_bad_material",
+            f"{quality_error}; preview={preview!r}",
+        )
+
+    return content.strip()
 
 # ==========================================
 # 2. 期货商分类配置
@@ -674,6 +718,16 @@ def _enrich_records_with_value(records: list[dict]) -> list[dict]:
     return enriched
 
 
+def _record_value_scale_sort_key(record: dict) -> float:
+    value_yi = record.get("value_yi")
+    if isinstance(value_yi, (int, float)):
+        return abs(float(value_yi))
+    try:
+        return float(abs(int(record.get("net_chg", 0))))
+    except Exception:
+        return 0.0
+
+
 def _format_value_yi(value_yi: float | None) -> str:
     if value_yi is None:
         return "(估值缺失)"
@@ -691,8 +745,16 @@ def _direction_of(v: int) -> int:
 def _build_institution_5d_snapshot(start_date: str, end_date: str) -> dict:
     institution_brokers_db = [get_db_broker_name(b) for b in BROKER_CONFIG["正指标_机构"]]
     records = _enrich_records_with_value(_query_group_product_net_changes(institution_brokers_db, start_date, end_date))
-    long_top = [r for r in records if r["net_chg"] > 0][:5]
-    short_top = sorted([r for r in records if r["net_chg"] < 0], key=lambda x: x["net_chg"])[:5]
+    long_top = sorted(
+        [r for r in records if r["net_chg"] > 0],
+        key=_record_value_scale_sort_key,
+        reverse=True,
+    )[:5]
+    short_top = sorted(
+        [r for r in records if r["net_chg"] < 0],
+        key=_record_value_scale_sort_key,
+        reverse=True,
+    )[:5]
     return {
         "start_date": start_date,
         "end_date": end_date,
@@ -1359,10 +1421,11 @@ IMPORTANT:
 """
 
         def _do_collect():
-            return reporter_agent.invoke(
+            result = reporter_agent.invoke(
                 {"messages": [HumanMessage(content=trigger_msg)]},
-                {"recursion_limit": 150}
+                {"recursion_limit": 200}
             )
+            return _extract_reporter_material(result)
 
         invoke_result = _invoke_with_retry(_do_collect, "collect_material")
         if not invoke_result.get("ok"):
@@ -1381,21 +1444,7 @@ IMPORTANT:
                 "elapsed_seconds": invoke_result.get("elapsed_seconds", 0.0),
             }
 
-        result = invoke_result.get("result")
-        messages = result.get("messages") if isinstance(result, dict) else None
-        if not messages:
-            return {
-                "ok": False,
-                "material": "",
-                "error_category": "collect_bad_response",
-                "error_message": "missing messages in reporter_agent response",
-                "attempts": invoke_result.get("attempts", 0),
-                "elapsed_seconds": invoke_result.get("elapsed_seconds", 0.0),
-            }
-
-        collected_content = getattr(messages[-1], "content", "")
-        if not isinstance(collected_content, str):
-            collected_content = str(collected_content or "")
+        collected_content = str(invoke_result.get("result") or "")
 
         print("✅[持仓记者] 采集完成。")
         return {
