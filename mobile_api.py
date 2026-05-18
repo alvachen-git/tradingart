@@ -19,6 +19,17 @@ mobile_api.py — 爱波塔手机端专用 FastAPI 后端
   POST   /api/auth/logout               登出当前设备
   GET    /api/auth/verify               验证 Token
 
+  GET    /api/device/ping               设备链路健康检查
+  GET    /api/device/config             设备端行为配置
+  GET    /api/device/briefing           设备简报（StackChan v1）
+  GET    /api/device/contracts/menu      设备合约菜单（StackChan v1.1）
+  GET    /api/device/contracts/briefing  设备单合约 IV 看板（StackChan v1.1）
+  POST   /api/device/voice/query       设备语音问答（StackChan v2）
+  WS     /api/device/voice/realtime    设备实时语音协议原型（StackChan v3 research）
+  GET    /api/device/voice/audio/{voice_id} 设备语音回答音频
+  GET    /api/device/voice/audio-prompt/{prompt_key} 设备固定提示音频
+  GET    /api/device/voice/task/{task_id} 设备深度分析任务状态
+
   POST   /api/chat/submit               提交 AI 问答任务
   GET    /api/chat/status/{task_id}     轮询 AI 任务状态
   GET    /api/chat/pending              获取最近聊天任务恢复态
@@ -49,26 +60,38 @@ mobile_api.py — 爱波塔手机端专用 FastAPI 后端
   GET    /api/user/profile              获取用户资料与订阅状态
 """
 
+import base64
+import difflib
 import hashlib
 import io
 import json
 import math
 import os
+import platform
 import re
+import shutil
+import struct
+import subprocess
 import sys
 import threading
 import time
 import uuid
+import wave
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
-from typing import Optional, List, Any, Dict
+from typing import Optional, List, Any, Dict, Tuple
 
 import redis
-from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, Query, Request
+from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, Form, Query, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
+
+if str(os.getenv("ENABLE_LANGSMITH_TRACING", "")).strip().lower() not in {"1", "true", "yes", "on"}:
+    os.environ["LANGCHAIN_TRACING_V2"] = "false"
+    os.environ["LANGSMITH_TRACING"] = "false"
+
 from llm_compat import ChatTongyiCompat as ChatTongyi
 
 # 确保同目录模块可以 import
@@ -160,6 +183,66 @@ _CHAT_FEEDBACK_ENV_ADMIN_USERS = {
     item.strip() for item in str(os.getenv("AI_FEEDBACK_ADMIN_USERS", "")).split(",") if item.strip()
 }
 _CHAT_FEEDBACK_ADMIN_USERS = _CHAT_FEEDBACK_DEFAULT_ADMIN_USERS | _CHAT_FEEDBACK_ENV_ADMIN_USERS
+_DEVICE_AUTO_POLL_ENABLED_DEFAULT = (
+    str(os.getenv("DEVICE_AUTO_POLL_ENABLED", "0")).strip().lower() in {"1", "true", "yes", "on"}
+)
+_DEVICE_AUTO_POLL_SECONDS_DEFAULT = int(str(os.getenv("DEVICE_AUTO_POLL_SECONDS", "180")).strip() or 180)
+_DEVICE_AUTO_POLL_MIN_SECONDS = 60
+_DEVICE_VOICE_ENABLED_DEFAULT = (
+    str(os.getenv("DEVICE_VOICE_ENABLED", "1")).strip().lower() in {"1", "true", "yes", "on"}
+)
+_DEVICE_VOICE_MODE_DEFAULT = "tap_to_wake"
+_DEVICE_VOICE_RECORD_MAX_SECONDS = 8
+_DEVICE_VOICE_SAMPLE_RATE = 16000
+_DEVICE_VOICE_CHANNELS = 1
+_DEVICE_VOICE_BITS_PER_SAMPLE = 16
+_DEVICE_VOICE_MAX_WAV_BYTES = 44 + (_DEVICE_VOICE_RECORD_MAX_SECONDS * _DEVICE_VOICE_SAMPLE_RATE * 2)
+_DEVICE_VOICE_REALTIME_MAX_PCM_BYTES = _DEVICE_VOICE_RECORD_MAX_SECONDS * _DEVICE_VOICE_SAMPLE_RATE * 2
+_DEVICE_VOICE_REALTIME_FOLLOWUP_WINDOW_SECONDS = 8
+_DEVICE_VOICE_REALTIME_TTS_CHUNK_BYTES = 4096
+_DEVICE_VOICE_REALTIME_TTS_AUDIO_DELTA_ENABLED = (
+    str(os.getenv("DEVICE_REALTIME_TTS_AUDIO_DELTA_ENABLED", "0")).strip().lower() in {"1", "true", "yes", "on"}
+)
+_DEVICE_VOICE_MIN_CLEAR_AUDIO_MS = 500
+_DEVICE_VOICE_LOW_PEAK_THRESHOLD = 600
+_DEVICE_VOICE_LOW_RMS_THRESHOLD = 60.0
+_DEVICE_VOICE_AUDIO_CACHE_TTL_SECONDS = 600
+_DEVICE_VOICE_AUDIO_DISK_CACHE_TTL_SECONDS = max(
+    600,
+    int(str(os.getenv("DEVICE_VOICE_AUDIO_DISK_CACHE_TTL_SECONDS", "3600")).strip() or 3600),
+)
+_DEVICE_VOICE_AUDIO_DISK_CACHE_DIR = os.getenv(
+    "DEVICE_VOICE_AUDIO_DISK_CACHE_DIR",
+    "/tmp/tradingart_device_voice_cache",
+)
+_DEVICE_VOICE_AUDIO_CACHE: Dict[str, Dict[str, Any]] = {}
+_DEVICE_VOICE_TEXT_AUDIO_CACHE: Dict[str, Dict[str, Any]] = {}
+_DEVICE_VOICE_AUDIO_CACHE_LOCK = threading.Lock()
+_DEVICE_TTS_VOLUME_GAIN_DEFAULT = 1.5
+_DEVICE_TTS_TARGET_PEAK = 22000
+_DEVICE_TTS_HARD_PEAK = 28000
+_DEVICE_VOICE_TASK_POLL_SECONDS = max(
+    1,
+    int(str(os.getenv("DEVICE_VOICE_TASK_POLL_SECONDS", "2")).strip() or 2),
+)
+_DEVICE_VOICE_TASK_MAX_WAIT_SECONDS = max(
+    300,
+    _DEVICE_VOICE_TASK_POLL_SECONDS,
+    int(str(os.getenv("DEVICE_VOICE_TASK_MAX_WAIT_SECONDS", "900")).strip() or 900),
+)
+_DEVICE_VOICE_TASK_WORKER_GRACE_SECONDS = max(
+    20,
+    int(str(os.getenv("DEVICE_VOICE_TASK_WORKER_GRACE_SECONDS", "35")).strip() or 35),
+)
+_DEVICE_VOICE_TASK_LOST_GRACE_SECONDS = max(
+    45,
+    int(str(os.getenv("DEVICE_VOICE_TASK_LOST_GRACE_SECONDS", "60")).strip() or 60),
+)
+_DEVICE_VOICE_LAST_TASK_TTL_SECONDS = 7200
+_DEVICE_VOICE_LAST_TASK_PREFIX = "device_voice:last_task:"
+_DEVICE_VOICE_LATENCY_OBSERVATION_ENABLED = (
+    str(os.getenv("DEVICE_VOICE_LATENCY_OBSERVATION_ENABLED", "1")).strip().lower() in {"1", "true", "yes", "on"}
+)
 
 # ════════════════════════════════════════════════════════════
 #  实时行情后台刷新 — 直连新浪行情接口（绕过 akshare 封装层）
@@ -1152,6 +1235,10 @@ def get_current_user(
 ) -> str:
     """验证 Bearer Token，返回 username；失败则抛出 401。"""
     username_hint, raw_token = _unpack_token(credentials.credentials)
+    return _resolve_username_from_raw_token(username_hint, raw_token)
+
+
+def _resolve_username_from_raw_token(username_hint: str, raw_token: str) -> str:
     try:
         if username_hint:
             is_valid = auth.check_token(username_hint, raw_token, strict=True)
@@ -1167,9 +1254,3062 @@ def get_current_user(
     return username
 
 
+def _resolve_websocket_user(websocket: WebSocket) -> str:
+    auth_header = _safe_textv(websocket.headers.get("authorization"))
+    token = ""
+    if auth_header.lower().startswith("bearer "):
+        token = auth_header[7:].strip()
+    if not token:
+        token = _safe_textv(websocket.query_params.get("token"))
+    username_hint, raw_token = _unpack_token(token)
+    return _resolve_username_from_raw_token(username_hint, raw_token)
+
+
+def _request_from_websocket(websocket: WebSocket) -> Request:
+    raw_headers = []
+    try:
+        raw_headers = list(websocket.headers.raw)
+    except Exception:
+        raw_headers = []
+    return Request({"type": "http", "headers": raw_headers})
+
+
 def _pack_token(username: str, raw_token: str) -> str:
     _ = username
     return str(raw_token or "")
+
+
+def _device_now_text() -> str:
+    import pytz
+
+    return datetime.now(pytz.timezone("Asia/Shanghai")).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _perf_ms_since(started_at: float) -> int:
+    return int(round((time.perf_counter() - started_at) * 1000))
+
+
+def _record_timing(timings: Dict[str, Any], key: str, started_at: float) -> None:
+    if _DEVICE_VOICE_LATENCY_OBSERVATION_ENABLED:
+        timings[key] = _perf_ms_since(started_at)
+
+
+def _safe_floatv(value: Any, default: Optional[float] = 0.0) -> Optional[float]:
+    if value is None:
+        return default
+    try:
+        if isinstance(value, float) and math.isnan(value):
+            return default
+        return float(value)
+    except Exception:
+        return default
+
+
+def _safe_textv(value: Any, default: str = "") -> str:
+    if value is None:
+        return default
+    text = str(value).strip()
+    return text if text else default
+
+
+def _clamp_device_score(value: Any) -> Optional[int]:
+    parsed = _safe_floatv(value, default=None)
+    if parsed is None:
+        return None
+    return max(0, min(100, int(round(parsed))))
+
+
+def _normalize_device_auto_poll_seconds(raw_value: Any) -> int:
+    parsed = _safe_floatv(raw_value, default=float(_DEVICE_AUTO_POLL_SECONDS_DEFAULT))
+    if parsed is None:
+        parsed = float(_DEVICE_AUTO_POLL_SECONDS_DEFAULT)
+    return max(_DEVICE_AUTO_POLL_MIN_SECONDS, int(round(parsed)))
+
+
+def _extract_device_context(request: Request) -> Dict[str, str]:
+    headers = request.headers
+    return {
+        "device_id": _safe_textv(headers.get("X-Device-Id")),
+        "device_model": _safe_textv(headers.get("X-Device-Model")),
+        "device_version": _safe_textv(headers.get("X-Device-Version")),
+    }
+
+
+def _log_device_request(
+    *,
+    endpoint: str,
+    username: str,
+    request: Request,
+    status: str,
+    detail: str = "",
+) -> None:
+    device_ctx = _extract_device_context(request)
+    print(
+        "[device_api] "
+        f"endpoint={endpoint} status={status} user={username} "
+        f"device_id={device_ctx.get('device_id') or '-'} "
+        f"model={device_ctx.get('device_model') or '-'} "
+        f"version={device_ctx.get('device_version') or '-'} "
+        f"detail={detail or '-'}",
+        flush=True,
+    )
+
+
+def _build_device_config_payload() -> Dict[str, Any]:
+    auto_poll_enabled = bool(_DEVICE_AUTO_POLL_ENABLED_DEFAULT)
+    auto_poll_seconds = None
+    briefing_mode = "manual"
+    if auto_poll_enabled:
+        auto_poll_seconds = _normalize_device_auto_poll_seconds(_DEVICE_AUTO_POLL_SECONDS_DEFAULT)
+        briefing_mode = "hybrid"
+    return {
+        "auto_poll_enabled": auto_poll_enabled,
+        "auto_poll_seconds": auto_poll_seconds,
+        "voice_enabled": bool(_DEVICE_VOICE_ENABLED_DEFAULT),
+        "voice_mode": _DEVICE_VOICE_MODE_DEFAULT,
+        "record_max_seconds": _DEVICE_VOICE_RECORD_MAX_SECONDS,
+        "audio_format": "wav_pcm_16k_mono",
+        "voice_task_poll_seconds": _DEVICE_VOICE_TASK_POLL_SECONDS,
+        "voice_task_max_wait_seconds": _DEVICE_VOICE_TASK_MAX_WAIT_SECONDS,
+        "voice_latency_observation_enabled": _DEVICE_VOICE_LATENCY_OBSERVATION_ENABLED,
+        "voice_realtime_endpoint": "/api/device/voice/realtime",
+        "briefing_mode": briefing_mode,
+    }
+
+
+def _pick_market_brief_alert(market_df: Any) -> str:
+    if market_df is None or getattr(market_df, "empty", True):
+        return ""
+
+    iv_col = "IV变动(日)"
+    pct_col = "涨跌%(日)"
+    name_col = "合约"
+    best_msg = ""
+    best_score = 0.0
+
+    try:
+        for _, row in market_df.iterrows():
+            name = _safe_textv(row.get(name_col), "市场")
+            iv_delta = _safe_floatv(row.get(iv_col), default=None)
+            if iv_delta is not None:
+                score = abs(iv_delta)
+                if score >= 1.0 and score > best_score:
+                    direction = "升温" if iv_delta > 0 else "回落"
+                    best_msg = f"{name}IV{direction}{abs(iv_delta):.1f}点"
+                    best_score = score
+            pct_1d = _safe_floatv(row.get(pct_col), default=None)
+            if pct_1d is not None:
+                score = abs(pct_1d) * 0.8
+                if score >= 2.0 and score > best_score:
+                    direction = "上涨" if pct_1d > 0 else "回落"
+                    best_msg = f"{name}{direction}{abs(pct_1d):.1f}%"
+                    best_score = score
+    except Exception as exc:
+        print(f"[device_api] market_alert_build_failed err={exc}", flush=True)
+        return ""
+
+    return best_msg
+
+
+def _derive_device_market_state(
+    *,
+    iv_temperature: Optional[int],
+    chaos_index: Optional[int],
+) -> tuple[str, str]:
+    if (chaos_index is not None and chaos_index >= 65) or (iv_temperature is not None and iv_temperature >= 68):
+        return "risk_off", "high"
+    if (chaos_index is not None and chaos_index <= 35) and (iv_temperature is not None and iv_temperature <= 40):
+        return "risk_on", "low"
+    return "neutral", "medium"
+
+
+def _build_device_texts(
+    *,
+    market_state: str,
+    latest_alert: str,
+    iv_temperature: Optional[int],
+    chaos_index: Optional[int],
+    data_freshness: str,
+) -> tuple[str, str]:
+    state_label = {
+        "risk_off": "市场偏谨慎",
+        "neutral": "市场中性观察",
+        "risk_on": "市场风险偏好回暖",
+    }.get(market_state, "市场中性观察")
+    alert_text = _safe_textv(latest_alert)
+
+    if alert_text:
+        headline = f"{state_label}，{alert_text}"
+    elif data_freshness == "degraded":
+        headline = "设备简报暂时降级，请稍后重试"
+    else:
+        headline = f"{state_label}，当前无突出预警"
+
+    metrics_bits = []
+    if chaos_index is not None:
+        metrics_bits.append(f"混乱指数{chaos_index}")
+    if iv_temperature is not None:
+        metrics_bits.append(f"IV温度{iv_temperature}")
+    metrics_text = "，".join(metrics_bits)
+
+    if data_freshness == "degraded":
+        speak_text = "当前市场简报暂时降级，请稍后再查询。"
+    elif alert_text and metrics_text:
+        speak_text = f"{state_label}。{alert_text}。{metrics_text}。"
+    elif alert_text:
+        speak_text = f"{state_label}。{alert_text}。"
+    elif metrics_text:
+        speak_text = f"{state_label}。{metrics_text}。"
+    else:
+        speak_text = f"{state_label}。当前没有新的设备预警。"
+
+    return headline, speak_text
+
+
+def _build_device_briefing_payload(username: str, request: Request) -> Dict[str, Any]:
+    device_ctx = _extract_device_context(request)
+    market_df = None
+    chaos_snapshot: Dict[str, Any] = {}
+    iv_snapshot: Dict[str, Any] = {}
+    source_errors: list[str] = []
+
+    try:
+        market_df = de.get_comprehensive_market_data()
+    except Exception as exc:
+        source_errors.append(f"market:{exc}")
+
+    try:
+        raw_chaos = de.get_latest_geopolitical_risk_snapshot()
+        if isinstance(raw_chaos, dict):
+            chaos_snapshot = raw_chaos
+    except Exception as exc:
+        source_errors.append(f"chaos:{exc}")
+
+    try:
+        raw_iv = de.get_cross_asset_iv_index(auto_compute=False)
+        if isinstance(raw_iv, dict):
+            iv_snapshot = raw_iv
+    except Exception as exc:
+        source_errors.append(f"iv:{exc}")
+
+    chaos_index = _clamp_device_score(
+        chaos_snapshot.get("score_display", chaos_snapshot.get("score_raw"))
+    )
+    iv_temperature = _clamp_device_score(
+        iv_snapshot.get("index_ewma5", iv_snapshot.get("index_raw"))
+    )
+    latest_alert = _pick_market_brief_alert(market_df)
+    if not latest_alert and iv_temperature is not None and iv_temperature >= 68:
+        latest_alert = "跨资产IV温度偏高"
+    if not latest_alert and chaos_index is not None and chaos_index >= 65:
+        latest_alert = "全球风险扰动偏强"
+
+    if not source_errors and chaos_index is not None and iv_temperature is not None:
+        data_freshness = "fresh"
+    elif chaos_index is not None or iv_temperature is not None or latest_alert:
+        data_freshness = "stale"
+    else:
+        data_freshness = "degraded"
+
+    market_state, risk_level = _derive_device_market_state(
+        iv_temperature=iv_temperature,
+        chaos_index=chaos_index,
+    )
+    headline, speak_text = _build_device_texts(
+        market_state=market_state,
+        latest_alert=latest_alert,
+        iv_temperature=iv_temperature,
+        chaos_index=chaos_index,
+        data_freshness=data_freshness,
+    )
+    updated_at = (
+        _safe_textv(chaos_snapshot.get("updated_at"))
+        or _safe_textv(iv_snapshot.get("trade_date"))
+        or _device_now_text()
+    )
+
+    return {
+        "user_id": username,
+        "device_id": device_ctx.get("device_id", ""),
+        "market_state": market_state,
+        "risk_level": risk_level,
+        "headline": headline,
+        "speak_text": speak_text,
+        "iv_temperature": iv_temperature,
+        "chaos_index": chaos_index,
+        "latest_alert": latest_alert,
+        "updated_at": updated_at,
+        "data_freshness": data_freshness,
+    }
+
+
+def _normalize_device_contract_code(value: Any) -> str:
+    raw = _safe_textv(value).upper()
+    return raw if re.match(r"^[A-Z]+[0-9]{3,4}$", raw) else ""
+
+
+def _device_product_name(product_code: str) -> str:
+    code = _safe_textv(product_code).upper()
+    return _safe_textv(getattr(de, "PRODUCT_MAP", {}).get(code), code)
+
+
+def _device_contract_product_code(contract: str) -> str:
+    m = re.match(r"^([A-Z]+)[0-9]{3,4}$", _safe_textv(contract).upper())
+    return m.group(1).lower() if m else ""
+
+
+def _device_contract_display(contract: str, product_name: str = "") -> str:
+    product_name = _safe_textv(product_name)
+    return f"{contract} {product_name}" if product_name else contract
+
+
+def _format_device_metric(value: Any, suffix: str = "") -> str:
+    parsed = _safe_floatv(value, default=None)
+    if parsed is None:
+        return "--"
+    text = f"{parsed:.1f}".rstrip("0").rstrip(".")
+    return f"{text}{suffix}"
+
+
+def _format_device_price(value: Any) -> str:
+    parsed = _safe_floatv(value, default=None)
+    if parsed is None:
+        return "--"
+    abs_value = abs(parsed)
+    if abs_value < 10:
+        text = f"{parsed:.3f}"
+    elif abs_value < 100:
+        text = f"{parsed:.2f}"
+    else:
+        text = f"{parsed:.1f}"
+    return text.rstrip("0").rstrip(".")
+
+
+_DEVICE_MENU_CATEGORIES = {"futures", "etf", "favorites", "stock"}
+_DEVICE_FAVORITE_PRODUCTS = ["pp", "ag", "au", "cu", "m", "rm", "sr", "ta", "sc", "if", "im", "io"]
+_DEVICE_ETF_PRODUCTS = [
+    {"product_code": "510050.SH", "product_name": "上证50ETF"},
+    {"product_code": "510300.SH", "product_name": "沪深300ETF"},
+    {"product_code": "510500.SH", "product_name": "中证500ETF"},
+    {"product_code": "159915.SZ", "product_name": "创业板ETF"},
+    {"product_code": "588000.SH", "product_name": "科创50ETF"},
+    {"product_code": "159901.SZ", "product_name": "深证100ETF"},
+]
+_DEVICE_VOICE_ETF_ALIASES = {
+    "上证50ETF": "510050.SH",
+    "上证50": "510050.SH",
+    "50ETF": "510050.SH",
+    "沪深300ETF": "510300.SH",
+    "沪深300": "510300.SH",
+    "300ETF": "510300.SH",
+    "中证500ETF": "510500.SH",
+    "中证500": "510500.SH",
+    "500ETF": "510500.SH",
+    "创业板ETF": "159915.SZ",
+    "创业板etf": "159915.SZ",
+    "创业板": "159915.SZ",
+    "创业ETF": "159915.SZ",
+    "科创50ETF": "588000.SH",
+    "科创50": "588000.SH",
+    "深证100ETF": "159901.SZ",
+    "深证100": "159901.SZ",
+}
+_DEVICE_VOICE_STOCK_NAME_ALIASES = {
+    "澜起科技": "澜起科技",
+    "蓝起科技": "澜起科技",
+    "蓝启科技": "澜起科技",
+    "兰起科技": "澜起科技",
+    "澜启科技": "澜起科技",
+}
+_DEVICE_VOICE_STOCK_FAST_ALIASES: Dict[str, Tuple[str, str]] = {
+    "澜起科技": ("688008.SH", "澜起科技"),
+    "蓝起科技": ("688008.SH", "澜起科技"),
+    "蓝启科技": ("688008.SH", "澜起科技"),
+    "兰起科技": ("688008.SH", "澜起科技"),
+    "澜启科技": ("688008.SH", "澜起科技"),
+}
+_DEVICE_VOICE_STOCK_NAME_CONFUSIONS = str.maketrans(
+    {
+        "蓝": "澜",
+        "兰": "澜",
+        "啟": "起",
+        "启": "起",
+    }
+)
+_DEVICE_VOICE_STOCK_NAME_CACHE_TTL_SECONDS = 600
+_DEVICE_VOICE_STOCK_NAME_CACHE: Dict[str, Any] = {"loaded_at": 0.0, "items": []}
+_DEVICE_VOICE_STOCK_NAME_CACHE_LOCK = threading.RLock()
+_DEVICE_VOICE_STOCK_NAME_PREWARMING = False
+_DEVICE_VOICE_PROMPT_TEXTS = {
+    "voice_timeout": "服务响应超时，请再问一次。",
+    "voice_network_error": "网络连接不稳定，请稍后再问一次。",
+    "voice_listening": "我在听。",
+    "voice_received": "收到，我看一下。",
+    "voice_thinking": "我正在思考。",
+    "voice_deep_confirm": "这个问题需要深度分析，我先帮你看。",
+    "voice_deep_busy": "我还在分析上一个复杂问题，先问我行情也可以。",
+    "voice_task_processing": "分析团队还在看技术面和波动率。",
+    "voice_task_timeout": "分析还没完成，我先不占着你，你可以继续问行情，稍后问我刚才结果。",
+    "voice_stt_empty": "没听清楚，请再说一次哦。",
+    "voice_hello": "你好，我在。",
+    "voice_help": "你可以问价格、涨跌、IV，或让我做深度分析。",
+}
+_DEVICE_VOICE_PROMPT_PREWARMING = False
+_DEVICE_VOICE_MARKET_FACT_KEYWORDS = (
+    "价格",
+    "最新价",
+    "现价",
+    "报价",
+    "收盘价",
+    "多少钱",
+    "多少点",
+    "涨跌",
+    "涨幅",
+    "跌幅",
+    "IV",
+    "iv",
+    "波动率",
+    "Rank",
+    "rank",
+    "技术面",
+    "做多",
+    "做空",
+)
+_DEVICE_VOICE_DEEP_ANALYSIS_KEYWORDS = (
+    "能做吗",
+    "能不能做",
+    "能不能买",
+    "可以买",
+    "该不该买",
+    "该不该卖",
+    "适合买",
+    "适合做",
+    "怎么做",
+    "怎么交易",
+    "策略",
+    "风险",
+    "仓位",
+    "止损",
+    "止盈",
+    "入场",
+    "出场",
+    "为什么",
+    "原因",
+    "分析",
+    "看法",
+    "建议",
+    "机会",
+    "做多",
+    "做空",
+    "买入",
+    "卖出",
+    "追高",
+    "抄底",
+    "趋势",
+    "突破",
+    "回调",
+    "综合",
+)
+_DEVICE_VOICE_QUICK_AI_KEYWORDS = (
+    "你是谁",
+    "你叫什么",
+    "你好",
+    "hello",
+    "在吗",
+    "怎么用",
+    "可以做什么",
+)
+_DEVICE_VOICE_INSTANT_REPLY_KEYWORDS = (
+    "你是谁",
+    "你叫什么",
+    "你好",
+    "hello",
+    "在吗",
+    "怎么用",
+    "可以做什么",
+    "现在几点",
+    "几点了",
+    "几点",
+    "当前时间",
+    "什么时间",
+    "还在分析",
+    "分析好了",
+    "结果好了",
+    "刚才结果",
+    "上一个结果",
+)
+
+
+def _normalize_device_menu_category(category: Optional[str]) -> str:
+    value = _safe_textv(category, "futures").lower()
+    return value if value in _DEVICE_MENU_CATEGORIES else "futures"
+
+
+def _normalize_device_etf_code(raw: Any) -> str:
+    value = _safe_textv(raw).upper()
+    m = re.search(r"(510\d{3}|588\d{3}|159\d{3})(?:\.(SH|SZ))?", value)
+    if not m:
+        return ""
+    base = m.group(1)
+    suffix = m.group(2)
+    if suffix:
+        return f"{base}.{suffix}"
+    return f"{base}.SZ" if base.startswith("159") else f"{base}.SH"
+
+
+def _normalize_device_stock_code(raw: Any) -> str:
+    value = _safe_textv(raw).upper()
+    if not value:
+        return ""
+    m = re.search(r"\b([0-9]{6})(?:\.(SH|SZ|BJ))?\b", value)
+    if m:
+        base = m.group(1)
+        suffix = m.group(2)
+        if suffix:
+            return f"{base}.{suffix}"
+        if base.startswith(("6", "5", "9")):
+            return f"{base}.SH"
+        if base.startswith(("0", "1", "2", "3")):
+            return f"{base}.SZ"
+        if base.startswith(("4", "8")):
+            return f"{base}.BJ"
+        return f"{base}.SH"
+    m = re.search(r"\b([0-9]{5})(?:\.HK)?\b", value)
+    if m:
+        return f"{m.group(1)}.HK"
+    m = re.search(r"\b([A-Z][A-Z0-9]{0,9})\.US\b", value)
+    if m:
+        return f"{m.group(1)}.US"
+    return ""
+
+
+def _device_etf_name(etf_code: str) -> str:
+    normalized = _normalize_device_etf_code(etf_code)
+    for item in _DEVICE_ETF_PRODUCTS:
+        if item["product_code"] == normalized:
+            return item["product_name"]
+    return normalized or _safe_textv(etf_code)
+
+
+def _normalize_device_voice_stock_name(value: str) -> str:
+    text = _safe_textv(value).lower()
+    text = re.sub(r"[\s\-_.,，。:：;；!?！？、/\\|（）()【】\[\]{}<>《》\"'“”‘’]", "", text)
+    return text.translate(_DEVICE_VOICE_STOCK_NAME_CONFUSIONS)
+
+
+def _device_voice_fast_stock_alias_match(transcript: str) -> Tuple[str, str]:
+    text = _safe_textv(transcript)
+    normalized_text = _normalize_device_voice_stock_name(text)
+    if not text and not normalized_text:
+        return "", ""
+    for alias, target in sorted(_DEVICE_VOICE_STOCK_FAST_ALIASES.items(), key=lambda item: len(item[0]), reverse=True):
+        alias_norm = _normalize_device_voice_stock_name(alias)
+        if alias in text or (alias_norm and alias_norm in normalized_text):
+            return target
+    return "", ""
+
+
+def _device_voice_stock_candidate_parts(candidate: Any) -> Tuple[str, str, str]:
+    if not isinstance(candidate, (list, tuple)) or len(candidate) < 2:
+        return "", "", ""
+    code = _safe_textv(candidate[0]).upper()
+    name = _safe_textv(candidate[1])
+    name_norm = _safe_textv(candidate[2]) if len(candidate) >= 3 else _normalize_device_voice_stock_name(name)
+    return code, name, name_norm
+
+
+def _device_voice_stock_name_cache_fresh(now: Optional[float] = None) -> bool:
+    current = time.time() if now is None else now
+    cached_at = float(_DEVICE_VOICE_STOCK_NAME_CACHE.get("loaded_at") or 0.0)
+    cached_items = _DEVICE_VOICE_STOCK_NAME_CACHE.get("items") or []
+    return bool(cached_items) and current - cached_at < _DEVICE_VOICE_STOCK_NAME_CACHE_TTL_SECONDS
+
+
+def _device_voice_stock_name_candidates() -> List[Tuple[str, str, str]]:
+    now = time.time()
+    with _DEVICE_VOICE_STOCK_NAME_CACHE_LOCK:
+        cached_items = _DEVICE_VOICE_STOCK_NAME_CACHE.get("items") or []
+        if _device_voice_stock_name_cache_fresh(now):
+            return list(cached_items)
+
+    try:
+        import pandas as pd
+        from sqlalchemy import text as _text
+
+        df = pd.read_sql(
+            _text("""
+            SELECT ts_code, name
+            FROM stock_price
+            WHERE name IS NOT NULL
+              AND name <> ''
+            GROUP BY ts_code, name
+            LIMIT 8000
+            """),
+            de.engine,
+        )
+        items: List[Tuple[str, str, str]] = []
+        for _, row in df.iterrows():
+            code = _safe_textv(row.get("ts_code")).upper()
+            name = _safe_textv(row.get("name"))
+            if code and name:
+                items.append((code, name, _normalize_device_voice_stock_name(name)))
+        with _DEVICE_VOICE_STOCK_NAME_CACHE_LOCK:
+            _DEVICE_VOICE_STOCK_NAME_CACHE.update({"loaded_at": time.time(), "items": items})
+        return list(items)
+    except Exception as exc:
+        print(f"[device_api] stock_symbol_db_resolve_failed err={exc}", flush=True)
+        return []
+
+
+def _ensure_device_voice_stock_name_cache_async() -> None:
+    global _DEVICE_VOICE_STOCK_NAME_PREWARMING
+    with _DEVICE_VOICE_STOCK_NAME_CACHE_LOCK:
+        if _device_voice_stock_name_cache_fresh() or _DEVICE_VOICE_STOCK_NAME_PREWARMING:
+            return
+        _DEVICE_VOICE_STOCK_NAME_PREWARMING = True
+
+    def _runner() -> None:
+        global _DEVICE_VOICE_STOCK_NAME_PREWARMING
+        try:
+            _device_voice_stock_name_candidates()
+        finally:
+            with _DEVICE_VOICE_STOCK_NAME_CACHE_LOCK:
+                _DEVICE_VOICE_STOCK_NAME_PREWARMING = False
+
+    threading.Thread(target=_runner, name="device-stock-name-prewarm", daemon=True).start()
+
+
+def _ensure_device_voice_prompt_audio_cache_async() -> None:
+    global _DEVICE_VOICE_PROMPT_PREWARMING
+    with _DEVICE_VOICE_AUDIO_CACHE_LOCK:
+        if _DEVICE_VOICE_PROMPT_PREWARMING:
+            return
+        _DEVICE_VOICE_PROMPT_PREWARMING = True
+
+    def _runner() -> None:
+        global _DEVICE_VOICE_PROMPT_PREWARMING
+        try:
+            for prompt_text in _DEVICE_VOICE_PROMPT_TEXTS.values():
+                _device_voice_audio_url_for_text(prompt_text)
+        finally:
+            with _DEVICE_VOICE_AUDIO_CACHE_LOCK:
+                _DEVICE_VOICE_PROMPT_PREWARMING = False
+
+    threading.Thread(target=_runner, name="device-voice-prompt-prewarm", daemon=True).start()
+
+
+def _best_device_voice_stock_name_match(transcript: str, candidates: List[Tuple[str, ...]]) -> Tuple[str, str]:
+    text = _safe_textv(transcript)
+    normalized_text = _normalize_device_voice_stock_name(text)
+    if not normalized_text:
+        return "", ""
+
+    fast_code, fast_name = _device_voice_fast_stock_alias_match(text)
+    if fast_code:
+        return fast_code, fast_name
+
+    for alias, canonical_name in sorted(_DEVICE_VOICE_STOCK_NAME_ALIASES.items(), key=lambda item: len(item[0]), reverse=True):
+        if alias in text or _normalize_device_voice_stock_name(alias) in normalized_text:
+            canonical_norm = _normalize_device_voice_stock_name(canonical_name)
+            for candidate in candidates:
+                code, name, name_norm = _device_voice_stock_candidate_parts(candidate)
+                if name_norm == canonical_norm:
+                    return code, name
+
+    exact_matches = []
+    for candidate in candidates:
+        code, name, name_norm = _device_voice_stock_candidate_parts(candidate)
+        if not name_norm:
+            continue
+        if name in text or name_norm in normalized_text:
+            exact_matches.append((len(name_norm), code, name))
+    if exact_matches:
+        _, code, name = max(exact_matches, key=lambda item: item[0])
+        return code, name
+
+    best_score = 0.0
+    second_score = 0.0
+    best_code = ""
+    best_name = ""
+    best_name_norm = ""
+    for candidate in candidates:
+        code, name, name_norm = _device_voice_stock_candidate_parts(candidate)
+        if len(name_norm) < 3:
+            continue
+        window_lengths = {len(name_norm)}
+        if len(name_norm) >= 4:
+            window_lengths.update({len(name_norm) - 1, len(name_norm) + 1})
+        local_best = 0.0
+        for window_len in sorted(window_lengths):
+            if window_len <= 0 or window_len > len(normalized_text):
+                continue
+            for start in range(0, len(normalized_text) - window_len + 1):
+                window = normalized_text[start : start + window_len]
+                score = difflib.SequenceMatcher(None, name_norm, window).ratio()
+                if score > local_best:
+                    local_best = score
+        if local_best > best_score:
+            second_score = best_score
+            best_score = local_best
+            best_code = code
+            best_name = name
+            best_name_norm = name_norm
+        elif local_best > second_score:
+            second_score = local_best
+
+    if best_name:
+        threshold = 0.86 if len(best_name_norm) <= 3 else 0.78
+        if best_score >= threshold and (best_score >= 0.92 or best_score - second_score >= 0.08):
+            return best_code, best_name
+    return "", ""
+
+
+def _resolve_device_voice_stock_symbol(transcript: str) -> Tuple[str, str]:
+    text = _safe_textv(transcript)
+    if not text:
+        return "", ""
+
+    direct_code = _normalize_device_stock_code(text)
+    if direct_code:
+        return direct_code, ""
+
+    fast_code, fast_name = _device_voice_fast_stock_alias_match(text)
+    if fast_code:
+        return fast_code, fast_name
+
+    code, name = _best_device_voice_stock_name_match(text, _device_voice_stock_name_candidates())
+    if code:
+        return code, name
+
+    try:
+        from symbol_map import COMMON_ALIASES, resolve_symbol
+
+        normalized_text = text.upper()
+        for alias, code in sorted(COMMON_ALIASES.items(), key=lambda item: len(str(item[0])), reverse=True):
+            alias_text = _safe_textv(alias).upper()
+            code_text = _safe_textv(code).upper()
+            if not alias_text or "." not in code_text:
+                continue
+            if alias_text in normalized_text:
+                return code_text, _safe_textv(alias)
+
+        resolved_code, asset_type = resolve_symbol(text)
+        if asset_type == "stock":
+            normalized_code = _normalize_device_stock_code(resolved_code) or _safe_textv(resolved_code).upper()
+            return normalized_code, ""
+    except Exception as exc:
+        print(f"[device_api] stock_symbol_resolve_failed err={exc}", flush=True)
+
+    return "", ""
+
+
+def _resolve_device_voice_futures_product(transcript: str) -> str:
+    text = _safe_textv(transcript)
+    if not text:
+        return ""
+    upper_text = text.upper()
+    product_map = getattr(de, "PRODUCT_MAP", {}) or {}
+
+    for code, name in sorted(product_map.items(), key=lambda item: len(str(item[1])), reverse=True):
+        name_text = _safe_textv(name)
+        if name_text and name_text in text:
+            return _safe_textv(code).lower()
+
+    try:
+        from symbol_map import COMMON_ALIASES, resolve_symbol
+
+        for alias, code in sorted(COMMON_ALIASES.items(), key=lambda item: len(str(item[0])), reverse=True):
+            alias_text = _safe_textv(alias).upper()
+            code_text = _safe_textv(code).upper()
+            if not alias_text or "." in code_text:
+                continue
+            if alias_text in upper_text and code_text in product_map:
+                return code_text.lower()
+
+        resolved_code, asset_type = resolve_symbol(text)
+        if asset_type == "future":
+            resolved = _safe_textv(resolved_code).upper()
+            if resolved in product_map:
+                return resolved.lower()
+    except Exception as exc:
+        print(f"[device_api] futures_product_resolve_failed err={exc}", flush=True)
+
+    for code in sorted(product_map.keys(), key=len, reverse=True):
+        code_text = _safe_textv(code).upper()
+        if len(code_text) < 2:
+            continue
+        if re.search(rf"(?<![A-Z0-9]){re.escape(code_text)}(?![A-Z0-9])", upper_text):
+            return code_text.lower()
+    return ""
+
+
+def _resolve_device_voice_market_target_detail(transcript: str, fallback_contract: str = "") -> Tuple[str, str, str]:
+    text = _safe_textv(transcript)
+    upper_text = text.upper()
+
+    explicit_etf = _normalize_device_etf_code(upper_text)
+    if explicit_etf:
+        return explicit_etf, "etf", ""
+
+    for alias, etf_code in _DEVICE_VOICE_ETF_ALIASES.items():
+        if alias in text:
+            return etf_code, "etf", ""
+
+    m = re.search(r"\b([A-Z]{1,4}[0-9]{3,4})\b", upper_text)
+    if m:
+        contract = _normalize_device_contract_code(m.group(1))
+        if contract:
+            return contract, "futures", ""
+
+    stock_code, stock_name = _resolve_device_voice_stock_symbol(text)
+    if stock_code:
+        return stock_code, "stock", stock_name
+
+    product_code = _resolve_device_voice_futures_product(text)
+    if product_code:
+        return product_code, "futures_product", ""
+
+    fallback_etf = _normalize_device_etf_code(fallback_contract)
+    if fallback_etf:
+        return fallback_etf, "etf", ""
+    fallback_futures = _normalize_device_contract_code(fallback_contract)
+    if fallback_futures:
+        return fallback_futures, "futures", ""
+    return "", "", ""
+
+
+def _resolve_device_voice_market_target(transcript: str, fallback_contract: str = "") -> Tuple[str, str]:
+    target, target_category, _ = _resolve_device_voice_market_target_detail(transcript, fallback_contract)
+    return target, target_category
+
+
+def _device_voice_asks_market_fact(transcript: str) -> bool:
+    text = _safe_textv(transcript)
+    return any(keyword in text for keyword in _DEVICE_VOICE_MARKET_FACT_KEYWORDS)
+
+
+def _device_voice_asks_time(transcript: str) -> bool:
+    text = _safe_textv(transcript)
+    return any(marker in text for marker in ("现在几点", "几点了", "几点", "当前时间", "什么时间"))
+
+
+def _device_voice_asks_stop_listening(transcript: str) -> bool:
+    text = _safe_textv(transcript)
+    if not text:
+        return False
+    return any(
+        marker in text
+        for marker in (
+            "结束语音",
+            "停止语音",
+            "退出语音",
+            "关闭语音",
+            "别听了",
+            "不用听了",
+            "先这样",
+            "不用了",
+            "结束对话",
+            "停止对话",
+            "退出对话",
+            "结束吧",
+            "停止吧",
+        )
+    ) or text in {"结束", "停止", "退出", "再见", "拜拜"}
+
+
+def _device_voice_asks_deep_analysis(transcript: str) -> bool:
+    text = _safe_textv(transcript)
+    if not text:
+        return False
+    price_only_markers = ("价格", "最新价", "现价", "报价", "多少钱", "多少点", "涨跌", "涨幅", "跌幅", "IV", "iv", "波动率", "Rank", "rank")
+    if any(marker in text for marker in price_only_markers) and not any(
+        marker in text
+        for marker in (
+            "能做",
+            "能不能",
+            "可以买",
+            "该不该",
+            "适合",
+            "策略",
+            "风险",
+            "仓位",
+            "止损",
+            "止盈",
+            "为什么",
+            "分析",
+            "怎么看",
+            "建议",
+            "机会",
+            "追高",
+            "抄底",
+            "突破",
+            "回调",
+        )
+    ):
+        return False
+    return any(keyword in text for keyword in _DEVICE_VOICE_DEEP_ANALYSIS_KEYWORDS)
+
+
+def _classify_device_voice_route(transcript: str) -> str:
+    text = _safe_textv(transcript)
+    if not text or text in {"语音识别失败", "语音识别暂未配置"}:
+        return "error"
+    if _device_voice_asks_stop_listening(text):
+        return "stop_listening"
+    if _device_voice_asks_deep_analysis(text):
+        return "deep_analysis"
+    if _device_voice_asks_market_fact(text):
+        return "market_fact"
+    if any(keyword in text for keyword in _DEVICE_VOICE_INSTANT_REPLY_KEYWORDS):
+        return "instant_reply"
+    if any(keyword in text for keyword in _DEVICE_VOICE_QUICK_AI_KEYWORDS):
+        return "quick_ai"
+    return "quick_ai"
+
+
+def _device_voice_fact_answer(contract_context: Dict[str, Any]) -> str:
+    if not contract_context:
+        return ""
+
+    product_name = _safe_textv(contract_context.get("product_name"))
+    contract = _safe_textv(contract_context.get("contract") or contract_context.get("product_code"))
+    label = product_name or contract or "当前标的"
+    latest_price = contract_context.get("latest_price")
+    price_pct = contract_context.get("price_pct")
+    iv = contract_context.get("iv")
+    iv_rank = contract_context.get("iv_rank")
+    technical_label = _safe_textv(contract_context.get("technical_label")) or "待生成"
+
+    has_price = _safe_floatv(latest_price, default=None) is not None
+    has_iv = _safe_floatv(iv, default=None) is not None
+    if not has_price and not has_iv:
+        return f"{label}当前行情数据还没有稳定取到，我先不乱报价格。"
+
+    parts = [label]
+    if has_price:
+        parts.append(f"最新价格{_format_device_price(latest_price)}")
+        if _safe_floatv(price_pct, default=None) is not None:
+            parts.append(f"涨跌{_format_device_metric(price_pct, '%')}")
+    if has_iv:
+        parts.append(f"IV{_format_device_metric(iv)}")
+    if _safe_floatv(iv_rank, default=None) is not None:
+        parts.append(f"IV Rank{_format_device_metric(iv_rank)}")
+    parts.append(f"技术面{technical_label}")
+    return "，".join(parts) + "。"
+
+
+def _query_device_stock_snapshot(stock_code: str) -> Dict[str, Any]:
+    normalized = _normalize_device_stock_code(stock_code) or _safe_textv(stock_code).upper()
+    if not normalized:
+        return {}
+
+    snapshot: Dict[str, Any] = {
+        "name": "",
+        "latest_price": None,
+        "price_pct": None,
+        "updated_at": "",
+    }
+    try:
+        import pandas as pd
+        from sqlalchemy import text as _text
+
+        price_df = pd.read_sql(
+            _text("""
+            SELECT ts_code, name, REPLACE(trade_date, '-', '') AS trade_date, close_price
+            FROM stock_price
+            WHERE UPPER(ts_code) = :stock_code
+              AND close_price IS NOT NULL
+            ORDER BY trade_date DESC
+            LIMIT 2
+            """),
+            de.engine,
+            params={"stock_code": normalized},
+        )
+        if price_df.empty and normalized.endswith(".US"):
+            ticker = normalized.split(".", 1)[0]
+            price_df = pd.read_sql(
+                _text("""
+                SELECT UPPER(symbol) AS ts_code, '' AS name, REPLACE(date, '-', '') AS trade_date, close AS close_price
+                FROM stock_prices
+                WHERE UPPER(symbol) = :ticker
+                  AND close IS NOT NULL
+                ORDER BY date DESC
+                LIMIT 2
+                """),
+                de.engine,
+                params={"ticker": ticker},
+            )
+        if price_df.empty:
+            return snapshot
+
+        latest = price_df.iloc[0]
+        latest_price = _safe_floatv(latest.get("close_price"), default=None)
+        snapshot["name"] = _safe_textv(latest.get("name"))
+        snapshot["latest_price"] = latest_price
+        snapshot["updated_at"] = _safe_textv(latest.get("trade_date"))
+        if len(price_df) > 1 and latest_price is not None:
+            prev_price = _safe_floatv(price_df.iloc[1].get("close_price"), default=None)
+            if prev_price and prev_price > 0:
+                snapshot["price_pct"] = round((latest_price / prev_price - 1.0) * 100.0, 2)
+    except Exception as exc:
+        print(f"[device_api] stock_snapshot_failed stock={normalized} err={exc}", flush=True)
+    return snapshot
+
+
+def _build_device_stock_briefing_payload(
+    *,
+    username: str,
+    request: Request,
+    stock_code: str,
+    name_hint: str = "",
+) -> Dict[str, Any]:
+    device_ctx = _extract_device_context(request)
+    normalized = _normalize_device_stock_code(stock_code) or _safe_textv(stock_code).upper()
+    if not normalized:
+        raise HTTPException(status_code=400, detail="股票代码格式错误")
+
+    snap = _query_device_stock_snapshot(normalized)
+    latest_price = _safe_floatv(snap.get("latest_price"), default=None)
+    price_pct = _safe_floatv(snap.get("price_pct"), default=None)
+    name = _safe_textv(snap.get("name")) or _safe_textv(name_hint) or normalized
+    updated_at = _safe_textv(snap.get("updated_at")) or _device_now_text()
+    data_freshness = "fresh" if latest_price is not None else "degraded"
+    technical_state = "pending"
+    technical_label = "待生成"
+    headline = f"{name} 价格{_format_device_price(latest_price)}，涨跌{_format_device_metric(price_pct, '%')}"
+    speak_text = (
+        f"{name}。最新价格{_format_device_price(latest_price)}，"
+        f"涨跌{_format_device_metric(price_pct, '%')}。"
+        f"技术面状态{technical_label}。"
+    )
+
+    return {
+        "user_id": username,
+        "device_id": device_ctx.get("device_id", ""),
+        "category": "stock",
+        "contract": normalized,
+        "product_code": normalized,
+        "product_name": name,
+        "latest_price": latest_price,
+        "price_pct": price_pct,
+        "iv": None,
+        "iv_rank": None,
+        "technical_state": technical_state,
+        "technical_label": technical_label,
+        "headline": headline,
+        "speak_text": speak_text,
+        "updated_at": updated_at,
+        "data_freshness": data_freshness,
+    }
+
+
+def _build_device_futures_product_briefing_payload(
+    *,
+    username: str,
+    request: Request,
+    product_code: str,
+) -> Dict[str, Any]:
+    product = _safe_textv(product_code).lower()
+    if not re.match(r"^[a-z]{1,4}$", product):
+        return {}
+    try:
+        raw = market_contracts(product=product, username=username)
+        for item in raw.get("items", []) if isinstance(raw, dict) else []:
+            contract = _normalize_device_contract_code(_extract_contract_code(item.get("name", "")))
+            if contract:
+                return _build_device_contract_briefing_payload(
+                    username=username,
+                    request=request,
+                    contract=contract,
+                    category="futures",
+                )
+    except Exception as exc:
+        print(f"[device_api] futures_product_context_failed product={product} err={exc}", flush=True)
+    return {}
+
+
+def _load_device_voice_market_context(
+    *,
+    username: str,
+    request: Request,
+    transcript: str,
+    contract: str,
+    category: str,
+) -> Dict[str, Any]:
+    target, target_category, name_hint = _resolve_device_voice_market_target_detail(transcript, contract)
+    if not target:
+        return {}
+    try:
+        if target_category == "stock":
+            return _build_device_stock_briefing_payload(
+                username=username,
+                request=request,
+                stock_code=target,
+                name_hint=name_hint,
+            )
+        if target_category == "futures_product":
+            return _build_device_futures_product_briefing_payload(
+                username=username,
+                request=request,
+                product_code=target,
+            )
+        return _build_device_contract_briefing_payload(
+            username=username,
+            request=request,
+            contract=target,
+            category=target_category or category,
+        )
+    except Exception as exc:
+        print(f"[device_api] voice_market_context_failed target={target} err={exc}", flush=True)
+        return {}
+
+
+def _query_device_etf_snapshot(etf_code: str) -> Dict[str, Any]:
+    normalized = _normalize_device_etf_code(etf_code)
+    if not normalized:
+        return {}
+
+    snapshot: Dict[str, Any] = {
+        "latest_price": None,
+        "price_pct": None,
+        "iv": None,
+        "iv_rank": None,
+        "updated_at": "",
+    }
+    try:
+        import pandas as pd
+        from sqlalchemy import text as _text
+
+        iv_df = pd.read_sql(
+            _text("""
+            SELECT REPLACE(trade_date, '-', '') AS trade_date, iv
+            FROM etf_iv_history
+            WHERE etf_code = :etf_code
+              AND iv IS NOT NULL
+            ORDER BY trade_date DESC
+            LIMIT 252
+            """),
+            de.engine,
+            params={"etf_code": normalized},
+        )
+        if not iv_df.empty:
+            current_iv = _safe_floatv(iv_df.iloc[0].get("iv"), default=None)
+            snapshot["iv"] = current_iv
+            snapshot["updated_at"] = _safe_textv(iv_df.iloc[0].get("trade_date"))
+            if current_iv is not None:
+                iv_values = [
+                    _safe_floatv(value, default=None)
+                    for value in iv_df["iv"].tolist()
+                ]
+                iv_values = [value for value in iv_values if value is not None]
+                if iv_values:
+                    rank = sum(1 for value in iv_values if value <= current_iv) / len(iv_values) * 100.0
+                    snapshot["iv_rank"] = round(rank, 1)
+
+        price_df = pd.read_sql(
+            _text("""
+            SELECT REPLACE(trade_date, '-', '') AS trade_date, close_price
+            FROM stock_price
+            WHERE ts_code = :etf_code
+              AND close_price IS NOT NULL
+            ORDER BY trade_date DESC
+            LIMIT 2
+            """),
+            de.engine,
+            params={"etf_code": normalized},
+        )
+        if not price_df.empty:
+            latest_price = _safe_floatv(price_df.iloc[0].get("close_price"), default=None)
+            snapshot["latest_price"] = latest_price
+            snapshot["updated_at"] = snapshot["updated_at"] or _safe_textv(price_df.iloc[0].get("trade_date"))
+            if len(price_df) > 1 and latest_price is not None:
+                prev_price = _safe_floatv(price_df.iloc[1].get("close_price"), default=None)
+                if prev_price and prev_price > 0:
+                    snapshot["price_pct"] = round((latest_price / prev_price - 1.0) * 100.0, 2)
+    except Exception as exc:
+        print(f"[device_api] etf_snapshot_failed etf={normalized} err={exc}", flush=True)
+    return snapshot
+
+
+def _build_device_etf_menu_payload(
+    *,
+    username: str,
+    request: Request,
+    max_products: int,
+    product: Optional[str] = None,
+) -> Dict[str, Any]:
+    _ = username
+    device_ctx = _extract_device_context(request)
+    product_filter = _normalize_device_etf_code(product)
+    catalog = [item for item in _DEVICE_ETF_PRODUCTS if not product_filter or item["product_code"] == product_filter]
+    products: List[Dict[str, Any]] = []
+
+    for item in catalog[:max_products]:
+        code = item["product_code"]
+        name = item["product_name"]
+        contracts: List[Dict[str, Any]] = []
+        if product_filter:
+            snap = _query_device_etf_snapshot(code)
+            contracts.append(
+                {
+                    "contract": code,
+                    "label": name,
+                    "latest_price": _safe_floatv(snap.get("latest_price"), default=None),
+                    "price_pct": _safe_floatv(snap.get("price_pct"), default=None),
+                    "iv": _safe_floatv(snap.get("iv"), default=None),
+                    "iv_rank": _safe_floatv(snap.get("iv_rank"), default=None),
+                }
+            )
+        products.append(
+            {
+                "category": "etf",
+                "product_code": code,
+                "product_name": name,
+                "contracts": contracts,
+            }
+        )
+
+    return {
+        "user_id": username,
+        "device_id": device_ctx.get("device_id", ""),
+        "category": "etf",
+        "products": products,
+        "updated_at": _device_now_text(),
+        "data_freshness": "fresh" if products else "degraded",
+    }
+
+
+def _build_device_etf_briefing_payload(
+    *,
+    username: str,
+    request: Request,
+    etf_code: str,
+) -> Dict[str, Any]:
+    device_ctx = _extract_device_context(request)
+    normalized = _normalize_device_etf_code(etf_code)
+    if not normalized:
+        raise HTTPException(status_code=400, detail="ETF代码格式错误")
+
+    name = _device_etf_name(normalized)
+    snap = _query_device_etf_snapshot(normalized)
+    latest_price = _safe_floatv(snap.get("latest_price"), default=None)
+    price_pct = _safe_floatv(snap.get("price_pct"), default=None)
+    iv = _safe_floatv(snap.get("iv"), default=None)
+    iv_rank = _safe_floatv(snap.get("iv_rank"), default=None)
+    updated_at = _safe_textv(snap.get("updated_at")) or _device_now_text()
+    data_freshness = "fresh" if iv is not None or latest_price is not None else "degraded"
+
+    technical_state = "pending"
+    technical_label = "待生成"
+    headline = (
+        f"{name} 价格{_format_device_price(latest_price)}，"
+        f"IV{_format_device_metric(iv)}，Rank{_format_device_metric(iv_rank)}"
+    )
+    speak_text = (
+        f"{name}。最新价格{_format_device_price(latest_price)}，"
+        f"涨跌{_format_device_metric(price_pct, '%')}，"
+        f"IV{_format_device_metric(iv)}，"
+        f"IV Rank{_format_device_metric(iv_rank)}。"
+        f"技术面状态{technical_label}。"
+    )
+
+    return {
+        "user_id": username,
+        "device_id": device_ctx.get("device_id", ""),
+        "category": "etf",
+        "contract": normalized,
+        "product_code": normalized,
+        "product_name": name,
+        "latest_price": latest_price,
+        "price_pct": price_pct,
+        "iv": iv,
+        "iv_rank": iv_rank,
+        "technical_state": technical_state,
+        "technical_label": technical_label,
+        "headline": headline,
+        "speak_text": speak_text,
+        "updated_at": updated_at,
+        "data_freshness": data_freshness,
+    }
+
+
+def _build_device_contract_menu_payload(
+    *,
+    username: str,
+    request: Request,
+    max_products: int = 12,
+    max_contracts: int = 6,
+    product: Optional[str] = None,
+    category: Optional[str] = None,
+) -> Dict[str, Any]:
+    device_ctx = _extract_device_context(request)
+    category_value = _normalize_device_menu_category(category)
+    max_products = max(1, min(int(max_products or 12), 60))
+    max_contracts = max(1, min(int(max_contracts or 6), 12))
+    if category_value == "etf":
+        return _build_device_etf_menu_payload(
+            username=username,
+            request=request,
+            max_products=max_products,
+            product=product,
+        )
+
+    product_filter = _safe_textv(product).lower()
+    product_filter = product_filter if re.match(r"^[a-z]{1,4}$", product_filter) else ""
+
+    grouped: Dict[str, Dict[str, Any]] = {}
+
+    if product_filter:
+        grouped[product_filter] = {
+            "category": category_value,
+            "product_code": product_filter,
+            "product_name": _device_product_name(product_filter),
+            "contracts": [],
+        }
+        raw: Dict[str, Any] = {"items": [], "updated_at": _device_now_text()}
+    else:
+        try:
+            raw = market_options(username=username)
+        except Exception as exc:
+            print(f"[device_api] contract_menu_options_failed err={exc}", flush=True)
+            raw = {"items": []}
+
+        for item in raw.get("items", []) if isinstance(raw, dict) else []:
+            contract = _normalize_device_contract_code(_extract_contract_code(item.get("name", "")))
+            product_code = _safe_textv(item.get("product_code")).lower() or _device_contract_product_code(contract)
+            if not contract or not product_code:
+                continue
+            if category_value == "favorites" and product_code not in _DEVICE_FAVORITE_PRODUCTS:
+                continue
+            product_item = grouped.setdefault(
+                product_code,
+                {
+                    "category": category_value,
+                    "product_code": product_code,
+                    "product_name": _device_product_name(product_code),
+                    "contracts": [],
+                },
+            )
+            product_item["contracts"].append(
+                {
+                    "contract": contract,
+                    "label": _device_contract_display(contract, product_item["product_name"]),
+                    "latest_price": _safe_floatv(item.get("cur_price"), default=None),
+                    "price_pct": _safe_floatv(item.get("pct_1d"), default=None),
+                    "iv": _safe_floatv(item.get("iv"), default=None),
+                    "iv_rank": _safe_floatv(item.get("iv_rank"), default=None),
+                }
+            )
+
+    products = []
+    for product in grouped.values():
+        if product_filter:
+            try:
+                expanded = market_contracts(product=product["product_code"], username=username)
+            except Exception as exc:
+                print(
+                    f"[device_api] contract_menu_expand_failed product={product['product_code']} err={exc}",
+                    flush=True,
+                )
+                expanded = {"items": []}
+            expanded_contracts = []
+            for item in expanded.get("items", []) if isinstance(expanded, dict) else []:
+                contract = _normalize_device_contract_code(_extract_contract_code(item.get("name", "")))
+                if not contract:
+                    continue
+                expanded_contracts.append(
+                    {
+                        "contract": contract,
+                        "label": _device_contract_display(contract, product["product_name"]),
+                        "latest_price": _safe_floatv(item.get("cur_price"), default=None),
+                        "price_pct": _safe_floatv(item.get("pct_1d"), default=None),
+                        "iv": _safe_floatv(item.get("iv"), default=None),
+                        "iv_rank": _safe_floatv(item.get("iv_rank"), default=None),
+                    }
+                )
+            product["contracts"] = expanded_contracts
+
+        contracts = product["contracts"]
+        contracts.sort(
+            key=lambda x: (
+                0 if _safe_floatv(x.get("iv"), default=0.0) and _safe_floatv(x.get("iv"), default=0.0) > 0 else 1,
+                -(_safe_floatv(x.get("iv_rank"), default=-999.0) or -999.0),
+                x.get("contract") or "",
+            )
+        )
+        product["contracts"] = contracts[:max_contracts]
+        products.append(product)
+
+    if category_value == "favorites":
+        order = {code: idx for idx, code in enumerate(_DEVICE_FAVORITE_PRODUCTS)}
+        products.sort(key=lambda x: order.get(x.get("product_code", ""), 999))
+    else:
+        products.sort(key=lambda x: x.get("product_code", ""))
+    products = products[:max_products]
+
+    return {
+        "user_id": username,
+        "device_id": device_ctx.get("device_id", ""),
+        "category": category_value,
+        "products": products,
+        "updated_at": _safe_textv(raw.get("updated_at")) if isinstance(raw, dict) else _device_now_text(),
+        "data_freshness": "fresh" if products else "degraded",
+    }
+
+
+def _find_device_contract_item(username: str, contract: str) -> Dict[str, Any]:
+    product_code = _device_contract_product_code(contract)
+    if not product_code:
+        return {}
+    try:
+        raw = market_contracts(product=product_code, username=username)
+    except Exception as exc:
+        print(f"[device_api] contract_lookup_failed contract={contract} err={exc}", flush=True)
+        raw = {"items": []}
+
+    for item in raw.get("items", []) if isinstance(raw, dict) else []:
+        item_contract = _normalize_device_contract_code(_extract_contract_code(item.get("name", "")))
+        if item_contract == contract:
+            return dict(item)
+    return {}
+
+
+def _build_device_contract_briefing_payload(
+    *,
+    username: str,
+    request: Request,
+    contract: str,
+    category: Optional[str] = None,
+) -> Dict[str, Any]:
+    category_value = _normalize_device_menu_category(category)
+    if category_value == "etf" or _normalize_device_etf_code(contract):
+        return _build_device_etf_briefing_payload(username=username, request=request, etf_code=contract)
+
+    device_ctx = _extract_device_context(request)
+    normalized_contract = _normalize_device_contract_code(contract)
+    if not normalized_contract:
+        raise HTTPException(status_code=400, detail="合约格式错误")
+
+    product_code = _device_contract_product_code(normalized_contract)
+    product_name = _device_product_name(product_code)
+    item = _find_device_contract_item(username=username, contract=normalized_contract)
+
+    chart_payload: Dict[str, Any] = {}
+    try:
+        raw_chart = market_chart(product=product_code, contract=normalized_contract, username=username)
+        if isinstance(raw_chart, dict):
+            chart_payload = raw_chart
+    except Exception as exc:
+        print(f"[device_api] contract_chart_failed contract={normalized_contract} err={exc}", flush=True)
+
+    latest_price = _safe_floatv(chart_payload.get("cur_price"), default=None)
+    if latest_price is None:
+        latest_price = _safe_floatv(item.get("cur_price"), default=None)
+    price_pct = _safe_floatv(chart_payload.get("cur_pct"), default=None)
+    if price_pct is None:
+        price_pct = _safe_floatv(item.get("pct_1d"), default=None)
+    iv = _safe_floatv(chart_payload.get("cur_iv"), default=None)
+    if iv is None:
+        iv = _safe_floatv(item.get("iv"), default=None)
+    iv_rank = _safe_floatv(item.get("iv_rank"), default=None)
+
+    has_price = latest_price is not None and latest_price > 0
+    has_iv = iv is not None and iv > 0
+    data_freshness = "fresh" if has_price or has_iv else "degraded"
+
+    technical_state = "pending"
+    technical_label = "待生成"
+    headline = (
+        f"{normalized_contract} 价格{_format_device_price(latest_price)}，"
+        f"IV{_format_device_metric(iv)}，Rank{_format_device_metric(iv_rank)}"
+    )
+    speak_text = (
+        f"{product_name}{normalized_contract}。"
+        f"最新价格{_format_device_price(latest_price)}，"
+        f"涨跌{_format_device_metric(price_pct, '%')}，"
+        f"IV{_format_device_metric(iv)}，"
+        f"IV Rank{_format_device_metric(iv_rank)}。"
+        f"技术面状态{technical_label}。"
+    )
+    updated_at = _safe_textv(chart_payload.get("db_cur_td")) or _device_now_text()
+
+    return {
+        "user_id": username,
+        "device_id": device_ctx.get("device_id", ""),
+        "contract": normalized_contract,
+        "product_code": product_code,
+        "product_name": product_name,
+        "latest_price": latest_price,
+        "price_pct": price_pct,
+        "iv": iv,
+        "iv_rank": iv_rank,
+        "technical_state": technical_state,
+        "technical_label": technical_label,
+        "headline": headline,
+        "speak_text": speak_text,
+        "updated_at": updated_at,
+        "data_freshness": data_freshness,
+    }
+
+
+def _read_device_wav_info(audio_bytes: bytes, *, enforce_device_recording_limits: bool = True) -> Dict[str, int]:
+    if len(audio_bytes) < 44:
+        raise HTTPException(status_code=400, detail="音频太短，请上传 WAV")
+    if enforce_device_recording_limits and len(audio_bytes) > _DEVICE_VOICE_MAX_WAV_BYTES:
+        raise HTTPException(status_code=413, detail="音频超过 8 秒限制")
+    if audio_bytes[:4] != b"RIFF" or audio_bytes[8:12] != b"WAVE":
+        raise HTTPException(status_code=400, detail="仅支持 WAV 音频")
+
+    offset = 12
+    fmt_info: Dict[str, int] = {}
+    data_size = 0
+    while offset + 8 <= len(audio_bytes):
+        chunk_id = audio_bytes[offset : offset + 4]
+        chunk_size = struct.unpack_from("<I", audio_bytes, offset + 4)[0]
+        chunk_start = offset + 8
+        chunk_end = chunk_start + chunk_size
+        if chunk_end > len(audio_bytes):
+            raise HTTPException(status_code=400, detail="WAV 数据不完整")
+        if chunk_id == b"fmt ":
+            if chunk_size < 16:
+                raise HTTPException(status_code=400, detail="WAV fmt chunk 无效")
+            audio_format, channels, sample_rate, _, _, bits_per_sample = struct.unpack_from(
+                "<HHIIHH", audio_bytes, chunk_start
+            )
+            fmt_info = {
+                "audio_format": int(audio_format),
+                "channels": int(channels),
+                "sample_rate": int(sample_rate),
+                "bits_per_sample": int(bits_per_sample),
+            }
+        elif chunk_id == b"data":
+            data_size = int(chunk_size)
+            break
+        offset = chunk_end + (chunk_size % 2)
+
+    if not fmt_info or data_size <= 0:
+        raise HTTPException(status_code=400, detail="WAV 缺少 fmt 或 data chunk")
+    if fmt_info["audio_format"] != 1:
+        raise HTTPException(status_code=400, detail="仅支持 PCM WAV")
+    if fmt_info["channels"] != _DEVICE_VOICE_CHANNELS:
+        raise HTTPException(status_code=400, detail="仅支持单声道音频")
+    if fmt_info["sample_rate"] != _DEVICE_VOICE_SAMPLE_RATE:
+        raise HTTPException(status_code=400, detail="仅支持 16kHz 音频")
+    if fmt_info["bits_per_sample"] != _DEVICE_VOICE_BITS_PER_SAMPLE:
+        raise HTTPException(status_code=400, detail="仅支持 16-bit 音频")
+    fmt_info["data_size"] = data_size
+    fmt_info["data_offset"] = chunk_start
+    return fmt_info
+
+
+def _device_wav_signal_stats(audio_bytes: bytes, wav_info: Dict[str, int]) -> Dict[str, Any]:
+    data_offset = int(wav_info.get("data_offset") or 0)
+    data_size = int(wav_info.get("data_size") or 0)
+    sample_rate = int(wav_info.get("sample_rate") or _DEVICE_VOICE_SAMPLE_RATE)
+    bits_per_sample = int(wav_info.get("bits_per_sample") or _DEVICE_VOICE_BITS_PER_SAMPLE)
+    if bits_per_sample != 16 or data_offset <= 0 or data_size <= 0:
+        return {"duration_ms": 0, "samples": 0, "peak": 0, "rms": 0.0}
+
+    data_end = min(len(audio_bytes), data_offset + data_size)
+    sample_count = max(0, (data_end - data_offset) // 2)
+    if sample_count <= 0:
+        return {"duration_ms": 0, "samples": 0, "peak": 0, "rms": 0.0}
+
+    peak = 0
+    square_sum = 0.0
+    for idx in range(sample_count):
+        sample = struct.unpack_from("<h", audio_bytes, data_offset + idx * 2)[0]
+        abs_sample = abs(int(sample))
+        if abs_sample > peak:
+            peak = abs_sample
+        square_sum += float(sample) * float(sample)
+
+    rms = math.sqrt(square_sum / sample_count) if sample_count else 0.0
+    duration_ms = int(round(sample_count * 1000.0 / max(1, sample_rate)))
+    return {
+        "duration_ms": duration_ms,
+        "samples": sample_count,
+        "peak": int(peak),
+        "rms": round(float(rms), 1),
+    }
+
+
+def _build_pcm_wav(pcm_bytes: bytes, *, sample_rate: int = 16000, channels: int = 1, bits_per_sample: int = 16) -> bytes:
+    byte_rate = sample_rate * channels * bits_per_sample // 8
+    block_align = channels * bits_per_sample // 8
+    data_size = len(pcm_bytes)
+    header = struct.pack(
+        "<4sI4s4sIHHIIHH4sI",
+        b"RIFF",
+        36 + data_size,
+        b"WAVE",
+        b"fmt ",
+        16,
+        1,
+        channels,
+        sample_rate,
+        byte_rate,
+        block_align,
+        bits_per_sample,
+        b"data",
+        data_size,
+    )
+    return header + pcm_bytes
+
+
+def _extract_dashscope_text(response: Any) -> str:
+    if response is None:
+        return ""
+    data = response
+    try:
+        if hasattr(response, "output"):
+            data = response.output
+        if isinstance(data, dict):
+            choices = data.get("choices") or []
+            if choices:
+                message = choices[0].get("message") or {}
+                content = message.get("content")
+                if isinstance(content, str):
+                    return content.strip()
+                if isinstance(content, list):
+                    parts = []
+                    for item in content:
+                        if isinstance(item, dict):
+                            parts.append(str(item.get("text") or item.get("transcript") or "").strip())
+                    return " ".join([part for part in parts if part]).strip()
+            text = data.get("text") or data.get("transcript") or ""
+            return str(text).strip()
+    except Exception:
+        return ""
+    return str(data).strip() if isinstance(data, str) else ""
+
+
+def _extract_dashscope_asr_text(response: Any) -> str:
+    if response is None:
+        return ""
+    try:
+        sentences = response.get_sentence() if hasattr(response, "get_sentence") else None
+        if isinstance(sentences, dict):
+            sentences = [sentences]
+        parts = []
+        if isinstance(sentences, list):
+            for sentence in sentences:
+                if isinstance(sentence, dict):
+                    text = sentence.get("text") or sentence.get("transcript") or ""
+                    if text:
+                        parts.append(str(text).strip())
+                elif isinstance(sentence, str):
+                    parts.append(sentence.strip())
+        if parts:
+            return "".join(parts).strip()
+    except Exception:
+        return ""
+    return _extract_dashscope_text(response)
+
+
+def _device_transcribe_wav(audio_bytes: bytes) -> str:
+    override = _safe_textv(os.getenv("DEVICE_STT_TEXT_OVERRIDE"))
+    if override:
+        return override
+    api_key = _safe_textv(os.getenv("DASHSCOPE_API_KEY"))
+    if not api_key:
+        raise RuntimeError("DASHSCOPE_API_KEY not configured")
+
+    import tempfile
+    import dashscope
+
+    path = ""
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+            tmp.write(audio_bytes)
+            path = tmp.name
+        model = os.getenv("DEVICE_STT_MODEL", "paraformer-realtime-v2")
+        if model.startswith("qwen-audio"):
+            response = dashscope.MultiModalConversation.call(
+                model=model,
+                api_key=api_key,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {"audio": f"file://{path}"},
+                            {"text": "请把这段普通话语音转写成纯文本，只输出转写内容。"},
+                        ],
+                    }
+                ],
+            )
+            transcript = _extract_dashscope_text(response)
+        else:
+            from dashscope.audio.asr import Recognition
+
+            dashscope.api_key = api_key
+            recognition = Recognition(
+                model=model,
+                format=os.getenv("DEVICE_STT_AUDIO_FORMAT", "wav"),
+                sample_rate=int(os.getenv("DEVICE_STT_SAMPLE_RATE", "16000")),
+                language_hints=["zh", "en"],
+                callback=None,
+            )
+            response = recognition.call(path)
+            transcript = _extract_dashscope_asr_text(response)
+        if not transcript:
+            status_code = getattr(response, "status_code", "")
+            code = getattr(response, "code", "")
+            message = getattr(response, "message", "")
+            request_id = getattr(response, "request_id", "")
+            raise RuntimeError(
+                f"empty transcript status={status_code} code={code} "
+                f"message={message} request_id={request_id}"
+            )
+        return transcript
+    finally:
+        if path:
+            try:
+                os.unlink(path)
+            except Exception:
+                pass
+
+
+def _build_device_voice_prompt(
+    *,
+    transcript: str,
+    contract_context: Dict[str, Any],
+    screen_context: str,
+) -> str:
+    context_lines = []
+    if contract_context:
+        context_lines.append(
+            "当前设备看板："
+            f"{contract_context.get('product_name') or ''}{contract_context.get('contract') or ''}，"
+            f"最新价{_format_device_price(contract_context.get('latest_price'))}，"
+            f"涨跌{_format_device_metric(contract_context.get('price_pct'), '%')}，"
+            f"IV{_format_device_metric(contract_context.get('iv'))}，"
+            f"IV Rank{_format_device_metric(contract_context.get('iv_rank'))}。"
+        )
+    if screen_context:
+        context_lines.append(f"设备屏幕上下文：{screen_context[:300]}")
+    context_text = "\n".join(context_lines) if context_lines else "当前没有明确合约上下文。"
+    return (
+        "你正在通过桌面机器人 StackChan 回答交易者的问题。"
+        "回答必须适合语音播报，最多 80 个中文字，直接给结论和理由，不要输出 Markdown。\n"
+        "如果用户问价格、涨跌、IV、IV Rank、技术面，只能使用当前设备看板里的数字；"
+        "没有数字就说数据暂缺，禁止编造行情。\n"
+        f"{context_text}\n"
+        f"用户语音转写：{transcript}"
+    )
+
+
+def _device_generate_voice_answer(
+    *,
+    username: str,
+    transcript: str,
+    contract_context: Dict[str, Any],
+    screen_context: str = "",
+) -> str:
+    if not transcript or transcript in {"语音识别失败", "语音识别暂未配置"}:
+        return "我没有听清楚，你可以再短按一次，用普通话问我。"
+    prompt = _build_device_voice_prompt(
+        transcript=transcript,
+        contract_context=contract_context,
+        screen_context=screen_context,
+    )
+    try:
+        llm = ChatTongyi(model=os.getenv("DEVICE_VOICE_LLM_MODEL", "qwen-turbo-latest"), streaming=False, temperature=0.2)
+        answer = simple_chatter_reply(prompt, llm, runtime_context={"current_user": username, "device": "StackChan"})
+        answer = _safe_textv(answer)
+        return answer[:180] if answer else "我暂时没有拿到稳定回答，请稍后再试。"
+    except Exception as exc:
+        print(f"[device_api] voice_llm_failed user={username} err={exc}", flush=True)
+        if contract_context:
+            return (
+                f"{contract_context.get('contract') or '当前合约'}最新价"
+                f"{_format_device_price(contract_context.get('latest_price'))}，"
+                f"IV{_format_device_metric(contract_context.get('iv'))}，"
+                f"IV Rank{_format_device_metric(contract_context.get('iv_rank'))}。"
+            )
+    return "我暂时无法连接大模型，但设备和后端链路是通的。"
+
+
+def _device_voice_observed_audio_stats(
+    audio_stats: Dict[str, Any],
+    *,
+    client_audio_peak: Any = None,
+    client_audio_rms: Any = None,
+) -> Dict[str, Any]:
+    peak = _safe_floatv(audio_stats.get("peak"), default=0.0) or 0.0
+    rms = _safe_floatv(audio_stats.get("rms"), default=0.0) or 0.0
+    client_peak = _safe_floatv(client_audio_peak, default=None)
+    client_rms = _safe_floatv(client_audio_rms, default=None)
+    if client_peak is not None:
+        peak = max(peak, client_peak)
+    if client_rms is not None:
+        rms = max(rms, client_rms)
+    return {
+        "duration_ms": int(_safe_floatv(audio_stats.get("duration_ms"), default=0.0) or 0),
+        "peak": int(round(peak)),
+        "rms": round(float(rms), 1),
+    }
+
+
+def _classify_device_voice_stt_failure(
+    stt_error: str,
+    audio_stats: Dict[str, Any],
+    *,
+    client_audio_peak: Any = None,
+    client_audio_rms: Any = None,
+) -> str:
+    text = _safe_textv(stt_error)
+    lower = text.lower()
+    if "allocationquota" in lower or "quota" in lower or "throttling" in lower:
+        return "stt_quota"
+    if "api_key" in lower or "unauthorized" in lower or "forbidden" in lower or "status=401" in lower:
+        return "stt_auth"
+    if "timeout" in lower:
+        return "stt_timeout"
+
+    observed = _device_voice_observed_audio_stats(
+        audio_stats,
+        client_audio_peak=client_audio_peak,
+        client_audio_rms=client_audio_rms,
+    )
+    duration_ms = int(observed.get("duration_ms") or 0)
+    peak = int(observed.get("peak") or 0)
+    rms = float(observed.get("rms") or 0.0)
+    if duration_ms > 0 and duration_ms < _DEVICE_VOICE_MIN_CLEAR_AUDIO_MS:
+        return "recording_too_short"
+    if peak <= _DEVICE_VOICE_LOW_PEAK_THRESHOLD and rms <= _DEVICE_VOICE_LOW_RMS_THRESHOLD:
+        return "audio_too_quiet"
+    if "empty transcript" in lower:
+        return "stt_empty"
+    return "stt_unavailable"
+
+
+def _device_voice_stt_error_answer(stt_error: str, failure_reason: str = "") -> str:
+    reason = _safe_textv(failure_reason)
+    if reason == "recording_too_short":
+        return "没听清楚，请再说一次哦。"
+    if reason == "audio_too_quiet":
+        return "没听清楚，请再说一次哦。"
+    text = _safe_textv(stt_error)
+    lower = text.lower()
+    if "allocationquota" in lower or "quota" in lower or "throttling" in lower:
+        return "语音识别额度暂时用完了，我现在无法把你的语音转成文字。请稍后再试，或先用文字问我。"
+    if "api_key" in lower or "unauthorized" in lower or "forbidden" in lower or "status=401" in lower:
+        return "语音识别服务的密钥配置有问题，我现在无法识别语音。请检查后端配置。"
+    if "timeout" in lower:
+        return "没听清楚，请再说一次哦。"
+    if "empty transcript" in lower:
+        return "没听清楚，请再说一次哦。"
+    return "语音识别服务暂时不可用，我现在无法把你的语音转成文字。请稍后再试，或先用文字问我。"
+
+
+def _device_synthesize_macos_say_wav(text: str) -> Optional[bytes]:
+    if platform.system() != "Darwin":
+        return None
+    if str(os.getenv("DEVICE_TTS_MACOS_FALLBACK", "1")).strip().lower() in {"0", "false", "no", "off"}:
+        return None
+    say_bin = shutil.which("say")
+    afconvert_bin = shutil.which("afconvert")
+    if not say_bin or not afconvert_bin:
+        return None
+
+    import tempfile
+
+    aiff_path = ""
+    wav_path = ""
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".aiff", delete=False) as aiff_tmp:
+            aiff_path = aiff_tmp.name
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as wav_tmp:
+            wav_path = wav_tmp.name
+
+        voice = os.getenv("DEVICE_TTS_MACOS_VOICE", "Tingting")
+        subprocess.run(
+            [say_bin, "-v", voice, "-o", aiff_path, text[:120]],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=8,
+        )
+        subprocess.run(
+            [afconvert_bin, "-f", "WAVE", "-d", "LEI16@16000", aiff_path, wav_path],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=8,
+        )
+        with open(wav_path, "rb") as f:
+            wav_bytes = f.read()
+        return wav_bytes if wav_bytes.startswith(b"RIFF") else None
+    except Exception as exc:
+        print(f"[device_api] voice_macos_tts_failed err={exc}", flush=True)
+        return None
+    finally:
+        for path in (aiff_path, wav_path):
+            if path:
+                try:
+                    os.unlink(path)
+                except Exception:
+                    pass
+
+
+class _DeviceVoiceRealtimeAsrSession:
+    def __init__(self) -> None:
+        self._recognition = None
+        self._events: List[Dict[str, Any]] = []
+        self._lock = threading.Lock()
+        self._final_text = ""
+        self._partial_text = ""
+        self.enabled = False
+        self.error = ""
+
+    def start(self) -> bool:
+        if str(os.getenv("DEVICE_REALTIME_ASR_ENABLED", "1")).strip().lower() in {"0", "false", "no", "off"}:
+            self.error = "disabled"
+            return False
+        api_key = _safe_textv(os.getenv("DASHSCOPE_API_KEY"))
+        if not api_key:
+            self.error = "DASHSCOPE_API_KEY not configured"
+            return False
+        try:
+            import dashscope
+            from dashscope.audio.asr import Recognition, RecognitionCallback
+
+            parent = self
+
+            class Callback(RecognitionCallback):
+                def on_event(self, result) -> None:  # type: ignore[override]
+                    sentences = result.get_sentence() if hasattr(result, "get_sentence") else None
+                    items = sentences if isinstance(sentences, list) else [sentences]
+                    for sentence in items:
+                        if not isinstance(sentence, dict):
+                            continue
+                        text = _safe_textv(sentence.get("text") or sentence.get("transcript"))
+                        if not text:
+                            continue
+                        is_final = False
+                        try:
+                            is_final = bool(result.is_sentence_end(sentence))
+                        except Exception:
+                            is_final = bool(sentence.get("sentence_end") or sentence.get("is_final"))
+                        parent._push_text(text, is_final=is_final)
+
+                def on_error(self, result) -> None:  # type: ignore[override]
+                    message = _safe_textv(getattr(result, "message", "")) or _safe_textv(result)
+                    with parent._lock:
+                        parent.error = message or "realtime asr error"
+                        parent._events.append({"type": "asr_error", "message": parent.error})
+
+            dashscope.api_key = api_key
+            self._recognition = Recognition(
+                model=os.getenv("DEVICE_REALTIME_STT_MODEL", os.getenv("DEVICE_STT_MODEL", "paraformer-realtime-v2")),
+                format="pcm",
+                sample_rate=_DEVICE_VOICE_SAMPLE_RATE,
+                language_hints=["zh", "en"],
+                callback=Callback(),
+            )
+            self._recognition.start()
+            self.enabled = True
+            return True
+        except Exception as exc:
+            self.error = str(exc)
+            print(f"[device_api] realtime_asr_start_failed err={exc}", flush=True)
+            return False
+
+    def _push_text(self, text: str, *, is_final: bool) -> None:
+        with self._lock:
+            if is_final:
+                self._final_text = text
+                event_type = "final_transcript"
+            else:
+                self._partial_text = text
+                event_type = "partial_transcript"
+            self._events.append({"type": event_type, "text": text})
+
+    def send_audio_frame(self, frame: bytes) -> None:
+        if not self.enabled or not self._recognition or not frame:
+            return
+        try:
+            self._recognition.send_audio_frame(frame)
+        except Exception as exc:
+            with self._lock:
+                self.error = str(exc)
+                self._events.append({"type": "asr_error", "message": self.error})
+            self.enabled = False
+
+    def stop(self) -> None:
+        if not self._recognition:
+            return
+        try:
+            self._recognition.stop()
+        except Exception as exc:
+            print(f"[device_api] realtime_asr_stop_failed err={exc}", flush=True)
+
+    def drain_events(self) -> List[Dict[str, Any]]:
+        with self._lock:
+            events = list(self._events)
+            self._events.clear()
+        return events
+
+    def best_text(self) -> str:
+        with self._lock:
+            return self._final_text or self._partial_text
+
+
+def _device_audio_gain() -> float:
+    try:
+        value = float(os.getenv("DEVICE_TTS_VOLUME_GAIN", str(_DEVICE_TTS_VOLUME_GAIN_DEFAULT)))
+        return max(0.2, min(2.0, value))
+    except Exception:
+        return _DEVICE_TTS_VOLUME_GAIN_DEFAULT
+
+
+def _clip_int16(value: float) -> int:
+    if value > 32767:
+        return 32767
+    if value < -32768:
+        return -32768
+    return int(round(value))
+
+
+def _decode_wav_to_mono_i16(audio_bytes: bytes) -> tuple[List[int], int]:
+    with wave.open(io.BytesIO(audio_bytes), "rb") as wav_file:
+        channels = wav_file.getnchannels()
+        sample_width = wav_file.getsampwidth()
+        sample_rate = wav_file.getframerate()
+        frame_count = wav_file.getnframes()
+        raw = wav_file.readframes(frame_count)
+
+    if channels <= 0 or sample_rate <= 0 or sample_width not in {1, 2, 3, 4}:
+        return [], 0
+
+    frame_size = channels * sample_width
+    if frame_size <= 0:
+        return [], 0
+
+    samples: List[int] = []
+    for offset in range(0, len(raw) - frame_size + 1, frame_size):
+        total = 0
+        for channel in range(channels):
+            start = offset + channel * sample_width
+            chunk = raw[start : start + sample_width]
+            if sample_width == 1:
+                value = (int(chunk[0]) - 128) << 8
+            elif sample_width == 2:
+                value = int.from_bytes(chunk, "little", signed=True)
+            elif sample_width == 3:
+                sign = b"\xff" if chunk[2] & 0x80 else b"\x00"
+                value = int.from_bytes(chunk + sign, "little", signed=True) >> 8
+            else:
+                value = int.from_bytes(chunk, "little", signed=True) >> 16
+            total += value
+        samples.append(_clip_int16(total / channels))
+    return samples, sample_rate
+
+
+def _resample_i16(samples: List[int], source_rate: int, target_rate: int) -> List[int]:
+    if not samples or source_rate <= 0 or source_rate == target_rate:
+        return samples
+    target_count = max(1, int(round(len(samples) * float(target_rate) / float(source_rate))))
+    if target_count == len(samples):
+        return samples
+    if target_count == 1 or len(samples) == 1:
+        return [samples[0]]
+
+    result: List[int] = []
+    scale = float(len(samples) - 1) / float(target_count - 1)
+    for idx in range(target_count):
+        pos = idx * scale
+        left = int(pos)
+        right = min(left + 1, len(samples) - 1)
+        frac = pos - left
+        value = samples[left] * (1.0 - frac) + samples[right] * frac
+        result.append(_clip_int16(value))
+    return result
+
+
+def _soft_limit_i16(samples: List[int]) -> List[int]:
+    if not samples:
+        return samples
+    peak = max(abs(int(sample)) for sample in samples)
+    if peak <= 0 or peak <= _DEVICE_TTS_HARD_PEAK:
+        return samples
+    scale = float(_DEVICE_TTS_TARGET_PEAK) / float(peak)
+    return [_clip_int16(int(sample) * scale) for sample in samples]
+
+
+def _normalize_device_tts_wav(audio_bytes: Optional[bytes]) -> Optional[bytes]:
+    if not audio_bytes or not bytes(audio_bytes).startswith(b"RIFF"):
+        return audio_bytes
+    try:
+        samples, sample_rate = _decode_wav_to_mono_i16(bytes(audio_bytes))
+        if not samples:
+            return audio_bytes
+        samples = _resample_i16(samples, sample_rate, _DEVICE_VOICE_SAMPLE_RATE)
+        gain = _device_audio_gain()
+        if gain != 1.0:
+            samples = [_clip_int16(sample * gain) for sample in samples]
+        samples = _soft_limit_i16(samples)
+        pcm = bytearray()
+        for sample in samples:
+            pcm.extend(int(sample).to_bytes(2, "little", signed=True))
+        return _build_pcm_wav(bytes(pcm), sample_rate=_DEVICE_VOICE_SAMPLE_RATE)
+    except Exception as exc:
+        print(f"[device_api] voice_tts_normalize_failed err={exc}", flush=True)
+        return audio_bytes
+
+
+def _extract_device_qwen_tts_audio_url(response: Any) -> str:
+    data = getattr(response, "output", response)
+    if not isinstance(data, dict):
+        data = getattr(data, "__dict__", {}) if data is not None else {}
+    audio = data.get("audio") if isinstance(data, dict) else None
+    if isinstance(audio, dict):
+        return _safe_textv(audio.get("url"))
+    if audio is not None:
+        return _safe_textv(getattr(audio, "url", ""))
+    return _safe_textv(data.get("audio_url") if isinstance(data, dict) else "")
+
+
+def _extract_device_qwen_tts_audio_data(response: Any) -> bytes:
+    data = getattr(response, "output", response)
+    if not isinstance(data, dict):
+        data = getattr(data, "__dict__", {}) if data is not None else {}
+    audio = data.get("audio") if isinstance(data, dict) else None
+    raw = ""
+    if isinstance(audio, dict):
+        raw = _safe_textv(audio.get("data") or audio.get("audio"))
+    elif audio is not None:
+        raw = _safe_textv(getattr(audio, "data", "") or getattr(audio, "audio", ""))
+    if not raw:
+        raw = _safe_textv(data.get("audio_data") if isinstance(data, dict) else "")
+    if not raw:
+        return b""
+    try:
+        return base64.b64decode(raw)
+    except Exception:
+        return b""
+
+
+def _device_synthesize_qwen_tts_wav(text: str, api_key: str) -> Optional[bytes]:
+    try:
+        import dashscope
+        import requests as _req
+
+        model = os.getenv("DEVICE_TTS_MODEL", "qwen3-tts-instruct-flash")
+        voice = os.getenv("DEVICE_TTS_VOICE", "Cherry")
+        instructions = _safe_textv(
+            os.getenv("DEVICE_TTS_INSTRUCTIONS"),
+            "用清晰、沉稳、简短的中文交易助理语气播报。",
+        )
+        response = dashscope.MultiModalConversation.call(
+            model=model,
+            api_key=api_key,
+            text=text[:180],
+            voice=voice,
+            language_type=os.getenv("DEVICE_TTS_LANGUAGE_TYPE", "Chinese"),
+            instructions=instructions,
+            optimize_instructions=True,
+            stream=False,
+        )
+        audio_bytes = _extract_device_qwen_tts_audio_data(response)
+        if audio_bytes:
+            return audio_bytes if audio_bytes.startswith(b"RIFF") else None
+        audio_url = _extract_device_qwen_tts_audio_url(response)
+        if audio_url:
+            resp = _req.get(audio_url, timeout=10)
+            resp.raise_for_status()
+            downloaded = bytes(resp.content or b"")
+            return downloaded if downloaded.startswith(b"RIFF") else None
+        status_code = getattr(response, "status_code", "")
+        code = getattr(response, "code", "")
+        message = getattr(response, "message", "")
+        raise RuntimeError(f"empty qwen tts audio status={status_code} code={code} message={message}")
+    except Exception as exc:
+        print(f"[device_api] voice_qwen_tts_failed err={exc}", flush=True)
+        return None
+
+
+def _device_synthesize_cosyvoice_wav(text: str, api_key: str) -> Optional[bytes]:
+    try:
+        import dashscope
+        from dashscope.audio.tts_v2 import AudioFormat, SpeechSynthesizer
+
+        dashscope.api_key = api_key
+        synthesizer = SpeechSynthesizer(
+            model=os.getenv("DEVICE_TTS_MODEL", "cosyvoice-v2"),
+            voice=os.getenv("DEVICE_TTS_VOICE", "longxiaochun"),
+            format=AudioFormat.PCM_16000HZ_MONO_16BIT,
+        )
+        pcm = synthesizer.call(text[:180])
+        if not pcm:
+            return None
+        return _build_pcm_wav(bytes(pcm))
+    except Exception as exc:
+        print(f"[device_api] voice_cosyvoice_tts_failed err={exc}", flush=True)
+        return None
+
+
+def _device_synthesize_speech_wav(text: str) -> Optional[bytes]:
+    if not _safe_textv(text):
+        return None
+    if str(os.getenv("DEVICE_TTS_DISABLED", "0")).strip().lower() in {"1", "true", "yes", "on"}:
+        return None
+    api_key = _safe_textv(os.getenv("DASHSCOPE_API_KEY"))
+    if not api_key:
+        return _normalize_device_tts_wav(_device_synthesize_macos_say_wav(text))
+    model = os.getenv("DEVICE_TTS_MODEL", "qwen3-tts-instruct-flash")
+    if model.startswith("qwen"):
+        audio = _device_synthesize_qwen_tts_wav(text, api_key)
+    else:
+        audio = _device_synthesize_cosyvoice_wav(text, api_key)
+    return _normalize_device_tts_wav(audio or _device_synthesize_macos_say_wav(text))
+
+
+def _device_voice_audio_playable(audio_bytes: Optional[bytes], *, min_duration_ms: int = 350) -> bool:
+    if not audio_bytes or not bytes(audio_bytes).startswith(b"RIFF"):
+        return False
+    try:
+        wav_info = _read_device_wav_info(bytes(audio_bytes), enforce_device_recording_limits=False)
+        stats = _device_wav_signal_stats(bytes(audio_bytes), wav_info)
+        return int(stats.get("duration_ms") or 0) >= min_duration_ms and int(stats.get("samples") or 0) > 0
+    except Exception:
+        return False
+
+
+def _cleanup_device_voice_audio_cache(now: Optional[float] = None) -> None:
+    now_value = now or time.time()
+    stale_ids = [
+        voice_id
+        for voice_id, item in _DEVICE_VOICE_AUDIO_CACHE.items()
+        if now_value - float(item.get("created_at", 0)) > _DEVICE_VOICE_AUDIO_CACHE_TTL_SECONDS
+    ]
+    for voice_id in stale_ids:
+        _DEVICE_VOICE_AUDIO_CACHE.pop(voice_id, None)
+
+
+def _store_device_voice_audio(audio_bytes: bytes) -> str:
+    voice_id = uuid.uuid4().hex
+    with _DEVICE_VOICE_AUDIO_CACHE_LOCK:
+        _cleanup_device_voice_audio_cache()
+        _DEVICE_VOICE_AUDIO_CACHE[voice_id] = {"created_at": time.time(), "audio": bytes(audio_bytes)}
+    return voice_id
+
+
+def _get_device_voice_audio(voice_id: str) -> Optional[bytes]:
+    normalized = re.sub(r"[^a-fA-F0-9]", "", str(voice_id or ""))[:64]
+    if not normalized:
+        return None
+    with _DEVICE_VOICE_AUDIO_CACHE_LOCK:
+        _cleanup_device_voice_audio_cache()
+        item = _DEVICE_VOICE_AUDIO_CACHE.get(normalized)
+        if not item:
+            return None
+        return bytes(item.get("audio") or b"")
+
+
+def _device_voice_disk_cache_enabled() -> bool:
+    return str(os.getenv("DEVICE_VOICE_AUDIO_DISK_CACHE_DISABLED", "0")).strip().lower() not in {"1", "true", "yes", "on"}
+
+
+def _device_voice_disk_cache_path(cache_key: str) -> str:
+    safe_key = re.sub(r"[^a-fA-F0-9]", "", cache_key)[:64]
+    return os.path.join(_DEVICE_VOICE_AUDIO_DISK_CACHE_DIR, f"{safe_key}.wav")
+
+
+def _read_device_voice_disk_audio(cache_key: str) -> Optional[bytes]:
+    if not _device_voice_disk_cache_enabled():
+        return None
+    path = _device_voice_disk_cache_path(cache_key)
+    try:
+        stat = os.stat(path)
+        if time.time() - float(stat.st_mtime) > _DEVICE_VOICE_AUDIO_DISK_CACHE_TTL_SECONDS:
+            return None
+        with open(path, "rb") as f:
+            audio = f.read()
+        return audio if audio.startswith(b"RIFF") else None
+    except FileNotFoundError:
+        return None
+    except Exception as exc:
+        print(f"[device_api] voice_disk_cache_read_failed err={exc}", flush=True)
+        return None
+
+
+def _write_device_voice_disk_audio(cache_key: str, audio_bytes: bytes) -> None:
+    if not _device_voice_disk_cache_enabled() or not audio_bytes or not audio_bytes.startswith(b"RIFF"):
+        return
+    try:
+        os.makedirs(_DEVICE_VOICE_AUDIO_DISK_CACHE_DIR, exist_ok=True)
+        path = _device_voice_disk_cache_path(cache_key)
+        tmp_path = f"{path}.{uuid.uuid4().hex}.tmp"
+        with open(tmp_path, "wb") as f:
+            f.write(audio_bytes)
+        os.replace(tmp_path, path)
+    except Exception as exc:
+        print(f"[device_api] voice_disk_cache_write_failed err={exc}", flush=True)
+
+
+def _device_voice_last_task_key(username: str, device_id: str) -> str:
+    user = re.sub(r"[^a-zA-Z0-9_.@-]", "_", _safe_textv(username) or "anonymous")[:80]
+    device = re.sub(r"[^a-zA-Z0-9_.@-]", "_", _safe_textv(device_id) or "default")[:80]
+    return f"{_DEVICE_VOICE_LAST_TASK_PREFIX}{user}:{device}"
+
+
+def _read_device_voice_last_task(username: str, device_id: str) -> Dict[str, Any]:
+    try:
+        raw = _redis.get(_device_voice_last_task_key(username, device_id))
+        data = _safe_json_loads(raw)
+        return data if isinstance(data, dict) else {}
+    except Exception as exc:
+        print(f"[device_api] voice_last_task_read_failed user={username} err={exc}", flush=True)
+        return {}
+
+
+def _write_device_voice_last_task(username: str, device_id: str, payload: Dict[str, Any]) -> None:
+    if not isinstance(payload, dict):
+        return
+    try:
+        stored = dict(payload)
+        stored["updated_at"] = datetime.now().isoformat()
+        _redis.setex(
+            _device_voice_last_task_key(username, device_id),
+            _DEVICE_VOICE_LAST_TASK_TTL_SECONDS,
+            json.dumps(stored, ensure_ascii=False),
+        )
+    except Exception as exc:
+        print(f"[device_api] voice_last_task_write_failed user={username} err={exc}", flush=True)
+
+
+def _device_voice_task_elapsed_seconds(task_id: str) -> float:
+    state = _read_mobile_chat_state(task_id)
+    created_ts = _parse_iso_ts(state.get("created_at")) if state else 0.0
+    if created_ts <= 0:
+        meta = TaskManager.get_task_meta(task_id) or {}
+        start_ts = float(meta.get("start_time") or 0.0)
+        if start_ts > 0:
+            created_ts = start_ts
+        else:
+            created_ts = _parse_iso_ts(meta.get("created_at")) if meta else 0.0
+    if created_ts <= 0:
+        return 0.0
+    return max(0.0, time.time() - created_ts)
+
+
+def _device_voice_next_poll_seconds(elapsed_seconds: float) -> int:
+    if elapsed_seconds < 20:
+        return 2
+    if elapsed_seconds < 120:
+        return 5
+    return 10
+
+
+def _device_voice_active_task_id(username: str, device_id: str) -> str:
+    last_task = _read_device_voice_last_task(username, device_id)
+    task_id = _safe_textv(last_task.get("task_id"))
+    if not task_id:
+        return ""
+    status = TaskManager.get_task_status(task_id) or {}
+    status_name = _safe_textv(status.get("status") or status.get("state")).lower()
+    if status_name in {"queued", "pending", "processing"} and _device_voice_task_elapsed_seconds(task_id) < _DEVICE_VOICE_TASK_MAX_WAIT_SECONDS:
+        return task_id
+    return ""
+
+
+def _device_voice_last_task_answer(username: str, device_id: str) -> str:
+    last_task = _read_device_voice_last_task(username, device_id)
+    task_id = _safe_textv(last_task.get("task_id"))
+    if not task_id:
+        return "我这边没有正在分析的深度任务。你可以直接问我行情、IV，或者让我做一次深度分析。"
+    try:
+        status_payload = chat_status(task_id=task_id, username=username)
+    except Exception as exc:
+        print(f"[device_api] voice_last_task_status_failed user={username} task_id={task_id} err={exc}", flush=True)
+        return "我刚才的分析状态暂时读取失败，你可以稍后再问我一次结果。"
+
+    status_name = _safe_textv(status_payload.get("status") or status_payload.get("state")).lower()
+    if status_name in {"queued", "pending", "processing"}:
+        return "还在分析，我会继续盯着。你现在也可以先问我价格、IV 或者切换合约。"
+    if status_name == "success":
+        answer = _extract_mobile_chat_response_text(status_payload)
+        return _summarize_device_voice_text(answer, max_chars=150) or "刚才的分析已经完成，但我没有拿到可播报的摘要。"
+    err_text = _safe_textv(status_payload.get("error") or status_payload.get("detail"))
+    return err_text or "刚才的分析没有成功完成，我没有拿到可靠结论。"
+
+
+def _device_voice_instant_answer(transcript: str, *, username: str, device_id: str) -> str:
+    text = _safe_textv(transcript).lower()
+    if any(marker in text for marker in ("还在分析", "分析好了", "结果好了", "刚才结果", "上一个结果")):
+        return _device_voice_last_task_answer(username, device_id)
+    if _device_voice_asks_time(text):
+        return f"现在是北京时间 {datetime.now().strftime('%H点%M分')}。"
+    if "怎么用" in text or "可以做什么" in text:
+        return _DEVICE_VOICE_PROMPT_TEXTS.get("voice_help", "你可以问价格、涨跌、IV，或让我做深度分析。")
+    if "你是谁" in text or "你叫什么" in text:
+        return "我是 TradingArt 助手。"
+    return _DEVICE_VOICE_PROMPT_TEXTS.get("voice_hello", "你好，我在。")
+
+
+def _summarize_device_voice_text(text: str, *, max_chars: int = 120) -> str:
+    value = re.sub(r"\s+", " ", _safe_textv(text)).strip()
+    if not value:
+        return ""
+    sentence_parts = [part.strip() for part in re.split(r"[。！？!?]\s*", value) if part.strip()]
+    if sentence_parts:
+        value = "。".join(sentence_parts[:3])
+        if value and not value.endswith("。"):
+            value += "。"
+    if len(value) <= max_chars:
+        return value
+    return value[: max_chars - 1].rstrip("，。；;、 ") + "。"
+
+
+def _device_voice_audio_url_for_text(text: str) -> str:
+    normalized_text = re.sub(r"\s+", " ", _safe_textv(text)).strip()
+    if not normalized_text:
+        return ""
+    cache_basis = "|".join(
+        [
+            normalized_text,
+            os.getenv("DEVICE_TTS_MODEL", "qwen3-tts-instruct-flash"),
+            os.getenv("DEVICE_TTS_VOICE", "Cherry"),
+            os.getenv("DEVICE_TTS_LANGUAGE_TYPE", "Chinese"),
+            str(_device_audio_gain()),
+        ]
+    )
+    cache_key = hashlib.sha256(cache_basis.encode("utf-8")).hexdigest()
+    now_value = time.time()
+    with _DEVICE_VOICE_AUDIO_CACHE_LOCK:
+        item = _DEVICE_VOICE_TEXT_AUDIO_CACHE.get(cache_key)
+        if item and now_value - float(item.get("created_at", 0)) <= _DEVICE_VOICE_AUDIO_CACHE_TTL_SECONDS:
+            cached_voice_id = _safe_textv(item.get("voice_id"))
+            if cached_voice_id and cached_voice_id in _DEVICE_VOICE_AUDIO_CACHE:
+                return f"/api/device/voice/audio/{cached_voice_id}"
+
+    disk_audio = _read_device_voice_disk_audio(cache_key)
+    if _device_voice_audio_playable(disk_audio):
+        voice_id = _store_device_voice_audio(disk_audio)
+        with _DEVICE_VOICE_AUDIO_CACHE_LOCK:
+            _DEVICE_VOICE_TEXT_AUDIO_CACHE[cache_key] = {"created_at": now_value, "voice_id": voice_id}
+        return f"/api/device/voice/audio/{voice_id}"
+
+    tts_bytes = _device_synthesize_speech_wav(normalized_text)
+    if not _device_voice_audio_playable(tts_bytes):
+        macos_fallback = _normalize_device_tts_wav(_device_synthesize_macos_say_wav(normalized_text))
+        if _device_voice_audio_playable(macos_fallback):
+            tts_bytes = macos_fallback
+        else:
+            print(
+                f"[device_api] voice_tts_audio_too_short text={normalized_text[:30]} "
+                f"bytes={len(tts_bytes or b'')}",
+                flush=True,
+            )
+            return ""
+    if not tts_bytes:
+        return ""
+    _write_device_voice_disk_audio(cache_key, tts_bytes)
+    voice_id = _store_device_voice_audio(tts_bytes)
+    with _DEVICE_VOICE_AUDIO_CACHE_LOCK:
+        _DEVICE_VOICE_TEXT_AUDIO_CACHE[cache_key] = {"created_at": now_value, "voice_id": voice_id}
+    return f"/api/device/voice/audio/{voice_id}"
+
+
+def _device_voice_audio_id_from_url(audio_url: str) -> str:
+    text = _safe_textv(audio_url)
+    match = re.search(r"/api/device/voice/audio/([a-fA-F0-9_-]+)", text)
+    return match.group(1) if match else ""
+
+
+def _device_voice_wav_pcm_payload(audio_bytes: bytes) -> Tuple[bytes, Dict[str, Any]]:
+    if not audio_bytes or not audio_bytes.startswith(b"RIFF"):
+        return b"", {"encoding": "unknown"}
+    try:
+        with wave.open(io.BytesIO(audio_bytes), "rb") as wf:
+            sample_rate = wf.getframerate()
+            channels = wf.getnchannels()
+            sample_width = wf.getsampwidth()
+            frames = wf.getnframes()
+            pcm = wf.readframes(frames)
+        if channels == 1 and sample_width == 2 and sample_rate == _DEVICE_VOICE_SAMPLE_RATE:
+            return pcm, {
+                "encoding": "pcm16",
+                "sample_rate": sample_rate,
+                "channels": channels,
+                "sample_width": sample_width,
+                "samples": frames,
+            }
+    except Exception:
+        pass
+    return audio_bytes, {"encoding": "wav"}
+
+
+def _build_device_voice_deep_prompt(
+    *,
+    transcript: str,
+    contract_context: Dict[str, Any],
+    screen_context: str,
+) -> str:
+    context_lines = []
+    if contract_context:
+        context_lines.append(
+            "设备当前看板："
+            f"标的={contract_context.get('product_name') or contract_context.get('contract') or contract_context.get('product_code') or ''}；"
+            f"代码={contract_context.get('contract') or contract_context.get('product_code') or ''}；"
+            f"最新价={_format_device_price(contract_context.get('latest_price'))}；"
+            f"涨跌={_format_device_metric(contract_context.get('price_pct'), '%')}；"
+            f"IV={_format_device_metric(contract_context.get('iv'))}；"
+            f"IV Rank={_format_device_metric(contract_context.get('iv_rank'))}；"
+            f"技术面={_safe_textv(contract_context.get('technical_label')) or '待生成'}。"
+        )
+    if screen_context:
+        context_lines.append(f"设备屏幕上下文：{_safe_textv(screen_context)[:300]}")
+    context_text = "\n".join(context_lines) if context_lines else "设备没有明确标的上下文。"
+    return (
+        "这是来自 StackChan 桌面机器人的语音提问。请复用 TradingArt 的分析框架，"
+        "结合确定性行情、波动率、技术面、风险和仓位做交易者可理解的分析。"
+        "不要编造缺失行情数字；若数据不足，请明确说明。\n"
+        f"{context_text}\n"
+        f"用户问题：{_safe_textv(transcript)}"
+    )
+
+
+def _submit_device_voice_deep_task(
+    *,
+    username: str,
+    transcript: str,
+    contract_context: Dict[str, Any],
+    screen_context: str,
+    conversation_id: str,
+) -> str:
+    prompt = _build_device_voice_deep_prompt(
+        transcript=transcript,
+        contract_context=contract_context,
+        screen_context=screen_context,
+    )
+    try:
+        profile = de.get_user_profile(username) or {}
+    except Exception:
+        profile = {}
+    risk = str(profile.get("risk_preference") or "稳健型")
+    context_payload = _build_mobile_context_payload(
+        prompt_text=prompt,
+        current_user=username,
+        history=[],
+        profile=profile,
+    )
+    context_payload.update(
+        {
+            "chat_mode": CHAT_MODE_ANALYSIS,
+            "delivery_mode": "device_voice_task",
+            "device_voice": True,
+            "screen_context": _safe_textv(screen_context)[:500],
+            "contract_context": contract_context or {},
+            "conversation_id": _safe_textv(conversation_id) or f"stackchan-{username}-{uuid.uuid4()}",
+        }
+    )
+    task_id = TaskManager.create_task(
+        user_id=username,
+        prompt=prompt,
+        risk_preference=risk,
+        history_messages=[],
+        context_payload=context_payload,
+        has_portfolio=_detect_mobile_has_portfolio(username),
+    )
+    trace_id = _generate_chat_trace_id()
+    answer_id = _generate_chat_answer_id()
+    progress_text = "分析团队还在看技术面和波动率"
+    existing_state = _read_mobile_chat_state(task_id)
+    existing_status = _safe_textv(existing_state.get("status")).lower()
+    if existing_status not in {"success", "error", "timeout", "canceled"}:
+        _write_mobile_chat_state(
+            task_id=task_id,
+            user_id=username,
+            status=existing_status if existing_status in {"processing"} else "pending",
+            error="",
+            finished=False,
+            extra_fields={
+                "trace_id": trace_id,
+                "answer_id": answer_id,
+                "prompt_text": prompt,
+                "intent_domain": str(context_payload.get("intent_domain") or "option"),
+                "feedback_allowed": False,
+                "chat_mode": CHAT_MODE_ANALYSIS,
+                "progress": _safe_textv(existing_state.get("progress")) or progress_text,
+                "delivery_mode": "device_voice_task",
+            },
+        )
+    _set_mobile_chat_last_task(username, task_id)
+    try:
+        _redis.setex(_mobile_chat_prompt_key(task_id), _MOBILE_CHAT_PROMPT_TTL, prompt)
+    except Exception as exc:
+        print(f"[device_api] voice_prompt_cache_failed task_id={task_id} err={exc}", flush=True)
+    return task_id
+
+
+def _build_device_voice_query_payload(
+    *,
+    username: str,
+    request: Request,
+    audio_bytes: bytes,
+    contract: str = "",
+    category: str = "futures",
+    screen_context: str = "",
+    conversation_id: str = "",
+    client_audio_peak: Any = None,
+    client_audio_rms: Any = None,
+    initial_timings_ms: Optional[Dict[str, Any]] = None,
+    transcript_override: str = "",
+) -> Dict[str, Any]:
+    total_started_at = time.perf_counter()
+    timings_ms: Dict[str, Any] = dict(initial_timings_ms or {})
+    stage_started_at = time.perf_counter()
+    wav_info = _read_device_wav_info(audio_bytes)
+    audio_stats = _device_wav_signal_stats(audio_bytes, wav_info)
+    _record_timing(timings_ms, "audio_parse_ms", stage_started_at)
+    stage_started_at = time.perf_counter()
+    category_value = _normalize_device_menu_category(category)
+    device_ctx = _extract_device_context(request)
+    device_id = _safe_textv(device_ctx.get("device_id"))
+    _record_timing(timings_ms, "context_parse_ms", stage_started_at)
+
+    freshness = "fresh"
+    emotion = "thinking"
+    action = "display"
+    route_type = "error"
+    task_id = ""
+    poll_after_seconds: Optional[int] = None
+    stt_status = "ok"
+    stt_error = ""
+    stt_failure_reason = ""
+    contract_context: Dict[str, Any] = {}
+    transcript_override = _safe_textv(transcript_override)
+    if transcript_override:
+        transcript = transcript_override
+        timings_ms.setdefault("stt_ms", 0)
+    else:
+        try:
+            stage_started_at = time.perf_counter()
+            transcript = _safe_textv(_device_transcribe_wav(audio_bytes))
+            _record_timing(timings_ms, "stt_ms", stage_started_at)
+        except Exception as exc:
+            _record_timing(timings_ms, "stt_ms", stage_started_at)
+            print(
+                "[device_api] voice_stt_failed "
+                f"user={username} duration_ms={audio_stats.get('duration_ms', 0)} "
+                f"peak={audio_stats.get('peak', 0)} rms={audio_stats.get('rms', 0.0)} "
+                f"err={exc}",
+                flush=True,
+            )
+            transcript = "语音识别失败"
+            stt_status = "failed"
+            stt_error = _safe_textv(f"{type(exc).__name__}: {exc}")[:180]
+            stt_failure_reason = _classify_device_voice_stt_failure(
+                stt_error,
+                audio_stats,
+                client_audio_peak=client_audio_peak,
+                client_audio_rms=client_audio_rms,
+            )
+            freshness = "degraded"
+            emotion = "error"
+
+    if stt_status == "failed":
+        route_type = "error"
+        stage_started_at = time.perf_counter()
+        answer_text = _device_voice_stt_error_answer(stt_error, stt_failure_reason)
+        _record_timing(timings_ms, "answer_ms", stage_started_at)
+    else:
+        stage_started_at = time.perf_counter()
+        route_type = _classify_device_voice_route(transcript)
+        _record_timing(timings_ms, "route_ms", stage_started_at)
+        active_task_id = ""
+        if route_type == "stop_listening":
+            stage_started_at = time.perf_counter()
+            answer_text = "好的，我先不听了。需要时再点我。"
+            action = "stop_listening"
+            emotion = "happy"
+            _record_timing(timings_ms, "answer_ms", stage_started_at)
+        elif route_type == "instant_reply":
+            stage_started_at = time.perf_counter()
+            answer_text = _device_voice_instant_answer(transcript, username=username, device_id=device_id)
+            _record_timing(timings_ms, "answer_ms", stage_started_at)
+            emotion = "happy"
+        elif route_type == "deep_analysis":
+            active_task_id = _device_voice_active_task_id(username, device_id)
+            if active_task_id:
+                stage_started_at = time.perf_counter()
+                answer_text = "我还在分析上一个复杂问题，先问我价格、IV 或者等我播报结果。"
+                route_type = "deep_analysis_busy"
+                freshness = "degraded"
+                emotion = "thinking"
+                _record_timing(timings_ms, "answer_ms", stage_started_at)
+            else:
+                stage_started_at = time.perf_counter()
+                contract_context = _load_device_voice_market_context(
+                    username=username,
+                    request=request,
+                    transcript=transcript,
+                    contract=contract,
+                    category=category_value,
+                )
+                _record_timing(timings_ms, "market_context_ms", stage_started_at)
+        elif route_type == "market_fact":
+            stage_started_at = time.perf_counter()
+            contract_context = _load_device_voice_market_context(
+                username=username,
+                request=request,
+                transcript=transcript,
+                contract=contract,
+                category=category_value,
+            )
+            _record_timing(timings_ms, "market_context_ms", stage_started_at)
+
+        if route_type == "market_fact":
+            stage_started_at = time.perf_counter()
+            answer_text = _device_voice_fact_answer(contract_context)
+            if not answer_text:
+                answer_text = "我还没有取到这个标的的实时看板数据，不能直接报行情数字。"
+                freshness = "degraded"
+            if _device_voice_asks_time(transcript) and "北京时间" not in answer_text:
+                answer_text = f"现在是北京时间 {datetime.now().strftime('%H点%M分')}。{answer_text}"
+            _record_timing(timings_ms, "answer_ms", stage_started_at)
+        elif route_type == "deep_analysis":
+            answer_text = _DEVICE_VOICE_PROMPT_TEXTS.get("voice_deep_confirm", "这个问题需要深度分析，我先帮你看。")
+            try:
+                stage_started_at = time.perf_counter()
+                task_id = _submit_device_voice_deep_task(
+                    username=username,
+                    transcript=transcript,
+                    contract_context=contract_context,
+                    screen_context=screen_context,
+                    conversation_id=conversation_id,
+                )
+                _write_device_voice_last_task(
+                    username,
+                    device_id,
+                    {
+                        "task_id": task_id,
+                        "transcript": transcript,
+                        "status": "processing",
+                        "contract": contract_context.get("contract") or contract_context.get("product_code") or contract,
+                        "category": category_value,
+                        "created_at": datetime.now().isoformat(),
+                    },
+                )
+                _record_timing(timings_ms, "deep_submit_ms", stage_started_at)
+                action = "thinking"
+                poll_after_seconds = _DEVICE_VOICE_TASK_POLL_SECONDS
+                emotion = "thinking"
+            except UserTaskQueueFullError as exc:
+                _record_timing(timings_ms, "deep_submit_ms", stage_started_at)
+                answer_text = (
+                    f"你前面已有 {exc.active_count} 个问题处理中、{exc.queued_count} 个排队，"
+                    "我先不继续塞任务，稍后再帮你分析。"
+                )
+                freshness = "degraded"
+                emotion = "error"
+            except Exception as exc:
+                _record_timing(timings_ms, "deep_submit_ms", stage_started_at)
+                print(f"[device_api] voice_deep_task_failed user={username} err={exc}", flush=True)
+                answer_text = "深度分析任务提交失败了，我先不乱给交易结论。请稍后再试。"
+                freshness = "degraded"
+                emotion = "error"
+        elif route_type not in {"instant_reply", "deep_analysis_busy", "stop_listening"}:
+            stage_started_at = time.perf_counter()
+            answer_text = _device_generate_voice_answer(
+                username=username,
+                transcript=transcript,
+                contract_context=contract_context,
+                screen_context=screen_context,
+            )
+            _record_timing(timings_ms, "llm_ms", stage_started_at)
+
+    audio_url = ""
+    stage_started_at = time.perf_counter()
+    if route_type in {"instant_reply", "market_fact", "deep_analysis", "deep_analysis_busy", "stop_listening", "error"}:
+        audio_url = _device_voice_audio_url_for_text(answer_text)
+    else:
+        tts_bytes = _device_synthesize_speech_wav(answer_text)
+        if tts_bytes:
+            voice_id = _store_device_voice_audio(tts_bytes)
+            audio_url = f"/api/device/voice/audio/{voice_id}"
+        else:
+            freshness = "degraded"
+    _record_timing(timings_ms, "tts_ms", stage_started_at)
+    if not audio_url and action != "thinking":
+        freshness = "degraded"
+    if audio_url:
+        if action != "thinking":
+            emotion = "speaking" if emotion != "error" else emotion
+    if action not in {"thinking", "stop_listening"}:
+        action = "speak" if audio_url else "display"
+    _record_timing(timings_ms, "server_total_ms", total_started_at)
+    if _DEVICE_VOICE_LATENCY_OBSERVATION_ENABLED:
+        print(
+            "[device_api] voice_timings "
+            f"user={username} device_id={device_id} route={route_type} "
+            f"total_ms={timings_ms.get('server_total_ms')} timings={timings_ms}",
+            flush=True,
+        )
+
+    return {
+        "user_id": username,
+        "device_id": device_ctx.get("device_id", ""),
+        "conversation_id": _safe_textv(conversation_id) or uuid.uuid4().hex,
+        "route_type": route_type,
+        "task_id": task_id,
+        "poll_after_seconds": poll_after_seconds,
+        "task_max_wait_seconds": _DEVICE_VOICE_TASK_MAX_WAIT_SECONDS,
+        "transcript": transcript,
+        "answer_text": answer_text,
+        "speak_text": answer_text,
+        "emotion": emotion,
+        "action": action,
+        "audio_url": audio_url,
+        "audio_duration_ms": audio_stats.get("duration_ms", 0),
+        "audio_peak": audio_stats.get("peak", 0),
+        "audio_rms": audio_stats.get("rms", 0.0),
+        "client_audio_peak": _safe_floatv(client_audio_peak, default=None),
+        "client_audio_rms": _safe_floatv(client_audio_rms, default=None),
+        "stt_status": stt_status,
+        "stt_error": stt_error,
+        "stt_failure_reason": stt_failure_reason,
+        "stt_user_message": answer_text if stt_status == "failed" else "",
+        "timings_ms": timings_ms,
+        "updated_at": _device_now_text(),
+        "data_freshness": freshness,
+    }
+
+
+def _extract_mobile_chat_response_text(status_payload: Dict[str, Any]) -> str:
+    result = status_payload.get("result")
+    if isinstance(result, dict):
+        for key in ("response", "answer", "answer_text", "message"):
+            value = _safe_textv(result.get(key))
+            if value:
+                return value
+    for key in ("response", "answer", "answer_text", "message"):
+        value = _safe_textv(status_payload.get(key))
+        if value:
+            return value
+    return ""
+
+
+def _read_device_voice_chat_status(task_id: str, username: str) -> Dict[str, Any]:
+    """Read chat task status for device voice without mobile pending timeout side effects."""
+    state = _read_mobile_chat_state(task_id)
+    if state and state.get("user_id") and str(state.get("user_id")) != str(username):
+        raise HTTPException(status_code=403, detail="无权限访问该任务")
+
+    status_name = _safe_textv(state.get("status") or state.get("state")).lower() if state else ""
+    result_wrapper = _read_mobile_chat_result(task_id)
+    result_payload = result_wrapper.get("result") if isinstance(result_wrapper, dict) else None
+    if status_name == "success" and isinstance(result_payload, dict):
+        return {"status": "success", "result": result_payload}
+    if status_name in {"error", "canceled", "timeout"}:
+        return {
+            "status": status_name,
+            "error": _safe_textv(state.get("error")) or ("AI思考太久，请稍后问我刚才结果。" if status_name == "timeout" else "分析失败，请稍后重试。"),
+        }
+    if status_name in {"pending", "queued", "processing"}:
+        chat_mode = _safe_textv(state.get("chat_mode")) or CHAT_MODE_ANALYSIS
+        return {
+            "status": status_name,
+            "progress": _safe_textv(state.get("progress")) or default_progress_for_chat_mode(chat_mode, status=status_name),
+            "result": None,
+            "error": None,
+            "chat_mode": chat_mode,
+        }
+
+    status = TaskManager.get_task_status(task_id) or {}
+    status_name = _safe_textv(status.get("status") or status.get("state")).lower()
+    if status_name == "success":
+        result = status.get("result")
+        if isinstance(result, dict):
+            _write_mobile_chat_result(task_id=task_id, user_id=username, result_payload=result)
+            existing_state = _read_mobile_chat_state(task_id)
+            _write_mobile_chat_state(
+                task_id=task_id,
+                user_id=username,
+                status="success",
+                error="",
+                finished=True,
+                extra_fields={
+                    "feedback_allowed": True,
+                    "trace_id": _safe_textv(existing_state.get("trace_id")),
+                    "answer_id": _safe_textv(existing_state.get("answer_id")),
+                    "prompt_text": _safe_textv(existing_state.get("prompt_text")),
+                    "intent_domain": _safe_textv(existing_state.get("intent_domain")) or "general",
+                    "chat_mode": _safe_textv(existing_state.get("chat_mode") or status.get("chat_mode")) or CHAT_MODE_ANALYSIS,
+                },
+            )
+            try:
+                TaskManager.complete_user_task(username, task_id)
+            except Exception:
+                pass
+        return status
+    if status_name == "error":
+        err_msg = _safe_textv(status.get("error")) or "分析失败，请稍后重试。"
+        _write_mobile_chat_state(task_id=task_id, user_id=username, status="error", error=err_msg, finished=True)
+        try:
+            TaskManager.complete_user_task(username, task_id)
+        except Exception:
+            pass
+        return status
+    if status_name in {"pending", "queued", "processing"}:
+        return status
+    return status if isinstance(status, dict) else {}
+
+
+def _build_device_voice_task_payload(
+    *,
+    username: str,
+    request: Request,
+    task_id: str,
+) -> Dict[str, Any]:
+    total_started_at = time.perf_counter()
+    timings_ms: Dict[str, Any] = {}
+    normalized_task_id = re.sub(r"[^a-zA-Z0-9_-]", "", _safe_textv(task_id))[:80]
+    if not normalized_task_id:
+        raise HTTPException(status_code=400, detail="无效任务 ID")
+
+    freshness = "fresh"
+    elapsed_seconds = _device_voice_task_elapsed_seconds(normalized_task_id)
+    status_payload: Dict[str, Any]
+    try:
+        stage_started_at = time.perf_counter()
+        raw_status = _read_device_voice_chat_status(task_id=normalized_task_id, username=username)
+        status_payload = raw_status if isinstance(raw_status, dict) else {}
+        _record_timing(timings_ms, "status_read_ms", stage_started_at)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        _record_timing(timings_ms, "status_read_ms", stage_started_at)
+        print(f"[device_api] voice_task_status_failed user={username} task_id={normalized_task_id} err={exc}", flush=True)
+        status_payload = {"status": "error", "error": "分析任务状态读取失败。"}
+        freshness = "degraded"
+
+    status_name = _safe_textv(status_payload.get("status") or status_payload.get("state")).lower()
+    task_status_source = "runtime"
+    state_status = ""
+    worker_status_name = ""
+    if status_name in {"pending", "queued", "processing"} and elapsed_seconds >= _DEVICE_VOICE_TASK_MAX_WAIT_SECONDS:
+        task_status_source = "timeout"
+        status_name = "timeout"
+        answer_text = "分析还没完成，我先不占着你，你可以继续问行情，稍后问我刚才结果。"
+        speak_text = answer_text
+        stage_started_at = time.perf_counter()
+        audio_url = _device_voice_audio_url_for_text(speak_text)
+        _record_timing(timings_ms, "tts_ms", stage_started_at)
+        action = "speak" if audio_url else "display"
+        emotion = "error"
+        freshness = "degraded"
+    elif status_name in {"pending", "processing"} and elapsed_seconds >= _DEVICE_VOICE_TASK_WORKER_GRACE_SECONDS:
+        state_snapshot = _read_mobile_chat_state(normalized_task_id)
+        state_status = _safe_textv(state_snapshot.get("status") or state_snapshot.get("state")).lower()
+        try:
+            worker_status = TaskManager.get_task_status(normalized_task_id) or {}
+        except Exception as exc:
+            print(
+                f"[device_api] voice_task_worker_status_failed user={username} task_id={normalized_task_id} err={exc}",
+                flush=True,
+            )
+            worker_status = {}
+        worker_status_name = _safe_textv(worker_status.get("status") or worker_status.get("state")).lower()
+        print(
+            "[device_api] voice_task_status_source "
+            f"user={username} task_id={normalized_task_id} status={status_name} "
+            f"elapsed={int(elapsed_seconds)} state={state_status or '-'} "
+            f"worker={worker_status_name or '-'}",
+            flush=True,
+        )
+        if not state_status and worker_status_name == "pending" and elapsed_seconds >= _DEVICE_VOICE_TASK_LOST_GRACE_SECONDS:
+            task_status_source = "lost"
+            status_name = "error"
+            status_payload = {
+                "status": "error",
+                "error": "后台分析任务状态丢失了。我先不占着你，请稍后重新让我分析。",
+            }
+            freshness = "degraded"
+
+    if status_name in {"pending", "queued"}:
+        progress_text = _safe_textv(status_payload.get("progress")) or "分析团队还在排队看这个问题"
+        answer_text = progress_text
+        speak_text = ""
+        action = "thinking"
+        emotion = "thinking"
+        audio_url = ""
+    elif status_name == "processing":
+        progress_text = _safe_textv(status_payload.get("progress")) or "分析团队还在看技术面和波动率"
+        answer_text = progress_text
+        speak_text = ""
+        action = "thinking"
+        emotion = "thinking"
+        audio_url = ""
+    elif status_name == "success":
+        answer_text = _extract_mobile_chat_response_text(status_payload)
+        if not answer_text:
+            answer_text = "分析已经完成，但我没有拿到可播报的摘要。"
+            freshness = "degraded"
+        speak_text = _summarize_device_voice_text(answer_text, max_chars=90)
+        stage_started_at = time.perf_counter()
+        audio_url = _device_voice_audio_url_for_text(speak_text)
+        _record_timing(timings_ms, "tts_ms", stage_started_at)
+        action = "speak" if audio_url else "display"
+        emotion = "speaking" if audio_url else "happy"
+    elif status_name == "timeout":
+        answer_text = "分析还没完成，我先不占着你，你可以继续问行情，稍后问我刚才结果。"
+        speak_text = answer_text
+        stage_started_at = time.perf_counter()
+        audio_url = _device_voice_audio_url_for_text(speak_text)
+        _record_timing(timings_ms, "tts_ms", stage_started_at)
+        action = "speak" if audio_url else "display"
+        emotion = "error"
+        freshness = "degraded"
+    else:
+        status_name = status_name or "error"
+        err_text = _safe_textv(status_payload.get("error") or status_payload.get("detail"))
+        answer_text = err_text or "分析服务刚刚出了点问题，我没有拿到可靠结论。"
+        speak_text = _summarize_device_voice_text(answer_text, max_chars=120)
+        stage_started_at = time.perf_counter()
+        audio_url = _device_voice_audio_url_for_text(speak_text)
+        _record_timing(timings_ms, "tts_ms", stage_started_at)
+        action = "speak" if audio_url else "display"
+        emotion = "error"
+        freshness = "degraded"
+
+    device_ctx = _extract_device_context(request)
+    if status_name in {"success", "error", "timeout"}:
+        _write_device_voice_last_task(
+            username,
+            _safe_textv(device_ctx.get("device_id")),
+            {
+                "task_id": normalized_task_id,
+                "status": status_name,
+                "answer_text": answer_text,
+                "speak_text": speak_text,
+            },
+        )
+    _record_timing(timings_ms, "server_total_ms", total_started_at)
+    return {
+        "user_id": username,
+        "device_id": device_ctx.get("device_id", ""),
+        "task_id": normalized_task_id,
+        "route_type": "deep_analysis",
+        "status": status_name,
+        "action": action,
+        "emotion": emotion,
+        "answer_text": answer_text,
+        "speak_text": speak_text,
+        "audio_url": audio_url,
+        "poll_after_seconds": _device_voice_next_poll_seconds(elapsed_seconds) if action == "thinking" else None,
+        "task_max_wait_seconds": _DEVICE_VOICE_TASK_MAX_WAIT_SECONDS,
+        "elapsed_seconds": int(elapsed_seconds),
+        "task_status_source": task_status_source,
+        "state_status": state_status,
+        "worker_status": worker_status_name,
+        "timings_ms": timings_ms,
+        "updated_at": _device_now_text(),
+        "data_freshness": freshness,
+    }
 
 
 # ════════════════════════════════════════════════════════════
@@ -2268,6 +5408,518 @@ def logout(credentials: HTTPAuthorizationCredentials = Depends(_bearer)):
 def verify_token(username: str = Depends(get_current_user)):
     """验证 Token 是否仍然有效。"""
     return {"valid": True, "username": username}
+
+
+@app.get("/api/device/ping", tags=["设备"])
+def device_ping(request: Request, username: str = Depends(get_current_user)):
+    device_ctx = _extract_device_context(request)
+    payload = {
+        "ok": True,
+        "user_id": username,
+        "device_id": device_ctx.get("device_id", ""),
+        "server_time": _device_now_text(),
+        "device_headers_echo": device_ctx,
+    }
+    _log_device_request(endpoint="/api/device/ping", username=username, request=request, status="ok")
+    return payload
+
+
+@app.get("/api/device/config", tags=["设备"])
+def device_config(request: Request, username: str = Depends(get_current_user)):
+    _ensure_device_voice_stock_name_cache_async()
+    _ensure_device_voice_prompt_audio_cache_async()
+    payload = _build_device_config_payload()
+    _log_device_request(
+        endpoint="/api/device/config",
+        username=username,
+        request=request,
+        status="ok",
+        detail=f"auto_poll={payload['auto_poll_enabled']}",
+    )
+    return payload
+
+
+@app.get("/api/device/briefing", tags=["设备"])
+def device_briefing(request: Request, username: str = Depends(get_current_user)):
+    payload = _build_device_briefing_payload(username=username, request=request)
+    _log_device_request(
+        endpoint="/api/device/briefing",
+        username=username,
+        request=request,
+        status=payload.get("data_freshness", "unknown"),
+        detail=payload.get("market_state", ""),
+    )
+    return payload
+
+
+@app.get("/api/device/contracts/menu", tags=["设备"])
+def device_contracts_menu(
+    request: Request,
+    max_products: int = Query(default=12, ge=1, le=60),
+    max_contracts: int = Query(default=6, ge=1, le=12),
+    product: Optional[str] = Query(default=None, description="可选品种代码，如 pp；为空时只返回轻量商品菜单"),
+    category: str = Query(default="futures", description="菜单分类：futures / etf / favorites"),
+    username: str = Depends(get_current_user),
+):
+    payload = _build_device_contract_menu_payload(
+        username=username,
+        request=request,
+        max_products=max_products,
+        max_contracts=max_contracts,
+        product=product,
+        category=category,
+    )
+    _log_device_request(
+        endpoint="/api/device/contracts/menu",
+        username=username,
+        request=request,
+        status=payload.get("data_freshness", "unknown"),
+        detail=f"products={len(payload.get('products') or [])}",
+    )
+    return payload
+
+
+@app.get("/api/device/contracts/briefing", tags=["设备"])
+def device_contract_briefing(
+    request: Request,
+    contract: str = Query(..., description="具体合约，如 PP2609"),
+    category: str = Query(default="futures", description="看板分类：futures / etf / favorites"),
+    username: str = Depends(get_current_user),
+):
+    payload = _build_device_contract_briefing_payload(
+        username=username,
+        request=request,
+        contract=contract,
+        category=category,
+    )
+    _log_device_request(
+        endpoint="/api/device/contracts/briefing",
+        username=username,
+        request=request,
+        status=payload.get("data_freshness", "unknown"),
+        detail=payload.get("contract", ""),
+    )
+    return payload
+
+
+@app.post("/api/device/voice/query", tags=["设备"])
+def device_voice_query(
+    request: Request,
+    audio: UploadFile = File(..., description="16kHz mono 16-bit WAV，最长 8 秒"),
+    contract: str = Form(default="", description="当前合约，如 PP2609 或 510300.SH"),
+    category: str = Form(default="futures", description="看板分类：futures / etf / favorites"),
+    screen_context: str = Form(default="", description="设备屏幕上下文"),
+    conversation_id: str = Form(default="", description="设备端会话 ID"),
+    client_audio_peak: str = Form(default="", description="设备端本地录音峰值，用于没听清原因分类"),
+    client_audio_rms: str = Form(default="", description="设备端本地录音 RMS，用于没听清原因分类"),
+    username: str = Depends(get_current_user),
+):
+    upload_started_at = time.perf_counter()
+    audio_bytes = audio.file.read()
+    initial_timings_ms: Dict[str, Any] = {}
+    _record_timing(initial_timings_ms, "upload_read_ms", upload_started_at)
+    payload = _build_device_voice_query_payload(
+        username=username,
+        request=request,
+        audio_bytes=audio_bytes,
+        contract=contract,
+        category=category,
+        screen_context=screen_context,
+        conversation_id=conversation_id,
+        client_audio_peak=client_audio_peak,
+        client_audio_rms=client_audio_rms,
+        initial_timings_ms=initial_timings_ms,
+    )
+    _log_device_request(
+        endpoint="/api/device/voice/query",
+        username=username,
+        request=request,
+        status=payload.get("data_freshness", "unknown"),
+        detail=f"{payload.get('route_type', '')}:{payload.get('timings_ms', {}).get('server_total_ms', '-')}",
+    )
+    return payload
+
+
+@app.get("/api/device/voice/audio/{voice_id}", tags=["设备"])
+def device_voice_audio(
+    voice_id: str,
+    request: Request,
+    username: str = Depends(get_current_user),
+):
+    audio_bytes = _get_device_voice_audio(voice_id)
+    if not audio_bytes:
+        _log_device_request(
+            endpoint="/api/device/voice/audio",
+            username=username,
+            request=request,
+            status="missing",
+            detail=voice_id,
+        )
+        raise HTTPException(status_code=404, detail="音频已过期或不存在")
+    _log_device_request(
+        endpoint="/api/device/voice/audio",
+        username=username,
+        request=request,
+        status="ok",
+        detail=voice_id,
+    )
+    return Response(content=audio_bytes, media_type="audio/wav")
+
+
+@app.get("/api/device/voice/audio-prompt/{prompt_key}", tags=["设备"])
+def device_voice_audio_prompt(
+    prompt_key: str,
+    request: Request,
+    username: str = Depends(get_current_user),
+):
+    prompt_text = _DEVICE_VOICE_PROMPT_TEXTS.get(_safe_textv(prompt_key))
+    if not prompt_text:
+        _log_device_request(
+            endpoint="/api/device/voice/audio-prompt",
+            username=username,
+            request=request,
+            status="missing",
+            detail=prompt_key,
+        )
+        raise HTTPException(status_code=404, detail="提示音不存在")
+    audio_url = _device_voice_audio_url_for_text(prompt_text)
+    voice_id = audio_url.rsplit("/", 1)[-1] if audio_url else ""
+    audio_bytes = _get_device_voice_audio(voice_id) if voice_id else b""
+    if not audio_bytes:
+        _log_device_request(
+            endpoint="/api/device/voice/audio-prompt",
+            username=username,
+            request=request,
+            status="tts_failed",
+            detail=prompt_key,
+        )
+        raise HTTPException(status_code=503, detail="提示音生成失败")
+    _log_device_request(
+        endpoint="/api/device/voice/audio-prompt",
+        username=username,
+        request=request,
+        status="ok",
+        detail=prompt_key,
+    )
+    return Response(content=audio_bytes, media_type="audio/wav")
+
+
+@app.get("/api/device/voice/task/{task_id}", tags=["设备"])
+def device_voice_task(
+    task_id: str,
+    request: Request,
+    username: str = Depends(get_current_user),
+):
+    payload = _build_device_voice_task_payload(
+        username=username,
+        request=request,
+        task_id=task_id,
+    )
+    _log_device_request(
+        endpoint="/api/device/voice/task",
+        username=username,
+        request=request,
+        status=payload.get("status", "unknown"),
+        detail=payload.get("task_id", ""),
+    )
+    return payload
+
+
+@app.websocket("/api/device/voice/realtime")
+async def device_voice_realtime(websocket: WebSocket):
+    """StackChan V3 realtime bridge.
+
+    v3-alpha accepts 16k mono pcm16 chunks over WebSocket and reuses the
+    existing STT/routing/TTS pipeline when the client sends a stop event.
+    Streaming STT/TTS can replace the finalization step later without changing
+    the client-side event envelope.
+    """
+    try:
+        username = _resolve_websocket_user(websocket)
+    except HTTPException:
+        await websocket.close(code=1008)
+        return
+
+    device_ctx = {
+        "device_id": _safe_textv(websocket.headers.get("X-Device-Id")),
+        "device_model": _safe_textv(websocket.headers.get("X-Device-Model")),
+        "device_version": _safe_textv(websocket.headers.get("X-Device-Version")),
+    }
+    await websocket.accept()
+    await websocket.send_json(
+        {
+            "type": "hello",
+            "protocol": "tradingart.stackchan.voice.realtime",
+            "version": "research-v1",
+            "mode": "prototype",
+            "user_id": username,
+            "device_id": device_ctx.get("device_id", ""),
+            "audio_format": {
+                "codec": "pcm16",
+                "sample_rate": _DEVICE_VOICE_SAMPLE_RATE,
+                "channels": _DEVICE_VOICE_CHANNELS,
+                "frame_ms": 60,
+            },
+            "capabilities": {
+                "status_events": True,
+                "binary_audio_frames": True,
+                "json_audio_frames": True,
+                "answer_delta": True,
+                "tts_audio_delta": _DEVICE_VOICE_REALTIME_TTS_AUDIO_DELTA_ENABLED,
+                "streaming_tts": _DEVICE_VOICE_REALTIME_TTS_AUDIO_DELTA_ENABLED,
+                "barge_in": True,
+                "followup_window_seconds": _DEVICE_VOICE_REALTIME_FOLLOWUP_WINDOW_SECONDS,
+                "finalize_event": "stop",
+                "http_fallback": "/api/device/voice/query",
+            },
+            "message": "实时语音通道已连接。",
+        }
+    )
+    print(
+        "[device_api] endpoint=/api/device/voice/realtime status=connected "
+        f"user={username} device_id={device_ctx.get('device_id') or '-'} "
+        f"model={device_ctx.get('device_model') or '-'} version={device_ctx.get('device_version') or '-'}",
+        flush=True,
+    )
+
+    realtime_request = _request_from_websocket(websocket)
+    session: Dict[str, Any] = {
+        "pcm": bytearray(),
+        "contract": "",
+        "category": "futures",
+        "screen_context": "",
+        "conversation_id": "",
+        "last_seq": 0,
+        "started_at": time.perf_counter(),
+        "asr": None,
+    }
+
+    def reset_session(payload: Optional[Dict[str, Any]] = None) -> None:
+        payload = payload or {}
+        previous_asr = session.get("asr")
+        if previous_asr:
+            try:
+                previous_asr.stop()
+            except Exception:
+                pass
+        session["pcm"] = bytearray()
+        session["contract"] = _safe_textv(payload.get("contract"))
+        session["category"] = _normalize_device_menu_category(payload.get("category"))
+        session["screen_context"] = _safe_textv(payload.get("screen_context"))
+        session["conversation_id"] = _safe_textv(payload.get("conversation_id"))
+        session["last_seq"] = 0
+        session["started_at"] = time.perf_counter()
+        asr_session = _DeviceVoiceRealtimeAsrSession()
+        session["asr"] = asr_session if asr_session.start() else None
+
+    async def drain_realtime_asr_events() -> None:
+        asr_session = session.get("asr")
+        if not asr_session:
+            return
+        for event in asr_session.drain_events():
+            if event.get("type") == "asr_error":
+                print(f"[device_api] realtime_asr_error user={username} err={event.get('message')}", flush=True)
+                continue
+            await websocket.send_json(event)
+
+    async def append_pcm_frame(frame: bytes, seq: int = 0) -> None:
+        if not frame:
+            await websocket.send_json({"type": "error", "code": "empty_audio_frame", "message": "空音频帧已忽略。"})
+            return
+        pcm: bytearray = session["pcm"]
+        if len(pcm) + len(frame) > _DEVICE_VOICE_REALTIME_MAX_PCM_BYTES:
+            await websocket.send_json(
+                {
+                    "type": "error",
+                    "code": "audio_too_long",
+                    "message": "音频超过设备实时通道最大长度，请重新开始。",
+                }
+            )
+            return
+        pcm.extend(frame)
+        asr_session = session.get("asr")
+        if asr_session:
+            asr_session.send_audio_frame(frame)
+            await drain_realtime_asr_events()
+        if seq:
+            session["last_seq"] = seq
+        await websocket.send_json({"type": "audio_ack", "seq": seq or session["last_seq"], "bytes": len(pcm)})
+
+    async def finalize_realtime_turn() -> None:
+        pcm = bytes(session["pcm"])
+        if not pcm:
+            await websocket.send_json({"type": "error", "code": "empty_audio", "message": "没有收到音频。"})
+            return
+        await websocket.send_json({"type": "status", "state": "transcribing", "bytes": len(pcm)})
+        asr_session = session.get("asr")
+        transcript_override = ""
+        if asr_session:
+            asr_session.stop()
+            await drain_realtime_asr_events()
+            transcript_override = _safe_textv(asr_session.best_text())
+        audio_bytes = _build_pcm_wav(pcm, sample_rate=_DEVICE_VOICE_SAMPLE_RATE)
+        try:
+            wav_info = _read_device_wav_info(audio_bytes)
+            audio_stats = _device_wav_signal_stats(audio_bytes, wav_info)
+            print(
+                "[device_api] realtime_audio_stats "
+                f"user={username} bytes={len(pcm)} duration_ms={audio_stats.get('duration_ms')} "
+                f"peak={audio_stats.get('peak')} rms={audio_stats.get('rms')} "
+                f"rt_asr={'yes' if transcript_override else 'no'}",
+                flush=True,
+            )
+        except Exception as exc:
+            print(f"[device_api] realtime_audio_stats_failed user={username} err={exc}", flush=True)
+        await websocket.send_json({"type": "status", "state": "thinking"})
+        payload = _build_device_voice_query_payload(
+            username=username,
+            request=realtime_request,
+            audio_bytes=audio_bytes,
+            contract=_safe_textv(session.get("contract")),
+            category=_safe_textv(session.get("category"), "futures"),
+            screen_context=_safe_textv(session.get("screen_context")),
+            conversation_id=_safe_textv(session.get("conversation_id")),
+            initial_timings_ms={
+                "ws_buffer_ms": _perf_ms_since(float(session.get("started_at") or time.perf_counter())),
+            },
+            transcript_override=transcript_override,
+        )
+        await websocket.send_json(
+            {
+                "type": "result",
+                "route_type": payload.get("route_type", ""),
+                "action": payload.get("action", ""),
+                "emotion": payload.get("emotion", ""),
+                "transcript": payload.get("transcript", ""),
+                "answer_text": payload.get("answer_text", ""),
+                "task_id": payload.get("task_id", ""),
+                "poll_after_seconds": payload.get("poll_after_seconds"),
+                "timings_ms": payload.get("timings_ms", {}),
+                "stt_status": payload.get("stt_status", ""),
+                "stt_failure_reason": payload.get("stt_failure_reason", ""),
+            }
+        )
+        answer_text = _safe_textv(payload.get("answer_text"))
+        if payload.get("transcript"):
+            await websocket.send_json({"type": "final_transcript", "text": payload.get("transcript", "")})
+        if answer_text:
+            await websocket.send_json({"type": "answer_delta", "text": answer_text, "is_final": True})
+        audio_url = _safe_textv(payload.get("audio_url"))
+        if audio_url:
+            await websocket.send_json({"type": "status", "state": "speaking"})
+            await websocket.send_json({"type": "audio_url", "url": audio_url})
+            if _DEVICE_VOICE_REALTIME_TTS_AUDIO_DELTA_ENABLED:
+                audio_id = _device_voice_audio_id_from_url(audio_url)
+                cached_audio = _get_device_voice_audio(audio_id) if audio_id else b""
+                pcm_payload, audio_meta = _device_voice_wav_pcm_payload(cached_audio or b"")
+            else:
+                pcm_payload, audio_meta = b"", {}
+            if pcm_payload:
+                chunk_size = _DEVICE_VOICE_REALTIME_TTS_CHUNK_BYTES
+                chunk_total = int(math.ceil(len(pcm_payload) / float(chunk_size)))
+                for chunk_index in range(chunk_total):
+                    start = chunk_index * chunk_size
+                    chunk = pcm_payload[start : start + chunk_size]
+                    await websocket.send_json(
+                        {
+                            "type": "tts_audio_delta",
+                            "seq": chunk_index + 1,
+                            "total": chunk_total,
+                            "audio_b64": base64.b64encode(chunk).decode("ascii"),
+                            "is_final": chunk_index + 1 == chunk_total,
+                            **audio_meta,
+                        }
+                    )
+                    await websocket.send_bytes(chunk)
+        if payload.get("action") == "thinking" and payload.get("task_id"):
+            await websocket.send_json(
+                {
+                    "type": "task",
+                    "task_id": payload.get("task_id"),
+                    "poll_after_seconds": payload.get("poll_after_seconds"),
+                    "task_max_wait_seconds": payload.get("task_max_wait_seconds"),
+                }
+            )
+        await websocket.send_json(
+            {
+                "type": "done",
+                "conversation_id": payload.get("conversation_id", ""),
+                "followup_window_seconds": _DEVICE_VOICE_REALTIME_FOLLOWUP_WINDOW_SECONDS,
+            }
+        )
+        await websocket.send_json(
+            {
+                "type": "status",
+                "state": "followup_listening",
+                "timeout_seconds": _DEVICE_VOICE_REALTIME_FOLLOWUP_WINDOW_SECONDS,
+            }
+        )
+        session["pcm"] = bytearray()
+
+    try:
+        while True:
+            message = await websocket.receive()
+            if message.get("type") == "websocket.disconnect":
+                break
+            if "text" in message and message["text"] is not None:
+                raw_text = _safe_textv(message.get("text"))
+                try:
+                    payload = json.loads(raw_text) if raw_text else {}
+                except Exception:
+                    payload = {"type": "text", "text": raw_text}
+                message_type = _safe_textv(payload.get("type")).lower()
+                if message_type == "ping":
+                    await websocket.send_json({"type": "pong", "server_time": _device_now_text()})
+                elif message_type == "start":
+                    reset_session(payload)
+                    await websocket.send_json({"type": "status", "state": "listening"})
+                elif message_type in {"user_speaking", "speech_start"}:
+                    await websocket.send_json({"type": "status", "state": "user_speaking"})
+                elif message_type in {"cancel", "barge_in", "interrupt"}:
+                    reset_session(payload)
+                    await websocket.send_json({"type": "status", "state": "listening", "interrupted": True})
+                elif message_type in {"audio", "audio_frame"}:
+                    raw_b64 = _safe_textv(payload.get("pcm_b64") or payload.get("audio_b64") or payload.get("data_b64"))
+                    try:
+                        frame = base64.b64decode(raw_b64, validate=True) if raw_b64 else b""
+                    except Exception:
+                        await websocket.send_json({"type": "error", "code": "bad_audio_frame", "message": "音频帧不是有效 base64。"})
+                        continue
+                    await append_pcm_frame(frame, int(_safe_floatv(payload.get("seq"), default=0) or 0))
+                elif message_type in {"stop", "finalize"}:
+                    await finalize_realtime_turn()
+                elif message_type in {"capabilities", "hello"}:
+                    await websocket.send_json(
+                        {
+                            "type": "capabilities",
+                            "status_events": True,
+                            "binary_audio_frames": True,
+                            "json_audio_frames": True,
+                            "answer_delta": True,
+                            "tts_audio_delta": _DEVICE_VOICE_REALTIME_TTS_AUDIO_DELTA_ENABLED,
+                            "streaming_tts": _DEVICE_VOICE_REALTIME_TTS_AUDIO_DELTA_ENABLED,
+                            "barge_in": True,
+                            "followup_window_seconds": _DEVICE_VOICE_REALTIME_FOLLOWUP_WINDOW_SECONDS,
+                            "finalize_event": "stop",
+                            "http_fallback": "/api/device/voice/query",
+                        }
+                    )
+                else:
+                    await websocket.send_json(
+                        {
+                            "type": "status",
+                            "status": "prototype",
+                            "message": "当前实时通道只用于协议研究，请继续使用 HTTP 语音接口。",
+                        }
+                    )
+            elif "bytes" in message and message["bytes"] is not None:
+                await append_pcm_frame(bytes(message["bytes"]), int(session.get("last_seq") or 0) + 1)
+    except WebSocketDisconnect:
+        print(
+            "[device_api] endpoint=/api/device/voice/realtime status=disconnected "
+            f"user={username} device_id={device_ctx.get('device_id') or '-'}",
+            flush=True,
+        )
 
 
 # ════════════════════════════════════════════════════════════
