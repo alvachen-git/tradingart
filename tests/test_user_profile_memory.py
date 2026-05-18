@@ -139,6 +139,174 @@ class TestUserProfileMemory(unittest.TestCase):
         self.assertEqual(self._active_value(upm.KEY_PREFERRED_PRODUCTS), "ETF期权")
         self.assertIn("优先按ETF期权的口径", out["confirmation"])
 
+    def test_stable_fact_keys_update_existing_profile_table(self):
+        out = upm.build_profile_memory_context(
+            self.engine,
+            user_id="u1",
+            prompt_text=(
+                "记住交易约束：资金量未知时，不要给金额级调仓建议，只给方向、条件和补数清单。"
+                "客户担忧是回撤过大和数据不完整。"
+            ),
+        )
+
+        self.assertTrue(out["should_short_circuit"])
+        self.assertEqual(self._active_value(upm.KEY_TRADING_CONSTRAINT), "资金量未知时，不要给金额级调仓建议，只给方向、条件和补数清单")
+        self.assertEqual(self._active_value(upm.KEY_CLIENT_CONCERN), "回撤过大和数据不完整")
+        self.assertIn("【稳定事实】", out["profile_context"])
+        self.assertIn("交易约束", out["profile_context"])
+        self.assertIn("客户担忧", out["profile_context"])
+
+    def test_account_capital_update_query_and_replace(self):
+        out = upm.build_profile_memory_context(
+            self.engine,
+            user_id="u1",
+            prompt_text="我现在资金量是200万，要记住",
+        )
+
+        self.assertTrue(out["should_short_circuit"])
+        self.assertEqual(self._active_value(upm.KEY_ACCOUNT_CAPITAL), "200万")
+        self.assertIn("账户资金", out["profile_context"])
+
+        query = upm.build_profile_memory_context(
+            self.engine,
+            user_id="u1",
+            prompt_text="还记得我有多少资金吗",
+        )
+
+        self.assertTrue(query["should_short_circuit"])
+        self.assertEqual(query["memory_action"], "query")
+        self.assertIn("200万", query["confirmation"])
+
+        upm.build_profile_memory_context(
+            self.engine,
+            user_id="u1",
+            prompt_text="把我的资金量改成150万",
+        )
+
+        self.assertEqual(self._active_value(upm.KEY_ACCOUNT_CAPITAL), "150万")
+
+    def test_account_capital_colloquial_phrases_persist_and_query(self):
+        cases = [
+            ("记住我有资金200万", "200万"),
+            ("记住我有200万资金", "200万"),
+            ("记住我的资金300万", "300万"),
+            ("记住我现在有350万", "350万"),
+            ("记住我有现金200万", "200万"),
+            ("记住我有200万现金", "200万"),
+            ("记住我的现金300万", "300万"),
+            ("记住我可用现金是150万", "150万"),
+        ]
+        for prompt, expected in cases:
+            with self.subTest(prompt=prompt):
+                engine = create_engine("sqlite:///:memory:", future=True)
+                upm.ensure_profile_memory_table(engine)
+                out = upm.build_profile_memory_context(
+                    engine,
+                    user_id="u1",
+                    prompt_text=prompt,
+                )
+
+                self.assertTrue(out["should_short_circuit"])
+                memories = upm.get_active_profile_memories(engine, "u1")
+                by_key = {m["memory_key"]: m["memory_value"] for m in memories}
+                self.assertEqual(by_key.get(upm.KEY_ACCOUNT_CAPITAL), expected)
+
+                query = upm.build_profile_memory_context(
+                    engine,
+                    user_id="u1",
+                    prompt_text="你知道我有多少资金吗",
+                )
+                self.assertEqual(query["memory_action"], "query")
+                self.assertIn(expected, query["confirmation"])
+
+                cash_query = upm.build_profile_memory_context(
+                    engine,
+                    user_id="u1",
+                    prompt_text="你知道我有多少现金吗",
+                )
+                self.assertEqual(cash_query["memory_action"], "query")
+                self.assertIn(expected, cash_query["confirmation"])
+
+    def test_natural_question_updates_current_capital_and_goal(self):
+        upm.upsert_profile_memory(
+            self.engine,
+            user_id="u1",
+            memory_key=upm.KEY_ACCOUNT_CAPITAL,
+            memory_value="300万",
+            source_text="历史资金画像",
+        )
+
+        out = upm.build_profile_memory_context(
+            self.engine,
+            user_id="u1",
+            prompt_text="我有资金500万，目标是靠买期权赚到可以在上海买房",
+        )
+
+        self.assertFalse(out["should_short_circuit"])
+        self.assertEqual(out["memory_action"], "context")
+        self.assertEqual(self._active_value(upm.KEY_ACCOUNT_CAPITAL), "500万")
+        self.assertEqual(self._active_value(upm.KEY_INVESTMENT_GOAL), "靠买期权赚到可以在上海买房")
+        self.assertIn("账户资金", out["profile_context"])
+        self.assertIn("目标/用途", out["profile_context"])
+
+        query = upm.build_profile_memory_context(
+            self.engine,
+            user_id="u1",
+            prompt_text="你记得我的投资目标吗",
+        )
+
+        self.assertTrue(query["should_short_circuit"])
+        self.assertEqual(query["memory_action"], "query")
+        self.assertIn("靠买期权赚到可以在上海买房", query["confirmation"])
+
+    def test_decision_style_and_investment_goal_update_profile(self):
+        out = upm.build_profile_memory_context(
+            self.engine,
+            user_id="u1",
+            prompt_text="记住我的决策风格是先给结论再看细节；投资目标是稳健增值和现金增强。",
+        )
+
+        self.assertTrue(out["should_short_circuit"])
+        self.assertEqual(self._active_value(upm.KEY_DECISION_STYLE), "先给结论再看细节")
+        self.assertEqual(self._active_value(upm.KEY_INVESTMENT_GOAL), "稳健增值和现金增强")
+        self.assertIn("决策风格", out["profile_context"])
+        self.assertIn("目标/用途", out["profile_context"])
+
+    def test_natural_goal_and_decision_style_can_create_context_memory(self):
+        out = upm.build_profile_memory_context(
+            self.engine,
+            user_id="u1",
+            prompt_text="我喜欢先看结论再看细节，这笔钱半年后要用，主要想做现金增强。",
+        )
+
+        self.assertFalse(out["should_short_circuit"])
+        self.assertEqual(self._active_value(upm.KEY_DECISION_STYLE), "结论再看细节")
+        self.assertEqual(self._active_value(upm.KEY_INVESTMENT_GOAL), "半年后要用，主要想做现金增强")
+        self.assertIn("决策风格", out["profile_context"])
+        self.assertIn("目标/用途", out["profile_context"])
+
+    def test_stable_fact_without_memory_marker_does_not_write(self):
+        out = upm.build_profile_memory_context(
+            self.engine,
+            user_id="u1",
+            prompt_text="今天数据不是实时，先帮我看看创业板ETF期权怎么调。",
+        )
+
+        self.assertFalse(out["should_short_circuit"])
+        self.assertNotIn("【稳定事实】", out["profile_context"])
+
+    def test_recurring_focus_explicit_update_ignores_data_limit_as_profile(self):
+        out = upm.build_profile_memory_context(
+            self.engine,
+            user_id="u1",
+            prompt_text="记住我经常关注创业板ETF期权；数据限制是资金流数据T+1，不要说成实时。",
+        )
+
+        self.assertTrue(out["should_short_circuit"])
+        self.assertEqual(self._active_value(upm.KEY_RECURRING_FOCUS), "创业板ETF期权")
+        self.assertIn("高频关注", out["profile_context"])
+        self.assertNotIn("数据限制", out["profile_context"])
+
     def test_query_risk_preference_is_deterministic(self):
         upm.upsert_profile_memory(
             self.engine,

@@ -17,6 +17,13 @@ KEY_GENDER = "gender"
 KEY_HOBBIES = "hobbies"
 KEY_FEARS = "fears"
 KEY_DISLIKES = "dislikes"
+KEY_STABLE_PREFERENCE = "stable_preference"
+KEY_TRADING_CONSTRAINT = "trading_constraint"
+KEY_RECURRING_FOCUS = "recurring_focus"
+KEY_CLIENT_CONCERN = "client_concern"
+KEY_ACCOUNT_CAPITAL = "account_capital"
+KEY_DECISION_STYLE = "decision_style"
+KEY_INVESTMENT_GOAL = "investment_goal"
 
 PROFILE_MEMORY_LABELS = {
     KEY_RISK_PREFERENCE: "风险偏好",
@@ -29,6 +36,18 @@ PROFILE_MEMORY_LABELS = {
     KEY_DISLIKES: "厌恶/不喜欢",
 }
 
+PROFILE_MEMORY_LABELS.update(
+    {
+        KEY_STABLE_PREFERENCE: "稳定偏好",
+        KEY_TRADING_CONSTRAINT: "交易约束",
+        KEY_RECURRING_FOCUS: "高频关注",
+        KEY_CLIENT_CONCERN: "客户担忧",
+        KEY_ACCOUNT_CAPITAL: "账户资金",
+        KEY_DECISION_STYLE: "决策风格",
+        KEY_INVESTMENT_GOAL: "目标/用途",
+    }
+)
+
 PROFILE_MEMORY_DISPLAY_ORDER = (
     KEY_RISK_PREFERENCE,
     KEY_PREFERRED_PRODUCTS,
@@ -38,11 +57,28 @@ PROFILE_MEMORY_DISPLAY_ORDER = (
     KEY_HOBBIES,
     KEY_FEARS,
     KEY_DISLIKES,
+    KEY_STABLE_PREFERENCE,
+    KEY_TRADING_CONSTRAINT,
+    KEY_RECURRING_FOCUS,
+    KEY_CLIENT_CONCERN,
+    KEY_ACCOUNT_CAPITAL,
+    KEY_DECISION_STYLE,
+    KEY_INVESTMENT_GOAL,
 )
 
 TRADING_PROFILE_KEYS = (KEY_RISK_PREFERENCE, KEY_PREFERRED_PRODUCTS, KEY_ANSWER_STYLE)
 PERSONAL_PROFILE_KEYS = (KEY_AGE, KEY_GENDER, KEY_HOBBIES, KEY_FEARS, KEY_DISLIKES)
+STABLE_FACT_KEYS = (
+    KEY_STABLE_PREFERENCE,
+    KEY_TRADING_CONSTRAINT,
+    KEY_RECURRING_FOCUS,
+    KEY_CLIENT_CONCERN,
+    KEY_ACCOUNT_CAPITAL,
+    KEY_DECISION_STYLE,
+    KEY_INVESTMENT_GOAL,
+)
 INFERRED_PROFILE_KEYS = {KEY_HOBBIES, KEY_FEARS, KEY_DISLIKES}
+DIRECT_FACT_UPDATE_KEYS = {KEY_ACCOUNT_CAPITAL, KEY_INVESTMENT_GOAL}
 
 GUEST_USER_IDS = {"", "访客", "guest", "anonymous"}
 
@@ -421,6 +457,136 @@ def _extract_dislikes_value(prompt_text: str) -> str:
     return ""
 
 
+def _clean_stable_fact_value(value: str, max_len: int = 120) -> str:
+    cleaned = re.sub(r"[；;\n\r]+", " ", str(value or "")).strip()
+    cleaned = re.sub(r"^(和|、|，|,|\s)+", "", cleaned).strip()
+    cleaned = re.sub(r"^(是|为|成|：|:|，|,|。|\s)+", "", cleaned).strip()
+    cleaned = re.sub(r"(这次|今天|本轮|临时|暂时).*$", "", cleaned).strip()
+    cleaned = re.sub(r"[，,。；;：:\s]+$", "", cleaned).strip()
+    return cleaned[:max_len]
+
+
+def _extract_after_markers(raw: str, markers: tuple[str, ...], *, max_len: int = 120) -> str:
+    for marker in markers:
+        idx = raw.find(marker)
+        if idx < 0:
+            continue
+        value = raw[idx + len(marker):]
+        value = re.split(r"[。；;\n\r]", value, maxsplit=1)[0]
+        value = _clean_stable_fact_value(value, max_len=max_len)
+        if value:
+            return value
+    return ""
+
+
+def _extract_account_capital_value(prompt_text: str) -> str:
+    raw = str(prompt_text or "")
+    patterns = (
+        r"(?:资金量|账户资金|可用资金|现金仓位|可用现金|现金|本金|总资金|交易资金|资金)[^0-9]{0,8}([0-9]+(?:\.[0-9]+)?\s*(?:万元|万|w|W|元|块|百万|千万))",
+        r"(?:我现在|我目前|现在|目前)?(?:有|拿|准备用)\s*([0-9]+(?:\.[0-9]+)?\s*(?:万元|万|w|W|元|块|百万|千万))(?:资金|现金|本金|账户资金|交易资金)?",
+        r"(?:我的|我)?(?:资金|现金|账户|本金)[^0-9]{0,8}([0-9]+(?:\.[0-9]+)?\s*(?:万元|万|w|W|元|块|百万|千万))",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, raw)
+        if match:
+            value = _clean_stable_fact_value(match.group(1), max_len=30)
+            if value:
+                return value
+    return ""
+
+
+def _extract_stable_fact_signals(prompt_text: str) -> Dict[str, str]:
+    raw = str(prompt_text or "")
+    signals: Dict[str, str] = {}
+
+    stable_preference = _extract_after_markers(
+        raw,
+        ("稳定偏好是", "我的稳定偏好是", "记住我的偏好", "以后我偏好", "我长期偏好"),
+    )
+    if stable_preference:
+        signals[KEY_STABLE_PREFERENCE] = stable_preference
+
+    trading_constraint = _extract_after_markers(
+        raw,
+        ("交易约束是", "我的交易约束是", "记住交易约束", "以后交易约束"),
+    )
+    if not trading_constraint and any(k in raw for k in ("资金量未知", "账户资金未知", "没有资金量", "数据不全")) and any(
+        k in raw for k in ("不要给金额", "不要给具体金额", "不许给金额", "只给方向")
+    ):
+        trading_constraint = "资金量或关键数据未知时，不给金额级调仓建议，只给方向、条件和补数清单"
+    if not trading_constraint and any(k in raw for k in ("Delta覆盖率不足", "delta覆盖率不足", "覆盖率不足")):
+        trading_constraint = "Delta覆盖率不足时，不给金额级执行量，只给方向性建议和补数清单"
+    if trading_constraint:
+        signals[KEY_TRADING_CONSTRAINT] = trading_constraint
+
+    recurring_focus = _extract_after_markers(
+        raw,
+        ("高频关注", "经常关注", "常看", "平时主要看", "长期关注"),
+    )
+    if not recurring_focus:
+        products = _extract_products_value(raw)
+        if products and any(k in raw for k in ("经常", "常看", "高频", "平时主要", "长期关注")):
+            recurring_focus = products
+    if recurring_focus:
+        signals[KEY_RECURRING_FOCUS] = recurring_focus
+
+    client_concern = _extract_after_markers(
+        raw,
+        ("客户担忧是", "客户担心的是", "客户最担心", "客户主要担心", "客户最怕"),
+    )
+    if not client_concern:
+        client_concern = _extract_after_markers(
+            raw,
+            ("我交易上最担心", "我持仓最担心", "我账户最担心"),
+        )
+    if client_concern:
+        signals[KEY_CLIENT_CONCERN] = client_concern
+
+    account_capital = _extract_account_capital_value(raw)
+    if account_capital:
+        signals[KEY_ACCOUNT_CAPITAL] = account_capital
+
+    decision_style = _extract_after_markers(
+        raw,
+        (
+            "决策风格是",
+            "我的决策风格是",
+            "记住我的决策风格",
+            "我做决策喜欢",
+            "我喜欢先看",
+            "我希望你先",
+        ),
+    )
+    if not decision_style and any(k in raw for k in ("先给结论", "先说结论", "结论先行", "再看细节", "多问我确认")):
+        decision_style = _clean_stable_fact_value(raw)
+    if decision_style:
+        decision_style = re.split(r"(?:这笔钱|我的目标|投资目标|资金用途|主要想)", decision_style, maxsplit=1)[0]
+        decision_style = _clean_stable_fact_value(decision_style)
+    if decision_style:
+        signals[KEY_DECISION_STYLE] = decision_style
+
+    investment_goal = _extract_after_markers(
+        raw,
+        (
+            "目标/用途是",
+            "投资目标是",
+            "我的投资目标是",
+            "资金用途是",
+            "这笔钱用途是",
+            "这笔钱",
+            "目标是",
+            "我的目标是",
+            "我主要想",
+        ),
+    )
+    if not investment_goal and any(k in raw for k in ("稳健增值", "现金增强", "半年后要用", "一年后要用", "学习期权", "不是重仓下注")):
+        investment_goal = _clean_stable_fact_value(raw)
+    if investment_goal:
+        signals[KEY_INVESTMENT_GOAL] = investment_goal
+
+    return signals
+
+
 def extract_profile_signals(prompt_text: str) -> Dict[str, str]:
     signals: Dict[str, str] = {}
     risk_value = _extract_risk_value(prompt_text)
@@ -431,9 +597,13 @@ def extract_profile_signals(prompt_text: str) -> Dict[str, str]:
     hobbies_value = _extract_hobbies_value(prompt_text)
     fears_value = _extract_fears_value(prompt_text)
     dislikes_value = _extract_dislikes_value(prompt_text)
+    stable_fact_signals = _extract_stable_fact_signals(prompt_text)
     if risk_value:
         signals[KEY_RISK_PREFERENCE] = risk_value
-    if product_value:
+    if product_value and not (
+        stable_fact_signals.get(KEY_RECURRING_FOCUS)
+        and product_value in stable_fact_signals.get(KEY_RECURRING_FOCUS, "")
+    ):
         signals[KEY_PREFERRED_PRODUCTS] = product_value
     if style_value:
         signals[KEY_ANSWER_STYLE] = style_value
@@ -447,12 +617,36 @@ def extract_profile_signals(prompt_text: str) -> Dict[str, str]:
         signals[KEY_FEARS] = fears_value
     if dislikes_value:
         signals[KEY_DISLIKES] = dislikes_value
+    signals.update(stable_fact_signals)
     return signals
 
 
 def _has_memory_command(prompt_text: str) -> bool:
     raw = str(prompt_text or "")
-    return any(k in raw for k in ("记住", "以后", "把我", "设为", "改成", "别再", "不要再", "我是", "我今年"))
+    return any(
+        k in raw
+        for k in (
+            "记住",
+            "以后",
+            "把我",
+            "设为",
+            "改成",
+            "别再",
+            "不要再",
+            "我是",
+            "我今年",
+            "客户担心",
+            "客户担忧",
+            "客户最担心",
+            "交易约束",
+            "高频关注",
+            "经常关注",
+            "决策风格",
+            "投资目标",
+            "资金用途",
+            "目标/用途",
+        )
+    )
 
 
 def _has_profile_update_command(prompt_text: str) -> bool:
@@ -503,6 +697,26 @@ def _looks_stable_profile_statement(prompt_text: str) -> bool:
             "我厌恶",
             "一看到",
             "我平时更爱",
+            "客户担心",
+            "客户担忧",
+            "客户最担心",
+            "交易约束",
+            "高频关注",
+            "经常关注",
+            "长期关注",
+            "决策风格",
+            "投资目标",
+            "资金用途",
+            "目标/用途",
+            "稳健增值",
+            "现金增强",
+            "我喜欢先看",
+            "我希望你先",
+            "目标是",
+            "我的目标是",
+            "这笔钱",
+            "半年后要用",
+            "一年后要用",
         )
     )
 
@@ -557,6 +771,19 @@ def _is_profile_query(prompt_text: str) -> bool:
             "我的风险偏好是什么",
             "我是什么风险偏好",
             "我的风险偏好",
+            "还记得我有多少资金",
+            "还记得我有多少现金",
+            "你记得我有多少资金",
+            "你知道我有多少现金",
+            "我的资金量是多少",
+            "我的账户资金是多少",
+            "我的现金是多少",
+            "我有多少资金",
+            "我有多少现金",
+            "你记得我的投资目标吗",
+            "你记得我的目标吗",
+            "我的投资目标是什么",
+            "我的目标是什么",
             "你记住了我什么",
             "你记得我什么",
             "你记住我的什么",
@@ -695,6 +922,31 @@ def _build_profile_query_answer(prompt_text: str, memories: List[Dict[str, Any]]
     active = _active_memory_map(memories)
     if not active:
         return "目前我还没有记录到你的明确交易画像。你可以直接说“把我的风险偏好改成偏保守”或“记住我主要做 ETF期权”。"
+
+    if any(
+        k in raw
+        for k in (
+            "还记得我有多少资金",
+            "还记得我有多少现金",
+            "你记得我有多少资金",
+            "你知道我有多少现金",
+            "我的资金量是多少",
+            "我的账户资金是多少",
+            "我的现金是多少",
+            "我有多少资金",
+            "我有多少现金",
+        )
+    ):
+        value = active.get(KEY_ACCOUNT_CAPITAL)
+        if value:
+            return f"你当前记录的账户资金是：{value}。我会把它作为仓位和资金占用分析的参考，但如果实际资金有变化，你可以随时让我更新。"
+        return "目前我还没有记录到你的账户资金。你可以说“记住我的资金量是200万”。"
+
+    if any(k in raw for k in ("你记得我的投资目标吗", "你记得我的目标吗", "我的投资目标是什么", "我的目标是什么")):
+        value = active.get(KEY_INVESTMENT_GOAL)
+        if value:
+            return f"你当前记录的目标/用途是：{value}。我会用它来约束收益目标、风险承受和时间周期。"
+        return "目前我还没有记录到你的投资目标。你可以说“投资目标是稳健增值”或“这笔钱半年后要用”。"
 
     if "风险偏好" in raw:
         value = active.get(KEY_RISK_PREFERENCE)
@@ -864,12 +1116,16 @@ def format_profile_context(
     lines: List[str] = []
     trading_lines = _format_profile_lines(memories, TRADING_PROFILE_KEYS)
     personal_lines = _format_profile_lines(memories, PERSONAL_PROFILE_KEYS)
+    stable_lines = _format_profile_lines(memories, STABLE_FACT_KEYS)
     if trading_lines:
         lines.append("【交易画像】")
         lines.extend(trading_lines)
     if personal_lines:
         lines.append("【个人画像】")
         lines.extend(personal_lines)
+    if stable_lines:
+        lines.append("【稳定事实】")
+        lines.extend(stable_lines)
     overrides = temporary_overrides or {}
     if overrides:
         lines.append("【本轮当前表达优先】")
@@ -998,30 +1254,43 @@ def build_profile_memory_context(
     for key, value in updates.items():
         active_value = str((active_by_key.get(key) or {}).get("memory_value") or "").strip()
         if active_value and active_value != value:
-            temporary_overrides[key] = value
-            count = _record_pending_conflict(
-                engine,
-                user_id=uid,
-                memory_key=key,
-                memory_value=value,
-                source_text=prompt_text,
-            )
-            if count >= 2:
+            if key in DIRECT_FACT_UPDATE_KEYS:
                 upsert_profile_memory(
                     engine,
                     user_id=uid,
                     memory_key=key,
                     memory_value=value,
-                    confidence=0.82,
+                    confidence=0.86,
                     source_text=prompt_text,
                 )
                 memories = get_active_profile_memories(engine, uid)
                 active_by_key[key] = {"memory_value": value}
-                conflict_notes.append(f"{PROFILE_MEMORY_LABELS[key]}已因重复表达更新为“{value}”。")
+                conflict_notes.append(f"{PROFILE_MEMORY_LABELS[key]}已按用户当前明确表达更新为“{value}”。")
             else:
-                conflict_notes.append(
-                    f"历史画像为“{active_value}”，本轮按用户当前表达“{value}”临时回答，不自动覆盖长期画像。"
+                temporary_overrides[key] = value
+                count = _record_pending_conflict(
+                    engine,
+                    user_id=uid,
+                    memory_key=key,
+                    memory_value=value,
+                    source_text=prompt_text,
                 )
+                if count >= 2:
+                    upsert_profile_memory(
+                        engine,
+                        user_id=uid,
+                        memory_key=key,
+                        memory_value=value,
+                        confidence=0.82,
+                        source_text=prompt_text,
+                    )
+                    memories = get_active_profile_memories(engine, uid)
+                    active_by_key[key] = {"memory_value": value}
+                    conflict_notes.append(f"{PROFILE_MEMORY_LABELS[key]}已因重复表达更新为“{value}”。")
+                else:
+                    conflict_notes.append(
+                        f"历史画像为“{active_value}”，本轮按用户当前表达“{value}”临时回答，不自动覆盖长期画像。"
+                    )
         elif not active_value and (_has_memory_command(prompt_text) or _looks_stable_profile_statement(prompt_text)):
             if key in (KEY_AGE, KEY_GENDER) or _looks_explicit_personal_profile_statement(prompt_text):
                 confidence = 0.9
