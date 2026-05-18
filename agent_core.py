@@ -368,6 +368,8 @@ def _apply_analysis_task_policy(query: str, plan: List[str], symbol: str = "") -
         filtered = [step for step in current_plan if step != "screener"]
         if not filtered and policy.recommended_plan:
             filtered = list(policy.recommended_plan)
+        if not filtered:
+            filtered = ["analyst"]
         return filtered, "" if policy.clear_symbol else current_symbol
 
     if policy.task_type == TASK_TYPE_OPTION_STRATEGY_WITH_SUBJECT and not current_plan:

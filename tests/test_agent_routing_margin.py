@@ -100,6 +100,16 @@ def test_analysis_task_policy_single_stock_removes_screener_only():
     assert symbol == "688008"
 
 
+def test_analysis_task_policy_generic_single_stock_analysis_defaults_to_analyst():
+    plan, symbol = agent_core._apply_analysis_task_policy(
+        "\u5206\u6790\u4e00\u4e0b688223",
+        [],
+        "688223",
+    )
+    assert plan == ["analyst"]
+    assert symbol == "688223"
+
+
 def test_analysis_task_policy_unspecified_option_strategy_clarifies():
     plan, symbol = agent_core._apply_analysis_task_policy(
         "趋势突破有效，期权到期还比较长，我能不能买深虚期权？",
