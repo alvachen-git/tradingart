@@ -43,7 +43,7 @@ def _sample_data(gate="open", buy_slots=3):
             {"symbol": "600002.SH", "name": "Sample B", "sector_name": "AI", "sector_rank": 1, "entry_price": 12.0, "stop_price": 11.2, "score": 82.0, "pattern": "watch", "bottom_turn_score": 62, "stage_note": "stage", "reversal_signal_desc": "signal"}
         ],
         "tracking": [
-            {"symbol": "600003.SH", "name": "Sample C", "status": "bought", "action": "hold", "close": 15.0, "gain": 0.03, "bottom_low": 13.5, "reason": "hold"}
+            {"symbol": "600003.SH", "name": "Sample C", "status": "bought", "action": "hold", "held_days": 3, "close": 15.0, "gain": 0.03, "bottom_low": 13.5, "reason": "hold"}
         ],
     }
 
@@ -87,6 +87,10 @@ def test_draft_safe_stock_report_contains_required_sections():
         assert section not in html
     for removed_header in ["<th class='nowrap'>风控位</th>", "<th class='nowrap'>底部转折分</th>", "<th class='nowrap'>底部下沿</th>"]:
         assert removed_header not in html
+    assert "已持有天数" in html
+    assert "今日操作" in html
+    assert "<th class='nowrap'>动作</th>" not in html
+    assert "<th class='nowrap num'>现价</th>" not in html
     assert "table-scroll" in html
     assert "信号/说明" in html
     assert "中证500开放买入" not in html
@@ -232,11 +236,12 @@ def test_select_new_recommendations_excludes_chase_from_buy_but_keeps_watch():
 
 
 def test_existing_recommendation_requalifies_as_one_time_add_not_new_buy():
-    active = pd.DataFrame([{"symbol": "600001.SH", "name": "held", "status": "bought", "entry_price": 10.0, "stop_price": 9.0, "score": 80, "sector_rank": 1, "take_profit_count": 0, "add_count": 0, "weak_count": 0, "bottom_low": 9.0, "bottom_high": 11.0, "bottom_range_date": "20260510"}])
+    active = pd.DataFrame([{"symbol": "600001.SH", "name": "held", "status": "bought", "first_signal_date": "20260509", "entry_price": 10.0, "stop_price": 9.0, "score": 80, "sector_rank": 1, "take_profit_count": 0, "add_count": 0, "weak_count": 0, "bottom_low": 9.0, "bottom_high": 11.0, "bottom_range_date": "20260510"}])
     candidates = pd.DataFrame([_buy_candidate("600001.SH", name="held", score=86, close=10.5), _buy_candidate("600002.SH", name="new", score=82, close=8.0)])
     with patch("safe_stock_report_generator.sim._fetch_price_snapshot", return_value={"600001.SH": {"close": 10.5}}):
         tracking = gen._tracking_actions(active, candidates, "20260511")
     assert tracking[0]["action"] == "add"
+    assert tracking[0]["held_days"] == 3
     assert tracking[0]["next_add_count"] == 1
     buys, _ = gen._select_new_recommendations(candidates, {"gate": "open", "buy_slots": 3}, active)
     assert [x["symbol"] for x in buys] == ["600002.SH"]

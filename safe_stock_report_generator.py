@@ -110,6 +110,19 @@ def _normalize_trade_date(trade_date: Optional[str] = None) -> str:
     return digits
 
 
+def _holding_days(first_signal_date: Any, trade_date: Any) -> int:
+    start = "".join(ch for ch in str(first_signal_date or "") if ch.isdigit())[:8]
+    end = "".join(ch for ch in str(trade_date or "") if ch.isdigit())[:8]
+    if len(start) != 8 or len(end) != 8:
+        return 0
+    try:
+        start_dt = datetime.strptime(start, "%Y%m%d")
+        end_dt = datetime.strptime(end, "%Y%m%d")
+    except ValueError:
+        return 0
+    return max(1, (end_dt - start_dt).days + 1)
+
+
 def ensure_safe_stock_tables() -> None:
     if sim.engine is None:
         raise ValueError("database engine is unavailable")
@@ -423,6 +436,7 @@ def _tracking_actions(active_df: pd.DataFrame, candidates_df: pd.DataFrame, trad
                 "status": status,
                 "action": action,
                 "next_status": next_status,
+                "held_days": _holding_days(row.get("first_signal_date"), trade_date),
                 "close": close,
                 "entry_price": entry,
                 "stop_price": stop,
@@ -480,6 +494,7 @@ def _forced_weak_exits(
                 "status": str(row.get("status") or ""),
                 "action": "exit",
                 "next_status": "exited",
+                "held_days": _holding_days(row.get("first_signal_date"), trade_date),
                 "close": _safe_float(price_map.get(symbol, {}).get("close"), 0.0),
                 "entry_price": _safe_float(row.get("entry_price"), 0.0),
                 "stop_price": _safe_float(row.get("stop_price"), 0.0),
@@ -708,8 +723,8 @@ def draft_safe_stock_report(data: Dict[str, Any]) -> str:
             x["symbol"],
             x["name"],
             _status_label(x["status"]),
+            int(_safe_float(x.get("held_days"), 0)) if _safe_float(x.get("held_days"), 0) > 0 else "",
             _action_label(x["action"]),
-            _fmt_num(x["close"]),
             _fmt_pct(x["gain"]),
             f"底部下沿{_fmt_num(x.get('bottom_low'), 2)}；{x['reason']}",
         ]
@@ -774,7 +789,7 @@ def draft_safe_stock_report(data: Dict[str, Any]) -> str:
   {_render_table(["代码", "名称", "板块", "板块排名", "价格", "信号/说明"], watch_rows, table_class="table-picks", wrap_cols={5}, numeric_cols={3, 4})}
 
   <h2>已买跟踪</h2>
-  {_render_table(["代码", "名称", "当前状态", "动作", "现价", "收益", "原因"], tracking_rows, table_class="table-tracking", wrap_cols={6}, numeric_cols={4, 5}, badge_cols={2, 3})}
+  {_render_table(["代码", "名称", "当前状态", "已持有天数", "今日操作", "收益", "原因"], tracking_rows, table_class="table-tracking", wrap_cols={6}, numeric_cols={3, 5}, badge_cols={2, 4})}
 
   <div class="risk">
     本报告为模型跟踪信号，不构成个性化投资建议。底部转折策略以底部区间失效作为核心退出条件；单日假突破等短线噪音不直接触发全部出场。
