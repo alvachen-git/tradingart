@@ -77,6 +77,7 @@ from agent_prompt_policy import (
     is_generic_option_strategy_question,
     is_option_strategy_question,
 )
+from followup_task_policy import apply_followup_supervisor_policy
 from option_strategy_policy import build_option_strategy_policy
 
 # ==========================================
@@ -119,6 +120,9 @@ class AgentState(TypedDict):
     focus_aspect: str
     focus_mode_hint: str
     followup_goal: str
+    followup_action_context: str
+    followup_task_policy: Dict[str, Any]
+    followup_route_context: str
 
     news_summary: str  # 情报员填入：新闻摘要 (CPI/非农/美联储)
     macro_view: str  # 宏观分析师填入：宏观定调 (宽松/紧缩)
@@ -352,9 +356,21 @@ def _enforce_named_stock_analysis_screener_isolation(query: str, plan: List[str]
     return current_plan
 
 
-def _apply_analysis_task_policy(query: str, plan: List[str], symbol: str = "") -> tuple[List[str], str]:
+def _apply_analysis_task_policy(
+    query: str,
+    plan: List[str],
+    symbol: str = "",
+    *,
+    is_followup: bool = False,
+    recent_context: str = "",
+) -> tuple[List[str], str]:
     # 不采信 planner 生成的 symbol 来判定“是否有标的”，它可能正是模型自行补出的默认对象。
-    policy = classify_analysis_task_type(query, symbol_hint="")
+    policy = classify_analysis_task_type(
+        query,
+        symbol_hint="",
+        is_followup=is_followup,
+        recent_context=recent_context,
+    )
     current_plan = list(plan or [])
     current_symbol = str(symbol or "").strip()
 
@@ -1686,6 +1702,17 @@ def supervisor_node(state: AgentState, llm):
     recent_context = str(state.get("recent_context", "") or "").strip()
     memory_context = str(state.get("memory_context", "") or "").strip()
     profile_context = str(state.get("profile_context", "") or "").strip()
+    followup_goal = str(state.get("followup_goal", "") or "").strip()
+    followup_action_context = str(state.get("followup_action_context", "") or "").strip()
+    followup_task_policy = state.get("followup_task_policy", {}) or {}
+    if not isinstance(followup_task_policy, dict):
+        followup_task_policy = {}
+    followup_route_context = str(state.get("followup_route_context", "") or "").strip()
+    is_execute_suggested_stock_selection = (
+        is_followup
+        and followup_goal == "execute_suggested_action"
+        and "stock_selection" in followup_action_context
+    )
     has_portfolio = bool(state.get("has_portfolio", False))  # 🔥 新增：获取持仓状态
 
     history_text = recent_context
@@ -1703,6 +1730,8 @@ def supervisor_node(state: AgentState, llm):
     # 🔥 新增：持仓状态提示
     portfolio_status = f"\n【重要】用户{'已上传' if has_portfolio else '未上传'}持仓数据。" if has_portfolio else ""
     profile_status = f"\n【用户专属画像】\n{profile_context}" if profile_context else ""
+    action_context_status = f"\n【上一轮可执行建议】\n{followup_action_context}" if followup_action_context else ""
+    route_context_status = f"\n{followup_route_context}" if followup_route_context else ""
     subject_policy = build_subject_policy(query)
     subject_policy_context = subject_policy.as_prompt_context()
 
@@ -1710,6 +1739,8 @@ def supervisor_node(state: AgentState, llm):
     你是交易团队的主管，根据问题制定计划。
     {portfolio_status}
     {profile_status}
+    {action_context_status}
+    {route_context_status}
     {subject_policy_context}
 
     【可用员工】
@@ -1747,6 +1778,7 @@ def supervisor_node(state: AgentState, llm):
     10. 只问K线或技术面分析时，只要派analyst，不要再派其他人
     11. 如果客户要画图，派 `['generalist']` 。
     12. 用户问保证金/合约乘数/一手资金占用，或基差/库存仓单/交割期转现等数据问题，优先派 `monitor`；若同时要策略建议，可派 `['monitor','strategist']`。
+    13. 如果【追问派工策略】给出了推荐专家，优先遵守；override_level 为 force 时必须直接采用推荐专家。
     """
 
     if is_followup:
@@ -1754,8 +1786,9 @@ def supervisor_node(state: AgentState, llm):
 
     【连续追问模式（强约束）】
     1. 当前问题是对上一轮的追问，必须先承接上一轮关键结论，再回答当前问题。
-    2. 承接问题优先派 `generalist`；若上下文不足则派 `chatter` 先澄清，不得编造。
+    2. 不要把所有追问默认交给 `generalist`；只有跨节点综合、对比、画图、复杂复盘才优先 `generalist`。
     3. 禁止把“知识库命中为空”当作默认回答模板。
+    4. 若【上一轮可执行建议】给出了可执行筛选动作，当前问题是在执行该建议，应直接按建议动作派工。
         """
 
     full_query = query
@@ -1763,6 +1796,8 @@ def supervisor_node(state: AgentState, llm):
         full_query = (
             f"【连续追问模式】是\n"
             f"【近期对话历史】\n{history_text if history_text else '无'}\n\n"
+            f"【上一轮可执行建议】\n{followup_action_context if followup_action_context else '无'}\n\n"
+            f"【追问派工策略】\n{followup_route_context if followup_route_context else '无'}\n\n"
             f"【相关长期记忆】\n{memory_context if memory_context else '无'}\n\n"
             f"【用户专属画像】\n{profile_context if profile_context else '无'}\n\n"
             f"【当前问题】\n{query}"
@@ -1770,6 +1805,8 @@ def supervisor_node(state: AgentState, llm):
     elif history_text:
         full_query = (
             f"【近期对话历史】\n{history_text}\n\n"
+            f"【上一轮可执行建议】\n{followup_action_context if followup_action_context else '无'}\n\n"
+            f"【追问派工策略】\n{followup_route_context if followup_route_context else '无'}\n\n"
             f"【用户专属画像】\n{profile_context if profile_context else '无'}\n\n"
             f"【当前问题】\n{query}"
         )
@@ -1799,13 +1836,13 @@ def supervisor_node(state: AgentState, llm):
     if "回测" in query or "策略回测" in query:
         final_plan = ["generalist"]
 
-    if is_followup:
-        if not history_text and not memory_context:
-            final_plan = ["chatter"]
-        elif not final_plan:
-            final_plan = ["generalist"]
-        elif final_plan[0] not in ["generalist", "chatter"]:
-            final_plan = ["generalist"] + [p for p in final_plan if p != "generalist"]
+    final_plan = apply_followup_supervisor_policy(
+        final_plan,
+        is_followup=is_followup,
+        has_context=bool(history_text or memory_context or followup_action_context or followup_route_context),
+        followup_task_policy=followup_task_policy,
+        is_execute_suggested_stock_selection=is_execute_suggested_stock_selection,
+    )
 
     final_symbol = str(result.symbol).strip()
     final_plan = _enforce_research_analyst_routing(query, final_plan)
@@ -1817,7 +1854,13 @@ def supervisor_node(state: AgentState, llm):
 
     # 去重并保持顺序，避免路由重复
     final_plan = _dedupe_plan(final_plan)
-    final_plan, final_symbol = _apply_analysis_task_policy(query, final_plan, final_symbol)
+    final_plan, final_symbol = _apply_analysis_task_policy(
+        query,
+        final_plan,
+        final_symbol,
+        is_followup=is_followup,
+        recent_context="\n".join(part for part in (recent_context, followup_action_context, followup_route_context) if part),
+    )
     final_plan = _dedupe_plan(final_plan)
 
     # 简单的正则判断是否为 A 股个股代码 (6开头沪市主板/科创, 0开头深市, 3开头创业板, 8/4开头北交所)
@@ -1857,10 +1900,16 @@ def generalist_node(state: AgentState, llm):
     recent_context = str(state.get("recent_context", "") or "").strip()
     mem_context = str(state.get("memory_context", "") or "").strip()
     profile_context = str(state.get("profile_context", "") or "").strip()
+    followup_action_context = str(state.get("followup_action_context", "") or "").strip()
+    followup_route_context = str(state.get("followup_route_context", "") or "").strip()
     current_date = datetime.now().strftime("%Y年%m月%d日 %A")
     context_parts = []
     if recent_context:
         context_parts.append(f"【最近两轮会话】\n{recent_context}")
+    if followup_action_context:
+        context_parts.append(f"【上一轮可执行建议】\n{followup_action_context}")
+    if followup_route_context:
+        context_parts.append(followup_route_context)
     if mem_context:
         context_parts.append(f"【相关长期记忆】\n{mem_context}")
     if profile_context:
@@ -2983,6 +3032,8 @@ def knowledge_chatter_node(state: AgentState, llm=None):
     recent_context = str(state.get("recent_context", "") or "").strip()
     mem_context = str(state.get("memory_context", "") or "").strip()
     profile_context = str(state.get("profile_context", "") or "").strip()
+    followup_action_context = str(state.get("followup_action_context", "") or "").strip()
+    followup_route_context = str(state.get("followup_route_context", "") or "").strip()
     focus_entity = str(state.get("focus_entity", "") or "").strip()
     focus_topic = str(state.get("focus_topic", "") or "").strip()
     focus_aspect = str(state.get("focus_aspect", "") or "").strip()
@@ -2995,6 +3046,10 @@ def knowledge_chatter_node(state: AgentState, llm=None):
     context_parts = []
     if recent_context:
         context_parts.append(f"【最近两轮会话】\n{recent_context}")
+    if followup_action_context:
+        context_parts.append(f"【上一轮可执行建议】\n{followup_action_context}")
+    if followup_route_context:
+        context_parts.append(followup_route_context)
     if mem_context:
         context_parts.append(f"【相关长期记忆】\n{mem_context}")
     if profile_context:
@@ -3229,6 +3284,19 @@ def screener_node(state: AgentState, llm):
     # --- 1. 获取宏观资金风向 (Sector Flow) ---
     sector_flow_info = ""
     query = state["user_query"]
+    followup_action_context = str(state.get("followup_action_context", "") or "").strip()
+    followup_action_block = (
+        f"\n【上一轮可执行建议】\n{followup_action_context}\n"
+        "【承接要求】用户当前请求是在执行上一轮建议，不要反问筛选什么；应按上一轮建议中的条件筛选。\n"
+        if followup_action_context
+        else ""
+    )
+    followup_route_context = str(state.get("followup_route_context", "") or "").strip()
+    if followup_route_context:
+        followup_action_block += (
+            f"\n{followup_route_context}\n"
+            "【追问承接要求】当前请求是短期承接，不要反问上下文中已经明确的对象或条件。\n"
+        )
 
     # === 🔥 [新增] 形态查询快速通道 ===
     # 当用户明确询问"有什么形态"时，直接返回形态统计，不走选股流程
@@ -3335,6 +3403,7 @@ def screener_node(state: AgentState, llm):
                    {sector_flow_for_vol}
 
                    【用户原始需求】: "{query}"
+                   {followup_action_block}
 
                    【你的任务】
                    1. 从【数据源A】中展示成交量异动的股票，**不要编造数据**！
@@ -3395,6 +3464,7 @@ def screener_node(state: AgentState, llm):
 
             【当前日期】：{current_date}
             【用户需求】：{query}
+            {followup_action_block}
 
             【你的核心能力：概念/主题选股】
             你主要处理的是"概念类"、"主题类"、"热点类"选股需求，例如：
@@ -3514,6 +3584,7 @@ def screener_node(state: AgentState, llm):
                 {volume_anomaly_info}
 
                 【用户原始需求】: "{query}"
+                {followup_action_block}
 
                 【你的任务】
                 1. 从【数据源B】中选出 3-5 只最危险的股票，**不要编造**！
@@ -3544,6 +3615,7 @@ def screener_node(state: AgentState, llm):
                 {raw_stocks}
 
                 【用户原始需求】: "{query}"
+                {followup_action_block}
 
                 【你的任务】
                 1. 如果【数据源B】中有符合形态的股票，**直接展示这些股票**，不要编造！
@@ -3566,6 +3638,7 @@ def screener_node(state: AgentState, llm):
                 {raw_stocks}
 
                 【当前用户需求】: "{query}"
+                {followup_action_block}
 
                 【选股逻辑】
                 1. **寻找交集**：观察【数据源A】中资金净流入靠前的板块，然后在【数据源B】中寻找属于这些板块的个股。

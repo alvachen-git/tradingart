@@ -79,5 +79,67 @@ class TestChatContextUtils(unittest.TestCase):
         self.assertIn("第一次世界大战", out.get("followup_anchor_clarify", ""))
 
 
+    def test_execute_suggested_action_goal_for_stock_screening_followup(self):
+        self.assertEqual(ctx.infer_followup_goal("帮我筛选"), "execute_suggested_action")
+        self.assertTrue(ctx.infer_followup_intent("好，帮我筛选"))
+
+    def test_preserve_recent_context_for_execute_suggested_action(self):
+        self.assertTrue(
+            ctx.should_preserve_recent_context(
+                "好，帮我筛选",
+                is_followup=False,
+                semantic_related=False,
+                is_same_domain=True,
+                recent_turns=[
+                    {
+                        "role": "assistant",
+                        "content": "需要我帮你筛选一下目前综合评分较高或高股息/防御性板块的股票名单吗？",
+                    }
+                ],
+                recent_focus_topic="精选股票",
+            )
+        )
+
+    def test_build_topic_anchors_extracts_suggested_actions(self):
+        messages = [
+            {"role": "user", "content": "股票要做对冲避险的话有什么好方法吗"},
+            {
+                "role": "assistant",
+                "content": "给您的实操建议：需要我帮你筛选一下目前综合评分较高或高股息/防御性板块的股票名单吗？",
+            },
+        ]
+        anchors = ctx.build_topic_anchors(messages, max_anchors=3)
+        self.assertTrue(anchors[0].get("suggested_actions"))
+        self.assertIn("股票名单", anchors[0].get("suggested_actions")[0])
+
+    def test_select_target_anchor_prefers_latest_suggested_action_anchor(self):
+        messages = [
+            {"role": "user", "content": "什么是牛市价差"},
+            {"role": "assistant", "content": "牛市价差是一种偏温和看涨的期权策略。"},
+            {"role": "user", "content": "股票要做对冲避险的话有什么好方法吗"},
+            {
+                "role": "assistant",
+                "content": "给您的实操建议：需要我帮你筛选一下目前综合评分较高或高股息/防御性板块的股票名单吗？",
+            },
+        ]
+        anchors = ctx.build_topic_anchors(messages, max_anchors=3)
+        out = ctx.select_target_anchor(
+            "好，帮我筛选",
+            anchors,
+            followup_goal="execute_suggested_action",
+            is_followup=True,
+        )
+        target = out.get("target_anchor") or {}
+        self.assertEqual(target.get("user_query"), "股票要做对冲避险的话有什么好方法吗")
+        self.assertFalse(out.get("followup_anchor_ambiguous"))
+
+
+    def test_non_finance_full_screening_request_is_not_execute_followup(self):
+        self.assertNotEqual(
+            ctx.infer_followup_goal("中午不知道吃什么，帮我筛选一些餐厅"),
+            "execute_suggested_action",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -148,5 +148,16 @@ class DataPolicyTest(unittest.TestCase):
         self.assertIn("研究员工具链", context)
 
 
+    def test_stock_selection_execution_followup_uses_screener(self):
+        policy = classify_analysis_task_type(
+            "帮我筛选",
+            is_followup=True,
+            recent_context="AI: 需要我帮你筛选一下目前综合评分较高或高股息/防御性板块的股票名单吗？",
+        )
+        self.assertEqual(policy.task_type, TASK_TYPE_STOCK_SELECTION)
+        self.assertEqual(policy.recommended_plan, ("screener",))
+        self.assertTrue(policy.hard_override)
+
+
 if __name__ == "__main__":
     unittest.main()

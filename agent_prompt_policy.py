@@ -262,6 +262,28 @@ STOCK_SELECTION_CONCEPT_KEYWORDS: Tuple[str, ...] = (
     "新能源",
     "机器人概念股",
 )
+STOCK_SELECTION_EXECUTION_HINTS: Tuple[str, ...] = (
+    "帮我筛选",
+    "帮我筛一下",
+    "按你说的筛",
+    "按你说的做",
+    "按刚才建议做",
+    "就按这个来",
+    "就按这个做",
+    "开始执行",
+    "给我名单",
+)
+STOCK_SELECTION_CONTEXT_HINTS: Tuple[str, ...] = (
+    "筛选",
+    "股票名单",
+    "候选股",
+    "股票池",
+    "综合评分",
+    "高股息",
+    "防御板块",
+    "防御性板块",
+    "低估值",
+)
 
 EXPLAIN_PREFIXES: Tuple[str, ...] = (
     "什么是",
@@ -469,6 +491,20 @@ def _looks_like_stock_selection(query: str) -> bool:
     return "概念股有哪些" in text or "相关股票" in text or "相关个股" in text
 
 
+def _looks_like_stock_selection_execution(query: str, recent_context: str) -> bool:
+    text = str(query or "").strip()
+    recent = str(recent_context or "").strip()
+    if not text or not recent:
+        return False
+    has_execute_hint = _contains_any(text, STOCK_SELECTION_EXECUTION_HINTS)
+    if not has_execute_hint:
+        return False
+    return _contains_any(recent, STOCK_SELECTION_CONTEXT_HINTS) and _contains_any(
+        recent,
+        STOCK_SELECTION_SUBJECT_KEYWORDS + STOCK_SELECTION_CONTEXT_HINTS,
+    )
+
+
 def _looks_like_technical_concept(query: str) -> bool:
     text = str(query or "").strip()
     if not text:
@@ -511,6 +547,15 @@ def classify_analysis_task_type(
     recent_context: str = "",
 ) -> AnalysisTaskPolicy:
     text = str(query or "").strip()
+    if is_followup and _looks_like_stock_selection_execution(text, recent_context):
+        return AnalysisTaskPolicy(
+            task_type=TASK_TYPE_STOCK_SELECTION,
+            recommended_chat_mode=CHAT_MODE_ANALYSIS,
+            recommended_plan=("screener",),
+            clear_symbol=True,
+            hard_override=True,
+            reason="用户正在执行上一轮股票筛选建议",
+        )
     if _looks_like_stock_selection(text):
         return AnalysisTaskPolicy(
             task_type=TASK_TYPE_STOCK_SELECTION,

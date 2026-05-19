@@ -6,7 +6,7 @@ from agent_prompt_policy import (
     TASK_TYPE_TECHNICAL_CONCEPT,
     classify_analysis_task_type,
 )
-from chat_context_utils import infer_correction_intent, infer_followup_goal
+from chat_context_utils import EXECUTE_SUGGESTED_ACTION_GOAL, infer_correction_intent, infer_followup_goal
 
 
 CHAT_MODE_SIMPLE: Final[str] = "simple_chat"
@@ -84,6 +84,16 @@ STOCK_SELECTION_PATTERN_KEYWORDS = (
 
 STOCK_SELECTION_CONCEPT_KEYWORDS = (
     "AI概念股", "ai概念股", "半导体", "芯片", "低空经济", "新能源", "机器人概念股",
+)
+STOCK_SELECTION_FOLLOWUP_CONTEXT_HINTS = (
+    "股票名单",
+    "筛选",
+    "综合评分",
+    "高股息",
+    "防御板块",
+    "防御性板块",
+    "候选股",
+    "股票池",
 )
 
 STOCK_SELECTION_EXPLAIN_PREFIXES = (
@@ -398,6 +408,7 @@ def classify_chat_mode(
     focus_aspect: str = "",
     focus_mode_hint: str = "",
     followup_goal: str = "",
+    followup_task_policy: dict | None = None,
     correction_intent: bool = False,
     has_uploaded_image: bool = False,
     has_structured_payload: bool = False,
@@ -446,6 +457,9 @@ def classify_chat_mode(
         recent_context=recent_context_lower,
         recent_focus_topic=focus_topic,
     )
+    policy_payload = followup_task_policy if isinstance(followup_task_policy, dict) else {}
+    policy_mode = str(policy_payload.get("recommended_chat_mode") or "").strip()
+    policy_override = str(policy_payload.get("override_level") or "").strip()
     effective_correction_intent = bool(correction_intent) or infer_correction_intent(
         text,
         recent_context=recent_context_lower,
@@ -471,6 +485,24 @@ def classify_chat_mode(
         focus_mode_hint=focus_mode_hint,
         is_followup=is_followup,
     )
+    if policy_mode in {CHAT_MODE_SIMPLE, CHAT_MODE_KNOWLEDGE, CHAT_MODE_ANALYSIS} and policy_override in {"force", "suggest"}:
+        if policy_mode != CHAT_MODE_ANALYSIS:
+            return policy_mode
+        policy_has_finance_signal = (
+            has_stock_selection
+            or has_finance_subject
+            or has_market_subject
+            or recent_has_finance_subject
+            or has_company_news
+            or has_company_analysis
+            or has_price_move_reason
+            or (
+                effective_followup_goal == EXECUTE_SUGGESTED_ACTION_GOAL
+                and any(hint in recent_context_lower for hint in STOCK_SELECTION_FOLLOWUP_CONTEXT_HINTS)
+            )
+        )
+        if policy_has_finance_signal:
+            return policy_mode
     correction_signal_text = "\n".join(
         part
         for part in (
@@ -498,6 +530,11 @@ def classify_chat_mode(
     correction_prompt_suggests_analysis = any(keyword in correction_prompt_text for keyword in CORRECTION_ANALYSIS_HINTS)
 
     if has_stock_selection:
+        return CHAT_MODE_ANALYSIS
+
+    if effective_followup_goal == EXECUTE_SUGGESTED_ACTION_GOAL and any(
+        hint in recent_context_lower for hint in STOCK_SELECTION_FOLLOWUP_CONTEXT_HINTS
+    ):
         return CHAT_MODE_ANALYSIS
 
     if analysis_task_policy.task_type == TASK_TYPE_TECHNICAL_CONCEPT:

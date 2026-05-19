@@ -288,5 +288,68 @@ class TestChatRouting(unittest.TestCase):
         self.assertFalse(is_market_data_query("解释一下IV"))
 
 
+    def test_execute_suggested_stock_screening_followup_routes_to_analysis(self):
+        recent_context = (
+            "用户: 股票要做对冲避险的话有什么好方法吗\n"
+            "AI: 需要我帮你筛选一下目前综合评分较高或高股息/防御性板块的股票名单吗？"
+        )
+        self.assertEqual(
+            classify_chat_mode(
+                "好，帮我筛选",
+                is_followup=True,
+                recent_context=recent_context,
+                followup_goal="execute_suggested_action",
+            ),
+            CHAT_MODE_ANALYSIS,
+        )
+
+    def test_followup_task_policy_can_force_knowledge_route(self):
+        self.assertEqual(
+            classify_chat_mode(
+                "详细说说",
+                is_followup=True,
+                recent_context="用户: 什么是牛市价差\nAI: 牛市价差是一种期权概念。",
+                followup_task_policy={
+                    "followup_intent": "continue_explanation",
+                    "recommended_chat_mode": CHAT_MODE_KNOWLEDGE,
+                    "recommended_plan": ["chatter"],
+                    "override_level": "suggest",
+                },
+            ),
+            CHAT_MODE_KNOWLEDGE,
+        )
+
+    def test_non_finance_screening_phrase_stays_simple(self):
+        self.assertEqual(classify_chat_mode("帮我筛选一下餐厅"), CHAT_MODE_SIMPLE)
+
+
+    def test_non_finance_screening_requests_ignore_analysis_policy_override(self):
+        policy = {
+            "followup_intent": "execute_suggestion",
+            "recommended_chat_mode": CHAT_MODE_ANALYSIS,
+            "recommended_plan": ["generalist"],
+            "override_level": "force",
+        }
+        self.assertEqual(
+            classify_chat_mode("中午不知道吃什么，帮我筛选一些餐厅", followup_task_policy=policy),
+            CHAT_MODE_SIMPLE,
+        )
+        self.assertEqual(
+            classify_chat_mode("帮我筛选一下上海适合约会的餐厅", followup_task_policy=policy),
+            CHAT_MODE_SIMPLE,
+        )
+        self.assertEqual(
+            classify_chat_mode("帮我筛选几部周末看的电影", followup_task_policy=policy),
+            CHAT_MODE_SIMPLE,
+        )
+        self.assertEqual(
+            classify_chat_mode("帮我推荐几本书", followup_task_policy=policy),
+            CHAT_MODE_SIMPLE,
+        )
+
+    def test_finance_screening_request_still_routes_to_analysis(self):
+        self.assertEqual(classify_chat_mode("帮我筛选一些高股息股票"), CHAT_MODE_ANALYSIS)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -108,6 +108,7 @@ from chat_routing import (
     default_progress_for_chat_mode,
 )
 from chat_context_utils import (
+    build_followup_action_context as _build_followup_action_context,
     build_topic_anchors as _build_topic_anchors,
     extract_focus_aspect as _shared_extract_focus_aspect,
     extract_focus_entity as _shared_extract_focus_entity,
@@ -120,6 +121,10 @@ from chat_context_utils import (
     is_semantically_related as _shared_is_semantically_related,
     select_target_anchor as _select_target_anchor,
     should_preserve_recent_context as _should_preserve_recent_context,
+)
+from followup_task_policy import (
+    build_followup_route_context as _build_followup_route_context,
+    classify_followup_task_policy as _classify_followup_task_policy,
 )
 import subscription_service as sub_svc
 import payment_service as pay_svc
@@ -4656,11 +4661,25 @@ def _build_mobile_context_payload(
         recent_context=recent_context_for_focus,
         recent_focus_topic=focus_topic,
     )
+    followup_action_context = _build_followup_action_context(
+        target_anchor if followup_goal == "execute_suggested_action" else {}
+    )
     correction_intent = _infer_correction_intent(
         prompt_text,
         recent_context=recent_context_for_focus,
         recent_focus_topic=focus_topic,
     )
+    followup_task_policy = _classify_followup_task_policy(
+        prompt_text,
+        is_followup=bool(is_followup),
+        followup_goal=followup_goal,
+        recent_context=recent_context_for_focus,
+        target_anchor=target_anchor,
+        focus_topic=focus_topic,
+        focus_mode_hint=focus_mode_hint,
+        correction_intent=bool(correction_intent),
+    ).to_dict()
+    followup_route_context = _build_followup_route_context(followup_task_policy)
 
     memory_context = ""
     if current_user and current_user != "访客" and should_load_long_memory:
@@ -4728,6 +4747,9 @@ def _build_mobile_context_payload(
         "focus_aspect": focus_aspect,
         "focus_mode_hint": focus_mode_hint,
         "followup_goal": followup_goal,
+        "followup_action_context": followup_action_context,
+        "followup_task_policy": followup_task_policy,
+        "followup_route_context": followup_route_context,
         "correction_intent": bool(correction_intent),
         "recent_topic_anchor": recent_topic_anchor,
         "candidate_topic_anchors": candidate_topic_anchors,
@@ -5995,6 +6017,7 @@ def chat_submit(
             focus_aspect=str(context_payload.get("focus_aspect") or ""),
             focus_mode_hint=str(context_payload.get("focus_mode_hint") or ""),
             followup_goal=str(context_payload.get("followup_goal") or ""),
+            followup_task_policy=context_payload.get("followup_task_policy") or {},
             correction_intent=bool(context_payload.get("correction_intent", False)),
         )
     context_payload["chat_mode"] = chat_mode
