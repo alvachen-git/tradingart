@@ -87,6 +87,16 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
+from dotenv import load_dotenv
+
+try:
+    _env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+    if os.path.exists(_env_path):
+        load_dotenv(dotenv_path=_env_path, override=True)
+    else:
+        load_dotenv(override=True)
+except Exception as exc:
+    print(f"[mobile_api] load_dotenv_failed err={exc}", flush=True)
 
 if str(os.getenv("ENABLE_LANGSMITH_TRACING", "")).strip().lower() not in {"1", "true", "yes", "on"}:
     os.environ["LANGCHAIN_TRACING_V2"] = "false"
@@ -6058,22 +6068,52 @@ def chat_submit(
     has_portfolio = _detect_mobile_has_portfolio(username)
 
     if chat_mode == CHAT_MODE_SIMPLE:
-        llm_turbo = build_deepseek_flash_llm(streaming=False, temperature=0.2)
-        runtime_context = _build_mobile_simple_runtime_context(username)
-        response_text = simple_chatter_reply(
-            normalized_prompt,
-            llm_turbo,
-            recent_context=str(context_payload.get("recent_context") or ""),
-            memory_context=str(context_payload.get("memory_context") or ""),
-            profile_context=str(context_payload.get("profile_context") or ""),
-            is_followup=bool(context_payload.get("is_followup", False)),
-            focus_entity=str(context_payload.get("focus_entity") or ""),
-            focus_topic=str(context_payload.get("focus_topic") or ""),
-            focus_aspect=str(context_payload.get("focus_aspect") or ""),
-            conversation_memory_query=bool(context_payload.get("conversation_memory_query", False)),
-            conversation_memory_label=str(context_payload.get("conversation_memory_label") or ""),
-            runtime_context=runtime_context,
-        )
+        try:
+            llm_turbo = build_deepseek_flash_llm(streaming=False, temperature=0.2)
+            runtime_context = _build_mobile_simple_runtime_context(username)
+            response_text = simple_chatter_reply(
+                normalized_prompt,
+                llm_turbo,
+                recent_context=str(context_payload.get("recent_context") or ""),
+                memory_context=str(context_payload.get("memory_context") or ""),
+                profile_context=str(context_payload.get("profile_context") or ""),
+                is_followup=bool(context_payload.get("is_followup", False)),
+                focus_entity=str(context_payload.get("focus_entity") or ""),
+                focus_topic=str(context_payload.get("focus_topic") or ""),
+                focus_aspect=str(context_payload.get("focus_aspect") or ""),
+                conversation_memory_query=bool(context_payload.get("conversation_memory_query", False)),
+                conversation_memory_label=str(context_payload.get("conversation_memory_label") or ""),
+                runtime_context=runtime_context,
+            )
+        except Exception as exc:
+            response_text = f"AI闲聊服务暂时不可用: {exc}"
+            print(f"[mobile-chat] simple_chat_failed user={username} err={exc}", flush=True)
+            feedback_allowed = _save_chat_answer_event(
+                task_id=f"immediate-{uuid.uuid4()}",
+                user_id=username,
+                trace_id=trace_id,
+                answer_id=answer_id,
+                prompt_text=raw_prompt or normalized_prompt,
+                response_text=response_text,
+                intent_domain=intent_domain,
+                feedback_allowed=False,
+            )
+            return {
+                "delivery_mode": "immediate",
+                "task_id": "",
+                "message": "AI闲聊服务暂不可用",
+                "chat_mode": CHAT_MODE_SIMPLE,
+                "trace_id": trace_id,
+                "answer_id": answer_id,
+                "feedback_allowed": feedback_allowed,
+                "result": {
+                    "status": "error",
+                    "response": response_text,
+                    "chart": None,
+                    "attachments": [],
+                    "error": response_text,
+                },
+            }
         feedback_allowed = _save_chat_answer_event(
             task_id=f"immediate-{uuid.uuid4()}",
             user_id=username,

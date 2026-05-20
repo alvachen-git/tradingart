@@ -165,6 +165,33 @@ class TestMobileApiChatMemoryAsync(unittest.TestCase):
         mocked_create.assert_not_called()
         mocked_knowledge.assert_not_called()
 
+    def test_chat_submit_simple_chat_returns_structured_error_when_fast_llm_fails(self):
+        body = mobile_api.ChatSubmitRequest(prompt="hello", history=[])
+
+        with patch.object(mobile_api.de, "get_user_profile", return_value={}), patch.object(
+            mobile_api, "build_profile_memory_context", return_value={"profile_context": ""}
+        ), patch.object(
+            mobile_api, "_detect_mobile_has_portfolio", return_value=False
+        ), patch.object(
+            mobile_api, "classify_chat_mode", return_value=mobile_api.CHAT_MODE_SIMPLE
+        ), patch.object(
+            mobile_api, "build_deepseek_flash_llm", side_effect=RuntimeError("DEEPSEEK_API_KEY not configured")
+        ), patch.object(
+            mobile_api, "_save_chat_answer_event", return_value=False
+        ), patch.object(
+            mobile_api.TaskManager, "create_task"
+        ) as mocked_create, patch.object(
+            mobile_api.TaskManager, "create_knowledge_task"
+        ) as mocked_knowledge:
+            out = mobile_api.chat_submit(body=body, username="u1")
+
+        self.assertEqual(out["delivery_mode"], "immediate")
+        self.assertEqual(out["chat_mode"], mobile_api.CHAT_MODE_SIMPLE)
+        self.assertEqual(out["result"]["status"], "error")
+        self.assertIn("DEEPSEEK_API_KEY not configured", out["result"]["error"])
+        mocked_create.assert_not_called()
+        mocked_knowledge.assert_not_called()
+
     def test_chat_submit_conversation_memory_query_reads_history_without_task(self):
         fake_mem = types.SimpleNamespace()
         fake_mem.retrieve_recent_conversation_memory = Mock(
