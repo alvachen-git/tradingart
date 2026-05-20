@@ -8,6 +8,12 @@ from langchain_community.chat_models import ChatTongyi
 from langchain_core.messages import BaseMessage
 
 
+DEFAULT_REPORT_LLM_MODEL = "qwen3.6-plus"
+DEFAULT_REPORT_LLM_FALLBACK_MODEL = "qwen-plus"
+DEFAULT_REPORT_LLM_TIMEOUT_SECONDS = 600
+DEFAULT_REPORT_LLM_MAX_RETRIES = 1
+
+
 def is_qwen_multimodal_family(model_name: str | None) -> bool:
     """Return True for qwen3.5/qwen3.6 models that need multimodal endpoint routing."""
     if not model_name:
@@ -54,6 +60,121 @@ def build_deepseek_flash_llm(
         extra_body=extra_body,
         **kwargs,
     )
+
+
+def _read_int_env(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None or str(raw).strip() == "":
+        return default
+    try:
+        return int(str(raw).strip())
+    except ValueError:
+        return default
+
+
+def build_report_tongyi_llm(
+    *,
+    env_prefix: str,
+    temperature: float = 0.1,
+    model: str | None = None,
+    api_key: str | None = None,
+    request_timeout: int | None = None,
+    max_retries: int | None = None,
+    **kwargs: Any,
+) -> ChatTongyi:
+    """
+    Build a DashScope report-generation LLM with stable shared defaults.
+
+    Env order:
+    - <ENV_PREFIX>_LLM_MODEL / REPORT_LLM_MODEL / qwen3.6-plus
+    - <ENV_PREFIX>_LLM_TIMEOUT_SECONDS / REPORT_LLM_TIMEOUT_SECONDS / 600
+    - <ENV_PREFIX>_LLM_MAX_RETRIES / REPORT_LLM_MAX_RETRIES / 1
+    """
+    prefix = str(env_prefix or "REPORT").strip().upper()
+    resolved_model = (
+        model
+        or os.getenv(f"{prefix}_LLM_MODEL")
+        or os.getenv("REPORT_LLM_MODEL")
+        or DEFAULT_REPORT_LLM_MODEL
+    )
+    resolved_timeout = request_timeout
+    if resolved_timeout is None:
+        resolved_timeout = _read_int_env(
+            f"{prefix}_LLM_TIMEOUT_SECONDS",
+            _read_int_env("REPORT_LLM_TIMEOUT_SECONDS", DEFAULT_REPORT_LLM_TIMEOUT_SECONDS),
+        )
+    resolved_retries = max_retries
+    if resolved_retries is None:
+        resolved_retries = _read_int_env(
+            f"{prefix}_LLM_MAX_RETRIES",
+            _read_int_env("REPORT_LLM_MAX_RETRIES", DEFAULT_REPORT_LLM_MAX_RETRIES),
+        )
+    return ChatTongyiCompat(
+        model=resolved_model,
+        temperature=temperature,
+        api_key=api_key or os.getenv("DASHSCOPE_API_KEY"),
+        request_timeout=resolved_timeout,
+        max_retries=resolved_retries,
+        **kwargs,
+    )
+
+
+def _is_retryable_report_llm_error(exc: Exception) -> bool:
+    text = f"{type(exc).__name__}: {exc}".lower()
+    retryable_markers = (
+        "timeout",
+        "timed out",
+        "read timed out",
+        "connection aborted",
+        "connection reset",
+        "temporarily unavailable",
+        "too many requests",
+        "rate limit",
+        "429",
+        "500",
+        "502",
+        "503",
+        "504",
+    )
+    return any(marker in text for marker in retryable_markers)
+
+
+def invoke_report_llm_with_fallback(
+    llm: Any,
+    messages: List[BaseMessage],
+    *,
+    env_prefix: str,
+    temperature: float = 0.1,
+    api_key: str | None = None,
+) -> Any:
+    """Invoke a report LLM, retrying once on qwen-plus if the primary call is transiently unavailable."""
+    try:
+        return llm.invoke(messages)
+    except Exception as exc:
+        if not _is_retryable_report_llm_error(exc):
+            raise
+
+        prefix = str(env_prefix or "REPORT").strip().upper()
+        fallback_model = (
+            os.getenv(f"{prefix}_LLM_FALLBACK_MODEL")
+            or os.getenv("REPORT_LLM_FALLBACK_MODEL")
+            or DEFAULT_REPORT_LLM_FALLBACK_MODEL
+        )
+        primary_model = str(getattr(llm, "model_name", "") or getattr(llm, "model", "") or "")
+        if fallback_model == primary_model:
+            raise
+
+        print(
+            f"[ReportLLM] primary model={primary_model or 'unknown'} failed with {type(exc).__name__}; "
+            f"fallback to {fallback_model}"
+        )
+        fallback_llm = build_report_tongyi_llm(
+            env_prefix=prefix,
+            temperature=temperature,
+            model=fallback_model,
+            api_key=api_key,
+        )
+        return fallback_llm.invoke(messages)
 
 
 class ChatTongyiCompat(ChatTongyi):
@@ -152,4 +273,3 @@ class ChatTongyiCompat(ChatTongyi):
             return resp_copy
         except Exception:
             return resp
-

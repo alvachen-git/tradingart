@@ -6,7 +6,7 @@ import time
 from datetime import datetime
 from sqlalchemy import bindparam, create_engine, text
 from dotenv import load_dotenv
-from llm_compat import ChatTongyiCompat as ChatTongyi
+from llm_compat import build_report_tongyi_llm, invoke_report_llm_with_fallback
 from langchain_core.messages import HumanMessage
 from langgraph.prebuilt import create_react_agent
 
@@ -29,7 +29,9 @@ db_url = f"mysql+pymysql://{os.getenv('DB_USER')}:{os.getenv('DB_PASSWORD')}@{os
 engine = create_engine(db_url)
 
 # 初始化 LLM
-llm = ChatTongyi(model="qwen3.6-plus", api_key=os.getenv("DASHSCOPE_API_KEY"))
+REPORT_LLM_ENV_PREFIX = "FUND_FLOW_REPORT"
+REPORT_LLM_TEMPERATURE = 0.1
+llm = build_report_tongyi_llm(env_prefix=REPORT_LLM_ENV_PREFIX, temperature=REPORT_LLM_TEMPERATURE)
 
 
 STOCK_CODE_RE = re.compile(r"(?<!\d)(\d{6})(?:\.(SH|SZ|BJ|HK))?(?!\d)", re.IGNORECASE)
@@ -229,7 +231,12 @@ def validate_fund_flow_report_direction(html_content: str, stock_moves: dict[str
 
 
 def _invoke_editor(prompt: str) -> str:
-    res = llm.invoke([HumanMessage(content=prompt)])
+    res = invoke_report_llm_with_fallback(
+        llm,
+        [HumanMessage(content=prompt)],
+        env_prefix=REPORT_LLM_ENV_PREFIX,
+        temperature=REPORT_LLM_TEMPERATURE,
+    )
     return res.content.replace("```html", "").replace("```", "").strip()
 
 

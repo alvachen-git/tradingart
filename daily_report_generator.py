@@ -13,7 +13,7 @@ import re
 from datetime import datetime
 from sqlalchemy import create_engine, text
 from dotenv import load_dotenv
-from llm_compat import ChatTongyiCompat as ChatTongyi
+from llm_compat import build_report_tongyi_llm, invoke_report_llm_with_fallback
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.prebuilt import create_react_agent
 from symbol_match import sql_prefix_condition
@@ -44,7 +44,9 @@ db_url = f"mysql+pymysql://{os.getenv('DB_USER')}:{os.getenv('DB_PASSWORD')}@{os
 engine = create_engine(db_url)
 
 # 初始化 LLM
-llm = ChatTongyi(model="qwen3.6-plus", api_key=os.getenv("DASHSCOPE_API_KEY"))
+REPORT_LLM_ENV_PREFIX = "DAILY_REPORT"
+REPORT_LLM_TEMPERATURE = 0.1
+llm = build_report_tongyi_llm(env_prefix=REPORT_LLM_ENV_PREFIX, temperature=REPORT_LLM_TEMPERATURE)
 
 # 商品卡片发布前校验配置（仅校验“商品期货全景”中的隐含波动率口径）
 COMMODITY_CARD_LIST = [
@@ -267,7 +269,12 @@ def _rewrite_report_after_validation(raw_material: str, html: str, anomalies: li
 【你上一次输出的HTML】
 {html}
 """
-    res = llm.invoke([HumanMessage(content=rewrite_prompt)])
+    res = invoke_report_llm_with_fallback(
+        llm,
+        [HumanMessage(content=rewrite_prompt)],
+        env_prefix=REPORT_LLM_ENV_PREFIX,
+        temperature=REPORT_LLM_TEMPERATURE,
+    )
     return res.content.replace("```html", "").replace("```", "").strip()
 
 
@@ -711,7 +718,12 @@ def draft_report(raw_material):
     - 底部写一句幽默毒舌点评
     """
 
-    res = llm.invoke([HumanMessage(content=prompt)])
+    res = invoke_report_llm_with_fallback(
+        llm,
+        [HumanMessage(content=prompt)],
+        env_prefix=REPORT_LLM_ENV_PREFIX,
+        temperature=REPORT_LLM_TEMPERATURE,
+    )
     html = res.content.replace("```html", "").replace("```", "").strip()
 
     # 发布前商品卡片校验：异常则提醒 LLM 重写

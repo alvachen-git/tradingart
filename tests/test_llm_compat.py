@@ -1,14 +1,25 @@
 import os
 import unittest
+from unittest.mock import patch
 
-from llm_compat import build_deepseek_flash_llm
+from llm_compat import build_deepseek_flash_llm, build_report_tongyi_llm, invoke_report_llm_with_fallback
 
 
 class LlmCompatTest(unittest.TestCase):
     def setUp(self):
         self._old_env = {
             key: os.environ.get(key)
-            for key in ("DEEPSEEK_API_KEY", "DEEPSEEK_FAST_MODEL", "DEEPSEEK_BASE_URL")
+            for key in (
+                "DEEPSEEK_API_KEY",
+                "DEEPSEEK_FAST_MODEL",
+                "DEEPSEEK_BASE_URL",
+                "DASHSCOPE_API_KEY",
+                "REPORT_LLM_MODEL",
+                "REPORT_LLM_TIMEOUT_SECONDS",
+                "REPORT_LLM_FALLBACK_MODEL",
+                "EXPIRY_OPTION_REPORT_LLM_MODEL",
+                "EXPIRY_OPTION_REPORT_LLM_TIMEOUT_SECONDS",
+            )
         }
 
     def tearDown(self):
@@ -34,6 +45,43 @@ class LlmCompatTest(unittest.TestCase):
 
         with self.assertRaisesRegex(RuntimeError, "DEEPSEEK_API_KEY not configured"):
             build_deepseek_flash_llm()
+
+    def test_build_report_tongyi_llm_defaults_to_qwen36_with_600s_timeout(self):
+        os.environ["DASHSCOPE_API_KEY"] = "test-key"
+        os.environ.pop("REPORT_LLM_MODEL", None)
+        os.environ.pop("REPORT_LLM_TIMEOUT_SECONDS", None)
+
+        with patch("llm_compat.ChatTongyiCompat") as mock_chat:
+            build_report_tongyi_llm(env_prefix="EXPIRY_OPTION_REPORT", temperature=0.1)
+
+        kwargs = mock_chat.call_args.kwargs
+        self.assertEqual(kwargs["model"], "qwen3.6-plus")
+        self.assertEqual(kwargs["request_timeout"], 600)
+        self.assertEqual(kwargs["max_retries"], 1)
+
+    def test_report_llm_fallback_uses_qwen_plus_not_turbo(self):
+        class Primary:
+            model_name = "qwen3.6-plus"
+
+            def invoke(self, messages):
+                raise TimeoutError("read timed out")
+
+        class Fallback:
+            model_name = "qwen-plus"
+
+            def invoke(self, messages):
+                return "ok"
+
+        with patch("llm_compat.build_report_tongyi_llm", return_value=Fallback()) as mock_build:
+            result = invoke_report_llm_with_fallback(
+                Primary(),
+                [],
+                env_prefix="EXPIRY_OPTION_REPORT",
+                temperature=0.1,
+            )
+
+        self.assertEqual(result, "ok")
+        self.assertEqual(mock_build.call_args.kwargs["model"], "qwen-plus")
 
 
 if __name__ == "__main__":

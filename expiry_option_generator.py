@@ -23,7 +23,7 @@ import re
 from datetime import datetime, timedelta
 from sqlalchemy import create_engine, text
 from dotenv import load_dotenv
-from llm_compat import ChatTongyiCompat as ChatTongyi
+from llm_compat import build_report_tongyi_llm, invoke_report_llm_with_fallback
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.tools import tool
 from langgraph.prebuilt import create_react_agent
@@ -40,7 +40,9 @@ load_dotenv(override=True)
 db_url = f"mysql+pymysql://{os.getenv('DB_USER')}:{os.getenv('DB_PASSWORD')}@{os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/{os.getenv('DB_NAME')}"
 engine = create_engine(db_url)
 
-llm = ChatTongyi(model="qwen3.6-plus", temperature=0.1, api_key=os.getenv("DASHSCOPE_API_KEY"))
+REPORT_LLM_ENV_PREFIX = "EXPIRY_OPTION_REPORT"
+REPORT_LLM_TEMPERATURE = 0.1
+llm = build_report_tongyi_llm(env_prefix=REPORT_LLM_ENV_PREFIX, temperature=REPORT_LLM_TEMPERATURE)
 
 HIGH_IV_RANK_THRESHOLD = 70.0
 # Match both styles:
@@ -1500,7 +1502,12 @@ def generate_report(sections: list[dict]) -> str:
         SystemMessage(content=SYSTEM_PROMPT),
         HumanMessage(content=prompt)
     ]
-    response = llm.invoke(messages)
+    response = invoke_report_llm_with_fallback(
+        llm,
+        messages,
+        env_prefix=REPORT_LLM_ENV_PREFIX,
+        temperature=REPORT_LLM_TEMPERATURE,
+    )
 
     html = clean_generated_html(response.content)
 
@@ -1512,7 +1519,12 @@ def generate_report(sections: list[dict]) -> str:
             SystemMessage(content=SYSTEM_PROMPT),
             HumanMessage(content=repair_prompt)
         ]
-        repair_response = llm.invoke(repair_messages)
+        repair_response = invoke_report_llm_with_fallback(
+            llm,
+            repair_messages,
+            env_prefix=REPORT_LLM_ENV_PREFIX,
+            temperature=REPORT_LLM_TEMPERATURE,
+        )
         repaired_html = clean_generated_html(repair_response.content)
         repaired_missing = collect_missing_contract_codes(repaired_html, sections)
         if len(repaired_missing) < len(missing):
