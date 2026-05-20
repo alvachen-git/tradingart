@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from typing import Any, Dict, List
 
 from langchain_community.chat_models import ChatTongyi
@@ -13,6 +14,46 @@ def is_qwen_multimodal_family(model_name: str | None) -> bool:
         return False
     m = str(model_name).lower()
     return m.startswith("qwen3.5-") or m.startswith("qwen3.6-")
+
+
+def build_deepseek_flash_llm(
+    *,
+    temperature: float = 0.2,
+    streaming: bool = False,
+    model: str | None = None,
+    api_key: str | None = None,
+    base_url: str | None = None,
+    **kwargs: Any,
+) -> Any:
+    """
+    Build the project's fast-response DeepSeek chat model.
+
+    This intentionally disables DeepSeek thinking mode for quick-reply paths,
+    where latency matters more than multi-step reasoning.
+    """
+    try:
+        from langchain_deepseek import ChatDeepSeek
+    except Exception as exc:
+        raise RuntimeError("langchain-deepseek is not installed") from exc
+
+    resolved_api_key = (api_key or os.getenv("DEEPSEEK_API_KEY") or "").strip()
+    if not resolved_api_key:
+        raise RuntimeError("DEEPSEEK_API_KEY not configured")
+
+    extra_body = dict(kwargs.pop("extra_body", {}) or {})
+    thinking = dict(extra_body.get("thinking", {}) or {})
+    thinking["type"] = "disabled"
+    extra_body["thinking"] = thinking
+
+    return ChatDeepSeek(
+        model=(model or os.getenv("DEEPSEEK_FAST_MODEL") or "deepseek-v4-flash"),
+        api_key=resolved_api_key,
+        base_url=(base_url or os.getenv("DEEPSEEK_BASE_URL") or "https://api.deepseek.com"),
+        temperature=temperature,
+        streaming=streaming,
+        extra_body=extra_body,
+        **kwargs,
+    )
 
 
 class ChatTongyiCompat(ChatTongyi):

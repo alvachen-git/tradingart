@@ -1070,7 +1070,7 @@ def _build_llm_analysis(context: Dict[str, Any], event_window_days: int, use_llm
         from langchain_core.messages import HumanMessage
         from llm_compat import ChatTongyiCompat as ChatTongyi
 
-        llm = ChatTongyi(model=os.getenv("MACRO_RADAR_LLM_MODEL", "qwen-plus"), api_key=api_key, temperature=0.35, max_retries=1)
+        llm = ChatTongyi(model=os.getenv("MACRO_RADAR_LLM_MODEL", "qwen3.6-plus"), api_key=api_key, temperature=0.35, max_retries=1)
         llm_input = {
             "yield_curve": context.get("yield_curve", {}),
             "gold_silver_ratio": context.get("gold_silver_ratio", {}),

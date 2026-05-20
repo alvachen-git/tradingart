@@ -29,7 +29,7 @@ db_url = f"mysql+pymysql://{os.getenv('DB_USER')}:{os.getenv('DB_PASSWORD')}@{os
 engine = create_engine(db_url)
 
 # 初始化 LLM
-llm = ChatTongyi(model="qwen-plus", api_key=os.getenv("DASHSCOPE_API_KEY"))
+llm = ChatTongyi(model="qwen3.6-plus", api_key=os.getenv("DASHSCOPE_API_KEY"))
 
 
 STOCK_CODE_RE = re.compile(r"(?<!\d)(\d{6})(?:\.(SH|SZ|BJ|HK))?(?!\d)", re.IGNORECASE)

@@ -134,13 +134,15 @@ class TestMobileApiChatMemoryAsync(unittest.TestCase):
         ), patch.object(
             mobile_api, "_detect_mobile_has_portfolio", return_value=False
         ), patch.object(
-            mobile_api, "ChatTongyi", return_value=object()
+            mobile_api, "build_deepseek_flash_llm", return_value=object()
         ), patch.object(
             mobile_api, "simple_chatter_reply", return_value="你好呀，我在。"
         ) as mocked_reply, patch.object(
             mobile_api, "_save_chat_answer_event", return_value=True
         ), patch.object(
             mobile_api, "_queue_mobile_chat_memory_persist", return_value="queued"
+        ), patch.object(
+            mobile_api, "classify_chat_mode", return_value=mobile_api.CHAT_MODE_SIMPLE
         ), patch.object(
             mobile_api.TaskManager, "create_task"
         ) as mocked_create, patch.object(
@@ -178,7 +180,7 @@ class TestMobileApiChatMemoryAsync(unittest.TestCase):
         ), patch.object(
             mobile_api, "_detect_mobile_has_portfolio", return_value=False
         ), patch.object(
-            mobile_api, "ChatTongyi", return_value=object()
+            mobile_api, "build_deepseek_flash_llm", return_value=object()
         ), patch.object(
             mobile_api, "simple_chatter_reply", return_value="昨天我们主要聊了网球类比。"
         ) as mocked_reply, patch.object(

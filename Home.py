@@ -89,7 +89,7 @@ from chat_feedback_service import (
     submit_chat_feedback,
 )
 # --- AI 相关导入 ---
-from llm_compat import ChatTongyiCompat as ChatTongyi
+from llm_compat import ChatTongyiCompat as ChatTongyi, build_deepseek_flash_llm
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 
 # Streamlit 运行时/第三方组件仍可能访问旧别名，提前映射以避免弃用日志噪音。
@@ -3288,7 +3288,7 @@ def process_user_input(
             typing_placeholder = st.empty()
             typing_placeholder.markdown(_render_simple_chat_typing_indicator(), unsafe_allow_html=True)
             time.sleep(0.08)
-            llm_turbo = ChatTongyi(model="qwen-turbo-latest", temperature=0.2)
+            llm_turbo = build_deepseek_flash_llm(temperature=0.2)
             runtime_context = build_simple_runtime_context_payload(current_user)
             simple_response = simple_chatter_reply(
                 prompt_text,

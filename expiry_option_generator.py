@@ -23,7 +23,7 @@ import re
 from datetime import datetime, timedelta
 from sqlalchemy import create_engine, text
 from dotenv import load_dotenv
-from langchain_community.chat_models import ChatTongyi
+from llm_compat import ChatTongyiCompat as ChatTongyi
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.tools import tool
 from langgraph.prebuilt import create_react_agent
@@ -40,7 +40,7 @@ load_dotenv(override=True)
 db_url = f"mysql+pymysql://{os.getenv('DB_USER')}:{os.getenv('DB_PASSWORD')}@{os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/{os.getenv('DB_NAME')}"
 engine = create_engine(db_url)
 
-llm = ChatTongyi(model="qwen-plus", temperature=0.1, api_key=os.getenv("DASHSCOPE_API_KEY"))
+llm = ChatTongyi(model="qwen3.6-plus", temperature=0.1, api_key=os.getenv("DASHSCOPE_API_KEY"))
 
 HIGH_IV_RANK_THRESHOLD = 70.0
 # Match both styles:

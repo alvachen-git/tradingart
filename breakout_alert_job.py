@@ -1866,7 +1866,7 @@ def run_job(
         engine_mode = DEFAULT_ENGINE_MODE
 
     top_k = max(1, int(top_k_arg or os.getenv("BREAKOUT_TOP_K", str(DEFAULT_TOP_K))))
-    model_name = os.getenv("BREAKOUT_LLM_MODEL", "qwen-plus")
+    model_name = os.getenv("BREAKOUT_LLM_MODEL", "qwen3.6-plus")
 
     llm_error = ""
     candidates: List[Dict[str, Any]] = []

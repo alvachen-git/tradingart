@@ -105,7 +105,7 @@ engine = create_engine(db_url)
 
 # 初始化 LLM
 llm = ChatTongyi(
-    model="qwen-plus",
+    model="qwen3.6-plus",
     api_key=os.getenv("DASHSCOPE_API_KEY"),
     request_timeout=BROKER_REPORT_REQ_TIMEOUT_SECONDS,
     max_retries=1,

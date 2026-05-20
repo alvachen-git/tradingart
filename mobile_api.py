@@ -92,7 +92,7 @@ if str(os.getenv("ENABLE_LANGSMITH_TRACING", "")).strip().lower() not in {"1", "
     os.environ["LANGCHAIN_TRACING_V2"] = "false"
     os.environ["LANGSMITH_TRACING"] = "false"
 
-from llm_compat import ChatTongyiCompat as ChatTongyi
+from llm_compat import ChatTongyiCompat as ChatTongyi, build_deepseek_flash_llm
 
 # 确保同目录模块可以 import
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -3019,7 +3019,11 @@ def _device_generate_voice_answer(
         screen_context=screen_context,
     )
     try:
-        llm = ChatTongyi(model=os.getenv("DEVICE_VOICE_LLM_MODEL", "qwen-turbo-latest"), streaming=False, temperature=0.2)
+        llm = build_deepseek_flash_llm(
+            model=os.getenv("DEVICE_VOICE_LLM_MODEL") or None,
+            streaming=False,
+            temperature=0.2,
+        )
         answer = simple_chatter_reply(prompt, llm, runtime_context={"current_user": username, "device": "StackChan"})
         answer = _safe_textv(answer)
         return answer[:180] if answer else "我暂时没有拿到稳定回答，请稍后再试。"
@@ -6054,7 +6058,7 @@ def chat_submit(
     has_portfolio = _detect_mobile_has_portfolio(username)
 
     if chat_mode == CHAT_MODE_SIMPLE:
-        llm_turbo = ChatTongyi(model="qwen-turbo-latest", streaming=False, temperature=0.2)
+        llm_turbo = build_deepseek_flash_llm(streaming=False, temperature=0.2)
         runtime_context = _build_mobile_simple_runtime_context(username)
         response_text = simple_chatter_reply(
             normalized_prompt,

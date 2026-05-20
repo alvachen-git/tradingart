@@ -44,7 +44,7 @@ db_url = f"mysql+pymysql://{os.getenv('DB_USER')}:{os.getenv('DB_PASSWORD')}@{os
 engine = create_engine(db_url)
 
 # 初始化 LLM
-llm = ChatTongyi(model="qwen-plus", api_key=os.getenv("DASHSCOPE_API_KEY"))
+llm = ChatTongyi(model="qwen3.6-plus", api_key=os.getenv("DASHSCOPE_API_KEY"))
 
 # 商品卡片发布前校验配置（仅校验“商品期货全景”中的隐含波动率口径）
 COMMODITY_CARD_LIST = [
