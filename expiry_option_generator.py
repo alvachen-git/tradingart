@@ -42,7 +42,11 @@ engine = create_engine(db_url)
 
 REPORT_LLM_ENV_PREFIX = "EXPIRY_OPTION_REPORT"
 REPORT_LLM_TEMPERATURE = 0.1
-llm = build_report_tongyi_llm(env_prefix=REPORT_LLM_ENV_PREFIX, temperature=REPORT_LLM_TEMPERATURE)
+llm = build_report_tongyi_llm(
+    env_prefix=REPORT_LLM_ENV_PREFIX,
+    temperature=REPORT_LLM_TEMPERATURE,
+    default_model="qwen3.5-plus",
+)
 
 HIGH_IV_RANK_THRESHOLD = 70.0
 # Match both styles:

@@ -59,6 +59,33 @@ class LlmCompatTest(unittest.TestCase):
         self.assertEqual(kwargs["request_timeout"], 600)
         self.assertEqual(kwargs["max_retries"], 1)
 
+    def test_build_report_tongyi_llm_accepts_script_default_model(self):
+        os.environ["DASHSCOPE_API_KEY"] = "test-key"
+        os.environ.pop("REPORT_LLM_MODEL", None)
+        os.environ.pop("EXPIRY_OPTION_REPORT_LLM_MODEL", None)
+
+        with patch("llm_compat.ChatTongyiCompat") as mock_chat:
+            build_report_tongyi_llm(
+                env_prefix="EXPIRY_OPTION_REPORT",
+                temperature=0.1,
+                default_model="qwen3.5-plus",
+            )
+
+        self.assertEqual(mock_chat.call_args.kwargs["model"], "qwen3.5-plus")
+
+    def test_build_report_tongyi_llm_env_model_overrides_script_default(self):
+        os.environ["DASHSCOPE_API_KEY"] = "test-key"
+        os.environ["EXPIRY_OPTION_REPORT_LLM_MODEL"] = "qwen-plus"
+
+        with patch("llm_compat.ChatTongyiCompat") as mock_chat:
+            build_report_tongyi_llm(
+                env_prefix="EXPIRY_OPTION_REPORT",
+                temperature=0.1,
+                default_model="qwen3.5-plus",
+            )
+
+        self.assertEqual(mock_chat.call_args.kwargs["model"], "qwen-plus")
+
     def test_report_llm_fallback_uses_qwen_plus_not_turbo(self):
         class Primary:
             model_name = "qwen3.6-plus"

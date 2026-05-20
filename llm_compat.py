@@ -77,6 +77,7 @@ def build_report_tongyi_llm(
     env_prefix: str,
     temperature: float = 0.1,
     model: str | None = None,
+    default_model: str | None = None,
     api_key: str | None = None,
     request_timeout: int | None = None,
     max_retries: int | None = None,
@@ -86,7 +87,7 @@ def build_report_tongyi_llm(
     Build a DashScope report-generation LLM with stable shared defaults.
 
     Env order:
-    - <ENV_PREFIX>_LLM_MODEL / REPORT_LLM_MODEL / qwen3.6-plus
+    - <ENV_PREFIX>_LLM_MODEL / REPORT_LLM_MODEL / default_model / qwen3.6-plus
     - <ENV_PREFIX>_LLM_TIMEOUT_SECONDS / REPORT_LLM_TIMEOUT_SECONDS / 600
     - <ENV_PREFIX>_LLM_MAX_RETRIES / REPORT_LLM_MAX_RETRIES / 1
     """
@@ -95,6 +96,7 @@ def build_report_tongyi_llm(
         model
         or os.getenv(f"{prefix}_LLM_MODEL")
         or os.getenv("REPORT_LLM_MODEL")
+        or default_model
         or DEFAULT_REPORT_LLM_MODEL
     )
     resolved_timeout = request_timeout
