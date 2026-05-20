@@ -215,13 +215,13 @@ STOCK_SELECTION_ACTION_KEYWORDS: Tuple[str, ...] = (
     "帮我找",
     "帮我选",
     "帮我筛",
+    "给我",
     "推荐",
     "筛选",
     "找几只",
     "选几只",
     "找一下",
     "哪些",
-    "有什么",
     "股票池",
     "候选股",
     "选股",
@@ -230,11 +230,29 @@ STOCK_SELECTION_ACTION_KEYWORDS: Tuple[str, ...] = (
 STOCK_SELECTION_SUBJECT_KEYWORDS: Tuple[str, ...] = (
     "股票",
     "个股",
+    "候选股",
+    "股票池",
     "概念股",
     "龙头股",
     "强势股",
     "弱势股",
-    "标的",
+)
+
+STOCK_SELECTION_QUESTION_PHRASES: Tuple[str, ...] = (
+    "有哪些股票",
+    "有什么股票",
+    "有哪些个股",
+    "有什么个股",
+    "有哪些候选股",
+    "有什么候选股",
+    "有哪些概念股",
+    "有什么概念股",
+)
+
+STOCK_SELECTION_EXPLICIT_TARGET_PHRASES: Tuple[str, ...] = (
+    "股票标的",
+    "个股标的",
+    "候选标的",
 )
 
 STOCK_SELECTION_PATTERN_KEYWORDS: Tuple[str, ...] = (
@@ -481,9 +499,16 @@ def _looks_like_stock_selection(query: str) -> bool:
     if _contains_any(text, EXPLAIN_PREFIXES):
         return False
     has_action = _contains_any(text, STOCK_SELECTION_ACTION_KEYWORDS)
-    has_subject = _contains_any(text, STOCK_SELECTION_SUBJECT_KEYWORDS)
+    has_subject = _contains_any(text, STOCK_SELECTION_SUBJECT_KEYWORDS) or _contains_any(
+        text,
+        STOCK_SELECTION_EXPLICIT_TARGET_PHRASES,
+    )
     has_pattern = _contains_any(text, STOCK_SELECTION_PATTERN_KEYWORDS)
     has_concept = any(keyword in text or keyword in lowered for keyword in STOCK_SELECTION_CONCEPT_KEYWORDS)
+    has_question_phrase = _contains_any(text, STOCK_SELECTION_QUESTION_PHRASES)
+    asks_stock_list = ("有什么" in text or "有哪些" in text or "哪些" in text) and (has_subject or has_concept)
+    if has_question_phrase or asks_stock_list:
+        return True
     if has_action and (has_subject or has_pattern or has_concept):
         return True
     if has_subject and has_pattern:
@@ -547,6 +572,26 @@ def classify_analysis_task_type(
     recent_context: str = "",
 ) -> AnalysisTaskPolicy:
     text = str(query or "").strip()
+    subject_policy = build_subject_policy(text, symbol_hint=symbol_hint)
+    if subject_policy.is_option_strategy and subject_policy.has_explicit_subject:
+        return AnalysisTaskPolicy(
+            task_type=TASK_TYPE_OPTION_STRATEGY_WITH_SUBJECT,
+            recommended_chat_mode=CHAT_MODE_ANALYSIS,
+            recommended_plan=("analyst", "strategist"),
+            clear_symbol=False,
+            hard_override=False,
+            reason=subject_policy.reason,
+        )
+    if subject_policy.is_option_strategy and not subject_policy.has_explicit_subject:
+        return AnalysisTaskPolicy(
+            task_type=TASK_TYPE_OPTION_STRATEGY_NEEDS_SUBJECT,
+            recommended_chat_mode=CHAT_MODE_ANALYSIS,
+            recommended_plan=("chatter",),
+            clear_symbol=True,
+            hard_override=True,
+            reason=subject_policy.reason,
+        )
+
     if is_followup and _looks_like_stock_selection_execution(text, recent_context):
         return AnalysisTaskPolicy(
             task_type=TASK_TYPE_STOCK_SELECTION,
@@ -575,26 +620,6 @@ def classify_analysis_task_type(
             reason="用户在解释或判断技术概念",
         )
 
-    subject_policy = build_subject_policy(text, symbol_hint=symbol_hint)
-    if subject_policy.is_option_strategy and subject_policy.has_explicit_subject:
-        return AnalysisTaskPolicy(
-            task_type=TASK_TYPE_OPTION_STRATEGY_WITH_SUBJECT,
-            recommended_chat_mode=CHAT_MODE_ANALYSIS,
-            recommended_plan=("analyst", "strategist"),
-            clear_symbol=False,
-            hard_override=False,
-            reason=subject_policy.reason,
-        )
-    if subject_policy.is_option_strategy and not subject_policy.has_explicit_subject:
-        return AnalysisTaskPolicy(
-            task_type=TASK_TYPE_OPTION_STRATEGY_NEEDS_SUBJECT,
-            recommended_chat_mode=CHAT_MODE_ANALYSIS,
-            recommended_plan=("chatter",),
-            clear_symbol=True,
-            hard_override=True,
-            reason=subject_policy.reason,
-        )
-
     if _looks_like_single_stock_analysis(text, symbol_hint=symbol_hint, focus_entity=focus_entity):
         return AnalysisTaskPolicy(
             task_type=TASK_TYPE_SINGLE_STOCK_ANALYSIS,
@@ -619,8 +644,10 @@ def is_option_strategy_question(query: str) -> bool:
     text = str(query or "")
     if not text:
         return False
-    has_option = "期权" in text or any(k in text for k in ["认购", "认沽", "价差", "双卖", "买方", "卖方"])
-    return bool(has_option and any(k in text for k in OPTION_STRATEGY_ACTION_KEYWORDS))
+    if "期权" in text or any(k in text for k in ["认购", "认沽"]):
+        return True
+    has_option_strategy_term = any(k in text for k in ["价差", "双卖", "买方", "卖方"])
+    return bool(has_option_strategy_term and any(k in text for k in OPTION_STRATEGY_ACTION_KEYWORDS))
 
 
 def has_explicit_option_underlying(query: str, symbol_hint: str = "") -> bool:

@@ -351,5 +351,21 @@ class TestChatRouting(unittest.TestCase):
         self.assertEqual(classify_chat_mode("帮我筛选一些高股息股票"), CHAT_MODE_ANALYSIS)
 
 
+    def test_option_question_with_target_word_does_not_route_as_stock_screening(self):
+        query = "如果用卖出认购的方式来做空，应该遵循什么原则，卖虚值，平值，还是实值，希腊字母有什么要求，还是根据对应标的的K线形态操作"
+        self.assertEqual(classify_chat_mode(query), CHAT_MODE_ANALYSIS)
+
+    def test_generic_target_phrases_do_not_trigger_stock_screening_route(self):
+        self.assertEqual(classify_chat_mode("这个策略有什么标的要求"), CHAT_MODE_ANALYSIS)
+        self.assertEqual(classify_chat_mode("有什么标的需要注意"), CHAT_MODE_SIMPLE)
+        self.assertEqual(classify_chat_mode("有什么原则"), CHAT_MODE_SIMPLE)
+
+    def test_explicit_stock_screening_phrases_still_route_to_analysis(self):
+        self.assertEqual(classify_chat_mode("有哪些高股息股票"), CHAT_MODE_ANALYSIS)
+        self.assertEqual(classify_chat_mode("有什么防御性板块个股"), CHAT_MODE_ANALYSIS)
+        self.assertEqual(classify_chat_mode("帮我筛选放量突破的股票"), CHAT_MODE_ANALYSIS)
+        self.assertEqual(classify_chat_mode("给我几个候选股"), CHAT_MODE_ANALYSIS)
+
+
 if __name__ == "__main__":
     unittest.main()

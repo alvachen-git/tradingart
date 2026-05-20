@@ -365,6 +365,9 @@ def _apply_analysis_task_policy(
     recent_context: str = "",
 ) -> tuple[List[str], str]:
     # 不采信 planner 生成的 symbol 来判定“是否有标的”，它可能正是模型自行补出的默认对象。
+    if is_market_data_query(query):
+        return ["monitor"], str(symbol or "").strip()
+
     policy = classify_analysis_task_type(
         query,
         symbol_hint="",
@@ -3266,6 +3269,16 @@ def _is_screener_risk_query(query: str) -> bool:
     """Detect requests for dangerous/avoid-list stocks without catching constraints."""
     compact_query = re.sub(r"\s+", "", query or "")
     if not compact_query:
+        return False
+
+    option_selling_phrases = (
+        "卖出认购",
+        "卖认购",
+        "卖出认沽",
+        "卖认沽",
+        "期权卖方",
+    )
+    if any(phrase in compact_query for phrase in option_selling_phrases):
         return False
 
     if any(keyword in compact_query for keyword in _SCREENER_RISK_KEYWORDS):

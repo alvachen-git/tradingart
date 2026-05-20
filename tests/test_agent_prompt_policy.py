@@ -118,6 +118,27 @@ class AnalysisTaskPolicyTest(unittest.TestCase):
         self.assertEqual(policy.recommended_plan, ("analyst", "strategist"))
 
 
+    def test_option_terms_take_priority_over_stock_selection(self):
+        query = "如果用卖出认购的方式来做空，应该遵循什么原则，卖虚值，平值，还是实值，希腊字母有什么要求，还是根据对应标的的K线形态操作"
+        policy = classify_analysis_task_type(query)
+        self.assertEqual(policy.task_type, TASK_TYPE_OPTION_STRATEGY_NEEDS_SUBJECT)
+        self.assertEqual(policy.recommended_plan, ("chatter",))
+        self.assertNotEqual(policy.task_type, TASK_TYPE_STOCK_SELECTION)
+
+    def test_generic_what_and_target_words_do_not_trigger_screener(self):
+        for query in ["这个策略有什么标的要求", "有什么标的需要注意", "有什么原则"]:
+            with self.subTest(query=query):
+                policy = classify_analysis_task_type(query)
+                self.assertNotEqual(policy.task_type, TASK_TYPE_STOCK_SELECTION)
+
+    def test_explicit_stock_questions_still_use_screener(self):
+        for query in ["有哪些高股息股票", "有什么防御性板块个股", "帮我筛选放量突破的股票", "给我几个候选股"]:
+            with self.subTest(query=query):
+                policy = classify_analysis_task_type(query)
+                self.assertEqual(policy.task_type, TASK_TYPE_STOCK_SELECTION)
+                self.assertEqual(policy.recommended_plan, ("screener",))
+
+
 class ProfilePolicyTest(unittest.TestCase):
     def test_structured_profile_overrides_old_risk_field(self):
         policy = build_profile_policy(
