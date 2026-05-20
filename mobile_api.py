@@ -116,6 +116,7 @@ from chat_routing import (
     CHAT_MODE_SIMPLE,
     classify_chat_mode,
     default_progress_for_chat_mode,
+    is_broker_signal_analysis_query,
 )
 from chat_context_utils import (
     build_followup_action_context as _build_followup_action_context,
@@ -4474,6 +4475,8 @@ def _classify_mobile_intent_domain(text: str) -> str:
         return "general"
     if any(kw in text_norm for kw in _MOBILE_OPTION_KEYWORDS):
         return "option"
+    if is_broker_signal_analysis_query(text_norm):
+        return "general"
     if any(kw in text_norm for kw in _MOBILE_STOCK_PORTFOLIO_KEYWORDS):
         return "stock_portfolio"
     return "general"

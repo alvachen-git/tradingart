@@ -12,6 +12,16 @@ except Exception as exc:  # pragma: no cover
 
 @unittest.skipIf(Home is None, f"Home import failed: {_IMPORT_ERROR}")
 class TestHomeProfileMemory(unittest.TestCase):
+    def test_intent_domain_keeps_futures_broker_signal_out_of_stock_portfolio(self):
+        self.assertEqual(
+            Home._classify_intent_domain("中信建投的持仓如果持续加多是不是利多？"),
+            "general",
+        )
+        self.assertEqual(
+            Home._classify_intent_domain("我的股票持仓要不要调仓？"),
+            "stock_portfolio",
+        )
+
     def test_build_context_payload_keeps_profile_query_short_circuit(self):
         payload = {
             "profile_context": "- 风险偏好：偏保守",

@@ -1,6 +1,7 @@
 import unittest
 
 from agent_prompt_policy import (
+    TASK_TYPE_FUTURES_BROKER_SIGNAL,
     TASK_TYPE_OPTION_STRATEGY_NEEDS_SUBJECT,
     TASK_TYPE_OPTION_STRATEGY_WITH_SUBJECT,
     TASK_TYPE_SINGLE_STOCK_ANALYSIS,
@@ -116,6 +117,19 @@ class AnalysisTaskPolicyTest(unittest.TestCase):
         policy = classify_analysis_task_type("500ETF趋势突破有效，到期还长，能不能买深虚期权？")
         self.assertEqual(policy.task_type, TASK_TYPE_OPTION_STRATEGY_WITH_SUBJECT)
         self.assertEqual(policy.recommended_plan, ("analyst", "strategist"))
+
+    def test_futures_broker_signal_task_type(self):
+        for query in [
+            "螺纹钢现在从期货商正反指标看偏多还是偏空？",
+            "螺纹刚现在从期货商正反指标看偏多还是偏空？",
+            "中信建投的持仓如果持续加多是不是利多？",
+        ]:
+            with self.subTest(query=query):
+                policy = classify_analysis_task_type(query)
+                self.assertEqual(policy.task_type, TASK_TYPE_FUTURES_BROKER_SIGNAL)
+                self.assertEqual(policy.recommended_plan, ("monitor",))
+                self.assertTrue(policy.clear_symbol)
+                self.assertTrue(policy.hard_override)
 
 
     def test_option_terms_take_priority_over_stock_selection(self):

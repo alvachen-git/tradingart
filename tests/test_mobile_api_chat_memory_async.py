@@ -42,6 +42,16 @@ class _FakeRedis:
 
 @unittest.skipIf(mobile_api is None, f"mobile_api import failed: {_IMPORT_ERROR}")
 class TestMobileApiChatMemoryAsync(unittest.TestCase):
+    def test_mobile_intent_domain_keeps_futures_broker_signal_out_of_stock_portfolio(self):
+        self.assertEqual(
+            mobile_api._classify_mobile_intent_domain("中信建投的持仓如果持续加多是不是利多？"),
+            "general",
+        )
+        self.assertEqual(
+            mobile_api._classify_mobile_intent_domain("我的股票持仓要不要调仓？"),
+            "stock_portfolio",
+        )
+
     def _make_feedback_engine(self):
         engine = create_engine("sqlite:///:memory:", future=True)
         mobile_api._CHAT_FEEDBACK_SCHEMA_READY = False

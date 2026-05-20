@@ -210,6 +210,63 @@ TASK_TYPE_SINGLE_STOCK_ANALYSIS = "single_stock_analysis"
 TASK_TYPE_TECHNICAL_CONCEPT = "technical_concept"
 TASK_TYPE_OPTION_STRATEGY_WITH_SUBJECT = "option_strategy_with_subject"
 TASK_TYPE_OPTION_STRATEGY_NEEDS_SUBJECT = "option_strategy_needs_subject"
+TASK_TYPE_FUTURES_BROKER_SIGNAL = "futures_broker_signal"
+
+FUTURES_BROKER_SIGNAL_SUBJECT_KEYWORDS: Tuple[str, ...] = (
+    "期货商",
+    "席位",
+    "龙虎榜",
+    "正反指标",
+    "正指标",
+    "反指标",
+    "东证",
+    "东证期货",
+    "海通",
+    "海通期货",
+    "中信期货",
+    "中信建投",
+    "东方财富",
+    "方正中期",
+)
+
+FUTURES_BROKER_SIGNAL_INTENT_KEYWORDS: Tuple[str, ...] = (
+    "偏多",
+    "偏空",
+    "利多",
+    "利空",
+    "做多",
+    "做空",
+    "加多",
+    "加空",
+    "减多",
+    "减空",
+    "多空",
+    "方向",
+    "信号",
+    "怎么看",
+    "看偏",
+    "判断",
+    "是不是",
+    "是否",
+)
+
+FUTURES_BROKER_SIGNAL_PRODUCT_KEYWORDS: Tuple[str, ...] = (
+    "螺纹钢",
+    "螺纹刚",
+    "rb",
+    "白银",
+    "ag",
+    "黄金",
+    "au",
+    "纯碱",
+    "sa",
+    "热卷",
+    "铁矿石",
+    "焦煤",
+    "焦炭",
+    "铜",
+    "沪铜",
+)
 
 STOCK_SELECTION_ACTION_KEYWORDS: Tuple[str, ...] = (
     "帮我找",
@@ -551,6 +608,28 @@ def _looks_like_single_stock_analysis(query: str, *, symbol_hint: str = "", focu
     return _contains_any(text, SINGLE_STOCK_ANALYSIS_KEYWORDS)
 
 
+def _looks_like_futures_broker_signal(query: str) -> bool:
+    text = str(query or "").strip()
+    if not text:
+        return False
+    lower = text.lower()
+    has_subject = _contains_any(text, FUTURES_BROKER_SIGNAL_SUBJECT_KEYWORDS) or _contains_any(
+        lower,
+        FUTURES_BROKER_SIGNAL_SUBJECT_KEYWORDS,
+    )
+    if not has_subject:
+        return False
+    has_intent = _contains_any(text, FUTURES_BROKER_SIGNAL_INTENT_KEYWORDS) or _contains_any(
+        lower,
+        FUTURES_BROKER_SIGNAL_INTENT_KEYWORDS,
+    )
+    has_product = _contains_any(text, FUTURES_BROKER_SIGNAL_PRODUCT_KEYWORDS) or _contains_any(
+        lower,
+        FUTURES_BROKER_SIGNAL_PRODUCT_KEYWORDS,
+    )
+    return bool(has_intent or has_product)
+
+
 def _single_stock_recommended_plan(query: str) -> Tuple[str, ...]:
     text = str(query or "")
     has_research = _contains_any(text, RESEARCH_NEED_KEYWORDS)
@@ -590,6 +669,16 @@ def classify_analysis_task_type(
             clear_symbol=True,
             hard_override=True,
             reason=subject_policy.reason,
+        )
+
+    if _looks_like_futures_broker_signal(text):
+        return AnalysisTaskPolicy(
+            task_type=TASK_TYPE_FUTURES_BROKER_SIGNAL,
+            recommended_chat_mode=CHAT_MODE_ANALYSIS,
+            recommended_plan=("monitor",),
+            clear_symbol=True,
+            hard_override=True,
+            reason="用户询问期货商正反指标或席位持仓的多空判断",
         )
 
     if is_followup and _looks_like_stock_selection_execution(text, recent_context):

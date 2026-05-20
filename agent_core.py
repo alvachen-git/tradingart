@@ -38,8 +38,26 @@ from futures_structure_tools import (
 )
 from volume_oi_tools import get_volume_oi, get_futures_oi_ranking, get_option_oi_ranking, get_option_volume_abnormal, get_option_oi_abnormal, analyze_etf_option_sentiment, get_etf_option_strikes
 from market_tools import get_market_snapshot, get_price_statistics,tool_query_specific_option,get_historical_price,get_recent_price_series,get_trending_hotspots,get_today_hotlist,analyze_keyword_trend,get_finance_related_trends,search_hotlist_history
-from data_engine import get_commodity_iv_info, check_option_expiry_status,search_broker_holdings_on_date,tool_analyze_position_change,tool_compare_stocks,get_stock_valuation,get_latest_data_date,tool_analyze_broker_positions
-from data_engine import parse_account_total_capital, normalize_account_total_capital
+from data_engine import (
+    BROKER_SIGNAL_NEGATIVE,
+    BROKER_SIGNAL_POSITIVE,
+    CN_TO_CODE,
+    PRODUCT_MAP,
+    _build_futures_broker_indicator_profile,
+    _build_futures_broker_position_signal,
+    check_option_expiry_status,
+    get_commodity_iv_info,
+    get_futures_broker_indicator_profile,
+    get_futures_broker_position_signal,
+    get_latest_data_date,
+    get_stock_valuation,
+    parse_account_total_capital,
+    normalize_account_total_capital,
+    search_broker_holdings_on_date,
+    tool_analyze_broker_positions,
+    tool_analyze_position_change,
+    tool_compare_stocks,
+)
 from search_tools import search_web
 from market_correlation import tool_stock_hedging_analysis, tool_futures_correlation_check,tool_stock_correlation_check
 from beta_tool import calculate_hedging_beta
@@ -66,6 +84,7 @@ from simple_chat_runtime import (
 from agent_prompt_policy import (
     TASK_TYPE_OPTION_STRATEGY_NEEDS_SUBJECT,
     TASK_TYPE_OPTION_STRATEGY_WITH_SUBJECT,
+    TASK_TYPE_FUTURES_BROKER_SIGNAL,
     TASK_TYPE_SINGLE_STOCK_ANALYSIS,
     TASK_TYPE_STOCK_SELECTION,
     TASK_TYPE_TECHNICAL_CONCEPT,
@@ -282,6 +301,7 @@ OPTION_ACTION_QUERY_KEYWORDS = [
 ]
 RESEARCH_ROUTE_KEYWORDS = [
     "基本面", "财报", "公告", "近期动态", "最近动态", "公司动态", "消息面", "新闻", "资讯",
+    "消息", "最新消息",
     "业绩", "一季报", "半年报", "中报", "三季报", "年报", "业绩快报", "业绩预告",
     "利好", "利空", "催化", "为什么涨", "为什么跌", "为什么大涨", "为什么大跌", "影响什么",
 ]
@@ -380,6 +400,9 @@ def _apply_analysis_task_policy(
     if policy.task_type in {TASK_TYPE_STOCK_SELECTION, TASK_TYPE_OPTION_STRATEGY_NEEDS_SUBJECT}:
         return list(policy.recommended_plan), ""
 
+    if policy.task_type == TASK_TYPE_FUTURES_BROKER_SIGNAL:
+        return list(policy.recommended_plan), "" if policy.clear_symbol else current_symbol
+
     if policy.task_type == TASK_TYPE_TECHNICAL_CONCEPT:
         return ["chatter"], "" if policy.clear_symbol else current_symbol
 
@@ -395,6 +418,40 @@ def _apply_analysis_task_policy(
         return list(policy.recommended_plan), current_symbol
 
     return current_plan, "" if policy.clear_symbol else current_symbol
+
+
+def _is_futures_broker_signal_task(query: str) -> bool:
+    return classify_analysis_task_type(query).task_type == TASK_TYPE_FUTURES_BROKER_SIGNAL
+
+
+def _extract_futures_broker_signal_broker(query: str) -> str:
+    text = str(query or "")
+    candidates = []
+    for broker in BROKER_SIGNAL_POSITIVE + BROKER_SIGNAL_NEGATIVE:
+        candidates.append((broker, broker))
+        short_name = broker.replace("期货", "")
+        if short_name:
+            candidates.append((short_name, broker))
+    for alias, broker in sorted(candidates, key=lambda item: len(item[0]), reverse=True):
+        if alias and alias in text:
+            return broker
+    for broker in BROKER_SIGNAL_POSITIVE + BROKER_SIGNAL_NEGATIVE:
+        if broker in text:
+            return broker
+    return ""
+
+
+def _extract_futures_broker_signal_product(query: str) -> str:
+    text = str(query or "").replace("螺纹刚", "螺纹钢")
+    lower = text.lower()
+    for name, code in sorted(CN_TO_CODE.items(), key=lambda item: len(item[0]), reverse=True):
+        if name and name in text:
+            return name
+    for code, name in sorted(PRODUCT_MAP.items(), key=lambda item: len(item[0]), reverse=True):
+        code_lower = str(code or "").lower()
+        if code_lower and re.search(rf"(?<![a-z0-9]){re.escape(code_lower)}(?![a-z0-9])", lower):
+            return name or code
+    return ""
 
 
 def _user_requested_unauthorized_indicator(query: str) -> bool:
@@ -1531,7 +1588,7 @@ def build_generalist_tools():
         get_futures_fund_flow, get_futures_fund_ranking, get_futures_margin_profile,
         get_futures_basis_profile, get_futures_inventory_receipt_profile, get_futures_delivery_tospot_profile,
         get_available_patterns, analyze_etf_option_sentiment, get_etf_option_strikes,
-        tool_analyze_broker_positions, run_option_strategy_backtest,
+        tool_analyze_broker_positions, get_futures_broker_position_signal, get_futures_broker_indicator_profile, run_option_strategy_backtest,
         get_macro_indicator, get_macro_overview, analyze_yield_curve
     ]
 
@@ -1558,6 +1615,8 @@ def build_monitor_tools():
         get_recent_price_series,
         check_option_expiry_status,
         tool_analyze_broker_positions,
+        get_futures_broker_position_signal,
+        get_futures_broker_indicator_profile,
         get_futures_oi_ranking,
         query_stock_volume,
         get_macro_indicator
@@ -1955,6 +2014,8 @@ def generalist_node(state: AgentState, llm):
         10.4 查期货交割/期转现 -> get_futures_delivery_tospot_profile
         11.查商品龙虎榜/期货商持仓 -> search_broker_holdings_on_date  
         12.查某期货商最近持仓变化情况 -> tool_analyze_position_change
+        12.1 查期货商正反指标/席位信号/龙虎榜辅助判断 -> get_futures_broker_position_signal
+        12.2 只问某期货商加多/加空是否利多利空，且没有给具体品种 -> get_futures_broker_indicator_profile
         13.查成交量和持仓量 -> get_volume_oi
         14.查期货持仓量排名 -> get_futures_oi_ranking
         15.查期权波动率-> get_commodity_iv_info
@@ -1973,6 +2034,7 @@ def generalist_node(state: AgentState, llm):
         3. 禁止空谈，必须用工具获取的数据说话。
         4. 不要编造数据，如果没查到数据就说不知道。
         5. 若处于连续追问模式，第一段必须先承接上一轮关键结论，再回答当前问题。
+        6. 东证期货、海通期货、中信期货是正指标期货商；中信建投、东方财富、方正中期是反指标期货商。反指标做多是一种利空，反指标做空是一种利多；只问某期货商加多/加空时，必须先调用 get_futures_broker_indicator_profile。
         """
 
     if wants_chart:
@@ -2247,6 +2309,23 @@ def monitor_node(state: AgentState, llm):
     latest_trade_date = get_latest_data_date()
     is_pure_option_data = is_pure_option_data_query(user_q)
 
+    if _is_futures_broker_signal_task(user_q):
+        product = _extract_futures_broker_signal_product(user_q)
+        broker = _extract_futures_broker_signal_broker(user_q)
+        if product:
+            last_response = _build_futures_broker_position_signal(product, lookback_days=5)
+        elif broker:
+            last_response = _build_futures_broker_indicator_profile(broker)
+        else:
+            last_response = (
+                "结论：数据不足\n"
+                "- 冲突与风险：已识别为期货商正反指标问题，但没有识别到具体品种或期货商名称。"
+            )
+        return {
+            "messages": [HumanMessage(content=f"【数据监控】\n{last_response}")],
+            "fund_data": last_response,
+        }
+
     # 1. 装备所有数据类工具
     tools = build_monitor_tools()
 
@@ -2304,6 +2383,8 @@ def monitor_node(state: AgentState, llm):
     - 查某天某品种的期货商持仓排名（龙虎榜） -> search_broker_holdings_on_date 
     - 查某品种一段时间内各期货商的持仓变化 -> tool_analyze_position_change 
     - 查某期货商在各品种的持仓变化 -> tool_analyze_broker_positions （当前净持仓代表期货商对这品种的趋势判断）
+    - 查期货商正反指标/席位信号/龙虎榜辅助判断 -> get_futures_broker_position_signal
+    - 只问某期货商加多/加空是否利多利空，且没有给具体品种 -> get_futures_broker_indicator_profile
     - 查期权成交量异常(放量/异动) -> get_option_volume_abnormal
     - 查期权持仓量异常(大单增仓) -> get_option_oi_abnormal
     - 查期权持仓量排名 -> get_option_oi_ranking
@@ -2327,6 +2408,7 @@ def monitor_node(state: AgentState, llm):
     5. 商品都有期权，禁止说商品没有场内期权。
     6. 用户要“某天价格”优先用 `get_historical_price`；用户要“区间统计”优先用 `get_price_statistics`。
     7. 用户要“最近N天/最近N个交易日/列表/逐日明细/走势数据表”时，优先用 `get_recent_price_series`，不要只返回 `get_market_snapshot`。
+    8. 东证期货、海通期货、中信期货是正指标期货商；中信建投、东方财富、方正中期是反指标期货商。反指标做多是一种利空，反指标做空是一种利多；只问某期货商加多/加空时，必须先调用 get_futures_broker_indicator_profile。
     {pure_option_data_instruction}
     """
 
@@ -3794,6 +3876,12 @@ def finalizer_node(state: AgentState, llm):
     # 拼接到一起用于输入
     context_text = "\n".join([f"{m.content}" for m in worker_msgs])
     user_query = state.get("user_query", "")
+    if _is_futures_broker_signal_task(user_query) and "【数据监控】" in context_text:
+        return {
+            "messages": [HumanMessage(content=context_text)],
+            "chart_img": state.get("chart_img", ""),
+        }
+
     vision_position_domain = str(state.get("vision_position_domain", "") or "").strip().lower()
     vision_position_payload = state.get("vision_position_payload") or {}
     vision_option_legs: List[Dict[str, Any]] = []

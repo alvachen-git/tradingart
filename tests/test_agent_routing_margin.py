@@ -130,6 +130,83 @@ def test_analysis_task_policy_option_with_subject_fills_empty_plan():
     assert symbol == "510500"
 
 
+def test_analysis_task_policy_futures_broker_signal_forces_monitor():
+    for query, original_plan in [
+        ("螺纹钢现在从期货商正反指标看偏多还是偏空？", ["chatter"]),
+        ("螺纹刚现在从期货商正反指标看偏多还是偏空？", ["generalist"]),
+        ("中信建投的持仓如果持续加多是不是利多？", ["portfolio_analyst"]),
+    ]:
+        plan, symbol = agent_core._apply_analysis_task_policy(query, original_plan, "601066")
+        assert plan == ["monitor"]
+        assert symbol == ""
+
+
+def test_monitor_node_futures_broker_single_broker_uses_profile_without_llm(monkeypatch):
+    class FailingLLM:
+        def invoke(self, *_args, **_kwargs):
+            raise AssertionError("monitor should not invoke llm for broker profile")
+
+    monkeypatch.setattr(agent_core, "get_latest_data_date", lambda: "20260520")
+    monkeypatch.setattr(
+        agent_core,
+        "_build_futures_broker_indicator_profile",
+        lambda broker: f"结论：{broker}属于反指标期货商。\n- 做多/加多解读：按反指标口径是一种利空。",
+    )
+
+    out = agent_core.monitor_node(
+        {"user_query": "中信建投的持仓如果持续加多是不是利多？", "symbol": ""},
+        FailingLLM(),
+    )
+    content = out["messages"][0].content
+    assert "【数据监控】" in content
+    assert "中信建投属于反指标期货商" in content
+    assert "利空" in content
+
+
+def test_monitor_node_futures_broker_product_uses_position_signal_without_llm(monkeypatch):
+    class FailingLLM:
+        def invoke(self, *_args, **_kwargs):
+            raise AssertionError("monitor should not invoke llm for broker signal")
+
+    monkeypatch.setattr(agent_core, "get_latest_data_date", lambda: "20260520")
+    monkeypatch.setattr(
+        agent_core,
+        "_build_futures_broker_position_signal",
+        lambda product, **_kwargs: f"结论：偏空\n- 品种：{product}\n- 最近5日趋势：0513->0520 偏空。",
+    )
+
+    out = agent_core.monitor_node(
+        {"user_query": "鸡蛋现在从期货商正反指标看偏多还是偏空？", "symbol": ""},
+        FailingLLM(),
+    )
+    content = out["messages"][0].content
+    assert "【数据监控】" in content
+    assert "品种：鸡蛋" in content
+    assert "最近5日趋势" in content
+
+
+def test_finalizer_keeps_futures_broker_monitor_output_without_audit_rewrite():
+    class FailingLLM:
+        def invoke(self, *_args, **_kwargs):
+            raise AssertionError("finalizer should not audit rewrite broker signal")
+
+    source = "【数据监控】\n结论：中信建投属于反指标期货商。\n- 做多/加多解读：按反指标口径是一种利空。"
+    out = agent_core.finalizer_node(
+        {
+            "messages": [],
+            "agent_reports": {"monitor": source},
+            "user_query": "中信建投的持仓如果持续加多是不是利多？",
+        },
+        FailingLLM(),
+    )
+
+    content = out["messages"][0].content
+    assert "【数据监控】" in content
+    assert "反指标期货商" in content
+    assert "利空" in content
+    assert "风控修正" not in content
+
+
 def test_recent_company_news_routes_to_researcher_only():
     out = agent_core._enforce_research_analyst_routing(
         "中天科技最近有什么消息",

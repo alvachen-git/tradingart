@@ -17,6 +17,7 @@ class TestChatRouting(unittest.TestCase):
         self.assertEqual(classify_chat_mode("法国大革命是什么"), CHAT_MODE_SIMPLE)
         self.assertEqual(classify_chat_mode("怎么缓解焦虑"), CHAT_MODE_SIMPLE)
         self.assertEqual(classify_chat_mode("帮我写一段生日祝福"), CHAT_MODE_SIMPLE)
+        self.assertEqual(classify_chat_mode("你记得我持仓吗"), CHAT_MODE_SIMPLE)
 
     def test_classify_knowledge_chat(self):
         self.assertEqual(classify_chat_mode("什么是牛市价差"), CHAT_MODE_KNOWLEDGE)
@@ -43,6 +44,26 @@ class TestChatRouting(unittest.TestCase):
         self.assertEqual(classify_chat_mode("牛市价差适合做吗"), CHAT_MODE_ANALYSIS)
         self.assertEqual(classify_chat_mode("查看甲醇2609的iv波动率"), CHAT_MODE_ANALYSIS)
         self.assertEqual(classify_chat_mode("甲醇2609价格多少"), CHAT_MODE_ANALYSIS)
+        self.assertEqual(classify_chat_mode("帮我分析我的持仓风险大吗"), CHAT_MODE_ANALYSIS)
+
+    def test_broker_signal_questions_route_to_analysis(self):
+        self.assertEqual(
+            classify_chat_mode("螺纹钢现在从期货商正反指标看偏多还是偏空？"),
+            CHAT_MODE_ANALYSIS,
+        )
+        self.assertEqual(
+            classify_chat_mode("螺纹刚现在从期货商正反指标看偏多还是偏空？"),
+            CHAT_MODE_ANALYSIS,
+        )
+        self.assertEqual(classify_chat_mode("RB 席位信号有没有分歧？"), CHAT_MODE_ANALYSIS)
+        self.assertEqual(classify_chat_mode("中信建投加多是不是利多？"), CHAT_MODE_ANALYSIS)
+        self.assertEqual(classify_chat_mode("中信建投的持仓如果持续加多是不是利多？"), CHAT_MODE_ANALYSIS)
+
+    def test_product_directional_view_routes_to_analysis(self):
+        self.assertEqual(classify_chat_mode("螺纹钢现在从成交量和持仓看偏多还是偏空？"), CHAT_MODE_ANALYSIS)
+        self.assertEqual(classify_chat_mode("白银现在多空方向怎么看？"), CHAT_MODE_ANALYSIS)
+        self.assertEqual(classify_chat_mode("RB从资金流和持仓看方向"), CHAT_MODE_ANALYSIS)
+        self.assertEqual(classify_chat_mode("纯碱近期信号偏多还是偏空？"), CHAT_MODE_ANALYSIS)
 
     def test_stock_selection_routes_to_analysis(self):
         self.assertEqual(classify_chat_mode("帮我找放量突破的股票"), CHAT_MODE_ANALYSIS)

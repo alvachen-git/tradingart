@@ -160,6 +160,35 @@ MARKET_DATA_EXCLUDED_KEYWORDS = OPTION_DATA_EXCLUDED_KEYWORDS + (
     "隐忧", "值不值得", "该怎么做",
 )
 
+BROKER_SIGNAL_SUBJECT_KEYWORDS = (
+    "期货商", "席位", "龙虎榜", "正反指标", "正指标", "反指标",
+    "东证", "中信期货", "海通", "中信建投", "东方财富", "方正中期",
+)
+
+BROKER_SIGNAL_ANALYSIS_KEYWORDS = (
+    "偏多", "偏空", "多空", "方向", "信号", "怎么看", "看偏", "判断",
+    "辅助判断", "现在", "当前", "利多", "利空", "加多", "加空", "减多", "减空",
+)
+
+FUTURES_PRODUCT_KEYWORDS = (
+    "螺纹钢", "螺纹", "热卷", "铁矿石", "焦煤", "焦炭", "锰硅", "硅铁", "不锈钢",
+    "黄金", "白银", "沪铜", "铜", "铝", "锌", "铅", "镍", "锡", "氧化铝",
+    "原油", "燃料油", "低硫燃油", "沥青", "pta", "甲醇", "乙二醇", "塑料", "聚丙烯",
+    "pvc", "苯乙烯", "液化气", "纯碱", "玻璃", "尿素", "纸浆", "橡胶", "br橡胶",
+    "豆粕", "豆油", "棕榈油", "菜油", "菜粕", "玉米", "淀粉", "棉花", "白糖",
+    "苹果", "红枣", "鸡蛋", "生猪", "花生", "碳酸锂", "工业硅", "多晶硅",
+)
+
+MARKET_DIRECTIONAL_VIEW_KEYWORDS = (
+    "偏多", "偏空", "看多", "看空", "多空", "方向", "趋势", "信号", "行情判断",
+    "利多", "利空", "涨还是跌", "会涨", "会跌", "上行", "下行", "强弱", "怎么看",
+)
+
+MARKET_DIRECTIONAL_CONTEXT_KEYWORDS = (
+    "现在", "当前", "今天", "今日", "最近", "近期", "从", "结合", "根据", "用",
+    "持仓", "成交量", "期货商", "席位", "龙虎榜", "资金流", "基差", "库存",
+)
+
 FINANCE_BASE_KEYWORDS = (
     "金融", "交易", "投资", "理财", "基金", "债券", "国债", "利率", "通胀", "cpi", "pmi",
     "非农", "美债", "美元", "汇率", "外汇", "a股", "港股", "美股", "期货", "现货",
@@ -398,6 +427,49 @@ def is_market_data_query(prompt_text: str) -> bool:
     return False
 
 
+def is_broker_signal_analysis_query(prompt_text: str) -> bool:
+    text = str(prompt_text or "").strip().lower()
+    if not text:
+        return False
+
+    has_subject = any(keyword in text for keyword in BROKER_SIGNAL_SUBJECT_KEYWORDS)
+    if not has_subject:
+        return False
+
+    if any(keyword in text for keyword in BROKER_SIGNAL_ANALYSIS_KEYWORDS):
+        return True
+
+    return any(keyword in text for keyword in ("螺纹钢", "白银", "黄金", "纯碱", "rb", "ag", "au", "sa"))
+
+
+def is_directional_market_view_query(prompt_text: str) -> bool:
+    text = str(prompt_text or "").strip().lower()
+    raw_text = str(prompt_text or "")
+    if not text:
+        return False
+
+    has_specific_subject = (
+        bool(CONTRACT_PATTERN.search(raw_text))
+        or bool(SYMBOL_PATTERN.search(raw_text.upper()))
+        or any(keyword in text for keyword in FUTURES_PRODUCT_KEYWORDS)
+    )
+    if not has_specific_subject:
+        return False
+
+    has_directional_intent = any(keyword in text for keyword in MARKET_DIRECTIONAL_VIEW_KEYWORDS)
+    if not has_directional_intent:
+        return False
+
+    has_knowledge_prefix = any(keyword in text for keyword in KNOWLEDGE_PREFIXES) or any(
+        keyword in text for keyword in CONVERSATIONAL_KNOWLEDGE_PREFIXES
+    )
+    has_market_context = any(keyword in text for keyword in MARKET_DIRECTIONAL_CONTEXT_KEYWORDS)
+    if has_knowledge_prefix and not has_market_context:
+        return False
+
+    return True
+
+
 def classify_chat_mode(
     prompt_text: str,
     *,
@@ -439,6 +511,12 @@ def classify_chat_mode(
         return CHAT_MODE_ANALYSIS
 
     if is_market_data_query(text):
+        return CHAT_MODE_ANALYSIS
+
+    if is_directional_market_view_query(text):
+        return CHAT_MODE_ANALYSIS
+
+    if is_broker_signal_analysis_query(text):
         return CHAT_MODE_ANALYSIS
 
     has_knowledge_prefix = any(keyword in text_lower for keyword in KNOWLEDGE_PREFIXES)
