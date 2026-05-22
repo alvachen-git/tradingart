@@ -1,5 +1,6 @@
 import pandas as pd
 import os
+import re
 from sqlalchemy import create_engine, text
 from dotenv import load_dotenv
 from langchain_core.tools import tool
@@ -197,6 +198,57 @@ def get_price_statistics(query_list: str, start_date: str, end_date: str):
 
 
 # --- 5. 另一個工具：獲取最新快照 (保持簡單可用) ---
+def _is_specific_futures_contract_code(target_code: str) -> bool:
+    code = re.sub(r"[^A-Z0-9]", "", str(target_code or "").upper())
+    return bool(re.search(r"\d{3,4}", code))
+
+
+def _query_latest_futures_snapshot(target_code: str) -> pd.DataFrame:
+    """
+    Return the latest futures snapshot for either a specific contract or a product.
+
+    Product-level queries must use the dominant month by open interest on the
+    latest trading day, otherwise low-liquidity far months can leak into strategy
+    prompts and distort option strike selection.
+    """
+    clean_code = re.sub(r"[^A-Z0-9]", "", str(target_code or "").upper())
+    if not clean_code:
+        return pd.DataFrame()
+
+    if _is_specific_futures_contract_code(clean_code):
+        sql = text(
+            """
+            SELECT *
+            FROM futures_price
+            WHERE UPPER(ts_code) LIKE :contract_like
+              AND UPPER(ts_code) NOT LIKE '%TAS%'
+            ORDER BY trade_date DESC
+            LIMIT 1
+            """
+        )
+        return pd.read_sql(sql, engine, params={"contract_like": f"{clean_code}%"})
+
+    pattern = strict_futures_prefix_pattern(clean_code)
+    sql = text(
+        """
+        SELECT *
+        FROM futures_price
+        WHERE UPPER(ts_code) REGEXP :pattern
+          AND UPPER(ts_code) NOT LIKE '%TAS%'
+          AND trade_date = (
+            SELECT MAX(trade_date)
+            FROM futures_price
+            WHERE UPPER(ts_code) REGEXP :pattern
+              AND UPPER(ts_code) NOT LIKE '%TAS%'
+          )
+        ORDER BY COALESCE(oi, 0) DESC,
+                 UPPER(SUBSTRING_INDEX(ts_code, '.', 1)) ASC
+        LIMIT 1
+        """
+    )
+    return pd.read_sql(sql, engine, params={"pattern": pattern})
+
+
 @tool
 def get_market_snapshot(query: str):
     """
@@ -226,24 +278,7 @@ def get_market_snapshot(query: str):
             df = pd.read_sql(sql, engine, params={"code": target_code})
 
         else:
-            # Futures: avoid prefix collisions (e.g., A vs AU)
-            if len(target_code) == 1:
-                # Match A0 / A2405 / A-2405 / A2405.DCE (case-insensitive)
-                sql = text(
-                    """
-                    SELECT * FROM futures_price
-                    WHERE UPPER(ts_code) REGEXP :pattern
-                      AND UPPER(ts_code) NOT LIKE '%TAS%'
-                    ORDER BY trade_date DESC LIMIT 1
-                    """
-                )
-                pattern = strict_futures_prefix_pattern(target_code)
-                df = pd.read_sql(sql, engine, params={"pattern": pattern})
-            else:
-                sql = text(
-                    "SELECT * FROM futures_price WHERE UPPER(ts_code) LIKE :code AND UPPER(ts_code) NOT LIKE '%TAS%' ORDER BY trade_date DESC LIMIT 1"
-                )
-                df = pd.read_sql(sql, engine, params={"code": f"{target_code}%"})
+            df = _query_latest_futures_snapshot(target_code)
 
         if df.empty: return f"暫無 {query} 最新數據"
 
