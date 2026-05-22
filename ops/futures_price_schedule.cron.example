@@ -6,5 +6,8 @@ CRON_TZ=Asia/Shanghai
 # 12:05 中午更新
 5 12 * * 1-5 cd /root/finance_app/future-app && bash run_noon.sh
 
+# 15:05 收盘快照（ETF期权标的 + 期货实时日线快照）
+5 15 * * 1-5 cd /root/finance_app/future-app && bash run_close_snapshot.sh
+
 # 17:20 收盘后更新
 20 17 * * 1-5 cd /root/finance_app/future-app && bash run_daily.sh
