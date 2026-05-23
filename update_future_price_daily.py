@@ -1,6 +1,9 @@
 import os
 import sys
 import time
+import argparse
+import html
+import socket
 from datetime import datetime
 
 import numpy as np
@@ -9,6 +12,12 @@ import tushare as ts
 from dotenv import load_dotenv
 from requests.exceptions import ConnectionError, ReadTimeout
 from sqlalchemy import create_engine, text
+
+try:
+    from email_utils2 import send_email as send_alert_email
+except Exception as exc:
+    send_alert_email = None
+    print(f"[warn] email alert sender unavailable: {exc}")
 
 load_dotenv(override=True)
 
@@ -34,6 +43,15 @@ EXCHANGE_CONFIG = {
     "GFEX": ".GFE",
 }
 
+MIN_TOTAL_ROWS = int(os.getenv("FUTURES_PRICE_MIN_TOTAL_ROWS", "800"))
+MIN_EXCHANGE_ROWS = int(os.getenv("FUTURES_PRICE_MIN_EXCHANGE_ROWS", "10"))
+ALERT_EMAIL_TO = (
+    os.getenv("FUTURES_PRICE_ALERT_EMAIL_TO", "").strip()
+    or os.getenv("ALERT_EMAIL_TO", "").strip()
+    or "alvachenart@163.com"
+)
+ALERT_EMAIL_ENABLED = os.getenv("FUTURES_PRICE_ALERT_EMAIL_ENABLED", "1").strip() != "0"
+
 
 def fetch_tushare_safe(api_func, max_retries=5, sleep_time=3, **kwargs):
     for i in range(max_retries):
@@ -53,7 +71,7 @@ def fetch_tushare_safe(api_func, max_retries=5, sleep_time=3, **kwargs):
 def is_trading_day(date_str):
     """
     Fail-closed:
-    - trade_cal fetch failed / empty -> treat as non-trading day
+    - trade_cal fetch failed / empty -> unknown, caller should alert and skip
     """
     try:
         df = fetch_tushare_safe(
@@ -61,13 +79,13 @@ def is_trading_day(date_str):
         )
         if df.empty:
             print(f"[-] trade_cal empty for {date_str}, skip for safety.")
-            return False
+            return None
 
         is_open = int(df.iloc[0].get("is_open", 0))
         return is_open == 1
     except Exception as exc:
         print(f"[-] trade calendar check failed: {exc}. skip for safety.")
-        return False
+        return None
 
 
 def check_futures_price_unique_index():
@@ -139,6 +157,86 @@ def dedupe_by_primary_key(df, key_cols):
     )
     print(f"[*] dedupe done: {len(df)} -> {len(deduped)} rows.")
     return deduped
+
+
+def parse_alert_recipients(raw_value):
+    return [
+        item.strip()
+        for item in str(raw_value or "").replace(";", ",").split(",")
+        if item.strip()
+    ]
+
+
+def send_update_alert(trade_date, reason, details=None):
+    if not ALERT_EMAIL_ENABLED:
+        print("[alert] email alert disabled by FUTURES_PRICE_ALERT_EMAIL_ENABLED=0")
+        return False
+
+    recipients = parse_alert_recipients(ALERT_EMAIL_TO)
+    if not recipients:
+        print("[alert] no alert email recipients configured.")
+        return False
+
+    if send_alert_email is None:
+        print("[alert] email sender unavailable, cannot send alert.")
+        return False
+
+    detail_lines = details or []
+    escaped_details = "".join(
+        f"<li>{html.escape(str(line))}</li>" for line in detail_lines
+    )
+    now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    host = socket.gethostname()
+    subject = f"[期货行情告警] {trade_date} 日线数据未完整更新"
+    content = f"""
+    <div style="font-family:Arial,'Microsoft YaHei',sans-serif;line-height:1.7;color:#222;">
+      <h2>期货行情日线更新告警</h2>
+      <p><b>交易日：</b>{html.escape(str(trade_date))}</p>
+      <p><b>服务器：</b>{html.escape(host)}</p>
+      <p><b>时间：</b>{html.escape(now_text)}</p>
+      <p><b>原因：</b>{html.escape(str(reason))}</p>
+      <p>系统已跳过本次覆盖写入，避免把 futures_price 写成半包数据。后续任务会继续执行。</p>
+      <ul>{escaped_details}</ul>
+    </div>
+    """
+
+    ok_count = 0
+    for addr in recipients:
+        try:
+            if bool(send_alert_email(addr, subject, content)):
+                ok_count += 1
+        except Exception as exc:
+            print(f"[alert] send email failed for {addr}: {exc}")
+
+    print(f"[alert] email sent {ok_count}/{len(recipients)} recipients.")
+    return ok_count > 0
+
+
+def validate_exchange_batches(exchange_stats, total_records):
+    errors = []
+
+    missing_exchanges = [
+        exchange for exchange in EXCHANGE_CONFIG if exchange not in exchange_stats
+    ]
+    if missing_exchanges:
+        errors.append(f"missing exchanges: {missing_exchanges}")
+
+    too_small = {
+        exchange: rows
+        for exchange, rows in exchange_stats.items()
+        if rows < MIN_EXCHANGE_ROWS
+    }
+    if too_small:
+        errors.append(
+            f"exchange rows below threshold {MIN_EXCHANGE_ROWS}: {too_small}"
+        )
+
+    if total_records < MIN_TOTAL_ROWS:
+        errors.append(
+            f"total rows below threshold {MIN_TOTAL_ROWS}: {total_records}"
+        )
+
+    return errors
 
 
 def prepare_exchange_data(trade_date, exchange, suffix):
@@ -242,43 +340,62 @@ def update_daily_data(trade_date):
     start_t = time.time()
 
     all_batches = []
+    exchange_stats = {}
+    failed_exchanges = []
     total_records = 0
 
     for exchange, suffix in EXCHANGE_CONFIG.items():
         try:
             df_ready = prepare_exchange_data(trade_date, exchange, suffix)
             if df_ready.empty:
+                failed_exchanges.append(exchange)
                 continue
             all_batches.append(df_ready)
-            total_records += len(df_ready)
-            print(f"   [ok] {exchange} prepared {len(df_ready)} rows.")
+            row_count = len(df_ready)
+            exchange_stats[exchange] = row_count
+            total_records += row_count
+            print(f"   [ok] {exchange} prepared {row_count} rows.")
         except Exception as exc:
+            failed_exchanges.append(exchange)
             print(f"   [!] {exchange} prepare failed: {exc}")
 
     if not all_batches:
-        print("[-] no valid futures rows, skip delete/insert.")
-        return
+        raise RuntimeError("no valid futures rows, skip delete/insert")
+
+    validation_errors = validate_exchange_batches(exchange_stats, total_records)
+    if failed_exchanges:
+        validation_errors.append(f"failed or empty exchanges: {failed_exchanges}")
+    if validation_errors:
+        raise RuntimeError(
+            "incomplete futures data, skip delete/insert. "
+            + "; ".join(validation_errors)
+        )
 
     df_save = pd.concat(all_batches, ignore_index=True)
     df_save = dedupe_by_primary_key(df_save, ["trade_date", "ts_code"])
     total_records = len(df_save)
     actual_dates = {_normalize_trade_date(v) for v in df_save["trade_date"]}
     if actual_dates != {trade_date}:
-        print(
-            f"[warn] final trade_date mismatch, expected={trade_date}, "
+        raise RuntimeError(
+            f"final trade_date mismatch, expected={trade_date}, "
             f"actual={sorted(actual_dates)}. skip write."
         )
-        return
 
-    with engine.connect() as conn:
+    with engine.begin() as conn:
         conn.execute(
             text("DELETE FROM futures_price WHERE trade_date = :trade_date"),
             {"trade_date": trade_date},
         )
-        conn.commit()
+        print("[*] old rows deleted for target date.")
+        df_save.to_sql(
+            "futures_price",
+            conn,
+            if_exists="append",
+            index=False,
+            chunksize=2000,
+        )
 
-    print("[*] old rows deleted for target date.")
-    df_save.to_sql("futures_price", engine, if_exists="append", index=False, chunksize=2000)
+    print("[*] new rows inserted for target date.")
 
     duration = time.time() - start_t
     print(
@@ -287,22 +404,70 @@ def update_daily_data(trade_date):
     )
 
 
+def normalize_target_date(value):
+    if not value:
+        return ""
+    s = str(value).strip().replace("-", "")
+    if len(s) != 8 or not s.isdigit():
+        raise ValueError("date must be YYYYMMDD or YYYY-MM-DD")
+    try:
+        datetime.strptime(s, "%Y%m%d")
+    except ValueError as exc:
+        raise ValueError("date must be a valid calendar date") from exc
+    return s
+
+
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(
+        description="Fetch daily futures prices from Tushare and overwrite futures_price rows for the target date."
+    )
+    parser.add_argument(
+        "--date",
+        dest="target_date",
+        help="Target trade date to refetch, e.g. 20260522. Default: today.",
+    )
+    parser.add_argument(
+        "--skip-calendar-check",
+        action="store_true",
+        help="Skip Tushare trade calendar check. Use only when the calendar API is unavailable or a make-up trading day is known.",
+    )
+    return parser.parse_args(argv)
+
+
 if __name__ == "__main__":
+    args = parse_args()
     now = datetime.now()
     today_str = now.strftime("%Y%m%d")
+    manual_date = bool(args.target_date)
 
-    if now.weekday() >= 5:
+    try:
+        target_date = normalize_target_date(args.target_date) if manual_date else today_str
+    except ValueError as exc:
+        print(f"[fatal] invalid --date: {exc}")
+        sys.exit(2)
+
+    if not manual_date and now.weekday() >= 5:
         print(f"[-] weekend ({today_str}), skip.")
         sys.exit(0)
 
-    if not is_trading_day(today_str):
-        print(f"[-] non-trading day ({today_str}), skip.")
-        sys.exit(0)
+    if args.skip_calendar_check:
+        print(f"[*] skip calendar check for {target_date}.")
+    else:
+        calendar_open = is_trading_day(target_date)
+        if calendar_open is None:
+            reason = f"trade calendar unavailable for {target_date}"
+            print(f"[alert] {reason}, skip update.")
+            send_update_alert(target_date, reason)
+            sys.exit(0)
+        if not calendar_open:
+            print(f"[-] non-trading day ({target_date}), skip.")
+            sys.exit(0)
 
     check_futures_price_unique_index()
 
     try:
-        update_daily_data(today_str)
+        update_daily_data(target_date)
     except Exception as exc:
-        print(f"[fatal] update failed: {exc}")
-        sys.exit(1)
+        print(f"[alert] futures update skipped: {exc}")
+        send_update_alert(target_date, exc)
+        sys.exit(0)
