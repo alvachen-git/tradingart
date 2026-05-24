@@ -121,8 +121,8 @@ ENABLE_HOME_ANNOUNCEMENT = False  # 临时关闭首页公告
 FAST_ROUTER_ENABLED = os.getenv("AIBOTA_FAST_ROUTER_ENABLED", "0").strip().lower() in {"1", "true", "yes", "on"}
 HOME_PROMO_BANNER = {
     "enabled": True,
-    "text": "【独家直播】如何选出强势股",
-    "target_page": "https://mp.weixin.qq.com/s/9J1xsxuU6GtWcYCL44I5zg",
+    "text": "【6月实战培训】期权重剑班",
+    "target_page": "https://mp.weixin.qq.com/s/1juKDDxqS4Jpgk2SZubFOw",
 }
 
 
