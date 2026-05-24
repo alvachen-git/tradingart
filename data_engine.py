@@ -2747,6 +2747,50 @@ def _get_broker_signal_trade_dates(code_prefix, start_date="", end_date="", look
     return d1, d2, notes
 
 
+def _get_broker_signal_global_trade_dates(start_date="", end_date="", lookback_days=5):
+    d1 = _normalize_signal_trade_date(start_date)
+    d2 = _normalize_signal_trade_date(end_date)
+    if d1 and d2:
+        return d1, d2, []
+
+    lookback = _safe_signal_lookback_days(lookback_days)
+    limit_n = max(2, min(30, lookback + 1))
+    params = {}
+    end_filter = ""
+    if d2:
+        params["end_date"] = d2
+        end_filter = "AND REPLACE(trade_date, '-', '') <= :end_date"
+
+    sql = f"""
+        SELECT DISTINCT REPLACE(trade_date, '-', '') AS trade_date_key
+        FROM futures_holding
+        WHERE ts_code NOT LIKE '%%TAS%%'
+          {end_filter}
+        ORDER BY trade_date_key DESC
+        LIMIT {limit_n}
+    """
+    df_dates = pd.read_sql(text(sql), engine, params=params)
+    if df_dates.empty:
+        return d1, d2, ["未找到可用期货商持仓日期"]
+
+    dates = [str(x).replace("-", "").replace("/", "") for x in df_dates["trade_date_key"].dropna().tolist()]
+    dates = [x for x in dates if re.fullmatch(r"\d{8}", x)]
+    if not dates:
+        return d1, d2, ["未找到有效持仓日期"]
+
+    notes = []
+    if not d2:
+        d2 = dates[0]
+    if not d1:
+        target_idx = min(max(1, lookback), len(dates) - 1)
+        if target_idx <= 0:
+            return "", d2, ["有效持仓日期不足，无法做区间对比"]
+        d1 = dates[target_idx]
+        if target_idx < lookback:
+            notes.append(f"可用历史日期不足{lookback}个交易日，已使用最早可用日期{d1}")
+    return d1, d2, notes
+
+
 def _format_signed_int(value):
     try:
         return f"{int(round(float(value))):+,}"
@@ -2819,6 +2863,164 @@ def _summarize_broker_signal_trend(df_agg, max_steps=5):
     if not steps:
         return "相邻日期没有共同可比样本，未按缺失值填0"
     return "；".join(steps[-max_steps:])
+
+
+def _resolve_broker_signal_group(signal_group):
+    raw = str(signal_group or "").strip().lower()
+    if raw in {"negative", "reverse", "contra", "反指标", "反向指标"}:
+        return "negative", "反指标", BROKER_SIGNAL_NEGATIVE
+    if raw in {"positive", "smart", "正指标", "正向指标"}:
+        return "positive", "正指标", BROKER_SIGNAL_POSITIVE
+    if "反" in raw:
+        return "negative", "反指标", BROKER_SIGNAL_NEGATIVE
+    return "positive", "正指标", BROKER_SIGNAL_POSITIVE
+
+
+def _resolve_broker_signal_move_direction(direction):
+    raw = str(direction or "").strip().lower()
+    if raw in {"short", "空", "做空", "加空", "空单"} or "空" in raw:
+        return "short", "空单增加"
+    if raw in {"net", "净", "净多", "净持仓"} or "净" in raw:
+        return "net", "净持仓增加"
+    return "long", "多单增加"
+
+
+def _product_name_from_ts_code(ts_code):
+    match = re.match(r"([A-Za-z]+)", str(ts_code or ""))
+    code = match.group(1).upper() if match else str(ts_code or "").upper()
+    return code, PRODUCT_MAP.get(code, code)
+
+
+def _build_futures_broker_group_position_moves(
+    signal_group="negative",
+    direction="long",
+    start_date="",
+    end_date="",
+    lookback_days=5,
+    top_n=5,
+):
+    group_key, group_label, brokers = _resolve_broker_signal_group(signal_group)
+    move_key, move_label = _resolve_broker_signal_move_direction(direction)
+    d1, d2, date_notes = _get_broker_signal_global_trade_dates(start_date, end_date, lookback_days)
+    if not d1 or not d2 or d1 == d2:
+        risk = "；".join(date_notes) if date_notes else "有效持仓日期不足，无法做区间对比"
+        return f"结论：数据不足\n- 指标组：{group_label}\n- 冲突与风险：{risk}。"
+
+    aliases = sorted(set(_expand_broker_signal_aliases(brokers)))
+    canonical_map = {_normalize_broker_signal_key(name): name for name in brokers}
+    broker_params = {}
+    broker_keys = []
+    for idx, broker in enumerate(aliases):
+        key = f"broker_{idx}"
+        broker_keys.append(f":{key}")
+        broker_params[key] = broker
+
+    sql = f"""
+        SELECT
+            broker,
+            ts_code,
+            long_vol,
+            short_vol,
+            REPLACE(trade_date, '-', '') AS trade_date_key
+        FROM futures_holding
+        WHERE REPLACE(trade_date, '-', '') IN (:start_date, :end_date)
+          AND ts_code NOT LIKE '%%TAS%%'
+          AND broker IN ({",".join(broker_keys)})
+    """
+    params = {"start_date": d1, "end_date": d2, **broker_params}
+    try:
+        df = pd.read_sql(text(sql), engine, params=params)
+    except Exception as exc:
+        return f"结论：数据不足\n- 指标组：{group_label}\n- 数据日期：{d1} -> {d2}\n- 冲突与风险：查询期货商持仓失败：{str(exc)}。"
+
+    if df.empty:
+        return f"结论：数据不足\n- 指标组：{group_label}\n- 数据日期：{d1} -> {d2}\n- 冲突与风险：{group_label}期货商在该区间无可用持仓记录。"
+
+    df["long_vol"] = pd.to_numeric(df["long_vol"], errors="coerce")
+    df["short_vol"] = pd.to_numeric(df["short_vol"], errors="coerce")
+    df = df.dropna(subset=["long_vol", "short_vol", "trade_date_key", "ts_code"]).copy()
+    df["broker_key"] = df["broker"].apply(_normalize_broker_signal_key)
+    target_keys = {_normalize_broker_signal_key(name) for name in aliases}
+    df = df[df["broker_key"].isin(target_keys)]
+    if df.empty:
+        return f"结论：数据不足\n- 指标组：{group_label}\n- 数据日期：{d1} -> {d2}\n- 冲突与风险：查询结果未命中{group_label}名单。"
+
+    product_pairs = df["ts_code"].apply(_product_name_from_ts_code)
+    df["product"] = product_pairs.apply(lambda item: item[0])
+    df["品种"] = product_pairs.apply(lambda item: item[1])
+    df_agg = (
+        df.groupby(["product", "品种", "broker_key", "trade_date_key"])[["long_vol", "short_vol"]]
+        .sum()
+        .reset_index()
+    )
+    df_start = df_agg[df_agg["trade_date_key"] == d1].set_index(["product", "品种", "broker_key"])
+    df_end = df_agg[df_agg["trade_date_key"] == d2].set_index(["product", "品种", "broker_key"])
+    if df_start.empty or df_end.empty:
+        return f"结论：数据不足\n- 指标组：{group_label}\n- 数据日期：{d1} -> {d2}\n- 冲突与风险：起止日期至少有一天缺少{group_label}持仓样本。"
+
+    start_keys = set(df_start.index.tolist())
+    end_keys = set(df_end.index.tolist())
+    common_keys = start_keys & end_keys
+    if not common_keys:
+        return f"结论：数据不足\n- 指标组：{group_label}\n- 数据日期：{d1} -> {d2}\n- 冲突与风险：两日没有共同可比样本，缺失观测未按0处理。"
+
+    df_end_cmp, df_start_cmp = df_end.align(df_start, join="inner")
+    df_diff = pd.DataFrame(index=df_end_cmp.index)
+    df_diff["多单变化"] = df_end_cmp["long_vol"] - df_start_cmp["long_vol"]
+    df_diff["空单变化"] = df_end_cmp["short_vol"] - df_start_cmp["short_vol"]
+    df_diff["净持仓变化"] = df_diff["多单变化"] - df_diff["空单变化"]
+    df_diff["当前净持仓"] = df_end_cmp["long_vol"] - df_end_cmp["short_vol"]
+    df_diff = df_diff.reset_index()
+
+    product_diff = (
+        df_diff.groupby(["product", "品种"])[["多单变化", "空单变化", "净持仓变化", "当前净持仓"]]
+        .sum()
+        .reset_index()
+    )
+    if move_key == "short":
+        product_diff = product_diff[product_diff["空单变化"] > 0].sort_values("空单变化", ascending=False)
+        interpretation = "反指标做空按当前口径是反向利多观察" if group_key == "negative" else "正指标做空按当前口径是偏空观察"
+    elif move_key == "net":
+        product_diff = product_diff[product_diff["净持仓变化"] != 0].sort_values("净持仓变化", ascending=False)
+        interpretation = "反指标净多增加按当前口径是反向利空观察" if group_key == "negative" else "正指标净多增加按当前口径是偏多观察"
+    else:
+        product_diff = product_diff[product_diff["多单变化"] > 0].sort_values("多单变化", ascending=False)
+        interpretation = "反指标做多按当前口径是反向利空观察，不能直接当利多" if group_key == "negative" else "正指标做多按当前口径是偏多观察"
+
+    if product_diff.empty:
+        return (
+            f"结论：暂无明显{move_label}品种\n"
+            f"- 统计对象：{', '.join(brokers)}\n"
+            f"- 数据日期：{d1} -> {d2}\n"
+            f"- 提醒：只比较起止两天都存在的席位数据，未发现{group_label}{move_label}为正的品种。"
+        )
+
+    top_n = max(1, min(20, int(top_n or 5)))
+    display = product_diff.head(top_n).copy()
+    if move_key == "short":
+        display = display[["品种", "空单变化", "净持仓变化", "当前净持仓"]]
+    elif move_key == "net":
+        display = display[["品种", "净持仓变化", "当前净持仓"]]
+    else:
+        display = display[["品种", "多单变化", "净持仓变化", "当前净持仓"]]
+    for col in [col for col in display.columns if col != "品种"]:
+        display[col] = display[col].apply(_format_signed_int)
+
+    missing_count = len(start_keys ^ end_keys)
+    risk_lines = []
+    if missing_count:
+        risk_lines.append("部分席位不是每天都有可比数据，已剔除不可比样本")
+    risk_lines.extend(date_notes)
+    risk_text = f"\n- 提醒：{'；'.join(risk_lines)}。" if risk_lines else ""
+
+    return (
+        f"结论：{group_label}最近主要在以下品种{move_label}\n"
+        f"- 统计对象：{', '.join(brokers)}\n"
+        f"- 数据日期：{d1} -> {d2}\n"
+        f"- 解读：{interpretation}。\n\n"
+        f"{display.to_markdown(index=False)}"
+        f"{risk_text}"
+    )
 
 
 def _build_futures_broker_position_signal(symbol, start_date="", end_date="", lookback_days=5):
@@ -2956,6 +3158,32 @@ def get_futures_broker_position_signal(symbol: str, start_date: str = "", end_da
     适用问题：期货商正反指标、席位信号、龙虎榜辅助判断、东证/中信/海通与中信建投/东方财富/方正中期怎么看。
     """
     return _build_futures_broker_position_signal(symbol, start_date, end_date, lookback_days)
+
+
+@tool
+def get_futures_broker_group_position_moves(
+    signal_group: str = "negative",
+    direction: str = "long",
+    start_date: str = "",
+    end_date: str = "",
+    lookback_days: int = 5,
+    top_n: int = 5,
+):
+    """
+    查询正指标或反指标期货商组最近在哪些品种上做多/做空。
+
+    适用问题：反指标最近在哪些商品上做多、正指标最近加空最多的品种、反指标组近期净多增加排名。
+    signal_group: negative/反指标 或 positive/正指标。
+    direction: long/做多、short/做空、net/净持仓。
+    """
+    return _build_futures_broker_group_position_moves(
+        signal_group=signal_group,
+        direction=direction,
+        start_date=start_date,
+        end_date=end_date,
+        lookback_days=lookback_days,
+        top_n=top_n,
+    )
 
 
 def _build_futures_broker_indicator_profile(broker_name):

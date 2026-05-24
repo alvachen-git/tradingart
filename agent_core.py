@@ -43,11 +43,13 @@ from data_engine import (
     BROKER_SIGNAL_POSITIVE,
     CN_TO_CODE,
     PRODUCT_MAP,
+    _build_futures_broker_group_position_moves,
     _build_futures_broker_indicator_profile,
     _build_futures_broker_position_signal,
     check_option_expiry_status,
     get_commodity_iv_info,
     get_futures_broker_indicator_profile,
+    get_futures_broker_group_position_moves,
     get_futures_broker_position_signal,
     get_latest_data_date,
     get_stock_valuation,
@@ -452,6 +454,24 @@ def _extract_futures_broker_signal_product(query: str) -> str:
         if code_lower and re.search(rf"(?<![a-z0-9]){re.escape(code_lower)}(?![a-z0-9])", lower):
             return name or code
     return ""
+
+
+def _extract_futures_broker_group_and_direction(query: str) -> tuple[str, str]:
+    text = str(query or "")
+    if "反指标" in text or "反向指标" in text:
+        group = "negative"
+    elif "正指标" in text or "正向指标" in text:
+        group = "positive"
+    else:
+        group = ""
+
+    if any(keyword in text for keyword in ("做空", "加空", "空单")):
+        direction = "short"
+    elif any(keyword in text for keyword in ("净持仓", "净多", "净变化")):
+        direction = "net"
+    else:
+        direction = "long"
+    return group, direction
 
 
 def _user_requested_unauthorized_indicator(query: str) -> bool:
@@ -1588,7 +1608,8 @@ def build_generalist_tools():
         get_futures_fund_flow, get_futures_fund_ranking, get_futures_margin_profile,
         get_futures_basis_profile, get_futures_inventory_receipt_profile, get_futures_delivery_tospot_profile,
         get_available_patterns, analyze_etf_option_sentiment, get_etf_option_strikes,
-        tool_analyze_broker_positions, get_futures_broker_position_signal, get_futures_broker_indicator_profile, run_option_strategy_backtest,
+        tool_analyze_broker_positions, get_futures_broker_position_signal, get_futures_broker_group_position_moves,
+        get_futures_broker_indicator_profile, run_option_strategy_backtest,
         get_macro_indicator, get_macro_overview, analyze_yield_curve
     ]
 
@@ -1616,6 +1637,7 @@ def build_monitor_tools():
         check_option_expiry_status,
         tool_analyze_broker_positions,
         get_futures_broker_position_signal,
+        get_futures_broker_group_position_moves,
         get_futures_broker_indicator_profile,
         get_futures_oi_ranking,
         query_stock_volume,
@@ -2015,7 +2037,8 @@ def generalist_node(state: AgentState, llm):
         11.查商品龙虎榜/期货商持仓 -> search_broker_holdings_on_date  
         12.查某期货商最近持仓变化情况 -> tool_analyze_position_change
         12.1 查期货商正反指标/席位信号/龙虎榜辅助判断 -> get_futures_broker_position_signal
-        12.2 只问某期货商加多/加空是否利多利空，且没有给具体品种 -> get_futures_broker_indicator_profile
+        12.2 查“正指标/反指标最近在哪些商品上做多/做空” -> get_futures_broker_group_position_moves
+        12.3 只问某期货商加多/加空是否利多利空，且没有给具体品种 -> get_futures_broker_indicator_profile
         13.查成交量和持仓量 -> get_volume_oi
         14.查期货持仓量排名 -> get_futures_oi_ranking
         15.查期权波动率-> get_commodity_iv_info
@@ -2034,7 +2057,7 @@ def generalist_node(state: AgentState, llm):
         3. 禁止空谈，必须用工具获取的数据说话。
         4. 不要编造数据，如果没查到数据就说不知道。
         5. 若处于连续追问模式，第一段必须先承接上一轮关键结论，再回答当前问题。
-        6. 东证期货、海通期货、中信期货是正指标期货商；中信建投、东方财富、方正中期是反指标期货商。反指标做多是一种利空，反指标做空是一种利多；只问某期货商加多/加空时，必须先调用 get_futures_broker_indicator_profile。
+        6. 东证期货、海通期货、中信期货是正指标期货商；中信建投、东方财富、方正中期是反指标期货商。反指标做多是一种利空，反指标做空是一种利多；只问某期货商加多/加空时，必须先调用 get_futures_broker_indicator_profile；问正/反指标组最近在哪些商品上做多/做空时，必须调用 get_futures_broker_group_position_moves。
         """
 
     if wants_chart:
@@ -2312,14 +2335,21 @@ def monitor_node(state: AgentState, llm):
     if _is_futures_broker_signal_task(user_q):
         product = _extract_futures_broker_signal_product(user_q)
         broker = _extract_futures_broker_signal_broker(user_q)
+        group, direction = _extract_futures_broker_group_and_direction(user_q)
         if product:
             last_response = _build_futures_broker_position_signal(product, lookback_days=5)
         elif broker:
             last_response = _build_futures_broker_indicator_profile(broker)
+        elif group:
+            last_response = _build_futures_broker_group_position_moves(
+                signal_group=group,
+                direction=direction,
+                lookback_days=5,
+            )
         else:
             last_response = (
                 "结论：数据不足\n"
-                "- 冲突与风险：已识别为期货商正反指标问题，但没有识别到具体品种或期货商名称。"
+                "- 冲突与风险：已识别为期货商正反指标问题，但没有识别到具体品种、期货商名称或正/反指标组。"
             )
         return {
             "messages": [HumanMessage(content=f"【数据监控】\n{last_response}")],
@@ -2384,6 +2414,7 @@ def monitor_node(state: AgentState, llm):
     - 查某品种一段时间内各期货商的持仓变化 -> tool_analyze_position_change 
     - 查某期货商在各品种的持仓变化 -> tool_analyze_broker_positions （当前净持仓代表期货商对这品种的趋势判断）
     - 查期货商正反指标/席位信号/龙虎榜辅助判断 -> get_futures_broker_position_signal
+    - 查正指标/反指标最近在哪些商品上做多/做空 -> get_futures_broker_group_position_moves
     - 只问某期货商加多/加空是否利多利空，且没有给具体品种 -> get_futures_broker_indicator_profile
     - 查期权成交量异常(放量/异动) -> get_option_volume_abnormal
     - 查期权持仓量异常(大单增仓) -> get_option_oi_abnormal
@@ -2408,7 +2439,7 @@ def monitor_node(state: AgentState, llm):
     5. 商品都有期权，禁止说商品没有场内期权。
     6. 用户要“某天价格”优先用 `get_historical_price`；用户要“区间统计”优先用 `get_price_statistics`。
     7. 用户要“最近N天/最近N个交易日/列表/逐日明细/走势数据表”时，优先用 `get_recent_price_series`，不要只返回 `get_market_snapshot`。
-    8. 东证期货、海通期货、中信期货是正指标期货商；中信建投、东方财富、方正中期是反指标期货商。反指标做多是一种利空，反指标做空是一种利多；只问某期货商加多/加空时，必须先调用 get_futures_broker_indicator_profile。
+    8. 东证期货、海通期货、中信期货是正指标期货商；中信建投、东方财富、方正中期是反指标期货商。反指标做多是一种利空，反指标做空是一种利多；问正/反指标组最近在哪些商品上做多/做空时，必须调用 get_futures_broker_group_position_moves；只问某期货商加多/加空时，必须先调用 get_futures_broker_indicator_profile。
     {pure_option_data_instruction}
     """
 

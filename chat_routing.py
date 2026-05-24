@@ -167,7 +167,7 @@ BROKER_SIGNAL_SUBJECT_KEYWORDS = (
 
 BROKER_SIGNAL_ANALYSIS_KEYWORDS = (
     "偏多", "偏空", "多空", "方向", "信号", "怎么看", "看偏", "判断",
-    "辅助判断", "现在", "当前", "利多", "利空", "加多", "加空", "减多", "减空",
+    "辅助判断", "现在", "当前", "利多", "利空", "做多", "做空", "加多", "加空", "减多", "减空",
 )
 
 FUTURES_PRODUCT_KEYWORDS = (

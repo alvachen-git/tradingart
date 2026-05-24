@@ -58,6 +58,7 @@ class TestChatRouting(unittest.TestCase):
         self.assertEqual(classify_chat_mode("RB 席位信号有没有分歧？"), CHAT_MODE_ANALYSIS)
         self.assertEqual(classify_chat_mode("中信建投加多是不是利多？"), CHAT_MODE_ANALYSIS)
         self.assertEqual(classify_chat_mode("中信建投的持仓如果持续加多是不是利多？"), CHAT_MODE_ANALYSIS)
+        self.assertEqual(classify_chat_mode("反指标最近在哪些商品上做多"), CHAT_MODE_ANALYSIS)
 
     def test_product_directional_view_routes_to_analysis(self):
         self.assertEqual(classify_chat_mode("螺纹钢现在从成交量和持仓看偏多还是偏空？"), CHAT_MODE_ANALYSIS)

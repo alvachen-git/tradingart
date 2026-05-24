@@ -135,6 +135,7 @@ def test_analysis_task_policy_futures_broker_signal_forces_monitor():
         ("螺纹钢现在从期货商正反指标看偏多还是偏空？", ["chatter"]),
         ("螺纹刚现在从期货商正反指标看偏多还是偏空？", ["generalist"]),
         ("中信建投的持仓如果持续加多是不是利多？", ["portfolio_analyst"]),
+        ("反指标最近在哪些商品上做多", ["generalist"]),
     ]:
         plan, symbol = agent_core._apply_analysis_task_policy(query, original_plan, "601066")
         assert plan == ["monitor"]
@@ -183,6 +184,35 @@ def test_monitor_node_futures_broker_product_uses_position_signal_without_llm(mo
     assert "【数据监控】" in content
     assert "品种：鸡蛋" in content
     assert "最近5日趋势" in content
+
+
+def test_monitor_node_futures_broker_group_uses_group_tool_without_llm(monkeypatch):
+    class FailingLLM:
+        def invoke(self, *_args, **_kwargs):
+            raise AssertionError("monitor should not invoke llm for broker group moves")
+
+    monkeypatch.setattr(agent_core, "get_latest_data_date", lambda: "20260522")
+    monkeypatch.setattr(
+        agent_core,
+        "_build_futures_broker_group_position_moves",
+        lambda **kwargs: (
+            "结论：反指标最近主要在以下品种多单增加\n"
+            "- 指标组：反指标（中信建投, 东方财富, 方正中期）\n"
+            "- 方向解读：反指标做多按当前口径是反向利空观察，不能直接当利多。\n"
+            "| 品种 | 多单变化 |\n| 纸浆 | +1,000 |"
+        ),
+    )
+
+    out = agent_core.monitor_node(
+        {"user_query": "反指标最近在哪些商品上做多", "symbol": ""},
+        FailingLLM(),
+    )
+    content = out["messages"][0].content
+    assert "【数据监控】" in content
+    assert "反指标最近主要" in content
+    assert "中信建投" in content
+    assert "国泰君安" not in content
+    assert "反向利空" in content
 
 
 def test_finalizer_keeps_futures_broker_monitor_output_without_audit_rewrite():

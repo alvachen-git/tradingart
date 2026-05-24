@@ -13,6 +13,13 @@ def _holding_df(rows):
     )
 
 
+def _group_holding_df(rows):
+    return pd.DataFrame(
+        rows,
+        columns=["broker", "ts_code", "long_vol", "short_vol", "trade_date_key"],
+    )
+
+
 class BrokerPositionSignalTest(unittest.TestCase):
     def _run_with_rows(self, rows):
         with patch.object(data_engine.pd, "read_sql", return_value=_holding_df(rows)):
@@ -126,6 +133,35 @@ class BrokerPositionSignalTest(unittest.TestCase):
 
         self.assertIn("结论：中信期货属于正指标期货商", output)
         self.assertIn("正向偏多", output)
+
+    def test_reverse_group_position_moves_uses_reverse_broker_group(self):
+        rows = [
+            ("中信建投", "SP2601.SHF", 100, 50, "20260515"),
+            ("中信建投", "SP2601.SHF", 150, 60, "20260522"),
+            ("东方财富", "AO2601.SHF", 80, 30, "20260515"),
+            ("东方财富", "AO2601.SHF", 120, 40, "20260522"),
+            ("方正中期", "BR2601.SHF", 20, 40, "20260515"),
+            ("方正中期", "BR2601.SHF", 70, 30, "20260522"),
+            ("国泰君安", "CU2601.SHF", 10, 5, "20260515"),
+            ("国泰君安", "CU2601.SHF", 999, 5, "20260522"),
+        ]
+        with patch.object(data_engine.pd, "read_sql", return_value=_group_holding_df(rows)):
+            output = data_engine._build_futures_broker_group_position_moves(
+                signal_group="negative",
+                direction="long",
+                start_date="20260515",
+                end_date="20260522",
+            )
+
+        self.assertIn("结论：反指标最近主要在以下品种多单增加", output)
+        self.assertIn("统计对象：中信建投, 东方财富, 方正中期", output)
+        self.assertIn("反向利空", output)
+        self.assertIn("纸浆", output)
+        self.assertIn("多单变化", output)
+        self.assertIn("当前净持仓", output)
+        self.assertNotIn("不包含国泰君安", output)
+        self.assertNotIn("国泰君安", output)
+        self.assertNotIn("铜", output)
 
 
 if __name__ == "__main__":

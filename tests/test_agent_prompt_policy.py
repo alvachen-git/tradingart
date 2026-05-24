@@ -123,6 +123,7 @@ class AnalysisTaskPolicyTest(unittest.TestCase):
             "螺纹钢现在从期货商正反指标看偏多还是偏空？",
             "螺纹刚现在从期货商正反指标看偏多还是偏空？",
             "中信建投的持仓如果持续加多是不是利多？",
+            "反指标最近在哪些商品上做多",
         ]:
             with self.subTest(query=query):
                 policy = classify_analysis_task_type(query)
