@@ -143,6 +143,8 @@ import data_engine as de
 from user_profile_memory import build_profile_memory_context
 from ai_simulation_service import (
     OFFICIAL_PORTFOLIO_ID,
+    compute_sharpe_ratio_from_nav as ai_compute_sharpe_ratio_from_nav,
+    get_closed_trade_extremes as ai_get_closed_trade_extremes,
     get_daily_review as ai_get_daily_review,
     get_latest_snapshot as ai_get_latest_snapshot,
     get_nav_series as ai_get_nav_series,
@@ -6812,6 +6814,7 @@ def intel_ai_overview(
                 "nav_series": [],
                 "positions": [],
                 "trades": [],
+                "closed_trade_extremes": {"top_gains": [], "top_losses": []},
                 "watchlist": [],
                 "fetched_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             }
@@ -6833,7 +6836,10 @@ def intel_ai_overview(
             "next_watchlist": [],
         }
 
-        nav_rows = _df_records_jsonable(ai_get_nav_series(OFFICIAL_PORTFOLIO_ID, days=nav_days), limit=nav_days)
+        nav_df = ai_get_nav_series(OFFICIAL_PORTFOLIO_ID, days=nav_days)
+        nav_rows = _df_records_jsonable(nav_df, limit=nav_days)
+        if snapshot.get("sharpe_ratio") is None:
+            snapshot["sharpe_ratio"] = ai_compute_sharpe_ratio_from_nav(nav_df)
         initial_capital = _safe_float(snapshot.get("initial_capital"), 1_000_000.0)
         if initial_capital <= 0:
             initial_capital = 1_000_000.0
@@ -6868,6 +6874,9 @@ def intel_ai_overview(
             row["trade_date"] = str(row.get("trade_date") or "")
             if row.get("created_at") is not None:
                 row["created_at"] = str(row.get("created_at"))
+        closed_trade_extremes = _json_safe_value(
+            ai_get_closed_trade_extremes(OFFICIAL_PORTFOLIO_ID, days=9999, limit=3)
+        ) or {"top_gains": [], "top_losses": []}
 
         watchlist = latest_review.get("next_watchlist") if isinstance(latest_review, dict) else []
         if not isinstance(watchlist, list):
@@ -6882,6 +6891,7 @@ def intel_ai_overview(
             "nav_series": nav_rows,
             "positions": positions,
             "trades": trades,
+            "closed_trade_extremes": closed_trade_extremes,
             "watchlist": _json_safe_value(watchlist) or [],
             "fetched_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }

@@ -156,6 +156,7 @@ export interface AiTradeItem {
   quantity: number
   price: number
   amount: number
+  realized_pnl?: number
   created_at?: string
 }
 
@@ -186,6 +187,10 @@ export interface AiOverviewPayload {
   nav_series: AiNavPoint[]
   positions: AiPositionItem[]
   trades: AiTradeItem[]
+  closed_trade_extremes?: {
+    top_gains: AiTradeItem[]
+    top_losses: AiTradeItem[]
+  }
   watchlist: AiWatchItem[]
   fetched_at: string
 }

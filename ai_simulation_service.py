@@ -2839,6 +2839,21 @@ def _compute_max_drawdown(portfolio_id: str, nav_today: float) -> float:
     return float(drawdown.min())
 
 
+def compute_sharpe_ratio_from_nav(nav_df: pd.DataFrame, annualization: float = 252.0) -> Optional[float]:
+    if nav_df is None or nav_df.empty or "daily_return" not in nav_df.columns:
+        return None
+
+    returns = pd.to_numeric(nav_df["daily_return"], errors="coerce").dropna()
+    if len(returns) < 2:
+        return None
+
+    std = float(returns.std())
+    if std <= 0:
+        return None
+
+    return float(returns.mean() / std * (annualization ** 0.5))
+
+
 def _get_index_close(ts_code: str, trade_date: str) -> Optional[float]:
     sql = text(
         """
@@ -3860,6 +3875,7 @@ def get_latest_snapshot(portfolio_id: str = OFFICIAL_PORTFOLIO_ID) -> Dict[str, 
         }
 
     data = dict(row)
+    sharpe_ratio = get_sharpe_ratio(portfolio_id)
     return {
         "has_data": True,
         "portfolio_id": portfolio_id,
@@ -3871,6 +3887,7 @@ def get_latest_snapshot(portfolio_id: str = OFFICIAL_PORTFOLIO_ID) -> Dict[str, 
         "cum_return": _to_float(data.get("cum_return")),
         "max_drawdown": _to_float(data.get("max_drawdown")),
         "turnover": _to_float(data.get("turnover")),
+        "sharpe_ratio": sharpe_ratio,
         "bench_hs300": _to_float(data.get("bench_hs300")),
         "bench_zz1000": _to_float(data.get("bench_zz1000")),
         "alpha_vs_hs300": _to_float(data.get("alpha_vs_hs300")),
@@ -3897,6 +3914,10 @@ def get_nav_series(portfolio_id: str = OFFICIAL_PORTFOLIO_ID, days: int = 120) -
     if df.empty:
         return df
     return df.sort_values("trade_date").reset_index(drop=True)
+
+
+def get_sharpe_ratio(portfolio_id: str = OFFICIAL_PORTFOLIO_ID, days: int = 250) -> Optional[float]:
+    return compute_sharpe_ratio_from_nav(get_nav_series(portfolio_id, days=days))
 
 
 def get_review_dates(portfolio_id: str = OFFICIAL_PORTFOLIO_ID, limit: int = 180) -> List[str]:
@@ -4073,6 +4094,54 @@ def get_trades(portfolio_id: str = OFFICIAL_PORTFOLIO_ID, days: int = 20) -> pd.
         kind="stable",
     ).head(int(days) * 20)
     return df.drop(columns=["_trade_date_norm", "_created_at_sort", "_id_sort"], errors="ignore").reset_index(drop=True)
+
+
+def build_closed_trade_extremes(trades_df: pd.DataFrame, limit: int = 3) -> Dict[str, List[Dict[str, Any]]]:
+    out: Dict[str, List[Dict[str, Any]]] = {"top_gains": [], "top_losses": []}
+    if trades_df is None or trades_df.empty or "side" not in trades_df.columns:
+        return out
+
+    df = trades_df.copy()
+    if "realized_pnl" not in df.columns:
+        df["realized_pnl"] = 0.0
+
+    df["_side_norm"] = df["side"].astype(str).str.lower().str.strip()
+    df["_realized_pnl_num"] = pd.to_numeric(df["realized_pnl"], errors="coerce")
+    closed = df[(df["_side_norm"] == "sell") & df["_realized_pnl_num"].notna()].copy()
+    if closed.empty:
+        return out
+
+    limit = max(1, int(limit))
+
+    def row_payload(row: pd.Series) -> Dict[str, Any]:
+        payload = {
+            "trade_date": str(row.get("trade_date") or ""),
+            "symbol": str(row.get("symbol") or ""),
+            "side": str(row.get("side") or ""),
+            "quantity": _to_float(row.get("quantity"), 0.0),
+            "price": _to_float(row.get("price"), 0.0),
+            "amount": _to_float(row.get("amount"), 0.0),
+            "realized_pnl": _to_float(row.get("_realized_pnl_num"), 0.0),
+        }
+        if row.get("created_at") is not None:
+            payload["created_at"] = str(row.get("created_at"))
+        if row.get("trade_id") is not None:
+            payload["trade_id"] = str(row.get("trade_id"))
+        return payload
+
+    top_gains = closed[closed["_realized_pnl_num"] > 0].sort_values("_realized_pnl_num", ascending=False).head(limit)
+    top_losses = closed[closed["_realized_pnl_num"] < 0].sort_values("_realized_pnl_num", ascending=True).head(limit)
+    out["top_gains"] = [row_payload(row) for _, row in top_gains.iterrows()]
+    out["top_losses"] = [row_payload(row) for _, row in top_losses.iterrows()]
+    return out
+
+
+def get_closed_trade_extremes(
+    portfolio_id: str = OFFICIAL_PORTFOLIO_ID,
+    days: int = 9999,
+    limit: int = 3,
+) -> Dict[str, List[Dict[str, Any]]]:
+    return build_closed_trade_extremes(get_trades(portfolio_id, days=days), limit=limit)
 
 
 def get_daily_review(portfolio_id: str = OFFICIAL_PORTFOLIO_ID, trade_date: Optional[str] = None) -> Dict[str, Any]:

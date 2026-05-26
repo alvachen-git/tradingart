@@ -12,6 +12,30 @@ class TestAISimulationService(unittest.TestCase):
         self.assertEqual(svc._normalize_symbol("830001"), "830001.BJ")
         self.assertEqual(svc._normalize_symbol("000300.SH"), "000300.SH")
 
+    def test_compute_sharpe_ratio_from_nav(self):
+        nav_df = pd.DataFrame({"daily_return": [0.01, -0.005, 0.015, 0.0]})
+        out = svc.compute_sharpe_ratio_from_nav(nav_df)
+        expected = nav_df["daily_return"].mean() / nav_df["daily_return"].std() * (252.0 ** 0.5)
+        self.assertAlmostEqual(out, expected)
+
+    def test_build_closed_trade_extremes_returns_top_three_each_side(self):
+        trades_df = pd.DataFrame(
+            [
+                {"trade_date": "20260321", "symbol": "A", "side": "sell", "quantity": 100, "price": 10, "amount": 1000, "realized_pnl": 120},
+                {"trade_date": "20260322", "symbol": "B", "side": "sell", "quantity": 100, "price": 10, "amount": 1000, "realized_pnl": -80},
+                {"trade_date": "20260323", "symbol": "C", "side": "sell", "quantity": 100, "price": 10, "amount": 1000, "realized_pnl": 300},
+                {"trade_date": "20260324", "symbol": "D", "side": "sell", "quantity": 100, "price": 10, "amount": 1000, "realized_pnl": -240},
+                {"trade_date": "20260325", "symbol": "E", "side": "sell", "quantity": 100, "price": 10, "amount": 1000, "realized_pnl": 90},
+                {"trade_date": "20260326", "symbol": "F", "side": "sell", "quantity": 100, "price": 10, "amount": 1000, "realized_pnl": -30},
+                {"trade_date": "20260327", "symbol": "G", "side": "buy", "quantity": 100, "price": 10, "amount": 1000, "realized_pnl": 999},
+            ]
+        )
+
+        out = svc.build_closed_trade_extremes(trades_df, limit=2)
+
+        self.assertEqual([x["symbol"] for x in out["top_gains"]], ["C", "A"])
+        self.assertEqual([x["symbol"] for x in out["top_losses"]], ["D", "B"])
+
     def test_apply_risk_gates_enforces_caps_and_universe(self):
         raw_actions = [
             {

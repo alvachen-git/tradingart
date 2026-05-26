@@ -11,6 +11,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from ai_simulation_service import (
     OFFICIAL_PORTFOLIO_ID,
+    get_closed_trade_extremes,
     get_daily_review,
     get_latest_snapshot,
     get_nav_series,
@@ -184,6 +185,58 @@ def _render_trades_table(trades_df: pd.DataFrame) -> str:
         "<thead><tr><th>交易日</th><th>代码</th><th>方向</th><th class='right'>数量</th><th class='right'>价格</th><th class='right'>金额</th><th class='right'>单笔盈亏</th></tr></thead>"
         f"<tbody>{body}</tbody>"
         "</table>"
+        "</div>"
+    )
+
+
+def _fmt_plain_number(value) -> str:
+    try:
+        v = float(value)
+    except Exception:
+        return "--"
+    if pd.isna(v):
+        return "--"
+    return f"{v:.2f}"
+
+
+def _render_closed_trade_extremes(extremes: dict) -> str:
+    gains = extremes.get("top_gains") if isinstance(extremes, dict) else []
+    losses = extremes.get("top_losses") if isinstance(extremes, dict) else []
+
+    def render_rows(rows: list[dict]) -> str:
+        if not rows:
+            return "<tr><td colspan='4' class='flat center'>暂无记录</td></tr>"
+        html_rows = []
+        for row in rows[:3]:
+            pnl = _safe_float(row.get("realized_pnl"))
+            pnl_cls = "pos" if pnl > 0 else ("neg" if pnl < 0 else "flat")
+            html_rows.append(
+                "<tr>"
+                f"<td class='mono'>{_fmt_trade_date(str(row.get('trade_date') or '-'))}</td>"
+                f"<td class='mono'>{html.escape(str(row.get('symbol') or '-'))}</td>"
+                f"<td class='mono right'>{int(_safe_float(row.get('quantity'))):,}</td>"
+                f"<td class='mono right {pnl_cls}'>{pnl:+,.0f}</td>"
+                "</tr>"
+            )
+        return "".join(html_rows)
+
+    def render_block(title: str, rows: list[dict], tone: str) -> str:
+        return (
+            f'<div class="extreme-block {tone}">'
+            f'<div class="extreme-title">{html.escape(title)}</div>'
+            '<div class="table-wrap extremes">'
+            '<table class="desk-table">'
+            "<thead><tr><th>平仓日</th><th>代码</th><th class='right'>数量</th><th class='right'>盈亏</th></tr></thead>"
+            f"<tbody>{render_rows(rows)}</tbody>"
+            "</table>"
+            "</div>"
+            "</div>"
+        )
+
+    return (
+        '<div class="closed-extremes-grid">'
+        f"{render_block('最大获利前三笔', gains or [], 'gain')}"
+        f"{render_block('最大亏损前三笔', losses or [], 'loss')}"
         "</div>"
     )
 
@@ -455,6 +508,9 @@ st.markdown(
     .table-wrap.trades {
         max-height: 380px;
     }
+    .table-wrap.extremes {
+        max-height: 210px;
+    }
     .desk-table {
         width: 100%;
         border-collapse: collapse;
@@ -487,6 +543,28 @@ st.markdown(
     }
     .desk-table .right {
         text-align: right;
+    }
+    .desk-table .center {
+        text-align: center;
+    }
+    .closed-extremes-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 10px;
+        margin-top: 12px;
+    }
+    .extreme-title {
+        color: #dce8ff;
+        font-size: 15px;
+        font-weight: 700;
+        margin: 0 0 6px 0;
+        letter-spacing: 0.02em;
+    }
+    .extreme-block.gain .extreme-title {
+        color: var(--green);
+    }
+    .extreme-block.loss .extreme-title {
+        color: var(--red);
     }
     .pos {
         color: var(--green);
@@ -625,6 +703,9 @@ st.markdown(
         .kpi-value {
             font-size: 24px;
         }
+        .closed-extremes-grid {
+            grid-template-columns: 1fr;
+        }
     }
 </style>
 """,
@@ -642,6 +723,7 @@ snapshot_trade_date_view = _fmt_trade_date(snapshot_trade_date)
 
 pos_df = get_positions(OFFICIAL_PORTFOLIO_ID, as_of_date=snapshot_trade_date, strict_as_of=True)
 trades_df = get_trades(OFFICIAL_PORTFOLIO_ID, days=20)
+closed_trade_extremes = get_closed_trade_extremes(OFFICIAL_PORTFOLIO_ID, days=9999, limit=3)
 review_dates = get_review_dates(OFFICIAL_PORTFOLIO_ID, limit=260)
 if not review_dates and snapshot_trade_date:
     review_dates = [snapshot_trade_date]
@@ -711,6 +793,12 @@ kpi_html = "".join(
             kind="pct_abs",
         ),
         _kpi_card(
+            "夏普率",
+            _fmt_plain_number(snapshot.get("sharpe_ratio")),
+            "近250日",
+            _tone(snapshot.get("sharpe_ratio")),
+        ),
+        _kpi_card(
             "剩余现金",
             _fmt_money(snapshot.get("cash")),
             f"¥{_safe_float(snapshot.get('cash')):,.2f}",
@@ -755,7 +843,7 @@ components.html(
   const easeOut = (t) => 1 - Math.pow(1 - t, 3);
   const trimNum = (num, digits) => {
     let s = Number(num).toFixed(digits);
-    s = s.replace(/\.?0+$/, "");
+    s = s.replace(/\\.?0+$/, "");
     return s === "-0" ? "0" : s;
   };
   const fmt = (v, kind) => {
@@ -963,6 +1051,8 @@ b1, b2 = st.columns([1.35, 1.0], gap="large")
 with b1:
     st.markdown('<div class="panel-title">最近交易流水</div>', unsafe_allow_html=True)
     st.markdown(_render_trades_table(trades_df), unsafe_allow_html=True)
+    st.markdown('<div class="panel-title">历史已平仓单笔表现</div>', unsafe_allow_html=True)
+    st.markdown(_render_closed_trade_extremes(closed_trade_extremes), unsafe_allow_html=True)
 
 with b2:
     st.markdown('<div class="panel-title">次日观察列表</div>', unsafe_allow_html=True)

@@ -39,7 +39,7 @@ const intelAccessChecking = ref(false)
 const allowedChannelCodes = ref<Set<string>>(new Set())
 
 // ── AI日记 ─────────────────────────────────────────────────
-const AI_OVERVIEW_CACHE_KEY = 'intel_ai_overview_cache_v1'
+const AI_OVERVIEW_CACHE_KEY = 'intel_ai_overview_cache_v2'
 const AI_OVERVIEW_TTL_MS = 20 * 60 * 1000
 const vm = getCurrentInstance()
 
@@ -77,6 +77,13 @@ const watchlist = computed(() => {
 
 const displayPositions = computed(() => (aiOverview.value?.positions || []).slice(0, 8))
 const displayTrades = computed(() => (aiOverview.value?.trades || []).slice(0, 10))
+const closedTradeExtremes = computed(() => {
+  const src = aiOverview.value?.closed_trade_extremes || {}
+  return {
+    topGains: Array.isArray((src as any).top_gains) ? (src as any).top_gains.slice(0, 3) : [],
+    topLosses: Array.isArray((src as any).top_losses) ? (src as any).top_losses.slice(0, 3) : [],
+  }
+})
 
 const reviewSummaryText = computed(() => mdToText(aiReview.value?.summary_md || '', '暂无复盘数据。'))
 const reviewBuysText = computed(() => mdToText(aiReview.value?.buys_md || '', ''))
@@ -537,6 +544,16 @@ function fmtPct(v: any): string {
   return `${n >= 0 ? '+' : ''}${(n * 100).toFixed(2)}%`
 }
 
+function fmtNumber(v: any, digits = 2): string {
+  const n = toNum(v, NaN)
+  return Number.isFinite(n) ? n.toFixed(digits) : '--'
+}
+
+function fmtSignedMoney(v: any): string {
+  const n = toNum(v, 0)
+  return `${n >= 0 ? '+' : ''}${fmtMoney(n)}`
+}
+
 function toneClass(v: any): string {
   const n = toNum(v, 0)
   if (n > 0) return 'pos'
@@ -656,6 +673,14 @@ watch(
             <text class="kpi-value neg">{{ fmtPct(snapshot.max_drawdown) }}</text>
           </view>
           <view class="kpi-card">
+            <text class="kpi-label">换手率</text>
+            <text class="kpi-value">{{ fmtPct(snapshot.turnover) }}</text>
+          </view>
+          <view class="kpi-card" :class="toneClass(snapshot.sharpe_ratio)">
+            <text class="kpi-label">夏普率</text>
+            <text class="kpi-value">{{ fmtNumber(snapshot.sharpe_ratio) }}</text>
+          </view>
+          <view class="kpi-card">
             <text class="kpi-label">现金</text>
             <text class="kpi-value">{{ fmtMoney(snapshot.cash) }}</text>
           </view>
@@ -765,6 +790,41 @@ watch(
           </view>
           <view v-else class="center-tip">
             <text class="muted-text">暂无交易记录</text>
+          </view>
+          <view class="closed-extremes">
+            <text class="panel-title">历史已平仓单笔表现</text>
+            <view class="extreme-grid">
+              <view class="extreme-block">
+                <text class="extreme-title gain">最大获利前三笔</text>
+                <view v-if="closedTradeExtremes.topGains.length">
+                  <view v-for="(row, idx) in closedTradeExtremes.topGains" :key="`gain-${row.trade_date}-${row.symbol}-${idx}`" class="extreme-row">
+                    <view class="left-col">
+                      <text class="row-title">{{ row.symbol || '-' }}</text>
+                      <text class="muted-text">{{ formatTradeDate(row.trade_date) }} · 数量 {{ toNum(row.quantity, 0) }}</text>
+                    </view>
+                    <text class="row-title pos">{{ fmtSignedMoney(row.realized_pnl) }}</text>
+                  </view>
+                </view>
+                <view v-else class="center-tip compact">
+                  <text class="muted-text">暂无获利平仓</text>
+                </view>
+              </view>
+              <view class="extreme-block">
+                <text class="extreme-title loss">最大亏损前三笔</text>
+                <view v-if="closedTradeExtremes.topLosses.length">
+                  <view v-for="(row, idx) in closedTradeExtremes.topLosses" :key="`loss-${row.trade_date}-${row.symbol}-${idx}`" class="extreme-row">
+                    <view class="left-col">
+                      <text class="row-title">{{ row.symbol || '-' }}</text>
+                      <text class="muted-text">{{ formatTradeDate(row.trade_date) }} · 数量 {{ toNum(row.quantity, 0) }}</text>
+                    </view>
+                    <text class="row-title neg">{{ fmtSignedMoney(row.realized_pnl) }}</text>
+                  </view>
+                </view>
+                <view v-else class="center-tip compact">
+                  <text class="muted-text">暂无亏损平仓</text>
+                </view>
+              </view>
+            </view>
           </view>
         </view>
 
@@ -1087,6 +1147,57 @@ watch(
   color: #ecf3ff;
   font-size: 25rpx;
   font-weight: 600;
+}
+
+.closed-extremes {
+  border-top: 1px solid rgba(62, 90, 140, 0.35);
+  margin-top: 10rpx;
+  padding-top: 6rpx;
+}
+
+.extreme-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10rpx;
+}
+
+.extreme-block {
+  border: 1px solid rgba(62, 90, 140, 0.45);
+  border-radius: 12rpx;
+  background: rgba(12, 24, 45, 0.85);
+  padding: 10rpx;
+}
+
+.extreme-title {
+  display: block;
+  font-size: 23rpx;
+  font-weight: 600;
+  margin-bottom: 8rpx;
+}
+
+.extreme-title.gain {
+  color: #e84040;
+}
+
+.extreme-title.loss {
+  color: #22c55e;
+}
+
+.extreme-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10rpx;
+  padding: 8rpx 0;
+  border-bottom: 1px solid rgba(62, 90, 140, 0.28);
+}
+
+.extreme-row:last-child {
+  border-bottom: none;
+}
+
+.center-tip.compact {
+  padding: 10rpx 0;
 }
 
 .watch-grid {

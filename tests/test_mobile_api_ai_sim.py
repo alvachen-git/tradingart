@@ -94,6 +94,13 @@ class TestMobileApiAiSim(unittest.TestCase):
             mobile_api,
             "ai_get_trades",
             return_value=trades_df,
+        ), patch.object(
+            mobile_api,
+            "ai_get_closed_trade_extremes",
+            return_value={
+                "top_gains": [{"trade_date": "20260327", "symbol": "600000", "realized_pnl": 120.0}],
+                "top_losses": [],
+            },
         ):
             out = mobile_api.intel_ai_overview(
                 nav_days=999,
@@ -107,6 +114,8 @@ class TestMobileApiAiSim(unittest.TestCase):
         self.assertEqual(out["review_dates"][0], "20260327")
         self.assertAlmostEqual(out["nav_series"][0]["nav_norm"], 1.05, places=6)
         self.assertEqual(out["positions"][0]["symbol"], "600000")
+        self.assertEqual(out["closed_trade_extremes"]["top_gains"][0]["symbol"], "600000")
+        self.assertIn("sharpe_ratio", out["snapshot"])
         self.assertEqual(out["watchlist"][0]["symbol"], "600000")
         self.assertEqual(mocked_nav.call_args.kwargs["days"], 250)
 
@@ -145,6 +154,10 @@ class TestMobileApiAiSim(unittest.TestCase):
             mobile_api,
             "ai_get_trades",
             return_value=pd.DataFrame([]),
+        ), patch.object(
+            mobile_api,
+            "ai_get_closed_trade_extremes",
+            return_value={"top_gains": [], "top_losses": []},
         ):
             out = mobile_api.intel_ai_overview(username="u1")
 
