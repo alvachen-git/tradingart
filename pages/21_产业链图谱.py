@@ -569,6 +569,8 @@ def _render_stage(stage: dict):
         pattern_raw = str(r["技术形态"])
         pattern = escape(pattern_raw)
         score = int(r["形态分"])
+        score_text = "数据不足" if score == 0 and pattern_raw == "待更新" else f"{score}"
+        score_cls = "flat" if score_text == "数据不足" else ""
         mv = float(r["总市值(亿元)"])
         f1 = float(r["主力净流(1D, 万)"])
         f5 = float(r["主力净流(5D, 万)"])
@@ -582,7 +584,7 @@ def _render_stage(stage: dict):
                 f"<td class='num mono'>{mv:,.2f}</td>"
                 f"<td class='tag-cell'>{tag_html}</td>"
                 f"<td class='pattern' title='{pattern}'>{pattern}</td>"
-                f"<td class='num mono'>{score}</td>"
+                f"<td class='num mono {score_cls}'>{escape(score_text)}</td>"
                 f"<td class='num mono {_tone_class_num(f1)}'>{f1:,.2f}</td>"
                 f"<td class='num mono {_tone_class_num(f5)}'>{f5:,.2f}</td>"
                 f"<td class='{_tone_signal(signal)}'>{signal}</td>"
