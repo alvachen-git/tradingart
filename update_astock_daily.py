@@ -148,7 +148,7 @@ if __name__ == "__main__":
                    "561750.SH", "512250.SH", "159593.SZ", "159136.SZ",
 
                    # === ChiNext / STAR Market / chip supplements ===
-                   "159949.SZ", "159967.SZ", "159368.SZ", "159369.SZ", "159383.SZ",
+                   "159949.SZ", "159967.SZ", "159368.SZ", "159369.SZ", "159383.SZ","159781.SZ",
                    "588200.SH", "588040.SH", "588720.SH", "588870.SH", "588940.SH",
 
                    # === Hong Kong and overseas supplements ===
