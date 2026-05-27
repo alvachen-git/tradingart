@@ -70,6 +70,10 @@ class TestChatRouting(unittest.TestCase):
         self.assertEqual(classify_chat_mode("帮我找放量突破的股票"), CHAT_MODE_ANALYSIS)
         self.assertEqual(classify_chat_mode("帮我选几只半导体里技术形态比较强的股票"), CHAT_MODE_ANALYSIS)
         self.assertEqual(classify_chat_mode("AI概念股有哪些"), CHAT_MODE_ANALYSIS)
+        self.assertEqual(classify_chat_mode("推荐一些美股"), CHAT_MODE_ANALYSIS)
+        self.assertEqual(classify_chat_mode("推荐一些美股，最好是从底部起来刚突破的"), CHAT_MODE_ANALYSIS)
+        self.assertEqual(classify_chat_mode("推荐一些美股，偏技术面强一点"), CHAT_MODE_ANALYSIS)
+        self.assertEqual(classify_chat_mode("推荐一些A股，最好是从底部起来刚突破的"), CHAT_MODE_ANALYSIS)
 
     def test_stock_selection_followup_routes_to_analysis(self):
         self.assertEqual(
@@ -83,6 +87,7 @@ class TestChatRouting(unittest.TestCase):
 
     def test_stock_selection_does_not_capture_concept_explanation(self):
         self.assertEqual(classify_chat_mode("什么是放量突破"), CHAT_MODE_KNOWLEDGE)
+        self.assertEqual(classify_chat_mode("什么是底部突破"), CHAT_MODE_KNOWLEDGE)
         self.assertEqual(classify_chat_mode("如何判断放量突破真假"), CHAT_MODE_KNOWLEDGE)
 
     def test_company_recent_news_routes_to_knowledge(self):

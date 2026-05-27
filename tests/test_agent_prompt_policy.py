@@ -147,7 +147,16 @@ class AnalysisTaskPolicyTest(unittest.TestCase):
                 self.assertNotEqual(policy.task_type, TASK_TYPE_STOCK_SELECTION)
 
     def test_explicit_stock_questions_still_use_screener(self):
-        for query in ["有哪些高股息股票", "有什么防御性板块个股", "帮我筛选放量突破的股票", "给我几个候选股"]:
+        for query in [
+            "有哪些高股息股票",
+            "有什么防御性板块个股",
+            "帮我筛选放量突破的股票",
+            "给我几个候选股",
+            "推荐一些美股",
+            "推荐一些美股，最好是从底部起来刚突破的",
+            "推荐一些美股，偏技术面强一点",
+            "推荐一些A股，最好是从底部起来刚突破的",
+        ]:
             with self.subTest(query=query):
                 policy = classify_analysis_task_type(query)
                 self.assertEqual(policy.task_type, TASK_TYPE_STOCK_SELECTION)

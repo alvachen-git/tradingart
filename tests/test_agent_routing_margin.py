@@ -90,6 +90,87 @@ def test_analysis_task_policy_stock_selection_overrides_empty_plan():
     assert symbol == ""
 
 
+def test_analysis_task_policy_us_stock_selection_forces_screener():
+    for original_plan in (["chatter"], ["generalist"]):
+        plan, symbol = agent_core._apply_analysis_task_policy(
+            "推荐一些美股，最好是从底部起来刚突破的",
+            original_plan,
+            "NVDA.US",
+        )
+        assert plan == ["screener"]
+        assert symbol == ""
+
+
+def test_screener_node_us_stock_selection_uses_us_tool_then_llm_reasoning(monkeypatch):
+    seen = {}
+
+    class FakeLLM:
+        def invoke(self, prompt, *_args, **_kwargs):
+            seen["prompt"] = prompt
+
+            class Response:
+                content = (
+                    "【精选股票】\n"
+                    "结论：AAA.US 更贴近底部刚突破，EXT.US 技术面强但已不早。\n"
+                    "- 数据日期：2026-05-22，美股日线 EOD。"
+                )
+
+            return Response()
+
+    class FakeUsScreener:
+        @staticmethod
+        def invoke(_params):
+            return (
+                "结论：美股技术候选如下，需按分层解读\n"
+                "- 数据日期：2026-05-22\n\n"
+                "| 分层 | 代码 | 当前状态 |\n"
+                "|:---|:---|:---|\n"
+                "| 底部刚突破优先观察 | AAA.US | 突破前20日高点 |\n"
+                "| 强势延续但不算底部刚启动 | EXT.US | 突破前20日高点 |"
+            )
+
+    monkeypatch.setattr(agent_core, "search_us_stocks_by_technical_setup", FakeUsScreener)
+
+    out = agent_core.screener_node(
+        {"user_query": "推荐一些美股，最好是从底部起来刚突破的", "symbol": ""},
+        FakeLLM(),
+    )
+    content = out["messages"][0].content
+    assert "【精选股票】" in content
+    assert "AAA.US" in content
+    assert "EXT.US 技术面强但已不早" in content
+    assert "只能使用" in seen["prompt"]
+    assert "底部刚突破优先观察" in seen["prompt"]
+
+
+def test_screener_node_us_stock_selection_falls_back_when_llm_fails(monkeypatch):
+    class FailingLLM:
+        def invoke(self, *_args, **_kwargs):
+            raise RuntimeError("boom")
+
+    class FakeUsScreener:
+        @staticmethod
+        def invoke(_params):
+            return (
+                "结论：美股技术候选如下，需按分层解读\n"
+                "- 数据日期：2026-05-22\n\n"
+                "| 分层 | 代码 | 当前状态 |\n"
+                "|:---|:---|:---|\n"
+                "| 底部刚突破优先观察 | AAA.US | 突破前20日高点 |"
+            )
+
+    monkeypatch.setattr(agent_core, "search_us_stocks_by_technical_setup", FakeUsScreener)
+
+    out = agent_core.screener_node(
+        {"user_query": "推荐一些美股，最好是从底部起来刚突破的", "symbol": ""},
+        FailingLLM(),
+    )
+    content = out["messages"][0].content
+    assert "【精选股票】" in content
+    assert "AAA.US" in content
+    assert "结论：美股技术候选如下" in content
+
+
 def test_analysis_task_policy_single_stock_removes_screener_only():
     plan, symbol = agent_core._apply_analysis_task_policy(
         "澜起科技的基本面和技术面分析下",

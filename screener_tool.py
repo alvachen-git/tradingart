@@ -167,6 +167,217 @@ def resolve_pattern_keywords(user_input: str) -> list:
     return [user_input]
 
 
+def _format_us_pct(value: float) -> str:
+    try:
+        return f"{float(value):+.2f}%"
+    except Exception:
+        return "N/A"
+
+
+def _build_us_stock_technical_candidates(
+    df: pd.DataFrame,
+    latest_date,
+    *,
+    limit: int = 10,
+    min_bars: int = 80,
+) -> tuple[pd.DataFrame, str]:
+    """Build lightweight US stock bottom-breakout candidates from OHLCV rows."""
+    if df is None or df.empty:
+        return pd.DataFrame(), "数据不足：stock_prices 没有可用美股日线。"
+
+    required = {"date", "symbol", "high", "low", "close", "volume"}
+    missing = required - set(df.columns)
+    if missing:
+        return pd.DataFrame(), f"数据不足：stock_prices 缺少字段 {', '.join(sorted(missing))}。"
+
+    work = df.copy()
+    work["date"] = pd.to_datetime(work["date"], errors="coerce")
+    latest_ts = pd.to_datetime(latest_date, errors="coerce")
+    if pd.isna(latest_ts):
+        return pd.DataFrame(), "数据不足：无法识别最新美股交易日。"
+
+    for col in ["high", "low", "close", "volume"]:
+        work[col] = pd.to_numeric(work[col], errors="coerce")
+    work["symbol"] = work["symbol"].astype(str).str.upper().str.strip()
+    work = work.dropna(subset=["date", "symbol", "high", "low", "close"]).sort_values(["symbol", "date"])
+    work = work[work["date"] <= latest_ts]
+    if work.empty:
+        return pd.DataFrame(), "数据不足：最新交易日前没有可用日线。"
+
+    rows = []
+    for symbol, group in work.groupby("symbol"):
+        group = group.sort_values("date").tail(max(120, min_bars + 40)).copy()
+        if len(group) < min_bars:
+            continue
+        latest = group.iloc[-1]
+        if latest["date"].normalize() != latest_ts.normalize():
+            continue
+
+        prior = group.iloc[:-1]
+        if len(prior) < 60:
+            continue
+
+        prev_close = float(prior.iloc[-1]["close"])
+        close = float(latest["close"])
+        low60 = float(group.tail(60)["low"].min())
+        prior20_high = float(prior.tail(20)["high"].max())
+        ma60 = float(group.tail(60)["close"].mean())
+        vol20 = float(prior.tail(20)["volume"].mean() or 0)
+        volume = float(latest.get("volume") or 0)
+
+        if prev_close <= 0 or close <= 0 or low60 <= 0:
+            continue
+
+        pct_chg = (close / prev_close - 1) * 100
+        rebound_pct = (close / low60 - 1) * 100
+        breakout_20d = prior20_high > 0 and close >= prior20_high * 1.002
+        reclaim_ma60 = prev_close < ma60 <= close
+        above_ma60 = close >= ma60
+        volume_ratio = volume / vol20 if vol20 > 0 else None
+
+        if rebound_pct < 8 or not (breakout_20d or reclaim_ma60):
+            continue
+
+        status_parts = []
+        if breakout_20d:
+            status_parts.append("突破前20日高点")
+        if reclaim_ma60:
+            status_parts.append("站回60日线")
+        elif above_ma60:
+            status_parts.append("位于60日线上方")
+        if volume_ratio is not None:
+            if volume_ratio >= 1.5:
+                status_parts.append("量能放大")
+            elif volume_ratio >= 1.0:
+                status_parts.append("量能温和")
+            else:
+                status_parts.append("量能未放大")
+
+        if rebound_pct >= 60:
+            bucket = "强势延续但不算底部刚启动"
+            bucket_order = 2
+        elif volume_ratio is not None and volume_ratio < 1.0:
+            bucket = "突破但量能不足"
+            bucket_order = 3
+        else:
+            bucket = "底部刚突破优先观察"
+            bucket_order = 1
+
+        # “底部刚突破”更看重回升幅度适中，而不是离低点越远越好。
+        ideal_rebound = 32.0
+        score = 100 - abs(rebound_pct - ideal_rebound)
+        if breakout_20d:
+            score += 15
+        if reclaim_ma60:
+            score += 10
+        if volume_ratio is not None:
+            score += min(volume_ratio, 2.5) * 6
+        if rebound_pct > 60:
+            score -= (rebound_pct - 60) * 0.8
+        if bucket_order == 2:
+            score -= 20
+        elif bucket_order == 3:
+            score -= 12
+
+        rows.append(
+            {
+                "分层": bucket,
+                "代码": f"{symbol}.US",
+                "最新价": close,
+                "涨跌幅": pct_chg,
+                "距60日低点涨幅": rebound_pct,
+                "突破位": prior20_high if breakout_20d else ma60,
+                "量能比": volume_ratio,
+                "当前状态": "；".join(status_parts) if status_parts else "观察",
+                "_bucket_order": bucket_order,
+                "_score": score,
+            }
+        )
+
+    result = pd.DataFrame(rows)
+    if result.empty:
+        return result, ""
+    result = result.sort_values(["_bucket_order", "_score"], ascending=[True, False]).head(max(1, min(30, int(limit or 10))))
+    return result.drop(columns=["_bucket_order", "_score"]), ""
+
+
+def _format_us_stock_technical_candidates(df: pd.DataFrame, latest_date, warning: str = "") -> str:
+    date_text = pd.to_datetime(latest_date).strftime("%Y-%m-%d") if latest_date else "未知"
+    if warning:
+        return (
+            "结论：数据不足\n"
+            f"- 数据日期：{date_text}\n"
+            f"- 原因：{warning}\n"
+            "- 提醒：美股筛选使用日线 EOD 数据，不代表盘中实时行情。"
+        )
+    if df is None or df.empty:
+        return (
+            "结论：暂无符合条件候选\n"
+            f"- 数据日期：{date_text}\n"
+            "- 筛选条件：从60日低点回升，且最新收盘突破前20日高点或站回60日线。\n"
+            "- 可放宽条件：改看综合强势、放宽到站上20日线，或扩大美股池。\n"
+            "- 提醒：美股筛选使用日线 EOD 数据，不代表盘中实时行情。"
+        )
+
+    display = df.copy()
+    display["最新价"] = display["最新价"].map(lambda x: f"{float(x):.2f}")
+    display["涨跌幅"] = display["涨跌幅"].map(_format_us_pct)
+    display["距60日低点涨幅"] = display["距60日低点涨幅"].map(lambda x: f"{float(x):.1f}%")
+    display["突破位"] = display["突破位"].map(lambda x: f"{float(x):.2f}")
+    display["量能比"] = display["量能比"].map(lambda x: "N/A" if pd.isna(x) else f"{float(x):.2f}x")
+    bucket_counts = display["分层"].value_counts().to_dict() if "分层" in display.columns else {}
+    bucket_summary = "；".join(f"{name}{count}只" for name, count in bucket_counts.items()) or "未分层"
+
+    return (
+        "结论：美股技术候选如下，需按分层解读\n"
+        f"- 数据日期：{date_text}\n"
+        "- 筛选条件：从60日低点回升，且最新收盘突破前20日高点或站回60日线。\n"
+        f"- 候选分层：{bucket_summary}\n"
+        "- 定位：候选观察名单，不是直接买入指令。\n\n"
+        f"{display.to_markdown(index=False)}\n\n"
+        "- 提醒：美股筛选使用日线 EOD 数据，不代表盘中实时行情；突破后仍要看回踩和成交量能否延续。"
+    )
+
+
+@tool
+def search_us_stocks_by_technical_setup(setup: str = "bottom_breakout", limit: int = 10, min_bars: int = 80):
+    """
+    【美股轻量技术筛选】
+    基于 stock_prices 美股日线筛选底部起来、刚突破、横盘突破等候选股。
+    """
+    if engine is None:
+        return "结论：数据不足\n- 原因：数据库连接失败，无法获取美股日线。\n- 提醒：美股筛选使用日线 EOD 数据。"
+
+    try:
+        with engine.connect() as conn:
+            latest_date = conn.execute(text("SELECT MAX(date) FROM stock_prices")).scalar()
+        if not latest_date:
+            return "结论：数据不足\n- 原因：stock_prices 没有美股日线。\n- 提醒：美股筛选使用日线 EOD 数据。"
+
+        start_date = pd.to_datetime(latest_date) - pd.Timedelta(days=260)
+        sql = """
+            SELECT date, UPPER(symbol) AS symbol, high, low, close, volume
+            FROM stock_prices
+            WHERE date >= :start_date AND date <= :latest_date
+        """
+        with engine.connect() as conn:
+            df = pd.read_sql(text(sql), conn, params={"start_date": start_date.date(), "latest_date": latest_date})
+
+        candidates, warning = _build_us_stock_technical_candidates(
+            df,
+            latest_date,
+            limit=limit,
+            min_bars=min_bars,
+        )
+        return _format_us_stock_technical_candidates(candidates, latest_date, warning)
+    except Exception as exc:
+        return (
+            "结论：数据不足\n"
+            f"- 原因：美股筛选工具运行出错：{exc}\n"
+            "- 提醒：美股筛选使用日线 EOD 数据。"
+        )
+
+
 # ==========================================
 # 🛠️ 智能选股工具
 # ==========================================

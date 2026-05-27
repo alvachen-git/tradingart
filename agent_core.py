@@ -24,7 +24,7 @@ from langgraph.types import Send
 # 请确保这些文件名和你项目里的一致
 from chart_annotation_tools import draw_pattern_annotation_chart, draw_forecast_chart
 from kline_tools import analyze_kline_pattern
-from screener_tool import search_top_stocks, get_available_patterns
+from screener_tool import search_top_stocks, get_available_patterns, search_us_stocks_by_technical_setup
 from news_tools import get_financial_news
 from news_rag_interpreter import interpret_market_news_tool
 from fund_flow_tools import tool_get_retail_money_flow
@@ -3406,6 +3406,69 @@ def _is_screener_risk_query(query: str) -> bool:
     return False
 
 
+def _is_us_stock_selection_query(query: str) -> bool:
+    text = str(query or "").strip()
+    lower = text.lower()
+    if not text:
+        return False
+    has_us_subject = any(keyword in text for keyword in ("美股", "纳斯达克", "纽交所")) or "us stock" in lower
+    if not has_us_subject:
+        return False
+    has_action = any(keyword in text for keyword in ("推荐", "筛选", "帮我找", "帮我选", "找几只", "选几只", "哪些", "候选股", "股票池"))
+    has_stock_word = any(keyword in text for keyword in ("股票", "个股", "标的", "候选"))
+    return bool(has_action or has_stock_word)
+
+
+def _should_reason_us_stock_screener_result(result_text: str) -> bool:
+    text = str(result_text or "").strip()
+    if not text:
+        return False
+    if "结论：数据不足" in text or "结论：暂无符合条件候选" in text:
+        return False
+    return "| 代码" in text and ".US" in text
+
+
+def _build_us_stock_screener_reasoning_prompt(query: str, result_text: str) -> str:
+    return f"""
+你是 TradingArt 的美股技术筛选解释员。现在已经有一个确定性筛选工具给出了候选事实表。
+
+【用户问题】
+{query}
+
+【确定性筛选结果】
+{result_text}
+
+【硬规则】
+1. 只能使用“确定性筛选结果”里的股票代码、数字和分层，不得新增股票，不得改写数字。
+2. 不要给买入/卖出指令，只能说“候选观察”“更适合跟踪”“需要确认”。
+3. 必须保留数据日期，并说明这是美股日线 EOD 数据，不是盘中实时行情。
+4. 如果候选属于“强势延续但不算底部刚启动”，要明确说它技术面强，但不完全符合“底部刚突破”。
+5. 如果优先观察层为空，要明确说“当前库里没有特别标准的底部刚突破，只能看相对接近的观察名单”。
+6. 回答要简洁，不要写通用技术课，不要解释一堆无关术语。
+
+【输出格式】
+【精选股票】
+结论：一句话概括这批候选是否真正贴近用户要的“底部起来刚突破”。
+- 数据日期：沿用工具里的日期，并注明美股日线 EOD。
+- 优先观察：列 1-4 只最贴近的，说明理由。
+- 偏强但已不早/量能不足：只列需要提醒的代表，不要展开太长。
+- 怎么看下一步：1 句，强调回踩和量能确认。
+""".strip()
+
+
+def _reason_us_stock_screener_result(query: str, result_text: str, llm) -> str:
+    if not _should_reason_us_stock_screener_result(result_text):
+        return f"【精选股票】\n{result_text}"
+    try:
+        response = llm.invoke(_build_us_stock_screener_reasoning_prompt(query, result_text))
+        content = str(getattr(response, "content", response) or "").strip()
+        if content:
+            return content if content.startswith("【精选股票】") else f"【精选股票】\n{content}"
+    except Exception as exc:
+        print(f"⚠️ 美股筛选 AI 推理失败，回退确定性结果: {exc}")
+    return f"【精选股票】\n{result_text}"
+
+
 def screener_node(state: AgentState, llm):
     # --- 1. 获取宏观资金风向 (Sector Flow) ---
     sector_flow_info = ""
@@ -3423,6 +3486,17 @@ def screener_node(state: AgentState, llm):
             f"\n{followup_route_context}\n"
             "【追问承接要求】当前请求是短期承接，不要反问上下文中已经明确的对象或条件。\n"
         )
+
+    if _is_us_stock_selection_query(query):
+        try:
+            us_result = search_us_stocks_by_technical_setup.invoke({"setup": "bottom_breakout", "limit": 10})
+        except Exception as e:
+            us_result = f"结论：数据不足\n- 原因：美股筛选工具调用失败：{e}"
+        final_result = _reason_us_stock_screener_result(query, us_result, llm)
+        return {
+            "messages": [HumanMessage(content=final_result)],
+            "symbol": state.get("symbol", ""),
+        }
 
     # === 🔥 [新增] 形态查询快速通道 ===
     # 当用户明确询问"有什么形态"时，直接返回形态统计，不走选股流程
