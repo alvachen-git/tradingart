@@ -32,6 +32,7 @@ ETF_NAME_MAP = {
 EXCHANGE_LIST = ["SHFE", "DCE", "CZCE", "CFFEX", "INE", "GFEX"]
 TS_CODE_RE = re.compile(r"^\d{6}\.(SH|SZ)$", re.IGNORECASE)
 DATE_RE = re.compile(r"^\d{8}$")
+CFFEX_SINA_RE = re.compile(r"^(?:NF_|CFF_RE_)(IF|IC|IH|IM|TF|TS|T)\d", re.IGNORECASE)
 
 
 def parse_args():
@@ -256,6 +257,11 @@ def futures_to_sina_code(ts_code):
     return f"nf_{symbol}"
 
 
+def is_cffex_sina_code(sina_code):
+    """Avoid treating CZCE PTA codes like nf_TA2609 as CFFEX T futures."""
+    return bool(CFFEX_SINA_RE.match(str(sina_code or "").strip()))
+
+
 def parse_sina_futures_text(raw_text):
     data_list = []
     for line in raw_text.split("\n"):
@@ -278,10 +284,7 @@ def parse_sina_futures_text(raw_text):
                 continue
             vals = val_part.split(",")
 
-            is_cffex = any(
-                key in sina_code.upper()
-                for key in ["NF_IF", "NF_IC", "NF_IH", "NF_IM", "NF_TF", "NF_T", "NF_TS"]
-            )
+            is_cffex = is_cffex_sina_code(sina_code)
 
             if is_cffex:
                 if len(vals) < 7:

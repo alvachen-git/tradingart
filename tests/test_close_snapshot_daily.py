@@ -48,6 +48,25 @@ class CloseSnapshotDailyTest(unittest.TestCase):
 
         self.assertEqual(rows, [])
 
+    def test_parse_sina_futures_text_keeps_pta_as_commodity(self):
+        raw = (
+            'var hq_str_nf_TA2609="PTA2609,150000,6018.000,6066.000,5974.000,'
+            '6044.000,6042.000,6044.000,6044.000,6022.000,5992.000,153,292,'
+            '1066186.000,788666,郑,PTA,2026-05-27,1,,,,,,,,,6022.000,0.000";'
+        )
+
+        got = close_snapshot.parse_sina_futures_text(raw)
+
+        self.assertEqual(len(got), 1)
+        row = got.iloc[0]
+        self.assertEqual(row["sina_code"], "nf_TA2609")
+        self.assertEqual(row["price"], 6044.0)
+        self.assertEqual(row["open"], 6018.0)
+        self.assertEqual(row["position"], 1066186.0)
+        self.assertEqual(row["volume"], 788666.0)
+        self.assertFalse(close_snapshot.is_cffex_sina_code("nf_TA2609"))
+        self.assertTrue(close_snapshot.is_cffex_sina_code("nf_T2609"))
+
     def test_dedupe_futures_rows_keeps_larger_oi_then_vol(self):
         df = pd.DataFrame(
             [
