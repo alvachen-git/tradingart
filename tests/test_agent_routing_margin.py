@@ -318,6 +318,57 @@ def test_finalizer_keeps_futures_broker_monitor_output_without_audit_rewrite():
     assert "风控修正" not in content
 
 
+def test_finalizer_returns_single_researcher_report_without_audit_rewrite():
+    class FailingLLM:
+        def invoke(self, *_args, **_kwargs):
+            raise AssertionError("finalizer should not audit rewrite single researcher report")
+
+    source = "【情报与舆情】\n中兴通讯近期消息：算力集采为媒体报道，专利诉讼金额待公告确认。"
+    out = agent_core.finalizer_node(
+        {
+            "messages": [],
+            "agent_reports": {"researcher": source},
+            "user_query": "中兴通讯最近有什么利好吗",
+        },
+        FailingLLM(),
+    )
+
+    content = out["messages"][0].content
+    assert "【情报与舆情】" in content
+    assert "中兴通讯近期消息" in content
+    assert "风控修正" not in content
+
+
+def test_recent_company_news_researcher_uses_fast_path(monkeypatch):
+    class FakeLLM:
+        def invoke(self, prompt):
+            assert "中兴通讯" in prompt
+
+            class Response:
+                content = "一句话：有待核验的潜在利好，但不算完全确认。"
+
+            return Response()
+
+    def fail_create_agent(*_args, **_kwargs):
+        raise AssertionError("recent company news should not enter ReAct researcher")
+
+    monkeypatch.setattr(agent_core, "create_react_agent", fail_create_agent)
+    monkeypatch.setattr(
+        agent_core,
+        "_invoke_search_web_for_researcher",
+        lambda query: "中兴通讯公告与媒体报道：算力服务器集采进展、专利诉讼进展待确认。",
+    )
+
+    out = agent_core.researcher_node(
+        {"user_query": "中兴通讯最近有什么利好吗", "symbol": "中兴通讯", "symbol_name": ""},
+        FakeLLM(),
+    )
+
+    content = out["messages"][0].content
+    assert "【情报与舆情】" in content
+    assert "潜在利好" in content
+
+
 def test_recent_company_news_routes_to_researcher_only():
     out = agent_core._enforce_research_analyst_routing(
         "中天科技最近有什么消息",

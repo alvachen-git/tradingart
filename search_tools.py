@@ -11,11 +11,18 @@ from langchain_core.prompts import ChatPromptTemplate
 # 建议将 key 放入 .env 文件: ZHIPUAI_API_KEY=...
 
 load_dotenv(override=True)
+if str(os.getenv("ENABLE_LANGSMITH_TRACING", "")).strip().lower() not in {"1", "true", "yes", "on"}:
+    os.environ["LANGCHAIN_TRACING_V2"] = "false"
+    os.environ["LANGSMITH_TRACING"] = "false"
+    os.environ["LANGCHAIN_CALLBACKS_BACKGROUND"] = "false"
+
 ZHIPU_API_KEY = os.getenv("ZHIPUAI_API_KEY")
+_SEARCH_WEB_TIMEOUT_SECONDS = float(str(os.getenv("SEARCH_WEB_TIMEOUT_SECONDS", "12")).strip() or 12)
 
 _COMPANY_ENTITY_SUFFIXES = (
     "技术", "股份", "集团", "银行", "药业", "控股", "能源", "电子", "科技",
     "汽车", "证券", "实业", "制造", "电气", "电器", "机械", "通信", "传媒",
+    "通讯", "电源",
 )
 _COMPANY_ENTITY_PATTERN = re.compile(
     rf"[A-Za-z\u4e00-\u9fff]{{2,20}}(?:{'|'.join(map(re.escape, _COMPANY_ENTITY_SUFFIXES))})"
@@ -36,7 +43,7 @@ _SEARCH_MISS_HINTS = (
     "未搜索到相关内容", "没搜到", "没有搜到", "未查到", "暂无明确", "暂无相关",
     "抱歉", "无法找到", "未找到",
 )
-_MAX_SEARCH_QUERIES = 3
+_MAX_SEARCH_QUERIES = int(str(os.getenv("SEARCH_WEB_MAX_QUERIES", "2")).strip() or 2)
 _A_SHARE_FILING_SITES = (
     "cninfo.com.cn",
     "sse.com.cn",
@@ -216,7 +223,8 @@ def _invoke_search_once(client: ZhipuAI, *, original_query: str, search_query: s
     response = client.chat.completions.create(
         model="glm-4-air",
         messages=messages,
-        tools=tools
+        tools=tools,
+        timeout=_SEARCH_WEB_TIMEOUT_SECONDS,
     )
     return _extract_answer_text(response)
 

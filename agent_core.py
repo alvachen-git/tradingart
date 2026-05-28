@@ -6,6 +6,7 @@ import re
 import os
 import glob
 import json
+import time
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage, AIMessage
 from langgraph.prebuilt import create_react_agent
 from langchain_core.prompts import ChatPromptTemplate
@@ -100,6 +101,18 @@ from agent_prompt_policy import (
 )
 from followup_task_policy import apply_followup_supervisor_policy
 from option_strategy_policy import build_option_strategy_policy
+from chat_context_layers import append_chat_trace_event, has_agent_context, render_agent_context
+
+
+def _disable_langsmith_tracing_by_default() -> None:
+    if str(os.getenv("ENABLE_LANGSMITH_TRACING", "")).strip().lower() in {"1", "true", "yes", "on"}:
+        return
+    os.environ["LANGCHAIN_TRACING_V2"] = "false"
+    os.environ["LANGSMITH_TRACING"] = "false"
+    os.environ["LANGCHAIN_CALLBACKS_BACKGROUND"] = "false"
+
+
+_disable_langsmith_tracing_by_default()
 
 # ==========================================
 # 1. 定义共享记忆 (The State)
@@ -144,6 +157,9 @@ class AgentState(TypedDict):
     followup_action_context: str
     followup_task_policy: Dict[str, Any]
     followup_route_context: str
+    context_layers: List[Dict[str, Any]]
+    context_layer_summary: List[Dict[str, Any]]
+    task_id: str
 
     news_summary: str  # 情报员填入：新闻摘要 (CPI/非农/美联储)
     macro_view: str  # 宏观分析师填入：宏观定调 (宽松/紧缩)
@@ -1595,6 +1611,53 @@ def _is_news_impact_query(query: str) -> bool:
     return has_event and has_impact
 
 
+_RECENT_COMPANY_NEWS_TERMS = (
+    "最近有什么利好",
+    "最近有啥利好",
+    "最近有没有利好",
+    "最近有什么消息",
+    "最近有啥消息",
+    "最近有什么动态",
+    "最近有没有消息",
+    "最近进展",
+    "近期动态",
+    "近期消息",
+    "近期利好",
+)
+
+
+def _is_recent_company_news_query(query: str) -> bool:
+    text = str(query or "").strip()
+    if not text:
+        return False
+    return any(term in text for term in _RECENT_COMPANY_NEWS_TERMS)
+
+
+def _extract_recent_company_subject(query: str, *, symbol: str = "", symbol_name: str = "") -> str:
+    for candidate in (symbol_name, symbol):
+        text = str(candidate or "").strip()
+        if text and text not in {"未知标的", "无", "None"}:
+            return text
+    text = re.sub(r"^(帮我|帮忙|请|麻烦)?(看看|看一下|查一下|查查|分析一下)?", "", str(query or "").strip())
+    for marker in ("最近", "近期"):
+        if marker in text:
+            subject = text.split(marker, 1)[0].strip(" ，,。？?的")
+            if subject:
+                return subject
+    return ""
+
+
+def _clean_finalizer_internal_labels(text: str) -> str:
+    cleaned = str(text or "")
+    cleaned = re.sub(r"^【风控修正】\s*", "", cleaned).strip()
+    cleaned = re.sub(r"^经审核，原报告未通过。[^\n]*\n*", "", cleaned).strip()
+    return cleaned
+
+
+def _invoke_search_web_for_researcher(query: str) -> str:
+    return str(search_web.invoke({"query": query}) or "")
+
+
 def build_generalist_tools():
     return [
         interpret_market_news_tool,
@@ -1686,6 +1749,91 @@ def _select_knowledge_chat_strategy(state: AgentState) -> str:
     return "concept_explain"
 
 
+_AGENT_TRACE_REDIS = None
+_AGENT_TRACE_REDIS_INIT_ATTEMPTED = False
+
+
+def _get_agent_trace_redis():
+    global _AGENT_TRACE_REDIS, _AGENT_TRACE_REDIS_INIT_ATTEMPTED
+    if _AGENT_TRACE_REDIS_INIT_ATTEMPTED:
+        return _AGENT_TRACE_REDIS
+    _AGENT_TRACE_REDIS_INIT_ATTEMPTED = True
+    try:
+        import redis
+
+        redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+        _AGENT_TRACE_REDIS = redis.from_url(redis_url, decode_responses=True)
+    except Exception:
+        _AGENT_TRACE_REDIS = None
+    return _AGENT_TRACE_REDIS
+
+
+def _append_agent_trace_event(state: Mapping[str, Any], event: str, payload: Mapping[str, Any] | None = None) -> None:
+    task_id = str(state.get("task_id", "") or "").strip()
+    if not task_id:
+        return
+    append_chat_trace_event(_get_agent_trace_redis(), task_id, event, payload or {})
+
+
+def _state_context_payload(state: Mapping[str, Any], *, recent_context_override: str = "") -> Dict[str, Any]:
+    payload = {
+        "recent_context": recent_context_override if recent_context_override else str(state.get("recent_context", "") or ""),
+        "memory_context": str(state.get("memory_context", "") or ""),
+        "profile_context": str(state.get("profile_context", "") or ""),
+        "conversation_memory_query": bool(state.get("conversation_memory_query", False)),
+        "conversation_memory_label": str(state.get("conversation_memory_label", "") or ""),
+        "is_followup": bool(state.get("is_followup", False)),
+        "focus_entity": str(state.get("focus_entity", "") or ""),
+        "focus_topic": str(state.get("focus_topic", "") or ""),
+        "focus_aspect": str(state.get("focus_aspect", "") or ""),
+        "focus_mode_hint": str(state.get("focus_mode_hint", "") or ""),
+        "followup_goal": str(state.get("followup_goal", "") or ""),
+        "followup_action_context": str(state.get("followup_action_context", "") or ""),
+        "followup_task_policy": state.get("followup_task_policy") or {},
+        "followup_route_context": str(state.get("followup_route_context", "") or ""),
+        "correction_intent": bool(state.get("correction_intent", False)),
+        "intent_domain": str(state.get("intent_domain", "") or ""),
+    }
+    context_layers = state.get("context_layers")
+    if isinstance(context_layers, list):
+        payload["context_layers"] = context_layers
+    context_layer_summary = state.get("context_layer_summary")
+    if isinstance(context_layer_summary, list):
+        payload["context_layer_summary"] = context_layer_summary
+    return payload
+
+
+def _simple_context_payload(
+    *,
+    recent_context: str = "",
+    memory_context: str = "",
+    profile_context: str = "",
+    is_followup: bool = False,
+    focus_entity: str = "",
+    focus_topic: str = "",
+    focus_aspect: str = "",
+    conversation_memory_query: bool = False,
+    conversation_memory_label: str = "",
+    context_payload: Mapping[str, Any] | None = None,
+) -> Dict[str, Any]:
+    payload = dict(context_payload or {})
+    legacy_values = {
+        "recent_context": recent_context,
+        "memory_context": memory_context,
+        "profile_context": profile_context,
+        "is_followup": is_followup,
+        "focus_entity": focus_entity,
+        "focus_topic": focus_topic,
+        "focus_aspect": focus_aspect,
+        "conversation_memory_query": conversation_memory_query,
+        "conversation_memory_label": conversation_memory_label,
+    }
+    for key, value in legacy_values.items():
+        if key not in payload or payload.get(key) in (None, ""):
+            payload[key] = value
+    return payload
+
+
 def simple_chatter_reply(
     user_query: str,
     llm,
@@ -1701,14 +1849,25 @@ def simple_chatter_reply(
     conversation_memory_label: str = "",
     messages: List[BaseMessage] | None = None,
     runtime_context: Mapping[str, Any] | None = None,
+    context_payload: Mapping[str, Any] | None = None,
 ) -> str:
     direct_answer = maybe_answer_simple_runtime_question(user_query, runtime_context)
     if direct_answer:
         return direct_answer
 
-    history_text = str(recent_context or "").strip()
-    memory_text = str(memory_context or "").strip()
-    profile_text = str(profile_context or "").strip()
+    simple_payload = _simple_context_payload(
+        recent_context=recent_context,
+        memory_context=memory_context,
+        profile_context=profile_context,
+        is_followup=is_followup,
+        focus_entity=focus_entity,
+        focus_topic=focus_topic,
+        focus_aspect=focus_aspect,
+        conversation_memory_query=conversation_memory_query,
+        conversation_memory_label=conversation_memory_label,
+        context_payload=context_payload,
+    )
+    history_text = str(simple_payload.get("recent_context") or "").strip()
     runtime_text = format_simple_runtime_context(runtime_context)
 
     if not history_text and messages:
@@ -1720,6 +1879,10 @@ def simple_chatter_reply(
                 history_lines.append(f"AI: {msg.content[:220]}")
         if history_lines:
             history_text = "\n".join(history_lines[-2:])
+            if not simple_payload.get("context_layers"):
+                simple_payload["recent_context"] = history_text
+
+    agent_context_block = render_agent_context(simple_payload, target="simple")
 
     followup_rule = (
         "你正在处理连续追问。必须先参考【近期对话历史】再回答当前问题。"
@@ -1753,12 +1916,7 @@ def simple_chatter_reply(
         f"11. {followup_rule}\n\n"
         f"【历史查询范围】\n{conversation_memory_label if conversation_memory_query and conversation_memory_label else '非历史查询'}\n\n"
         f"【运行时上下文】\n{runtime_text}\n\n"
-        f"【用户专属画像】\n{profile_text if profile_text else '无'}\n\n"
-        f"【当前核心实体】\n{focus_entity if focus_entity else '未明确'}\n\n"
-        f"【当前核心主题】\n{focus_topic if focus_topic else '未明确'}\n\n"
-        f"【当前细分维度】\n{focus_aspect if focus_aspect else '未明确'}\n\n"
-        f"【近期对话历史】\n{history_text if history_text else '无'}\n\n"
-        f"【相关长期记忆】\n{memory_text if memory_text else '无'}\n\n"
+        f"{agent_context_block}\n\n"
         f"【当前问题】\n{user_query}\n"
     )
     response = llm.invoke(prompt)
@@ -1784,8 +1942,6 @@ def supervisor_node(state: AgentState, llm):
     messages = state.get("messages", [])
     is_followup = bool(state.get("is_followup", False))
     recent_context = str(state.get("recent_context", "") or "").strip()
-    memory_context = str(state.get("memory_context", "") or "").strip()
-    profile_context = str(state.get("profile_context", "") or "").strip()
     followup_goal = str(state.get("followup_goal", "") or "").strip()
     followup_action_context = str(state.get("followup_action_context", "") or "").strip()
     followup_task_policy = state.get("followup_task_policy", {}) or {}
@@ -1811,20 +1967,18 @@ def supervisor_node(state: AgentState, llm):
         if history_lines:
             history_text = "\n".join(history_lines[-2:])
 
+    context_payload = _state_context_payload(state, recent_context_override=history_text)
+    agent_context_block = render_agent_context(context_payload, target="supervisor")
+
     # 🔥 新增：持仓状态提示
     portfolio_status = f"\n【重要】用户{'已上传' if has_portfolio else '未上传'}持仓数据。" if has_portfolio else ""
-    profile_status = f"\n【用户专属画像】\n{profile_context}" if profile_context else ""
-    action_context_status = f"\n【上一轮可执行建议】\n{followup_action_context}" if followup_action_context else ""
-    route_context_status = f"\n{followup_route_context}" if followup_route_context else ""
     subject_policy = build_subject_policy(query)
     subject_policy_context = subject_policy.as_prompt_context()
 
     system_prompt = f"""
     你是交易团队的主管，根据问题制定计划。
     {portfolio_status}
-    {profile_status}
-    {action_context_status}
-    {route_context_status}
+    {agent_context_block}
     {subject_policy_context}
 
     【可用员工】
@@ -1879,26 +2033,15 @@ def supervisor_node(state: AgentState, llm):
     if is_followup:
         full_query = (
             f"【连续追问模式】是\n"
-            f"【近期对话历史】\n{history_text if history_text else '无'}\n\n"
-            f"【上一轮可执行建议】\n{followup_action_context if followup_action_context else '无'}\n\n"
-            f"【追问派工策略】\n{followup_route_context if followup_route_context else '无'}\n\n"
-            f"【相关长期记忆】\n{memory_context if memory_context else '无'}\n\n"
-            f"【用户专属画像】\n{profile_context if profile_context else '无'}\n\n"
             f"【当前问题】\n{query}"
         )
     elif history_text:
-        full_query = (
-            f"【近期对话历史】\n{history_text}\n\n"
-            f"【上一轮可执行建议】\n{followup_action_context if followup_action_context else '无'}\n\n"
-            f"【追问派工策略】\n{followup_route_context if followup_route_context else '无'}\n\n"
-            f"【用户专属画像】\n{profile_context if profile_context else '无'}\n\n"
-            f"【当前问题】\n{query}"
-        )
+        full_query = f"【当前问题】\n{query}"
 
     # 使用 structured_output 强制输出 JSON
     planner = llm.with_structured_output(PlanningOutput)
     prompt = ChatPromptTemplate.from_messages([
-        ("system", system_prompt),
+        SystemMessage(content=system_prompt),
         ("human", "{query}")
     ])
 
@@ -1923,7 +2066,7 @@ def supervisor_node(state: AgentState, llm):
     final_plan = apply_followup_supervisor_policy(
         final_plan,
         is_followup=is_followup,
-        has_context=bool(history_text or memory_context or followup_action_context or followup_route_context),
+        has_context=has_agent_context(context_payload),
         followup_task_policy=followup_task_policy,
         is_execute_suggested_stock_selection=is_execute_suggested_stock_selection,
     )
@@ -1981,26 +2124,11 @@ def generalist_node(state: AgentState, llm):
     symbol_input = state.get("symbol", "")
     wants_chart = _wants_chart(query)
     is_followup = bool(state.get("is_followup", False))
-    recent_context = str(state.get("recent_context", "") or "").strip()
-    mem_context = str(state.get("memory_context", "") or "").strip()
-    profile_context = str(state.get("profile_context", "") or "").strip()
-    followup_action_context = str(state.get("followup_action_context", "") or "").strip()
-    followup_route_context = str(state.get("followup_route_context", "") or "").strip()
     current_date = datetime.now().strftime("%Y年%m月%d日 %A")
-    context_parts = []
-    if recent_context:
-        context_parts.append(f"【最近两轮会话】\n{recent_context}")
-    if followup_action_context:
-        context_parts.append(f"【上一轮可执行建议】\n{followup_action_context}")
-    if followup_route_context:
-        context_parts.append(followup_route_context)
-    if mem_context:
-        context_parts.append(f"【相关长期记忆】\n{mem_context}")
-    if profile_context:
-        context_parts.append(f"【用户专属画像】\n{profile_context}")
-    followup_context_block = "\n\n".join(context_parts) if context_parts else "无"
+    context_payload = _state_context_payload(state)
+    followup_context_block = render_agent_context(context_payload, target="generalist")
 
-    if is_followup and not context_parts:
+    if is_followup and not has_agent_context(context_payload):
         return {
             "messages": [HumanMessage(content="【王牌分析】未检索到上一轮关键结论。请贴出上一轮结论（方向、关键位或策略），我再承接展开。")],
             "chart_img": ""
@@ -2944,6 +3072,52 @@ def researcher_node(state: AgentState,llm=None):
     symbol_name = state.get("symbol_name", "")
     query = state["user_query"]
     current_date = datetime.now().strftime("%Y年%m月%d日 %A")
+    if _is_recent_company_news_query(query):
+        subject = _extract_recent_company_subject(query, symbol=symbol, symbol_name=symbol_name)
+        if subject:
+            search_query = f"{subject} 最近 利好 消息 公告 财报 进展"
+            try:
+                web_result = _invoke_search_web_for_researcher(search_query)
+            except Exception as e:
+                web_result = f"联网检索失败: {e}"
+            web_text = str(web_result or "").strip()
+            if not web_text or any(hint in web_text for hint in ("未搜索到相关内容", "搜索出错", "未配置")):
+                return {
+                    "messages": [
+                        HumanMessage(
+                            content=(
+                                f"【情报与舆情】\n暂时没有在限定时间内检索到 {subject} 的可靠近期利好。"
+                                "建议稍后再查公告、财报或交易所披露。"
+                            )
+                        )
+                    ]
+                }
+            summary_prompt = f"""
+            你是市场情报员。请基于下面联网检索结果，回答用户关于公司近期利好/消息的问题。
+            只能使用检索结果，不要编造具体金额、日期、诉讼结论或财务占比。
+            若信息只是市场传闻、条件式推演或尚未被权威公告确认，必须明确写出“不算确认”。
+
+            【当前日期】{current_date}
+            【用户问题】{query}
+            【公司】{subject}
+            【检索结果】
+            {web_text[:4000]}
+
+            【输出要求】
+            - 先用一句话回答“有没有明确利好”。
+            - 分 3-5 点列出可能相关的近期信息。
+            - 每点标注：明确公告 / 媒体报道 / 条件式推演 / 待核验。
+            - 最后给一句风险提醒，不要给买卖建议。
+            """
+            try:
+                response = llm.invoke(summary_prompt)
+                summary = str(getattr(response, "content", response) or "").strip()
+            except Exception as e:
+                summary = f"{subject} 的近期检索结果如下，AI 汇总暂时失败（{e}）：\n{web_text[:1200]}"
+            return {
+                "messages": [HumanMessage(content=f"【情报与舆情】\n{summary}")]
+            }
+
     # 1. 装备舆情与搜索工具
     tools = [
         interpret_market_news_tool,  # 新闻RAG解释器：补背景、查行情验证、用交易员口吻解读新闻影响
@@ -3145,34 +3319,15 @@ def knowledge_chatter_node(state: AgentState, llm=None):
     """
     user_query = state["user_query"]
     is_followup = bool(state.get("is_followup", False))
-    recent_context = str(state.get("recent_context", "") or "").strip()
-    mem_context = str(state.get("memory_context", "") or "").strip()
-    profile_context = str(state.get("profile_context", "") or "").strip()
-    followup_action_context = str(state.get("followup_action_context", "") or "").strip()
-    followup_route_context = str(state.get("followup_route_context", "") or "").strip()
-    focus_entity = str(state.get("focus_entity", "") or "").strip()
-    focus_topic = str(state.get("focus_topic", "") or "").strip()
-    focus_aspect = str(state.get("focus_aspect", "") or "").strip()
-    followup_goal = str(state.get("followup_goal", "") or "").strip()
     knowledge_strategy = _select_knowledge_chat_strategy(state)
     subject_policy = build_subject_policy(user_query, symbol_hint=str(state.get("symbol", "") or ""))
     subject_policy_context = subject_policy.as_prompt_context()
     data_policy_context = build_data_policy_context(symbol=str(state.get("symbol", "") or ""), mode="chatter")
     current_date = datetime.now().strftime("%Y年%m月%d日")
-    context_parts = []
-    if recent_context:
-        context_parts.append(f"【最近两轮会话】\n{recent_context}")
-    if followup_action_context:
-        context_parts.append(f"【上一轮可执行建议】\n{followup_action_context}")
-    if followup_route_context:
-        context_parts.append(followup_route_context)
-    if mem_context:
-        context_parts.append(f"【相关长期记忆】\n{mem_context}")
-    if profile_context:
-        context_parts.append(f"【用户专属画像】\n{profile_context}")
-    combined_context = "\n\n".join(context_parts) if context_parts else "无"
+    context_payload = _state_context_payload(state)
+    combined_context = render_agent_context(context_payload, target="knowledge")
 
-    if is_followup and combined_context == "无":
+    if is_followup and not has_agent_context(context_payload):
         return {
             "messages": [HumanMessage(content="【知识问答】\n我这轮没有检索到上一轮关键结论，暂时无法安全承接。请补充上一轮的核心结论（例如方向、关键位、策略），我立刻继续。")],
             "knowledge_context": ""
@@ -3230,10 +3385,6 @@ def knowledge_chatter_node(state: AgentState, llm=None):
         【用户问题】：{user_query}
         【连续追问模式】：{"是" if is_followup else "否"}
         【当前回答策略】：{"公司近期动态" if knowledge_strategy == "company_news" else "概念解释/知识问答"}
-        【当前核心实体】：{focus_entity or "未明确"}
-        【当前核心主题】：{focus_topic or "未明确"}
-        【当前细分维度】：{focus_aspect or "未明确"}
-        【当前追问目标】：{followup_goal or "未明确"}
         【历史承接上下文】：
         {combined_context}
 
@@ -3342,6 +3493,7 @@ def chatter_node(state: AgentState, llm=None):
                 conversation_memory_label=str(state.get("conversation_memory_label", "") or ""),
                 messages=state.get("messages", []),
                 runtime_context=build_simple_runtime_context(current_user_label=str(state.get("user_id", "") or "访客")),
+                context_payload=_state_context_payload(state),
             )
             return {
                 "messages": [HumanMessage(content=f"【闲聊】\n{reply}")],
@@ -4178,6 +4330,18 @@ def finalizer_node(state: AgentState, llm):
             "messages": [HumanMessage(content=roaster_content if roaster_content else context_text)],
             "chart_img": chart_img
         }
+    is_pure_researcher_source = bool(worker_msgs) and all(
+        str(getattr(msg, "content", "") or "").strip().startswith("【情报与舆情】")
+        for msg in worker_msgs
+    )
+    if is_pure_researcher_source:
+        sanitized_context_text = _clean_finalizer_internal_labels(
+            _sanitize_unauthorized_technical_indicators(context_text, query=user_query)
+        )
+        return {
+            "messages": [HumanMessage(content=sanitized_context_text)],
+            "chart_img": state.get("chart_img", ""),
+        }
     # === 判断逻辑：单兵还是团战？ ===
     # 如果只有 1 个工种发言（或者没有发言），且不是王牌分析师（王牌本来就是总结好的）
     symbol = state.get("symbol", "")
@@ -4366,7 +4530,8 @@ def finalizer_node(state: AgentState, llm):
                         "price_conflict_count": int(lock_result.get("price_conflict_count") or 0),
                     }
             revised_text = _sanitize_unauthorized_technical_indicators(revised_text, query=user_query)
-            lock_result = _lock_option_and_price(f"【风控修正】\n{revised_text}")
+            revised_text = _clean_finalizer_internal_labels(revised_text)
+            lock_result = _lock_option_and_price(revised_text)
             # 如果有错被重写了，就返回重写的内容
             return {
                 "messages": [HumanMessage(content=str(lock_result.get("text") or revised_text))],
@@ -4747,19 +4912,32 @@ def build_trading_graph(fast_llm, mid_llm, smart_llm):
     def _wrap_worker(name: str, fn):
         def _runner(state: AgentState):
             batch_index = int(state.get("current_batch_index", 0) or 0)
+            started_at = time.perf_counter()
             print(
                 f"[analysis-node-start] batch={batch_index} "
                 f"step={name} query={_query_preview(state)}"
             )
             update = fn(state)
             report = _extract_latest_report(update)
+            duration_ms = int((time.perf_counter() - started_at) * 1000)
             wrapped = dict(update)
             wrapped["completed_steps"] = [name]
             if report:
                 wrapped["agent_reports"] = {name: report}
+            _append_agent_trace_event(
+                state,
+                "node_done",
+                {
+                    "node": name,
+                    "batch_index": batch_index,
+                    "duration_ms": duration_ms,
+                    "report_len": len(report),
+                    "has_report": bool(report),
+                },
+            )
             print(
                 f"[analysis-node-done] batch={batch_index} "
-                f"step={name} report_len={len(report)}"
+                f"step={name} report_len={len(report)} duration_ms={duration_ms}"
             )
             return wrapped
 
@@ -4778,6 +4956,15 @@ def build_trading_graph(fast_llm, mid_llm, smart_llm):
         wrapped["current_batch_index"] = 0
         wrapped["completed_steps"] = []
         wrapped["agent_reports"] = {}
+        _append_agent_trace_event(
+            state,
+            "supervisor_plan",
+            {
+                "plan": plan,
+                "batches": execution_batches,
+                "symbol": str(update.get("symbol", "") or ""),
+            },
+        )
         return wrapped
 
     def _run_generalist(state: AgentState):

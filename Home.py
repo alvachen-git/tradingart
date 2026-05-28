@@ -60,6 +60,7 @@ from chat_context_utils import (
     select_target_anchor as _select_target_anchor,
     should_preserve_recent_context as _should_preserve_recent_context,
 )
+from chat_context_layers import attach_context_layers
 from followup_task_policy import (
     build_followup_route_context as _build_followup_route_context,
     classify_followup_task_policy as _classify_followup_task_policy,
@@ -3256,6 +3257,7 @@ def process_user_input(
     if deep_mode:
         chat_mode = CHAT_MODE_ANALYSIS
     context_payload["chat_mode"] = chat_mode
+    context_payload = attach_context_layers(context_payload, prompt_text=prompt_text, channel="web")
 
     # --- 2. 显示用户提问 (保留) ---
     st.session_state.messages.append({"role": "user", "content": prompt_text, "linked_task_id": ""})
@@ -3306,6 +3308,7 @@ def process_user_input(
                 conversation_memory_query=bool(context_payload.get("conversation_memory_query", False)),
                 conversation_memory_label=str(context_payload.get("conversation_memory_label") or ""),
                 runtime_context=runtime_context,
+                context_payload=context_payload,
             )
             typing_placeholder.empty()
             response_placeholder = st.empty()

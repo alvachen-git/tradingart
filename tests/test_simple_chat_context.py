@@ -99,6 +99,31 @@ class TestSimpleChatContext(unittest.TestCase):
         self.assertIn("英特尔", fake_llm.last_prompt)
         self.assertIn("异动原因", fake_llm.last_prompt)
 
+    def test_simple_chatter_reply_prefers_context_layers_over_legacy_fields(self):
+        fake_llm = _FakeLLM()
+        agent_core.simple_chatter_reply(
+            "继续",
+            fake_llm,
+            recent_context="旧近期上下文不应出现",
+            memory_context="旧长期记忆不应出现",
+            profile_context="旧画像不应出现",
+            context_payload={
+                "context_layers": [
+                    {
+                        "layer": "recent_turns",
+                        "content": "新分层上下文",
+                        "source": "session_history",
+                        "include_reason": "followup_context",
+                    }
+                ]
+            },
+        )
+
+        self.assertIn("新分层上下文", fake_llm.last_prompt)
+        self.assertNotIn("旧近期上下文不应出现", fake_llm.last_prompt)
+        self.assertNotIn("旧长期记忆不应出现", fake_llm.last_prompt)
+        self.assertNotIn("旧画像不应出现", fake_llm.last_prompt)
+
     def test_simple_chatter_reply_includes_runtime_context(self):
         fake_llm = _FakeLLM()
         runtime_context = build_simple_runtime_context(current_user_label="访客")

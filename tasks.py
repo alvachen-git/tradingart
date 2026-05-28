@@ -3,11 +3,12 @@ import os
 import sys
 import json
 from datetime import datetime
-from celery_config import celery_app
+from celery_config import celery_app, _configure_langsmith_tracing
 from dotenv import load_dotenv
 import redis
 
 load_dotenv(override=True)
+_configure_langsmith_tracing()
 
 # 保证 worker 在非项目目录启动时仍能加载同目录模块（如 memory_utils.py）
 _PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -29,6 +30,7 @@ for key in [
 from llm_compat import ChatTongyiCompat as ChatTongyi
 from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
 from agent_core import build_trading_graph, knowledge_chatter_node
+from chat_context_layers import append_chat_trace_event
 from chat_routing import (
     CHAT_MODE_ANALYSIS,
     CHAT_MODE_KNOWLEDGE,
@@ -58,6 +60,13 @@ _task_redis = redis.from_url(_TASK_REDIS_URL, decode_responses=True)
 _MOBILE_CHAT_STATE_KEY_PREFIX = "mobile:chat:state:"
 _MOBILE_CHAT_RESULT_KEY_PREFIX = "mobile:chat:result:"
 _MOBILE_CHAT_RESULT_TTL_SECONDS = int(str(os.getenv("MOBILE_CHAT_RESULT_TTL_SECONDS", "86400")).strip() or 86400)
+
+
+def _append_task_trace_event(task_id: str, event: str, payload: dict | None = None) -> None:
+    task_id = str(task_id or "").strip()
+    if not task_id:
+        return
+    append_chat_trace_event(_task_redis, task_id, event, payload or {})
 
 
 def _mobile_chat_state_key(task_id: str) -> str:
@@ -617,6 +626,27 @@ def process_ai_query(
     try:
         task_id = str(getattr(getattr(self, "request", None), "id", "") or "").strip()
         context_payload = context_payload or {}
+        _append_task_trace_event(
+            task_id,
+            "context_built",
+            {
+                "chat_mode": str(context_payload.get("chat_mode") or CHAT_MODE_ANALYSIS),
+                "intent_domain": str(context_payload.get("intent_domain", "") or ""),
+                "conversation_id": str(context_payload.get("conversation_id", f"{user_id}-default") or ""),
+                "channel": str(context_payload.get("context_layer_channel", "") or ""),
+                "layers": context_payload.get("context_layer_summary", []),
+            },
+        )
+        _append_task_trace_event(
+            task_id,
+            "route_decided",
+            {
+                "chat_mode": str(context_payload.get("chat_mode") or CHAT_MODE_ANALYSIS),
+                "intent_domain": str(context_payload.get("intent_domain", "") or ""),
+                "followup_goal": str(context_payload.get("followup_goal", "") or ""),
+                "is_followup": bool(context_payload.get("is_followup", False)),
+            },
+        )
         _write_mobile_chat_state(
             task_id=task_id,
             user_id=str(user_id or ""),
@@ -735,6 +765,17 @@ def process_ai_query(
             "recent_context": str(context_payload.get("recent_context", "")),
             "memory_context": str(context_payload.get("memory_context", "")),
             "profile_context": str(context_payload.get("profile_context", "")),
+            "context_layers": (
+                context_payload.get("context_layers")
+                if isinstance(context_payload.get("context_layers"), list)
+                else []
+            ),
+            "context_layer_summary": (
+                context_payload.get("context_layer_summary")
+                if isinstance(context_payload.get("context_layer_summary"), list)
+                else []
+            ),
+            "task_id": task_id,
             "conversation_memory_query": bool(context_payload.get("conversation_memory_query", False)),
             "conversation_memory_label": str(context_payload.get("conversation_memory_label", "")),
             "focus_entity": str(context_payload.get("focus_entity", "")),
@@ -755,6 +796,7 @@ def process_ai_query(
                 else {}
             ),
             "vision_position_domain": str(context_payload.get("vision_position_domain", "")),
+            "intent_domain": str(context_payload.get("intent_domain", "")),
         }
 
         self.update_state(state='PROCESSING', meta={'progress': '团队正在协作分析...'})
@@ -987,6 +1029,15 @@ def process_ai_query(
             "attachments": attachments,
             "error": None
         }
+        _append_task_trace_event(
+            task_id,
+            "final_saved",
+            {
+                "response_len": len(str(payload.get("response") or "")),
+                "has_chart": bool(chart_img),
+                "attachment_count": len(attachments or []),
+            },
+        )
         _write_mobile_chat_result(task_id=task_id, user_id=str(user_id or ""), result_payload=payload)
         _write_mobile_chat_state(
             task_id=task_id,
@@ -1042,6 +1093,27 @@ def process_knowledge_chat(
     try:
         task_id = str(getattr(getattr(self, "request", None), "id", "") or "").strip()
         context_payload = context_payload or {}
+        _append_task_trace_event(
+            task_id,
+            "context_built",
+            {
+                "chat_mode": str(context_payload.get("chat_mode") or CHAT_MODE_KNOWLEDGE),
+                "intent_domain": str(context_payload.get("intent_domain", "") or ""),
+                "conversation_id": str(context_payload.get("conversation_id", f"{user_id}-default") or ""),
+                "channel": str(context_payload.get("context_layer_channel", "") or ""),
+                "layers": context_payload.get("context_layer_summary", []),
+            },
+        )
+        _append_task_trace_event(
+            task_id,
+            "route_decided",
+            {
+                "chat_mode": str(context_payload.get("chat_mode") or CHAT_MODE_KNOWLEDGE),
+                "intent_domain": str(context_payload.get("intent_domain", "") or ""),
+                "followup_goal": str(context_payload.get("followup_goal", "") or ""),
+                "is_followup": bool(context_payload.get("is_followup", False)),
+            },
+        )
         _write_mobile_chat_state(
             task_id=task_id,
             user_id=str(user_id or ""),
@@ -1074,6 +1146,17 @@ def process_knowledge_chat(
             "recent_context": str(context_payload.get("recent_context", "")),
             "memory_context": str(context_payload.get("memory_context", "")),
             "profile_context": str(context_payload.get("profile_context", "")),
+            "context_layers": (
+                context_payload.get("context_layers")
+                if isinstance(context_payload.get("context_layers"), list)
+                else []
+            ),
+            "context_layer_summary": (
+                context_payload.get("context_layer_summary")
+                if isinstance(context_payload.get("context_layer_summary"), list)
+                else []
+            ),
+            "task_id": task_id,
             "conversation_memory_query": bool(context_payload.get("conversation_memory_query", False)),
             "conversation_memory_label": str(context_payload.get("conversation_memory_label", "")),
             "focus_entity": str(context_payload.get("focus_entity", "")),
@@ -1087,6 +1170,7 @@ def process_knowledge_chat(
             "conversation_id": str(context_payload.get("conversation_id", f"{user_id}-default")),
             "user_id": str(user_id or ""),
             "knowledge_context": "",
+            "intent_domain": str(context_payload.get("intent_domain", "")),
         }
 
         self.update_state(state="PROCESSING", meta={"progress": "正在检索知识库..."})
@@ -1135,6 +1219,15 @@ def process_knowledge_chat(
             "attachments": attachments,
             "error": None,
         }
+        _append_task_trace_event(
+            task_id,
+            "final_saved",
+            {
+                "response_len": len(str(payload.get("response") or "")),
+                "has_chart": False,
+                "attachment_count": len(attachments or []),
+            },
+        )
         _write_mobile_chat_result(task_id=task_id, user_id=str(user_id or ""), result_payload=payload)
         _write_mobile_chat_state(
             task_id=task_id,

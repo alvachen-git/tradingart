@@ -133,6 +133,7 @@ from chat_context_utils import (
     select_target_anchor as _select_target_anchor,
     should_preserve_recent_context as _should_preserve_recent_context,
 )
+from chat_context_layers import attach_context_layers
 from followup_task_policy import (
     build_followup_route_context as _build_followup_route_context,
     classify_followup_task_policy as _classify_followup_task_policy,
@@ -6040,6 +6041,7 @@ def chat_submit(
             correction_intent=bool(context_payload.get("correction_intent", False)),
         )
     context_payload["chat_mode"] = chat_mode
+    context_payload = attach_context_layers(context_payload, prompt_text=normalized_prompt, channel="mobile")
 
     if bool(context_payload.get("profile_memory_should_short_circuit", False)):
         response_text = str(context_payload.get("profile_memory_confirmation") or "好，我记住了。")
@@ -6089,6 +6091,7 @@ def chat_submit(
                 conversation_memory_query=bool(context_payload.get("conversation_memory_query", False)),
                 conversation_memory_label=str(context_payload.get("conversation_memory_label") or ""),
                 runtime_context=runtime_context,
+                context_payload=context_payload,
             )
         except Exception as exc:
             response_text = f"AI闲聊服务暂时不可用: {exc}"
