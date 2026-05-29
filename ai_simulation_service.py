@@ -336,11 +336,58 @@ def ensure_ai_sim_tables() -> None:
         conn.execute(upsert_sql, DEFAULT_CONFIG_V2)
 
 
+def _compact_trade_date(value: Any) -> str:
+    normalized = re.sub(r"[^0-9]", "", str(value or ""))[:8]
+    return normalized if len(normalized) == 8 else ""
+
+
+def _latest_stock_price_date() -> Optional[str]:
+    if engine is None:
+        return None
+    sql = text(
+        """
+        SELECT MAX(trade_date) AS trade_date
+        FROM stock_price
+        WHERE close_price IS NOT NULL AND close_price > 0
+        """
+    )
+    try:
+        with engine.connect() as conn:
+            value = conn.execute(sql).scalar()
+    except Exception as exc:
+        print(f"Failed to load latest stock price date: {exc}")
+        return None
+    normalized = _compact_trade_date(value)
+    return normalized or None
+
+
+def _stock_price_row_count(trade_date: str) -> int:
+    td = _compact_trade_date(trade_date)
+    if engine is None or not td:
+        return 0
+    sql = text(
+        """
+        SELECT COUNT(*) AS n
+        FROM stock_price
+        WHERE trade_date = :td
+          AND close_price IS NOT NULL
+          AND close_price > 0
+        """
+    )
+    try:
+        with engine.connect() as conn:
+            value = conn.execute(sql, {"td": td}).scalar()
+        return int(value or 0)
+    except Exception as exc:
+        print(f"Failed to count stock price rows for {td}: {exc}")
+        return 0
+
+
 def _normalize_trade_date(trade_date: Optional[str]) -> str:
     if not trade_date:
-        trade_date = str(get_latest_data_date())
-    normalized = re.sub(r"[^0-9]", "", str(trade_date))[:8]
-    if len(normalized) != 8:
+        trade_date = _latest_stock_price_date() or str(get_latest_data_date())
+    normalized = _compact_trade_date(trade_date)
+    if not normalized:
         raise ValueError(f"trade_date 闈炴硶: {trade_date}")
     return normalized
 
@@ -479,7 +526,7 @@ def _fetch_price_snapshot(symbols: List[str], trade_date: str) -> Dict[str, Dict
 
     sql = text(
         f"""
-        SELECT s.ts_code, s.name, s.close_price, s.amount, s.vol
+        SELECT s.ts_code, s.trade_date, s.name, s.close_price, s.amount, s.vol
         FROM stock_price s
         INNER JOIN (
             SELECT ts_code, MAX(trade_date) AS max_td
@@ -504,12 +551,30 @@ def _fetch_price_snapshot(symbols: List[str], trade_date: str) -> Dict[str, Dict
             continue
         price_map[symbol] = {
             "symbol": symbol,
+            "trade_date": _compact_trade_date(r.get("trade_date")),
             "name": str(r.get("name") or ""),
             "close": _to_float(r.get("close_price")),
             "amount": _to_float(r.get("amount")),
             "vol": _to_float(r.get("vol")),
         }
     return price_map
+
+
+def _stale_price_symbols(
+    symbols: List[str], price_map: Dict[str, Dict[str, Any]], trade_date: str
+) -> List[str]:
+    td = _compact_trade_date(trade_date)
+    stale: List[str] = []
+    for raw_symbol in symbols:
+        symbol = _normalize_symbol(str(raw_symbol or ""))
+        if not symbol:
+            continue
+        price_info = price_map.get(symbol) or {}
+        price_td = _compact_trade_date(price_info.get("trade_date"))
+        close = _to_float(price_info.get("close"), 0.0)
+        if close <= 0 or price_td != td:
+            stale.append(symbol)
+    return stale
 
 
 def _latest_screener_date(trade_date: str) -> Optional[str]:
@@ -3451,6 +3516,15 @@ def run_daily_simulation(
     if int(config.get("is_active", 1)) != 1:
         return {"status": "skipped", "reason": "portfolio inactive", "trade_date": td}
 
+    stock_price_rows = _stock_price_row_count(td)
+    if stock_price_rows <= 0:
+        return {
+            "status": "skipped",
+            "reason": "stock price data unavailable for trade_date",
+            "trade_date": td,
+            "portfolio_id": portfolio_id,
+        }
+
     latest_sql = text("SELECT MAX(trade_date) FROM ai_sim_nav_daily WHERE portfolio_id = :pid")
     with engine.connect() as conn:
         latest_td_raw = conn.execute(latest_sql, {"pid": portfolio_id}).scalar()
@@ -3517,6 +3591,17 @@ def run_daily_simulation(
     candidate_symbols.update(current_positions.keys())
     all_symbols_for_price = sorted(set(candidate_symbols) | set(current_positions.keys()))
     price_map = _fetch_price_snapshot(all_symbols_for_price, td)
+
+    stale_positions = _stale_price_symbols(list(current_positions.keys()), price_map, td)
+    if current_positions and len(stale_positions) == len(current_positions):
+        return {
+            "status": "skipped",
+            "reason": "current position prices are stale for trade_date",
+            "trade_date": td,
+            "portfolio_id": portfolio_id,
+            "stale_symbols": stale_positions[:20],
+        }
+
     current_weights = _current_weight_map(current_positions, price_map, context.nav_prev)
 
     if not is_v2:

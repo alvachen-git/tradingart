@@ -18,6 +18,54 @@ class TestAISimulationService(unittest.TestCase):
         expected = nav_df["daily_return"].mean() / nav_df["daily_return"].std() * (252.0 ** 0.5)
         self.assertAlmostEqual(out, expected)
 
+    @patch("ai_simulation_service.get_latest_data_date")
+    @patch("ai_simulation_service._latest_stock_price_date")
+    def test_normalize_trade_date_prefers_stock_price_date(self, mock_stock_date, mock_latest_data_date):
+        mock_stock_date.return_value = "20260528"
+        mock_latest_data_date.return_value = "20260529"
+
+        self.assertEqual(svc._normalize_trade_date(None), "20260528")
+        mock_latest_data_date.assert_not_called()
+
+    @patch("ai_simulation_service.pd.read_sql")
+    def test_fetch_price_snapshot_keeps_source_trade_date(self, mock_read_sql):
+        mock_read_sql.return_value = pd.DataFrame(
+            [
+                {
+                    "ts_code": "600519.SH",
+                    "trade_date": "20260528",
+                    "name": "Kweichow Moutai",
+                    "close_price": 1500.0,
+                    "amount": 2.5e9,
+                    "vol": 100000.0,
+                }
+            ]
+        )
+        fake_engine = MagicMock()
+        fake_engine.connect.return_value.__enter__.return_value = MagicMock()
+        fake_engine.connect.return_value.__exit__.return_value = False
+
+        with patch("ai_simulation_service.engine", fake_engine):
+            out = svc._fetch_price_snapshot(["600519.SH"], "20260529")
+
+        self.assertEqual(out["600519.SH"]["trade_date"], "20260528")
+        self.assertEqual(out["600519.SH"]["close"], 1500.0)
+
+    def test_stale_price_symbols_flags_missing_or_old_prices(self):
+        price_map = {
+            "600519.SH": {"trade_date": "20260529", "close": 1500.0},
+            "000001.SZ": {"trade_date": "20260528", "close": 12.0},
+            "510300.SH": {"trade_date": "20260529", "close": 0.0},
+        }
+
+        out = svc._stale_price_symbols(
+            ["600519.SH", "000001.SZ", "510300.SH", "159915.SZ"],
+            price_map,
+            "20260529",
+        )
+
+        self.assertEqual(out, ["000001.SZ", "510300.SH", "159915.SZ"])
+
     def test_build_closed_trade_extremes_returns_top_three_each_side(self):
         trades_df = pd.DataFrame(
             [
@@ -337,6 +385,217 @@ class TestAISimulationService(unittest.TestCase):
         self.assertIn("600519.SH", out)
         self.assertEqual(out["600519.SH"]["quantity"], 100.0)
         self.assertEqual(mock_read_sql.call_args.kwargs["params"]["td"], "20260327")
+
+    def _index_box_df(self, last_open=102.0, last_high=103.0, last_low=97.0, last_close=98.0):
+        rows = []
+        for i in range(39):
+            rows.append(
+                {
+                    "trade_date": f"202603{i + 1:02d}",
+                    "open_price": 101.0,
+                    "high_price": 104.0,
+                    "low_price": 99.0,
+                    "close_price": 101.0,
+                }
+            )
+        rows.append(
+            {
+                "trade_date": "20260410",
+                "open_price": last_open,
+                "high_price": last_high,
+                "low_price": last_low,
+                "close_price": last_close,
+            }
+        )
+        return pd.DataFrame(rows)
+
+    def test_detect_compression_breakdown_triggers_on_close_below_box(self):
+        out = svc._detect_compression_breakdown(self._index_box_df())
+        self.assertTrue(out["triggered"])
+        self.assertEqual(out["period"], 5)
+
+    def test_detect_compression_breakdown_ignores_intraday_break_without_close(self):
+        out = svc._detect_compression_breakdown(self._index_box_df(last_open=101.0, last_low=97.0, last_close=100.0))
+        self.assertFalse(out["triggered"])
+
+    def test_detect_compression_breakdown_requires_large_body(self):
+        out = svc._detect_compression_breakdown(self._index_box_df(last_open=98.4, last_high=103.0, last_low=97.0, last_close=98.0))
+        self.assertFalse(out["triggered"])
+
+    @patch("ai_simulation_service.pd.read_sql")
+    def test_get_csi500_regime_blocks_on_bear_ma_stack(self, mock_read_sql):
+        rows = []
+        for i in range(80):
+            close = 180.0 - i
+            rows.append(
+                {
+                    "trade_date": f"202603{i + 1:02d}",
+                    "open_price": close + 0.2,
+                    "high_price": close + 1.0,
+                    "low_price": close - 1.0,
+                    "close_price": close,
+                }
+            )
+        mock_read_sql.return_value = pd.DataFrame(rows)
+        conn_cm = MagicMock()
+        conn_cm.__enter__.return_value = MagicMock()
+        conn_cm.__exit__.return_value = False
+        fake_engine = MagicMock()
+        fake_engine.connect.return_value = conn_cm
+
+        with patch("ai_simulation_service.engine", fake_engine):
+            out = svc._get_csi500_regime("20260430")
+
+        self.assertEqual(out["regime"], "bear")
+        self.assertEqual(out["gate"], "blocked")
+        self.assertEqual(out["buy_slots"], 0)
+        self.assertTrue(out["bear_ma_stack"])
+
+    def test_v2_rule_targets_caps_new_buys_by_regime_slots(self):
+        candidates = pd.DataFrame(
+            [
+                {
+                    "symbol": f"60000{i}.SH",
+                    "signal_active": 1,
+                    "pullback_ready": 1,
+                    "chase_ok": 1,
+                    "sector_rank": 1,
+                    "score": 90 - i,
+                    "amount": 10_000_000_000 - i,
+                    "stop_price": 9.0,
+                }
+                for i in range(4)
+            ]
+        )
+
+        targets, _, _, _, eligible = svc._v2_build_rule_targets(
+            current_positions={},
+            current_weights={},
+            candidates_df=candidates,
+            price_map={},
+            csi500_regime={"regime": "bull", "buy_slots": 3},
+            max_positions=10,
+        )
+        self.assertEqual(len([v for v in targets.values() if v > 0]), 3)
+        self.assertEqual(len(eligible), 3)
+
+        targets2, _, notes2, _, eligible2 = svc._v2_build_rule_targets(
+            current_positions={},
+            current_weights={},
+            candidates_df=candidates,
+            price_map={},
+            csi500_regime={"regime": "bear", "buy_slots": 0},
+            max_positions=10,
+        )
+        self.assertEqual(targets2, {})
+        self.assertEqual(eligible2, set())
+        self.assertTrue(any("禁买" in x for x in notes2))
+
+
+    def test_marginal_flow_sectors_no_longer_require_low_prior_rank(self):
+        dates = [f"202604{i + 1:02d}" for i in range(25)]
+        rows = []
+        for d in dates[:20]:
+            rows.extend(
+                [
+                    {
+                        "trade_date": d,
+                        "industry": "强关注板块",
+                        "sector_type": "行业",
+                        "main_net_inflow": 100.0,
+                        "medium_net_inflow": 0.0,
+                        "total_turnover": 1000.0,
+                        "pct_change": 0.1,
+                    },
+                    {
+                        "trade_date": d,
+                        "industry": "弱板块",
+                        "sector_type": "行业",
+                        "main_net_inflow": -20.0,
+                        "medium_net_inflow": 0.0,
+                        "total_turnover": 1000.0,
+                        "pct_change": -0.1,
+                    },
+                ]
+            )
+        for d in dates[20:]:
+            rows.extend(
+                [
+                    {
+                        "trade_date": d,
+                        "industry": "强关注板块",
+                        "sector_type": "行业",
+                        "main_net_inflow": 150.0,
+                        "medium_net_inflow": 0.0,
+                        "total_turnover": 1000.0,
+                        "pct_change": 0.2,
+                    },
+                    {
+                        "trade_date": d,
+                        "industry": "弱板块",
+                        "sector_type": "行业",
+                        "main_net_inflow": -30.0,
+                        "medium_net_inflow": 0.0,
+                        "total_turnover": 1000.0,
+                        "pct_change": -0.1,
+                    },
+                ]
+            )
+
+        out = svc._rank_marginal_flow_sectors(pd.DataFrame(rows), limit=5)
+
+        self.assertTrue(any(x["industry"] == "强关注板块" for x in out))
+
+    def test_match_v2_sector_rank_uses_concept_keyword_text(self):
+        matchers = svc._build_v2_sector_matchers(
+            [{"industry": "环氧丙烷", "sector_type": "概念", "rank": 2}]
+        )
+
+        rank = svc._match_v2_sector_rank(
+            "化工原料",
+            matchers,
+            ["公司主营环氧丙烷及相关化工材料"],
+        )
+
+        self.assertEqual(rank, 2)
+
+    def test_bottom_turn_score_flags_chasing_even_with_breakout(self):
+        out = svc._score_v2_bottom_turn(
+            "创新高,平台突破",
+            "均线多头",
+            {
+                "ret20": 0.25,
+                "ret60": 0.48,
+                "drawdown_120d_high": 0.02,
+                "position_pct_120d": 0.96,
+                "right_confirm": 1,
+                "ma10_slope": 0.05,
+                "lows_stabilized": 1,
+            },
+        )
+
+        self.assertEqual(out["anti_chase_flag"], 1)
+        self.assertIn("创新高", out["anti_chase_reasons"])
+        self.assertLess(out["reversal_signal_score"], svc.V2_MIN_REVERSAL_SIGNAL_SCORE)
+
+    def test_bottom_turn_score_accepts_right_side_bottom_reversal(self):
+        out = svc._score_v2_bottom_turn(
+            "破底翻,多头吞噬",
+            "均线修复",
+            {
+                "ret20": 0.03,
+                "ret60": -0.12,
+                "drawdown_120d_high": 0.32,
+                "position_pct_120d": 0.28,
+                "right_confirm": 1,
+                "ma10_slope": 0.02,
+                "lows_stabilized": 1,
+            },
+        )
+
+        self.assertEqual(out["anti_chase_flag"], 0)
+        self.assertGreaterEqual(out["bottom_turn_score"], svc.V2_BOTTOM_BUY_SCORE)
+        self.assertGreaterEqual(out["reversal_signal_score"], svc.V2_MIN_REVERSAL_SIGNAL_SCORE)
 
 
 if __name__ == "__main__":

@@ -2,9 +2,14 @@ import tushare as ts
 import pandas as pd
 from sqlalchemy import create_engine, text, types
 import os
+import re
+import sys
+from dataclasses import dataclass
 from dotenv import load_dotenv
 from datetime import datetime, timedelta
+from html import escape
 import time
+from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 from astock_target_supplements import merge_a_share_targets
 
@@ -14,6 +19,34 @@ load_dotenv(override=True)
 engine = None
 pro = None
 NAME_MAP = None
+
+DEFAULT_ALERT_EMAIL = "alvachenart@163.com"
+ETF_COVERAGE_THRESHOLD = 0.90
+STOCK_COVERAGE_THRESHOLD = 0.85
+AI_PORTFOLIO_IDS = ("official_cn_a_etf_v1", "official_cn_a_etf_v2")
+ETF_PREFIXES = ("159", "510", "511", "512", "513", "515", "516", "518", "588")
+TARGET_COLS = [
+    "trade_date", "ts_code", "name",
+    "open_price", "high_price", "low_price", "close_price",
+    "vol", "amount", "pct_chg",
+]
+
+
+@dataclass
+class FetchResult:
+    ts_code: str
+    asset_type: str
+    source: str = ""
+    primary_ok: bool = False
+    fallback_used: bool = False
+    rows_saved: int = 0
+    primary_rows: int = 0
+    has_target_date: bool = False
+    error: str = ""
+
+    @property
+    def ok(self) -> bool:
+        return self.rows_saved > 0
 
 
 def get_engine():
@@ -41,6 +74,143 @@ def build_stock_targets(base_targets):
     return merge_a_share_targets(base_targets)
 
 
+def compact_trade_date(value: Any) -> str:
+    digits = re.sub(r"[^0-9]", "", str(value or ""))[:8]
+    return digits if len(digits) == 8 else ""
+
+
+def normalize_symbol(symbol: str) -> str:
+    raw = str(symbol or "").strip().upper().replace(" ", "")
+    if not raw:
+        return ""
+    if "." in raw:
+        return raw.replace(".XSHG", ".SH").replace(".XSHE", ".SZ")
+    if raw.startswith(("6", "5", "9")):
+        return f"{raw}.SH"
+    if raw.startswith(("0", "1", "2", "3")):
+        return f"{raw}.SZ"
+    return raw
+
+
+def is_etf_symbol(symbol: str) -> bool:
+    code = normalize_symbol(symbol).split(".")[0]
+    return code.startswith(ETF_PREFIXES)
+
+
+def _has_target_date(df: Optional[pd.DataFrame], target_date: str) -> bool:
+    if df is None or df.empty or "trade_date" not in df.columns:
+        return False
+    td = compact_trade_date(target_date)
+    dates = {compact_trade_date(x) for x in df["trade_date"].tolist()}
+    return td in dates
+
+
+def _prepare_save_df(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    for c in TARGET_COLS:
+        if c not in out.columns:
+            out[c] = 0
+    out = out[TARGET_COLS].copy()
+    out["trade_date"] = out["trade_date"].map(compact_trade_date)
+    for c in ["open_price", "high_price", "low_price", "close_price", "vol", "amount", "pct_chg"]:
+        out[c] = pd.to_numeric(out[c], errors="coerce").fillna(0.0)
+    out = out[out["trade_date"] != ""]
+    return out
+
+
+def _standardize_tushare_df(df: pd.DataFrame, ts_code: str, code_name: str) -> pd.DataFrame:
+    out = df.copy()
+    out = out.rename(
+        columns={
+            "open": "open_price",
+            "high": "high_price",
+            "low": "low_price",
+            "close": "close_price",
+        }
+    )
+    out["trade_date"] = out["trade_date"].map(compact_trade_date)
+    out["ts_code"] = ts_code
+    out["name"] = code_name
+    return _prepare_save_df(out)
+
+
+def _standardize_akshare_df(df: pd.DataFrame, ts_code: str, code_name: str) -> pd.DataFrame:
+    out = df.copy()
+    out = out.rename(
+        columns={
+            "\u65e5\u671f": "trade_date",
+            "\u5f00\u76d8": "open_price",
+            "\u6700\u9ad8": "high_price",
+            "\u6700\u4f4e": "low_price",
+            "\u6536\u76d8": "close_price",
+            "\u6210\u4ea4\u91cf": "vol",
+            "\u6210\u4ea4\u989d": "amount",
+            "\u6da8\u8dcc\u5e45": "pct_chg",
+        }
+    )
+    out["trade_date"] = out["trade_date"].map(compact_trade_date)
+    out["ts_code"] = ts_code
+    out["name"] = code_name
+    if "amount" in out.columns:
+        out["amount"] = pd.to_numeric(out["amount"], errors="coerce") / 1000.0
+    return _prepare_save_df(out)
+
+
+def _fetch_tushare_df(ts_code: str, start_date: str, end_date: str, asset_type: str, code_name: str) -> pd.DataFrame:
+    ts_pro = get_pro()
+    if asset_type == "S":
+        raw = ts_pro.daily(ts_code=ts_code, start_date=start_date, end_date=end_date)
+    else:
+        raw = ts_pro.fund_daily(ts_code=ts_code, start_date=start_date, end_date=end_date)
+    if raw is None or raw.empty:
+        return pd.DataFrame(columns=TARGET_COLS)
+    return _standardize_tushare_df(raw, ts_code, code_name)
+
+
+def _fetch_akshare_df(ts_code: str, start_date: str, end_date: str, asset_type: str, code_name: str) -> pd.DataFrame:
+    try:
+        import akshare as ak
+    except Exception as exc:
+        raise RuntimeError(f"AkShare import failed: {exc}") from exc
+
+    symbol = normalize_symbol(ts_code).split(".")[0]
+    if asset_type == "S":
+        raw = ak.stock_zh_a_hist(symbol=symbol, period="daily", start_date=start_date, end_date=end_date, adjust="")
+    else:
+        raw = ak.fund_etf_hist_em(symbol=symbol, period="daily", start_date=start_date, end_date=end_date, adjust="")
+    if raw is None or raw.empty:
+        return pd.DataFrame(columns=TARGET_COLS)
+    return _standardize_akshare_df(raw, ts_code, code_name)
+
+
+def _save_price_df(ts_code: str, start_date: str, end_date: str, df_save: pd.DataFrame) -> int:
+    if df_save is None or df_save.empty:
+        return 0
+    db_engine = get_engine()
+    with db_engine.connect() as conn:
+        conn.execute(
+            text(
+                """
+                DELETE FROM stock_price
+                WHERE ts_code = :ts_code
+                  AND trade_date >= :start_date
+                  AND trade_date <= :end_date
+                """
+            ),
+            {"ts_code": ts_code, "start_date": start_date, "end_date": end_date},
+        )
+        conn.commit()
+
+    df_save.to_sql("stock_price", db_engine, if_exists="append", index=False, dtype={
+        "trade_date": types.VARCHAR(8),
+        "ts_code": types.VARCHAR(10),
+        "name": types.VARCHAR(50),
+        "open_price": types.Float(), "high_price": types.Float(), "low_price": types.Float(), "close_price": types.Float(),
+        "vol": types.Float(), "amount": types.Float(), "pct_chg": types.Float()
+    })
+    return int(len(df_save))
+
+
 # --- 獲取全市場名稱字典 (用於填補 name) ---
 def get_name_map():
     global NAME_MAP
@@ -61,79 +231,289 @@ def get_name_map():
     return NAME_MAP
 
 
-# --- 3. 核心抓取邏輯 ---
+# --- 3. 核心抓取與質量檢查 ---
 def fetch_and_save_data(ts_code, start_date, end_date, asset_type='E'):
     """
-    asset_type: 'E' = ETF, 'S' = Stock
+    asset_type: 'E' = ETF, 'S' = Stock.
+    Tushare remains the primary source; AkShare is used only when the
+    primary source is empty, errors, or misses the target trade date.
     """
-    # 嘗試從字典獲取名稱，如果沒有則用代碼
     code_name = get_name_map().get(ts_code, ts_code)
-    print(f"[*] 正在獲取 {code_name} ({ts_code})...", end="")
+    result = FetchResult(ts_code=ts_code, asset_type=asset_type)
+    print(f"[*] Fetching {code_name} ({ts_code})...", end="")
 
     try:
-        ts_pro = get_pro()
-        if asset_type == 'S':
-            df = ts_pro.daily(ts_code=ts_code, start_date=start_date, end_date=end_date)
-        else:
-            df = ts_pro.fund_daily(ts_code=ts_code, start_date=start_date, end_date=end_date)
+        df_save = _fetch_tushare_df(ts_code, start_date, end_date, asset_type, code_name)
+        result.primary_ok = True
+        result.primary_rows = int(len(df_save))
+        result.has_target_date = _has_target_date(df_save, end_date)
+        if df_save.empty:
+            result.error = "Tushare returned empty data"
+        elif not result.has_target_date:
+            result.error = "Tushare data missing target trade_date"
+    except Exception as exc:
+        df_save = pd.DataFrame(columns=TARGET_COLS)
+        result.error = f"Tushare error: {exc}"
 
-        if df.empty:
-            print(" [-] 無數據")
-            return
+    if df_save.empty or not _has_target_date(df_save, end_date):
+        print(" Tushare incomplete; trying AkShare fallback...", end="")
+        result.fallback_used = True
+        try:
+            fallback_df = _fetch_akshare_df(ts_code, start_date, end_date, asset_type, code_name)
+            if not fallback_df.empty and _has_target_date(fallback_df, end_date):
+                df_save = fallback_df
+                result.source = "akshare"
+                result.error = ""
+                result.has_target_date = True
+            elif result.error:
+                result.error = f"{result.error}; AkShare returned no target-date data"
+            else:
+                result.error = "AkShare returned no target-date data"
+        except Exception as exc:
+            result.error = f"{result.error}; AkShare error: {exc}" if result.error else f"AkShare error: {exc}"
 
-        # --- 【關鍵修改】統一列名 ---
-        # 把 Tushare 的 open/high/low/close 改成 open_price/high_price...
-        df = df.rename(columns={
-                'open': 'open_price',
-                'high': 'high_price',
-                'low': 'low_price',
-                'close': 'close_price'
-            })
+    if df_save.empty:
+        print(f" [SKIP] {result.error}")
+        return result
 
-
-        # --- 【核心修復 1】填入名稱 ---
-        df['name'] = code_name
-
-        # --- 【核心修復 2】嚴格過濾字段 (防止 Unknown column 報錯) ---
-        # 只保留資料庫中肯定存在的字段
-        target_cols = [
-            'trade_date', 'ts_code', 'name',
-            'open_price', 'high_price', 'low_price', 'close_price',  # 新列名
-            'vol', 'amount', 'pct_chg'
-        ]
-
-        # 確保 DataFrame 裡有這些列，沒有的填 0
-        for c in target_cols:
-            if c not in df.columns:
-                df[c] = 0
-
-        # 只取這些列，剔除 pre_close 等多餘列
-        df_save = df[target_cols].copy()
-
-        # 入庫 (先刪後寫)
-        db_engine = get_engine()
-        with db_engine.connect() as conn:
-            del_sql = f"DELETE FROM stock_price WHERE ts_code='{ts_code}' AND trade_date >= '{start_date}' AND trade_date <= '{end_date}'"
-            conn.execute(text(del_sql))
-            conn.commit()
-
-        df_save.to_sql('stock_price', db_engine, if_exists='append', index=False, dtype={
-            'trade_date': types.VARCHAR(8),
-            'ts_code': types.VARCHAR(10),
-            'name': types.VARCHAR(50),
-            'open_price': types.Float(), 'high_price': types.Float(), 'low_price': types.Float(), 'close_price': types.Float(),
-            'vol': types.Float(), 'amount': types.Float(), 'pct_chg': types.Float()
-        })
-        print(f" [√] 成功入庫 {len(df)} 條")
-
-    except Exception as e:
-        print(f" [!] 錯誤: {e}")
+    try:
+        result.rows_saved = _save_price_df(ts_code, start_date, end_date, df_save)
+        result.has_target_date = _has_target_date(df_save, end_date)
+        if not result.source:
+            result.source = "tushare"
+        print(f" [OK] source={result.source} rows={result.rows_saved}")
+    except Exception as exc:
+        result.rows_saved = 0
+        result.error = f"DB save error: {exc}"
+        print(f" [ERROR] {result.error}")
+    return result
 
 
-# --- 4. 批量運行 ---
+def _query_price_symbols(conn, trade_date: str) -> set:
+    rows = conn.execute(
+        text(
+            """
+            SELECT ts_code
+            FROM stock_price
+            WHERE trade_date = :td
+              AND close_price IS NOT NULL
+              AND close_price > 0
+            """
+        ),
+        {"td": trade_date},
+    ).fetchall()
+    return {normalize_symbol(row[0]) for row in rows}
+
+
+def _load_ai_position_symbols(conn, portfolio_id: str, trade_date: str) -> Dict[str, Any]:
+    source_td = conn.execute(
+        text(
+            """
+            SELECT MAX(trade_date)
+            FROM ai_sim_positions
+            WHERE portfolio_id = :pid AND trade_date <= :td
+            """
+        ),
+        {"pid": portfolio_id, "td": trade_date},
+    ).scalar()
+    if not source_td:
+        return {"portfolio_id": portfolio_id, "position_source_date": "", "symbols": []}
+    rows = conn.execute(
+        text(
+            """
+            SELECT symbol
+            FROM ai_sim_positions
+            WHERE portfolio_id = :pid AND trade_date = :td
+            """
+        ),
+        {"pid": portfolio_id, "td": str(source_td)},
+    ).fetchall()
+    return {
+        "portfolio_id": portfolio_id,
+        "position_source_date": str(source_td),
+        "symbols": [normalize_symbol(row[0]) for row in rows if normalize_symbol(row[0])],
+    }
+
+
+def validate_update_quality(
+    trade_date: str,
+    etf_targets: Sequence[str],
+    stock_targets: Sequence[str],
+    fetch_results: Sequence[FetchResult],
+) -> Dict[str, Any]:
+    td = compact_trade_date(trade_date)
+    etf_set = {normalize_symbol(x) for x in etf_targets if normalize_symbol(x)}
+    stock_set = {normalize_symbol(x) for x in stock_targets if normalize_symbol(x)}
+    failures = [r for r in fetch_results if not r.ok]
+    fallback_used = [r for r in fetch_results if r.fallback_used]
+
+    with get_engine().connect() as conn:
+        price_symbols = _query_price_symbols(conn, td)
+        ai_payloads = [_load_ai_position_symbols(conn, pid, td) for pid in AI_PORTFOLIO_IDS]
+
+    etf_present = etf_set & price_symbols
+    stock_present = stock_set & price_symbols
+    etf_coverage = len(etf_present) / len(etf_set) if etf_set else 1.0
+    stock_coverage = len(stock_present) / len(stock_set) if stock_set else 1.0
+
+    ai_missing = []
+    for payload in ai_payloads:
+        missing = [symbol for symbol in payload["symbols"] if symbol not in price_symbols]
+        if missing:
+            ai_missing.append(
+                {
+                    "portfolio_id": payload["portfolio_id"],
+                    "position_source_date": payload["position_source_date"],
+                    "missing_symbols": missing,
+                }
+            )
+
+    issues = []
+    if etf_coverage < ETF_COVERAGE_THRESHOLD:
+        issues.append(f"ETF coverage {etf_coverage:.1%} below {ETF_COVERAGE_THRESHOLD:.0%}")
+    if stock_coverage < STOCK_COVERAGE_THRESHOLD:
+        issues.append(f"Stock coverage {stock_coverage:.1%} below {STOCK_COVERAGE_THRESHOLD:.0%}")
+    if ai_missing:
+        issues.append("AI portfolio position prices missing target date")
+    if failures:
+        issues.append(f"{len(failures)} symbols failed to update")
+
+    return {
+        "trade_date": td,
+        "is_abnormal": bool(issues),
+        "issues": issues,
+        "target_rows": {
+            "total": len(price_symbols),
+            "stock": sum(1 for symbol in price_symbols if not is_etf_symbol(symbol)),
+            "etf": sum(1 for symbol in price_symbols if is_etf_symbol(symbol)),
+        },
+        "coverage": {
+            "stock": stock_coverage,
+            "etf": etf_coverage,
+            "stock_present": len(stock_present),
+            "stock_target": len(stock_set),
+            "etf_present": len(etf_present),
+            "etf_target": len(etf_set),
+        },
+        "failures": failures,
+        "fallback_used": fallback_used,
+        "ai_missing": ai_missing,
+    }
+
+
+def _format_result_rows(results: Iterable[FetchResult], limit: int = 40) -> str:
+    rows = []
+    for result in list(results)[:limit]:
+        rows.append(
+            "<tr>"
+            f"<td>{escape(result.ts_code)}</td>"
+            f"<td>{escape(result.asset_type)}</td>"
+            f"<td>{escape(result.source or '-')}</td>"
+            f"<td>{'YES' if result.fallback_used else 'NO'}</td>"
+            f"<td>{result.rows_saved}</td>"
+            f"<td>{escape(result.error or '')}</td>"
+            "</tr>"
+        )
+    return "".join(rows) or "<tr><td colspan='6'>None</td></tr>"
+
+
+def build_alert_html(report: Dict[str, Any]) -> str:
+    coverage = report["coverage"]
+    target_rows = report["target_rows"]
+    ai_missing_html = []
+    for item in report["ai_missing"]:
+        symbols = ", ".join(item["missing_symbols"][:50])
+        ai_missing_html.append(
+            f"<li>{escape(item['portfolio_id'])} positions from {escape(item['position_source_date'])}: "
+            f"{escape(symbols)}</li>"
+        )
+    if not ai_missing_html:
+        ai_missing_html.append("<li>None</li>")
+
+    commands = [
+        "python update_astock_daily.py",
+        "python update_index.py",
+        "python update_options_daily.py",
+        "python calc_iv_oneday.py",
+        "python update_stock_score.py",
+        f"python scripts/rerun_ai_simulation.py --trade-date {report['trade_date']}",
+    ]
+    command_html = "".join(f"<li><code>{escape(cmd)}</code></li>" for cmd in commands)
+    issue_html = "".join(f"<li>{escape(issue)}</li>" for issue in report["issues"])
+
+    return f"""
+    <h2>A-stock/ETF daily update alert - {escape(report['trade_date'])}</h2>
+    <h3>Issues</h3>
+    <ul>{issue_html}</ul>
+    <h3>Coverage</h3>
+    <ul>
+      <li>stock_price rows: total={target_rows['total']}, stock={target_rows['stock']}, etf={target_rows['etf']}</li>
+      <li>Stock coverage: {coverage['stock_present']}/{coverage['stock_target']} ({coverage['stock']:.1%})</li>
+      <li>ETF coverage: {coverage['etf_present']}/{coverage['etf_target']} ({coverage['etf']:.1%})</li>
+    </ul>
+    <h3>AI positions missing target-date prices</h3>
+    <ul>{''.join(ai_missing_html)}</ul>
+    <h3>Failed symbols</h3>
+    <table border="1" cellspacing="0" cellpadding="4">
+      <tr><th>ts_code</th><th>type</th><th>source</th><th>fallback</th><th>rows</th><th>error</th></tr>
+      {_format_result_rows(report['failures'])}
+    </table>
+    <h3>Fallback symbols</h3>
+    <table border="1" cellspacing="0" cellpadding="4">
+      <tr><th>ts_code</th><th>type</th><th>source</th><th>fallback</th><th>rows</th><th>error</th></tr>
+      {_format_result_rows(report['fallback_used'])}
+    </table>
+    <h3>Recovery commands</h3>
+    <ol>{command_html}</ol>
+    """
+
+
+def send_quality_alert(report: Dict[str, Any]) -> None:
+    raw = os.getenv("ASTOCK_ALERT_EMAILS", DEFAULT_ALERT_EMAIL)
+    recipients = [x.strip() for x in raw.split(",") if x.strip()]
+    if not recipients:
+        recipients = [DEFAULT_ALERT_EMAIL]
+    try:
+        from email_utils2 import send_email
+    except Exception as exc:
+        print(f"[WARN] Cannot import email sender: {exc}")
+        return
+
+    subject = f"A-stock/ETF daily update alert {report['trade_date']}"
+    html = build_alert_html(report)
+    for recipient in recipients:
+        ok = send_email(recipient, subject, html)
+        print(f"[ALERT] email to {recipient}: {'sent' if ok else 'failed'}")
+
+
+def print_quality_summary(report: Dict[str, Any]) -> None:
+    coverage = report["coverage"]
+    target_rows = report["target_rows"]
+    print("=== A-stock update quality ===")
+    print(f"Trade date: {report['trade_date']}")
+    print(f"Rows: total={target_rows['total']}, stock={target_rows['stock']}, etf={target_rows['etf']}")
+    print(
+        "Coverage: "
+        f"stock={coverage['stock_present']}/{coverage['stock_target']} ({coverage['stock']:.1%}), "
+        f"etf={coverage['etf_present']}/{coverage['etf_target']} ({coverage['etf']:.1%})"
+    )
+    print(f"Fallback used: {len(report['fallback_used'])}, failures: {len(report['failures'])}")
+    if report["ai_missing"]:
+        for item in report["ai_missing"]:
+            print(
+                f"AI missing {item['portfolio_id']} from {item['position_source_date']}: "
+                f"{', '.join(item['missing_symbols'][:20])}"
+            )
+    if report["issues"]:
+        print("Issues:")
+        for issue in report["issues"]:
+            print(f"  - {issue}")
+
+
 if __name__ == "__main__":
     today = datetime.now().strftime('%Y%m%d')
     start = (datetime.now() - timedelta(days=1)).strftime('%Y%m%d')
+    fetch_results = []
 
     print(f"=== 開始抓取 ({start} - {today}) ===")
 
@@ -221,7 +601,7 @@ if __name__ == "__main__":
 
                    ]
     for code in ETF_TARGETS:
-        fetch_and_save_data(code, start, today, asset_type='E')
+        fetch_results.append(fetch_and_save_data(code, start, today, asset_type='E'))
         time.sleep(0.3)
 
     # 2. 個股 (茅台在這裡！)
@@ -2504,7 +2884,14 @@ if __name__ == "__main__":
     STOCK_TARGETS = build_stock_targets(STOCK_TARGETS)
     print(f"[*] 個股更新目標: {len(STOCK_TARGETS)} 只 (含中证2000缺口补充和强制补充)")
     for code in STOCK_TARGETS:
-        fetch_and_save_data(code, start, today, asset_type='S')
+        fetch_results.append(fetch_and_save_data(code, start, today, asset_type='S'))
         time.sleep(0.5)
+
+    quality_report = validate_update_quality(today, ETF_TARGETS, STOCK_TARGETS, fetch_results)
+    print_quality_summary(quality_report)
+    if quality_report["is_abnormal"]:
+        send_quality_alert(quality_report)
+        print("=== Completed with data quality errors ===")
+        sys.exit(1)
 
     print("=== 全部完成 ===")
