@@ -61,7 +61,7 @@ from data_engine import (
     tool_analyze_position_change,
     tool_compare_stocks,
 )
-from search_tools import search_web
+from search_tools import search_web, is_search_answer_acceptable
 from market_correlation import tool_stock_hedging_analysis, tool_futures_correlation_check,tool_stock_correlation_check
 from beta_tool import calculate_hedging_beta
 from knowledge_tools import search_investment_knowledge
@@ -1744,6 +1744,10 @@ def _select_knowledge_chat_strategy(state: AgentState) -> str:
         return "company_news"
     if any(keyword in user_query for keyword in ("最近有什么好消息", "最近有没有好消息", "最近有什么动态", "最近进展", "最近催化")):
         return "company_news"
+    if any(keyword in user_query for keyword in ("最近财报", "最新财报", "最近公告", "最新公告", "最近新闻", "最新新闻", "最近消息", "最新消息", "最近业绩", "最新业绩")):
+        return "company_news"
+    if _looks_like_latest_company_fact_query(user_query):
+        return "company_news"
     if any(keyword in recent_context for keyword in ("最近有什么好消息", "最近有没有好消息", "最近有什么动态", "最近进展", "最近催化")):
         return "company_news"
     return "concept_explain"
@@ -1832,6 +1836,64 @@ def _simple_context_payload(
         if key not in payload or payload.get(key) in (None, ""):
             payload[key] = value
     return payload
+
+
+_LATEST_COMPANY_FACT_KEYWORDS = (
+    "最近",
+    "最新",
+    "财报",
+    "公告",
+    "新闻",
+    "消息",
+    "动态",
+    "业绩",
+)
+_LATEST_FACT_TIME_KEYWORDS = ("最近", "最新", "近期", "今年", "本年", "本月", "这个月", "一季度", "第一季度")
+_COMPANY_FACT_TOPIC_KEYWORDS = ("财报", "公告", "新闻", "消息", "动态", "业绩", "年报", "季报", "一季报", "半年报", "中报")
+
+
+def _looks_like_latest_company_fact_query(query: str) -> bool:
+    query_text = str(query or "")
+    return (
+        any(keyword in query_text for keyword in _LATEST_FACT_TIME_KEYWORDS)
+        and any(keyword in query_text for keyword in _COMPANY_FACT_TOPIC_KEYWORDS)
+    )
+
+
+def _is_latest_company_fact_query(knowledge_strategy: str, query: str) -> bool:
+    if knowledge_strategy != "company_news":
+        return False
+    query_text = str(query or "")
+    return any(keyword in query_text for keyword in _LATEST_COMPANY_FACT_KEYWORDS) or _looks_like_latest_company_fact_query(query_text)
+
+
+def _insufficient_latest_company_fact_message() -> str:
+    return "我这轮没有检索到足够新的公开资料。你可以指定报告期、公告来源或股票代码，我再帮你精确查。"
+
+
+def _invoke_search_web_direct(query: str) -> str:
+    try:
+        if hasattr(search_web, "invoke"):
+            return str(search_web.invoke({"query": query}) or "").strip()
+        return str(search_web(query) or "").strip()
+    except TypeError:
+        return str(search_web(query) or "").strip()
+    except Exception as exc:
+        print(f"[knowledge fast path] search_web failed: {exc}")
+        return ""
+
+
+def _try_direct_company_fact_search(query: str, knowledge_strategy: str) -> str | None:
+    if not _is_latest_company_fact_query(knowledge_strategy, query):
+        return None
+
+    answer = _invoke_search_web_direct(query)
+    if answer and is_search_answer_acceptable(query, answer):
+        return answer
+    if answer:
+        preview = answer.replace("\n", " ")[:160]
+        print(f"[knowledge fast path] rejected stale/low-quality search answer: {preview}")
+    return _insufficient_latest_company_fact_message()
 
 
 def simple_chatter_reply(
@@ -3334,6 +3396,13 @@ def knowledge_chatter_node(state: AgentState, llm=None):
         }
 
     # === 🔥 知识问答专用工具集 ===
+    direct_company_fact_answer = _try_direct_company_fact_search(user_query, knowledge_strategy)
+    if direct_company_fact_answer:
+        return {
+            "messages": [HumanMessage(content=f"【知识问答】\n{direct_company_fact_answer}")],
+            "knowledge_context": ""
+        }
+
     tools = build_chatter_tools()
 
     if knowledge_strategy == "company_news":
@@ -3454,6 +3523,11 @@ def knowledge_chatter_node(state: AgentState, llm=None):
                     f"当前问题：{user_query}\n"
                     f"请先承接上一轮关键结论，再回答当前问题。"
                 )
+            if _is_latest_company_fact_query(knowledge_strategy, user_query):
+                return {
+                    "messages": [HumanMessage(content=f"【知识问答】\n{_insufficient_latest_company_fact_message()}")],
+                    "knowledge_context": kb_content
+                }
             simple_response = llm.invoke(fallback_prompt)
             return {
                 "messages": [HumanMessage(content=f"【闲聊】\n{simple_response.content}")],
