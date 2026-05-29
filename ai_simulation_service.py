@@ -3311,7 +3311,6 @@ def _build_review_payload(
     deterministic_summary_md = summary_md
     deterministic_buys_md = buys_md
     deterministic_sells_md = sells_md
-    deterministic_risk_md = risk_md
 
     def _trade_symbols_for_side(trades: List[Dict[str, Any]], side: str) -> List[str]:
         return [
@@ -3401,6 +3400,7 @@ def _build_review_payload(
             risk_md,
             "### 明天继续盯什么\n\n先看开盘情绪有没有回暖，盯住手里和观察名单里的几只票，耐心等信号更清楚一点。",
         )
+    deterministic_risk_md = risk_md
 
     def _build_llm_diary() -> Optional[Dict[str, str]]:
         if int(config.get("review_use_llm", 1)) != 1:
