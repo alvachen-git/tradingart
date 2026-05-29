@@ -66,6 +66,47 @@ class TestAISimulationService(unittest.TestCase):
 
         self.assertEqual(out, ["000001.SZ", "510300.SH", "159915.SZ"])
 
+    @patch("ai_simulation_service._delete_from_day")
+    @patch("ai_simulation_service._stock_price_row_count", return_value=100)
+    @patch("ai_simulation_service._load_config", return_value={"is_active": 1})
+    @patch("ai_simulation_service.ensure_ai_sim_tables")
+    def test_force_old_date_requires_explicit_rewind(
+        self,
+        _ensure_tables,
+        _load_config,
+        _row_count,
+        mock_delete_from_day,
+    ):
+        class _ScalarResult:
+            def scalar(self):
+                return "20260529"
+
+        class _Conn:
+            def execute(self, *_args, **_kwargs):
+                return _ScalarResult()
+
+        class _Engine:
+            def connect(self):
+                return self
+
+            def __enter__(self):
+                return _Conn()
+
+            def __exit__(self, *_args):
+                return False
+
+        with patch("ai_simulation_service.engine", _Engine()):
+            out = svc.run_daily_simulation(
+                trade_date="20260528",
+                portfolio_id=svc.OFFICIAL_PORTFOLIO_2_ID,
+                force=True,
+            )
+
+        self.assertEqual(out["status"], "error")
+        self.assertEqual(out["trade_date"], "20260528")
+        self.assertEqual(out["latest_trade_date"], "20260529")
+        mock_delete_from_day.assert_not_called()
+
     def test_build_closed_trade_extremes_returns_top_three_each_side(self):
         trades_df = pd.DataFrame(
             [
@@ -211,6 +252,62 @@ class TestAISimulationService(unittest.TestCase):
         self.assertIn("300750.SZ", out["sells_md"])
         self.assertIn("明天继续盯什么", out["risk_md"])
         self.assertIsInstance(out.get("next_watchlist"), list)
+
+    @patch("ai_simulation_service._load_recent_diary_snippets", return_value=[])
+    @patch.dict("os.environ", {"DASHSCOPE_API_KEY": "test-key"})
+    def test_build_review_payload_rejects_llm_no_sell_claim_when_sells_exist(self, _snippets):
+        class _Resp:
+            content = (
+                '{"summary_md":"### Review\\n\\nCalm day.",'
+                '"buys_md":"### Buy\\n\\nNo buys today.",'
+                '"sells_md":"### Sell\\n\\n今天没有卖出。",'
+                '"risk_md":"### Risk\\n\\nWatch tomorrow."}'
+            )
+
+        class _FakeLLM:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def invoke(self, _messages):
+                return _Resp()
+
+        executed_trades = [
+            {
+                "symbol": "000670.SZ",
+                "side": "sell",
+                "quantity": 4800,
+                "price": 8.7,
+                "amount": 41760,
+                "realized_pnl": -2640,
+            }
+        ]
+        orders_audited = [
+            {
+                "symbol": "000670.SZ",
+                "action": "sell",
+                "reason": "risk control",
+                "gate_status": "passed",
+            }
+        ]
+
+        with patch("ai_simulation_service.ChatTongyiCompat", _FakeLLM):
+            out = svc._build_review_payload(
+                trade_date="20260529",
+                nav_prev=920000.0,
+                nav_now=918000.0,
+                executed_trades=executed_trades,
+                orders_audited=orders_audited,
+                risk_notes=[],
+                ai_payload={"summary": "calm", "risk_notes": "watch"},
+                candidates_df=pd.DataFrame(),
+                final_positions={},
+                config={"review_use_llm": 1, "model_name": "qwen3.5-plus"},
+                portfolio_id=svc.OFFICIAL_PORTFOLIO_2_ID,
+            )
+
+        self.assertIn("000670.SZ", out["sells_md"])
+        self.assertIn("卖出", out["sells_md"])
+        self.assertNotIn("今天没有卖出", out["sells_md"])
 
     def test_build_review_payload_persona_trigger_mentions_once(self):
         candidates_df = pd.DataFrame(

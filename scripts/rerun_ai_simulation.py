@@ -26,6 +26,11 @@ def main() -> int:
         help="Portfolio id to rerun. Can be passed more than once. Defaults to official v1 and v2.",
     )
     parser.add_argument("--no-force", action="store_true", help="Do not overwrite an existing settled day.")
+    parser.add_argument(
+        "--allow-rewind",
+        action="store_true",
+        help="Allow deleting the target date and all later days when rerunning an older date.",
+    )
     args = parser.parse_args()
 
     portfolio_ids: List[str] = args.portfolio_id or [OFFICIAL_PORTFOLIO_ID, OFFICIAL_PORTFOLIO_2_ID]
@@ -36,12 +41,24 @@ def main() -> int:
                 trade_date=args.trade_date,
                 portfolio_id=portfolio_id,
                 force=not args.no_force,
+                allow_rewind=bool(args.allow_rewind),
             )
         except Exception as exc:
             result = {"status": "error", "portfolio_id": portfolio_id, "error": str(exc)}
         results.append({"portfolio_id": portfolio_id, "result": result})
 
-    print(json.dumps({"trade_date": args.trade_date, "results": results}, ensure_ascii=False, indent=2))
+    print(
+        json.dumps(
+            {
+                "requested_trade_date": args.trade_date,
+                "force": not args.no_force,
+                "allow_rewind": bool(args.allow_rewind),
+                "results": results,
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
     return 0 if all(item["result"].get("status") in {"success", "skipped"} for item in results) else 1
 
 

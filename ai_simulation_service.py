@@ -3308,6 +3308,45 @@ def _build_review_payload(
     if is_v2:
         sells_md = _strip_v2_diary_rule_lines(sells_md, "### 今天为什么卖\n\n今天没有卖出，先稳住再说。")
 
+    deterministic_summary_md = summary_md
+    deterministic_buys_md = buys_md
+    deterministic_sells_md = sells_md
+    deterministic_risk_md = risk_md
+
+    def _trade_symbols_for_side(trades: List[Dict[str, Any]], side: str) -> List[str]:
+        return [
+            _normalize_symbol(t.get("symbol", ""))
+            for t in trades
+            if str(t.get("side") or "").lower() == side and _normalize_symbol(t.get("symbol", ""))
+        ]
+
+    def _has_false_no_trade_claim(text: str, side: str) -> bool:
+        body = re.sub(r"\s+", "", str(text or ""))
+        if side == "buy":
+            patterns = ["没有买", "没有买入", "未买入", "无买入", "没有新开仓", "全天零开仓"]
+        else:
+            patterns = ["没有卖", "没有卖出", "未卖出", "无卖出", "没有主动卖出"]
+        return any(p in body for p in patterns)
+
+    def _mentions_any_symbol(text: str, symbols: List[str]) -> bool:
+        body = str(text or "").upper()
+        compact = body.replace(".", "")
+        for symbol in symbols:
+            sym = _normalize_symbol(symbol)
+            if not sym:
+                continue
+            if sym in body or sym.replace(".", "") in compact:
+                return True
+        return False
+
+    def _llm_trade_section_is_valid(text: str, side: str) -> bool:
+        symbols = _trade_symbols_for_side(executed_trades, side)
+        if not symbols:
+            return True
+        if _has_false_no_trade_claim(text, side):
+            return False
+        return _mentions_any_symbol(text, symbols)
+
     rejected = [o for o in orders_audited if str(o.get("gate_status") or "").lower() == "rejected"]
     adjusted = [o for o in orders_audited if str(o.get("gate_status") or "").lower() == "adjusted"]
     watch_symbols = [str(x.get("symbol") or "") for x in watchlist if str(x.get("symbol") or "").strip()]
@@ -3458,10 +3497,17 @@ def _build_review_payload(
 
     llm_diary = _build_llm_diary()
     if llm_diary:
-        summary_md = llm_diary["summary_md"]
-        buys_md = llm_diary["buys_md"]
-        sells_md = llm_diary["sells_md"]
-        risk_md = llm_diary["risk_md"]
+        candidate_summary_md = llm_diary["summary_md"]
+        if (
+            (buys and _has_false_no_trade_claim(candidate_summary_md, "buy"))
+            or (sells and _has_false_no_trade_claim(candidate_summary_md, "sell"))
+        ):
+            summary_md = deterministic_summary_md
+        else:
+            summary_md = candidate_summary_md
+        buys_md = llm_diary["buys_md"] if _llm_trade_section_is_valid(llm_diary["buys_md"], "buy") else deterministic_buys_md
+        sells_md = llm_diary["sells_md"] if _llm_trade_section_is_valid(llm_diary["sells_md"], "sell") else deterministic_sells_md
+        risk_md = llm_diary["risk_md"] or deterministic_risk_md
 
     return {
         "summary_md": summary_md,
@@ -3505,6 +3551,7 @@ def run_daily_simulation(
     trade_date: Optional[str] = None,
     portfolio_id: str = OFFICIAL_PORTFOLIO_ID,
     force: bool = False,
+    allow_rewind: bool = False,
 ) -> Dict[str, Any]:
     if engine is None:
         return {"status": "error", "error": "鏁版嵁搴撹繛鎺ヤ笉鍙敤"}
@@ -3531,15 +3578,16 @@ def run_daily_simulation(
     latest_td = _normalize_trade_date(latest_td_raw) if latest_td_raw else ""
 
     if latest_td and td < latest_td:
-        if not force:
+        if not force or not allow_rewind:
             return {
                 "status": "error",
-                "reason": "trade_date older than latest settled day; use force to rewind",
+                "reason": "trade_date older than latest settled day; rerun refuses to delete later days unless allow_rewind=True",
                 "trade_date": td,
                 "latest_trade_date": latest_td,
                 "portfolio_id": portfolio_id,
             }
-        # 鍥炲ご閲嶇畻鑰佹棩鏈熸椂锛屽繀椤绘竻鐞嗚鏃ュ強涔嬪悗蹇収锛岄伩鍏嶆椂闂寸嚎鏂銆?
+        # Rewinding an old date deletes that date and all later snapshots.
+        # Keep this behind an explicit allow_rewind guard to avoid accidental data loss.
         _delete_from_day(portfolio_id, td)
 
     # 骞傜瓑锛氬凡瀛樺湪鍑€鍊煎垯涓嶉噸澶嶆墽琛?
