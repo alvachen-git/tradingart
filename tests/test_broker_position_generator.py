@@ -165,6 +165,48 @@ def test_invoke_with_retry_403_fails_immediately(monkeypatch):
     assert result["attempts"] == 1
 
 
+def test_query_group_product_net_changes_drops_suspicious_one_sided_products(monkeypatch):
+    mod = _load_module(monkeypatch)
+
+    fake_rows = [
+        # Healthy product: both dates have balanced long/short sides.
+        {"broker": "海通期货（代客）", "ts_code": "rb", "long_vol": 100000, "short_vol": 80000, "t_date": "20260529"},
+        {"broker": "海通期货（代客）", "ts_code": "rb", "long_vol": 120000, "short_vol": 85000, "t_date": "20260601"},
+        # Bad product: the start date has an implausible missing short side.
+        {"broker": "海通期货（代客）", "ts_code": "m", "long_vol": 120000, "short_vol": 0, "t_date": "20260529"},
+        {"broker": "海通期货（代客）", "ts_code": "m", "long_vol": 125000, "short_vol": 90000, "t_date": "20260601"},
+    ]
+
+    monkeypatch.setattr(mod.pd, "read_sql", lambda *args, **kwargs: mod.pd.DataFrame(fake_rows))
+
+    records = mod._query_group_product_net_changes(["海通期货（代客）"], "20260529", "20260601")
+
+    assert [x["product"] for x in records] == ["RB"]
+    assert records[0]["net_chg"] == 15000
+    assert [x["product"] for x in mod._LAST_NET_CHANGE_QUALITY_ISSUES] == ["M"]
+
+
+def test_institution_day_section_shows_quality_exclusion_note(monkeypatch):
+    mod = _load_module(monkeypatch)
+    html = """
+<div>
+<h2 class="section-title">机构当日动向</h2>
+old
+<!-- 机构5日累计布局 -->
+</div>
+"""
+    snapshot = {
+        "long_top": [],
+        "short_top": [],
+        "quality_issues": [{"product": "M", "name": "豆粕", "reason": "side bad"}],
+    }
+
+    out = mod.enforce_institution_day_section(html, snapshot)
+
+    assert "已剔除疑似缺边/断档品种：豆粕" in out
+    assert "这些品种不参与当日TOP排名" in out
+
+
 def test_main_collect_failure_exit_code_1(monkeypatch):
     mod = _load_module(monkeypatch)
     monkeypatch.setattr(mod, "should_skip_non_trading_publish", lambda: False)

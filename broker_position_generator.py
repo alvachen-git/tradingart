@@ -277,6 +277,12 @@ CONTRA_BROKER_ALIASES = [
     "东方财富", "东财",
 ]
 
+BROKER_NET_MIN_GROSS_FOR_SIDE_CHECK = 50000
+BROKER_NET_MIN_SIDE_RATIO = 0.25
+BROKER_NET_MIN_GROSS_FOR_PAIR_CHECK = 100000
+BROKER_NET_MIN_PAIR_GROSS_RATIO = 0.35
+_LAST_NET_CHANGE_QUALITY_ISSUES: list[dict[str, Any]] = []
+
 # ==========================================
 # 3. 合约乘数配置（只存乘数，价格从数据库获取）
 # ==========================================
@@ -399,11 +405,65 @@ def _broker_alias(broker_name: str) -> str:
     return alias or broker_name
 
 
+def _find_net_change_quality_issues(df_agg: pd.DataFrame, d1: str, d2: str) -> dict[str, list[str]]:
+    """
+    Detect product/date rows where one side is likely missing rather than truly zero.
+
+    The holding report ranks net changes. If a data source drops most long or short
+    rows for one product/date, the normal diff formula will create fake giant moves.
+    """
+    if df_agg is None or df_agg.empty:
+        return {}
+
+    totals = (
+        df_agg.groupby(["product", "t_date"], as_index=False)[["long_vol", "short_vol"]]
+        .sum()
+    )
+    if totals.empty:
+        return {}
+
+    issues: dict[str, list[str]] = {}
+    for product, group in totals.groupby("product"):
+        rows = {str(r["t_date"]): r for _, r in group.iterrows()}
+        for date_key in (d1, d2):
+            row = rows.get(date_key)
+            if row is None:
+                continue
+            long_total = float(row.get("long_vol") or 0.0)
+            short_total = float(row.get("short_vol") or 0.0)
+            gross = long_total + short_total
+            max_side = max(abs(long_total), abs(short_total))
+            min_side = min(abs(long_total), abs(short_total))
+            side_ratio = (min_side / max_side) if max_side > 0 else 1.0
+            if gross >= BROKER_NET_MIN_GROSS_FOR_SIDE_CHECK and side_ratio < BROKER_NET_MIN_SIDE_RATIO:
+                issues.setdefault(str(product), []).append(
+                    f"{date_key}多空侧失衡(long={int(long_total)}, short={int(short_total)}, ratio={side_ratio:.2f})"
+                )
+
+        if d1 in rows and d2 in rows:
+            gross_values = [
+                float(rows[d1].get("long_vol") or 0.0) + float(rows[d1].get("short_vol") or 0.0),
+                float(rows[d2].get("long_vol") or 0.0) + float(rows[d2].get("short_vol") or 0.0),
+            ]
+            max_gross = max(gross_values)
+            min_gross = min(gross_values)
+            pair_ratio = (min_gross / max_gross) if max_gross > 0 else 1.0
+            if max_gross >= BROKER_NET_MIN_GROSS_FOR_PAIR_CHECK and pair_ratio < BROKER_NET_MIN_PAIR_GROSS_RATIO:
+                issues.setdefault(str(product), []).append(
+                    f"{d1}/{d2}总持仓断档(ratio={pair_ratio:.2f})"
+                )
+
+    return issues
+
+
 def _query_group_product_net_changes(brokers_db: list[str], start_date: str, end_date: str) -> list[dict]:
     """
     代码端确定性计算：
     给定期货商分组，返回各品种净持仓变化（end-start）及分期货商明细。
     """
+    global _LAST_NET_CHANGE_QUALITY_ISSUES
+    _LAST_NET_CHANGE_QUALITY_ISSUES = []
+
     d1 = _normalize_trade_date(start_date)
     d2 = _normalize_trade_date(end_date)
     query_brokers = _expand_broker_list(brokers_db)
@@ -440,6 +500,25 @@ def _query_group_product_net_changes(brokers_db: list[str], start_date: str, end
             .sum()
             .reset_index()
         )
+        quality_issues = _find_net_change_quality_issues(df_agg, d1, d2)
+        if quality_issues:
+            _LAST_NET_CHANGE_QUALITY_ISSUES = [
+                {
+                    "product": product,
+                    "name": PRODUCT_MAP.get(product, product),
+                    "reason": "；".join(reasons),
+                }
+                for product, reasons in sorted(quality_issues.items())
+            ]
+            bad_products = set(quality_issues.keys())
+            print(
+                "[broker_net] drop_suspicious_products: "
+                + "; ".join(f"{item['name']}({item['reason']})" for item in _LAST_NET_CHANGE_QUALITY_ISSUES[:12])
+            )
+            df_agg = df_agg[~df_agg["product"].isin(bad_products)].copy()
+            if df_agg.empty:
+                return []
+
         df_start = df_agg[df_agg["t_date"] == d1].set_index(["broker_norm", "product"])
         df_end = df_agg[df_agg["t_date"] == d2].set_index(["broker_norm", "product"])
         if df_start.empty or df_end.empty:
@@ -590,6 +669,7 @@ def _collect_missing_end_products(brokers_db: list[str], start_date: str, end_da
 def _build_institution_day_snapshot(start_date: str, end_date: str) -> dict:
     institution_brokers_db = [get_db_broker_name(b) for b in BROKER_CONFIG["正指标_机构"]]
     records = _query_group_product_net_changes(institution_brokers_db, start_date, end_date)
+    quality_issues = list(_LAST_NET_CHANGE_QUALITY_ISSUES)
     missing_today = _collect_missing_end_products(institution_brokers_db, start_date, end_date)
     long_top = [r for r in records if r["net_chg"] > 0][:5]
     short_top = sorted([r for r in records if r["net_chg"] < 0], key=lambda x: x["net_chg"])[:5]
@@ -598,6 +678,7 @@ def _build_institution_day_snapshot(start_date: str, end_date: str) -> dict:
         "end_date": end_date,
         "long_top": long_top,
         "short_top": short_top,
+        "quality_issues": quality_issues,
         "missing_today": missing_today,
     }
 
@@ -639,6 +720,15 @@ def enforce_institution_day_section(html_content: str, snapshot: dict) -> str:
 
     long_rows = _render_institution_rows(snapshot.get("long_top", []), "text-red", "— 无显著净多增仓 —")
     short_rows = _render_institution_rows(snapshot.get("short_top", []), "text-green", "— 无显著净空增仓 —")
+    quality_issues = snapshot.get("quality_issues", []) or []
+    quality_note = ""
+    if quality_issues:
+        names = "、".join(str(x.get("name") or x.get("product") or "") for x in quality_issues[:8])
+        quality_note = (
+            f'<p class="sub-text" style="margin:10px 0 0 0;">'
+            f'已剔除疑似缺边/断档品种：{html.escape(names)}；这些品种不参与当日TOP排名。'
+            f'</p>'
+        )
 
     section = f"""
 <h2 class="section-title">机构当日动向</h2>
@@ -655,6 +745,7 @@ def enforce_institution_day_section(html_content: str, snapshot: dict) -> str:
   <tr><th>品种</th><th style="text-align:right;">合计</th><th style="text-align:right;">明细</th></tr>
   {short_rows}
 </table>
+{quality_note}
 </div>
 
 """
