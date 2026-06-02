@@ -340,7 +340,7 @@ class TestPaymentService(unittest.TestCase):
         )
         self.assertEqual(int(safe_stock.get("points_monthly") or 0), 800)
 
-    def test_paid_products_include_macro_radar_and_package_includes_it(self):
+    def test_paid_products_include_macro_radar_and_package_excludes_safe_stock_report(self):
         products = pay.get_paid_products()
         channel_codes = [
             str(item.get("code") or "")
@@ -361,7 +361,7 @@ class TestPaymentService(unittest.TestCase):
         )
         self.assertIsNotNone(package)
         include_codes = [str(x or "") for x in (package.get("includes") or [])]
-        self.assertIn("safe_stock_report", include_codes)
+        self.assertNotIn("safe_stock_report", include_codes)
         self.assertIn("macro_risk_radar", include_codes)
 
     def test_purchase_intel_package_rolls_back_on_partial_failure(self):
