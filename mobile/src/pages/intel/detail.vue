@@ -9,6 +9,7 @@ import {
   type SafeStockMobileRender,
 } from '../../api/index'
 import { formatAiForMobile } from '../../utils/ai_mobile_formatter'
+import { formatBeijingDateTime } from '../../utils/time'
 
 const content = ref<ReportDetail | null>(null)
 const loading = ref(true)
@@ -25,11 +26,6 @@ onLoad(async (options) => {
     loading.value = false
   }
 })
-
-function formatDate(s: string) {
-  if (!s) return ''
-  return s.slice(0, 16).replace('T', ' ')
-}
 
 function formatReportTitle(title: string) {
   return String(title || '')
@@ -187,7 +183,7 @@ function listCount(items?: unknown[]) {
       <!-- 头部信息 -->
       <view class="meta">
         <view class="channel-badge">{{ formatChannelName(content.channel_name) }}</view>
-        <text class="date-text">{{ formatDate(content.published_at) }}</text>
+        <text class="date-text">{{ formatBeijingDateTime(content.published_at) }}</text>
       </view>
 
       <text class="article-title">{{ formatReportTitle(content.title) }}</text>
