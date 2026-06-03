@@ -2,9 +2,39 @@
 import { onLaunch } from '@dcloudio/uni-app'
 import { useAuthStore } from './store/auth'
 
+function setupMiniProgramUpdateManager() {
+  // #ifdef MP-WEIXIN
+  const updateManager = (uni as any).getUpdateManager?.()
+  if (!updateManager) return
+
+  updateManager.onUpdateReady(() => {
+    uni.showModal({
+      title: '更新提示',
+      content: '新版本已准备好，是否立即重启应用？',
+      confirmText: '重启',
+      cancelText: '稍后',
+      success(res) {
+        if (res.confirm) {
+          updateManager.applyUpdate()
+        }
+      },
+    })
+  })
+
+  updateManager.onUpdateFailed(() => {
+    uni.showModal({
+      title: '更新提示',
+      content: '新版本下载失败，请删除小程序后重新打开。',
+      showCancel: false,
+    })
+  })
+  // #endif
+}
+
 onLaunch(() => {
   const auth = useAuthStore()
   auth.restoreFromStorage()
+  setupMiniProgramUpdateManager()
 })
 </script>
 

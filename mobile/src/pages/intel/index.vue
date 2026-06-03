@@ -11,6 +11,7 @@ import {
   type UserProfile,
 } from '../../api/index'
 import { formatAiForMobile } from '../../utils/ai_mobile_formatter'
+import { formatBeijingDateTime } from '../../utils/time'
 import { useAuthStore } from '../../store/auth'
 import BottomNav from '../../components/BottomNav.vue'
 
@@ -551,11 +552,6 @@ function goRecharge() {
   uni.navigateTo({ url: '/pages/recharge/index' })
 }
 
-function formatDate(s: string) {
-  if (!s) return ''
-  return s.slice(0, 16).replace('T', ' ')
-}
-
 function formatReportTitle(title: string) {
   return String(title || '')
     .replace(/期货商持仓晚报/g, '持仓晚报')
@@ -660,7 +656,7 @@ function toneClass(v: any): string {
           <view v-if="canAccessReport(item)">
             <view class="card-top">
               <view class="channel-badge">{{ formatChannelName(item.channel_name) }}</view>
-              <text class="date-text">{{ formatDate(item.published_at) }}</text>
+              <text class="date-text">{{ formatBeijingDateTime(item.published_at) }}</text>
             </view>
             <text class="card-title">{{ formatReportTitle(item.title) }}</text>
             <text class="card-summary">{{ stripHtml(item.summary) }}</text>
