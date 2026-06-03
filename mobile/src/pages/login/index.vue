@@ -30,16 +30,21 @@ const resetMessage = ref('')
 
 const agreed = ref(false)
 const error = ref('')
+const autoRedirecting = ref(false)
 
-onShow(async () => {
+let savedLoginRedirectStarted = false
+
+onShow(() => {
   auth.restoreFromStorage()
-  if (!auth.isLoggedIn) return
-  try {
-    await authApi.verify()
-    uni.reLaunch({ url: '/pages/index/index' })
-  } catch {
-    auth.clearAuth()
+  if (!auth.isLoggedIn) {
+    autoRedirecting.value = false
+    savedLoginRedirectStarted = false
+    return
   }
+  autoRedirecting.value = true
+  if (savedLoginRedirectStarted) return
+  savedLoginRedirectStarted = true
+  uni.reLaunch({ url: '/pages/index/index' })
 })
 
 function switchMode(nextMode: 'login' | 'register' | 'reset') {
@@ -188,234 +193,241 @@ function openProtocol(type: 'terms' | 'privacy') {
 
 <template>
   <view class="page">
-    <!-- Logo 区域 -->
-    <view class="header">
+    <view v-if="autoRedirecting" class="auto-login-panel">
       <text class="logo-text">爱波塔</text>
-      <text class="logo-sub">AI 驱动的期权期货分析</text>
+      <text class="auto-login-text">自动登录中...</text>
     </view>
 
-    <view class="mode-switch">
-      <view class="mode-btn" :class="{ active: mode === 'login' }" @tap="switchMode('login')">登录</view>
-      <view class="mode-btn" :class="{ active: mode === 'register' }" @tap="switchMode('register')">注册</view>
-      <view class="mode-btn" :class="{ active: mode === 'reset' }" @tap="switchMode('reset')">忘记密码</view>
-    </view>
-
-    <view v-if="mode === 'login'" class="form">
-      <view class="field">
-        <text class="field-label">账号</text>
-        <input
-          v-model="account"
-          class="field-input"
-          placeholder="请输入用户名"
-          placeholder-class="placeholder"
-          :disabled="loginLoading"
-        />
-      </view>
-      <view class="field">
-        <text class="field-label">密码</text>
-        <input
-          v-model="password"
-          class="field-input"
-          placeholder="请输入密码"
-          placeholder-class="placeholder"
-          password
-          :disabled="loginLoading"
-          @confirm="handleLogin"
-        />
-      </view>
-    </view>
-
-    <view v-else-if="mode === 'register'" class="form">
-      <view class="step-title-wrap">
-        <text class="step-title">步骤1：账号与密码</text>
-      </view>
-      <view class="field">
-        <text class="field-label">账号</text>
-        <input
-          v-model="regUsername"
-          class="field-input"
-          placeholder="至少3个字符"
-          placeholder-class="placeholder"
-          :disabled="registerLoading || regStep1Ready"
-        />
-      </view>
-      <view class="field">
-        <text class="field-label">设置密码</text>
-        <input
-          v-model="regPassword"
-          class="field-input"
-          placeholder="至少6位"
-          placeholder-class="placeholder"
-          password
-          :disabled="registerLoading || regStep1Ready"
-        />
-      </view>
-      <view class="field">
-        <text class="field-label">确认密码</text>
-        <input
-          v-model="regPasswordConfirm"
-          class="field-input"
-          placeholder="再次输入密码"
-          placeholder-class="placeholder"
-          password
-          :disabled="registerLoading || regStep1Ready"
-        />
-      </view>
-      <button
-        v-if="!regStep1Ready"
-        class="btn-secondary"
-        :disabled="registerLoading"
-        @click="handleRegisterStep1"
-      >
-        下一步
-      </button>
-      <view v-else class="step-ok-row">
-        <text class="step-ok-text">账号步骤已完成：{{ regUsername }}</text>
-        <text class="step-edit-btn" @tap="editRegisterStep1">修改</text>
+    <template v-else>
+      <!-- Logo 区域 -->
+      <view class="header">
+        <text class="logo-text">爱波塔</text>
+        <text class="logo-sub">AI 驱动的期权期货分析</text>
       </view>
 
-      <view v-if="regStep1Ready">
-        <view class="step-title-wrap step-gap">
-          <text class="step-title">步骤2：手机号验证</text>
+      <view class="mode-switch">
+        <view class="mode-btn" :class="{ active: mode === 'login' }" @tap="switchMode('login')">登录</view>
+        <view class="mode-btn" :class="{ active: mode === 'register' }" @tap="switchMode('register')">注册</view>
+        <view class="mode-btn" :class="{ active: mode === 'reset' }" @tap="switchMode('reset')">忘记密码</view>
+      </view>
+
+      <view v-if="mode === 'login'" class="form">
+        <view class="field">
+          <text class="field-label">账号</text>
+          <input
+            v-model="account"
+            class="field-input"
+            placeholder="请输入用户名"
+            placeholder-class="placeholder"
+            :disabled="loginLoading"
+          />
+        </view>
+        <view class="field">
+          <text class="field-label">密码</text>
+          <input
+            v-model="password"
+            class="field-input"
+            placeholder="请输入密码"
+            placeholder-class="placeholder"
+            password
+            :disabled="loginLoading"
+            @confirm="handleLogin"
+          />
+        </view>
+      </view>
+
+      <view v-else-if="mode === 'register'" class="form">
+        <view class="step-title-wrap">
+          <text class="step-title">步骤1：账号与密码</text>
+        </view>
+        <view class="field">
+          <text class="field-label">账号</text>
+          <input
+            v-model="regUsername"
+            class="field-input"
+            placeholder="至少3个字符"
+            placeholder-class="placeholder"
+            :disabled="registerLoading || regStep1Ready"
+          />
+        </view>
+        <view class="field">
+          <text class="field-label">设置密码</text>
+          <input
+            v-model="regPassword"
+            class="field-input"
+            placeholder="至少6位"
+            placeholder-class="placeholder"
+            password
+            :disabled="registerLoading || regStep1Ready"
+          />
+        </view>
+        <view class="field">
+          <text class="field-label">确认密码</text>
+          <input
+            v-model="regPasswordConfirm"
+            class="field-input"
+            placeholder="再次输入密码"
+            placeholder-class="placeholder"
+            password
+            :disabled="registerLoading || regStep1Ready"
+          />
+        </view>
+        <button
+          v-if="!regStep1Ready"
+          class="btn-secondary"
+          :disabled="registerLoading"
+          @click="handleRegisterStep1"
+        >
+          下一步
+        </button>
+        <view v-else class="step-ok-row">
+          <text class="step-ok-text">账号步骤已完成：{{ regUsername }}</text>
+          <text class="step-edit-btn" @tap="editRegisterStep1">修改</text>
+        </view>
+
+        <view v-if="regStep1Ready">
+          <view class="step-title-wrap step-gap">
+            <text class="step-title">步骤2：手机号验证</text>
+          </view>
+          <view class="field">
+            <text class="field-label">手机号（+86）</text>
+            <input
+              v-model="regPhone"
+              class="field-input"
+              placeholder="例如 13800138000"
+              placeholder-class="placeholder"
+              :disabled="registerLoading"
+            />
+          </view>
+          <view class="field">
+            <text class="field-label">短信验证码</text>
+            <view class="code-row">
+              <input
+                v-model="regCode"
+                class="field-input code-input"
+                placeholder="输入6位验证码"
+                placeholder-class="placeholder"
+                :disabled="registerLoading"
+              />
+              <button
+                class="code-btn"
+                :disabled="registerLoading || codeSending"
+                @click="sendRegisterCode"
+              >
+                {{ codeSending ? '发送中...' : '发验证码' }}
+              </button>
+            </view>
+          </view>
+        </view>
+      </view>
+
+      <view v-else class="form">
+        <view class="step-title-wrap">
+          <text class="step-title">通过注册手机号重置密码</text>
         </view>
         <view class="field">
           <text class="field-label">手机号（+86）</text>
           <input
-            v-model="regPhone"
+            v-model="resetPhone"
             class="field-input"
             placeholder="例如 13800138000"
             placeholder-class="placeholder"
-            :disabled="registerLoading"
+            :disabled="resetLoading"
           />
         </view>
         <view class="field">
           <text class="field-label">短信验证码</text>
           <view class="code-row">
             <input
-              v-model="regCode"
+              v-model="resetCode"
               class="field-input code-input"
               placeholder="输入6位验证码"
               placeholder-class="placeholder"
-              :disabled="registerLoading"
+              :disabled="resetLoading"
             />
             <button
               class="code-btn"
-              :disabled="registerLoading || codeSending"
-              @click="sendRegisterCode"
+              :disabled="resetLoading || resetCodeSending"
+              @click="sendResetCode"
             >
-              {{ codeSending ? '发送中...' : '发验证码' }}
+              {{ resetCodeSending ? '发送中...' : '发验证码' }}
             </button>
           </view>
         </view>
-      </view>
-    </view>
-
-    <view v-else class="form">
-      <view class="step-title-wrap">
-        <text class="step-title">通过注册手机号重置密码</text>
-      </view>
-      <view class="field">
-        <text class="field-label">手机号（+86）</text>
-        <input
-          v-model="resetPhone"
-          class="field-input"
-          placeholder="例如 13800138000"
-          placeholder-class="placeholder"
-          :disabled="resetLoading"
-        />
-      </view>
-      <view class="field">
-        <text class="field-label">短信验证码</text>
-        <view class="code-row">
+        <view class="field">
+          <text class="field-label">新密码</text>
           <input
-            v-model="resetCode"
-            class="field-input code-input"
-            placeholder="输入6位验证码"
+            v-model="resetPassword"
+            class="field-input"
+            placeholder="至少6位"
             placeholder-class="placeholder"
+            password
             :disabled="resetLoading"
           />
-          <button
-            class="code-btn"
-            :disabled="resetLoading || resetCodeSending"
-            @click="sendResetCode"
-          >
-            {{ resetCodeSending ? '发送中...' : '发验证码' }}
-          </button>
+        </view>
+        <view class="field">
+          <text class="field-label">确认密码</text>
+          <input
+            v-model="resetPasswordConfirm"
+            class="field-input"
+            placeholder="再次输入新密码"
+            placeholder-class="placeholder"
+            password
+            :disabled="resetLoading"
+            @confirm="handleResetPassword"
+          />
         </view>
       </view>
-      <view class="field">
-        <text class="field-label">新密码</text>
-        <input
-          v-model="resetPassword"
-          class="field-input"
-          placeholder="至少6位"
-          placeholder-class="placeholder"
-          password
-          :disabled="resetLoading"
-        />
+
+      <view v-if="mode !== 'reset'" class="agree-row">
+        <checkbox-group class="agree-check-group" @change="onAgreeChange">
+          <checkbox class="agree-checkbox" value="agreed" :checked="agreed" color="#f5c518" />
+        </checkbox-group>
+        <view class="agree-text-wrap">
+          <text class="agree-text" @tap="toggleAgree">我已阅读并同意</text>
+          <text class="link-text" @tap.stop="openProtocol('terms')">《用户服务协议》</text>
+          <text class="agree-text"> 和 </text>
+          <text class="link-text" @tap.stop="openProtocol('privacy')">《隐私政策》</text>
+        </view>
       </view>
-      <view class="field">
-        <text class="field-label">确认密码</text>
-        <input
-          v-model="resetPasswordConfirm"
-          class="field-input"
-          placeholder="再次输入新密码"
-          placeholder-class="placeholder"
-          password
-          :disabled="resetLoading"
-          @confirm="handleResetPassword"
-        />
+
+      <!-- 错误提示 -->
+      <view v-if="resetMessage" class="success-msg">{{ resetMessage }}</view>
+      <view v-if="error" class="error-msg">{{ error }}</view>
+
+      <!-- 登录按钮 -->
+      <button
+        v-if="mode === 'login'"
+        class="btn-primary login-btn"
+        :disabled="loginLoading"
+        @click="handleLogin"
+      >
+        {{ loginLoading ? '登录中...' : '登录' }}
+      </button>
+      <button
+        v-else-if="mode === 'register'"
+        class="btn-primary login-btn"
+        :disabled="registerLoading || !regStep1Ready"
+        @click="handleRegister"
+      >
+        {{ registerLoading ? '注册中...' : '完成注册' }}
+      </button>
+      <button
+        v-else
+        class="btn-primary login-btn"
+        :disabled="resetLoading"
+        @click="handleResetPassword"
+      >
+        {{ resetLoading ? '重置中...' : '重置密码' }}
+      </button>
+
+      <view class="footer-tip">
+        <text class="muted-text" v-if="mode === 'login'">还没有账号？切换到“注册”即可开通</text>
+        <text class="muted-text" v-else-if="mode === 'register'">注册成功后将自动登录</text>
+        <text class="muted-text" v-else>重置成功后请使用新密码登录</text>
+        <text class="contact-text">登录遇到问题可咨询客服：微信 trader-sec ｜ 电话 17521591756</text>
       </view>
-    </view>
-
-    <view v-if="mode !== 'reset'" class="agree-row">
-      <checkbox-group class="agree-check-group" @change="onAgreeChange">
-        <checkbox class="agree-checkbox" value="agreed" :checked="agreed" color="#f5c518" />
-      </checkbox-group>
-      <view class="agree-text-wrap">
-        <text class="agree-text" @tap="toggleAgree">我已阅读并同意</text>
-        <text class="link-text" @tap.stop="openProtocol('terms')">《用户服务协议》</text>
-        <text class="agree-text"> 和 </text>
-        <text class="link-text" @tap.stop="openProtocol('privacy')">《隐私政策》</text>
-      </view>
-    </view>
-
-    <!-- 错误提示 -->
-    <view v-if="resetMessage" class="success-msg">{{ resetMessage }}</view>
-    <view v-if="error" class="error-msg">{{ error }}</view>
-
-    <!-- 登录按钮 -->
-    <button
-      v-if="mode === 'login'"
-      class="btn-primary login-btn"
-      :disabled="loginLoading"
-      @click="handleLogin"
-    >
-      {{ loginLoading ? '登录中...' : '登录' }}
-    </button>
-    <button
-      v-else-if="mode === 'register'"
-      class="btn-primary login-btn"
-      :disabled="registerLoading || !regStep1Ready"
-      @click="handleRegister"
-    >
-      {{ registerLoading ? '注册中...' : '完成注册' }}
-    </button>
-    <button
-      v-else
-      class="btn-primary login-btn"
-      :disabled="resetLoading"
-      @click="handleResetPassword"
-    >
-      {{ resetLoading ? '重置中...' : '重置密码' }}
-    </button>
-
-    <view class="footer-tip">
-      <text class="muted-text" v-if="mode === 'login'">还没有账号？切换到“注册”即可开通</text>
-      <text class="muted-text" v-else-if="mode === 'register'">注册成功后将自动登录</text>
-      <text class="muted-text" v-else>重置成功后请使用新密码登录</text>
-      <text class="contact-text">登录遇到问题可咨询客服：微信 trader-sec ｜ 电话 17521591756</text>
-    </view>
+    </template>
   </view>
 </template>
 
@@ -426,6 +438,21 @@ function openProtocol(type: 'terms' | 'privacy') {
   padding: 0 48rpx;
   display: flex;
   flex-direction: column;
+}
+
+.auto-login-panel {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+}
+
+.auto-login-text {
+  margin-top: 24rpx;
+  color: #8ea4d1;
+  font-size: 26rpx;
 }
 
 .header {

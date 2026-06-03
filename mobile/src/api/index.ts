@@ -129,6 +129,31 @@ export interface ReportItem {
   published_at: string
 }
 
+export interface SafeStockMobileRender {
+  type: 'safe_stock_report'
+  hero: {
+    title: string
+    trade_date: string
+    generated_at: string
+    market_note: string
+  }
+  sectors: Array<Record<string, string>>
+  buys: Array<Record<string, string>>
+  watches: Array<Record<string, string>>
+  tracking: Array<Record<string, string>>
+}
+
+export interface ReportDetail {
+  id: number
+  title: string
+  summary?: string
+  content: string
+  channel_name: string
+  channel_code?: string
+  published_at: string
+  mobile_render?: SafeStockMobileRender
+}
+
 export interface AiNavPoint {
   trade_date: string
   nav: number
@@ -208,7 +233,7 @@ export const intelApi = {
   },
 
   detail: (id: number) =>
-    request<{ id: number; title: string; summary?: string; content: string; channel_name: string; published_at: string }>(
+    request<ReportDetail>(
       'GET', `/api/intel/report/${id}`
     ),
 
