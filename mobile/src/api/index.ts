@@ -143,6 +143,53 @@ export interface SafeStockMobileRender {
   tracking: Array<Record<string, string>>
 }
 
+export interface ExpiryOptionMobileRender {
+  type: 'expiry_option_radar'
+  hero: {
+    title: string
+    subtitle: string
+    intro: string
+  }
+  items: Array<{
+    name: string
+    days_left: string
+    strategy: string
+    trend: string
+    reason: string
+    price: string
+    contracts: Array<Record<string, string>>
+  }>
+  risks: string[]
+}
+
+export interface BrokerPositionMobileRender {
+  type: 'broker_position_report'
+  hero: {
+    title: string
+    subtitle: string
+  }
+  core_signals: Array<Record<string, string>>
+  institution_day: {
+    longs: Array<Record<string, string>>
+    shorts: Array<Record<string, string>>
+  }
+  institution_5d: {
+    longs: Array<Record<string, string>>
+    shorts: Array<Record<string, string>>
+  }
+  foreign_notes: string[]
+  contra: {
+    longs: Array<Record<string, string>>
+    shorts: Array<Record<string, string>>
+  }
+  commentary: string[]
+}
+
+export type ReportMobileRender =
+  | SafeStockMobileRender
+  | ExpiryOptionMobileRender
+  | BrokerPositionMobileRender
+
 export interface ReportDetail {
   id: number
   title: string
@@ -151,7 +198,7 @@ export interface ReportDetail {
   channel_name: string
   channel_code?: string
   published_at: string
-  mobile_render?: SafeStockMobileRender
+  mobile_render?: ReportMobileRender
 }
 
 export interface AiNavPoint {
