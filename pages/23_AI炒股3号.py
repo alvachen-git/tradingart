@@ -10,7 +10,7 @@ import streamlit.components.v1 as components
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from ai_simulation_service import (
-    OFFICIAL_PORTFOLIO_2_ID,
+    OFFICIAL_PORTFOLIO_3_ID,
     get_closed_trade_extremes,
     get_daily_review,
     get_latest_snapshot,
@@ -280,7 +280,7 @@ def _status_tone(status: str) -> str:
 
 def _render_watch_state_table(watch_state_df: pd.DataFrame) -> str:
     if watch_state_df.empty:
-        return '<div class="empty-box">暂无2号自选池数据</div>'
+        return '<div class="empty-box">暂无3号候选池数据</div>'
 
     show_cols = [
         "symbol",
@@ -299,7 +299,7 @@ def _render_watch_state_table(watch_state_df: pd.DataFrame) -> str:
     ]
     df = watch_state_df[[c for c in show_cols if c in watch_state_df.columns]].copy()
     if df.empty:
-        return '<div class="empty-box">暂无2号自选池数据</div>'
+        return '<div class="empty-box">暂无3号候选池数据</div>'
 
     df = df.sort_values(["score", "last_signal_date"], ascending=[False, False], na_position="last")
 
@@ -343,7 +343,7 @@ def _render_watch_state_table(watch_state_df: pd.DataFrame) -> str:
     )
 
 
-st.set_page_config(page_title="爱波塔-AI炒股2号", page_icon="favicon.ico", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title="爱波塔-AI炒股3号", page_icon="favicon.ico", layout="wide", initial_sidebar_state="expanded")
 
 from sidebar_navigation import show_navigation
 
@@ -832,7 +832,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-snapshot = get_latest_snapshot(OFFICIAL_PORTFOLIO_2_ID)
+snapshot = get_latest_snapshot(OFFICIAL_PORTFOLIO_3_ID)
 
 if not snapshot.get("has_data"):
     st.info("暂无模拟投资数据。请等待每日任务执行后查看。")
@@ -841,14 +841,14 @@ if not snapshot.get("has_data"):
 snapshot_trade_date = str(snapshot.get("trade_date") or "")
 snapshot_trade_date_view = _fmt_trade_date(snapshot_trade_date)
 
-pos_df = get_positions(OFFICIAL_PORTFOLIO_2_ID, as_of_date=snapshot_trade_date, strict_as_of=True)
-trades_df = get_trades(OFFICIAL_PORTFOLIO_2_ID, days=TRADE_WINDOW_DAYS)
-closed_trade_extremes = get_closed_trade_extremes(OFFICIAL_PORTFOLIO_2_ID, days=9999, limit=3)
-review_dates = get_review_dates(OFFICIAL_PORTFOLIO_2_ID, limit=260)
+pos_df = get_positions(OFFICIAL_PORTFOLIO_3_ID, as_of_date=snapshot_trade_date, strict_as_of=True)
+trades_df = get_trades(OFFICIAL_PORTFOLIO_3_ID, days=TRADE_WINDOW_DAYS)
+closed_trade_extremes = get_closed_trade_extremes(OFFICIAL_PORTFOLIO_3_ID, days=9999, limit=3)
+review_dates = get_review_dates(OFFICIAL_PORTFOLIO_3_ID, limit=260)
 if not review_dates and snapshot_trade_date:
     review_dates = [snapshot_trade_date]
 selected_review_date = review_dates[0] if review_dates else snapshot_trade_date
-review = get_daily_review(OFFICIAL_PORTFOLIO_2_ID, trade_date=selected_review_date)
+review = get_daily_review(OFFICIAL_PORTFOLIO_3_ID, trade_date=selected_review_date)
 
 if not pos_df.empty and "trade_date" in pos_df.columns:
     pos_trade_date = str(pos_df["trade_date"].astype(str).iloc[0])
@@ -860,8 +860,8 @@ st.markdown(
         '<div class="hero-shell">'
         '<div class="hero-top">'
         '<div>'
-        '<h1 class="hero-title">爱波塔-AI炒股2号</h1>'
-        '<div class="hero-sub">千问模型搭配Georgia训练｜A股 + ETF｜只做多｜每日20:30更新</div>'
+        '<h1 class="hero-title">爱波塔-AI炒股3号</h1>'
+        '<div class="hero-sub">千问模型搭配Jack训练｜A股 + ETF｜只做多｜每日20:30更新</div>'
         "</div>"
         "</div>"
         '<div class="hero-note">执行口径：AI自主推理选股，无人工干预，成交价格统一用当日收盘价，不计手续费与滑点。</div>'
@@ -1021,9 +1021,9 @@ if review_dates:
         format_func=_fmt_trade_date,
         key="ai_sim_review_date_selector",
     )
-    review = get_daily_review(OFFICIAL_PORTFOLIO_2_ID, trade_date=selected_review_date)
+    review = get_daily_review(OFFICIAL_PORTFOLIO_3_ID, trade_date=selected_review_date)
 else:
-    review = get_daily_review(OFFICIAL_PORTFOLIO_2_ID, trade_date=snapshot_trade_date)
+    review = get_daily_review(OFFICIAL_PORTFOLIO_3_ID, trade_date=snapshot_trade_date)
 
 st.markdown('<div class="diary-box">', unsafe_allow_html=True)
 st.markdown(
@@ -1044,7 +1044,7 @@ with left:
     st.markdown('<div class="panel-title">净值与双基准曲线</div>', unsafe_allow_html=True)
     st.markdown('<div class="panel-sub">观察组合净值与沪深300/中证1000归一化走势</div>', unsafe_allow_html=True)
     days = st.selectbox("查看区间", options=[30, 60, 120, 250, 9999], index=2, format_func=lambda x: "全部" if x == 9999 else f"近{x}日")
-    nav_df = get_nav_series(OFFICIAL_PORTFOLIO_2_ID, days)
+    nav_df = get_nav_series(OFFICIAL_PORTFOLIO_3_ID, days)
 
     if nav_df.empty:
         st.info("暂无净值曲线数据")
@@ -1183,9 +1183,9 @@ with b2:
     watchlist = review.get("next_watchlist") or []
     st.markdown(_render_watchlist_cards(watchlist), unsafe_allow_html=True)
     st.markdown('<div style="height:10px"></div>', unsafe_allow_html=True)
-    st.markdown('<div class="panel-title">2号自选池状态</div>', unsafe_allow_html=True)
+    st.markdown('<div class="panel-title">3号候选池状态</div>', unsafe_allow_html=True)
     watch_state_df = get_watchlist(
-        portfolio_id=OFFICIAL_PORTFOLIO_2_ID,
+        portfolio_id=OFFICIAL_PORTFOLIO_3_ID,
         as_of_date=snapshot_trade_date,
         limit=40,
         statuses=["watching", "bought", "exited"],

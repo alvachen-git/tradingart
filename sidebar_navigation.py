@@ -76,6 +76,7 @@ def show_navigation() -> None:
         _safe_page_link("Home.py", label="AI对话")
         _safe_page_link("pages/20_AI模拟投资.py", label="AI炒股")
         _safe_page_link("pages/22_AI炒股2号.py", label="AI炒股2号")
+        _safe_page_link("pages/23_AI炒股3号.py", label="AI炒股3号")
 
     with st.expander("期权数据", expanded=False):
         if not _is_online_env():

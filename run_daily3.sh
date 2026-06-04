@@ -19,14 +19,15 @@ run_step() {
   local total="$2"
   local title="$3"
   local script="$4"
+  shift 4
 
-  echo ">>> [${idx}/${total}] 开始${title}..." >> "$LOG_FILE"
-  log_system_state "STEP ${idx} BEFORE ${script}"
+  echo ">>> [${idx}/${total}] 开始${title}: ${script} $*..." >> "$LOG_FILE"
+  log_system_state "STEP ${idx} BEFORE ${script} $*"
 
-  /usr/bin/time -v /usr/bin/python3 "$script" >> "$LOG_FILE" 2>&1
+  /usr/bin/time -v /usr/bin/python3 "$script" "$@" >> "$LOG_FILE" 2>&1
   local rc=$?
 
-  log_system_state "STEP ${idx} AFTER ${script} (rc=${rc})"
+  log_system_state "STEP ${idx} AFTER ${script} $* (rc=${rc})"
   echo "<<< [${idx}/${total}] 结束${title} (rc=${rc})" >> "$LOG_FILE"
   echo "" >> "$LOG_FILE"
 
@@ -43,24 +44,28 @@ log_system_state "RUN START"
 
 
 # 1. 更新【期权数据】
-run_step 1 8 "更新ETF期权数据" "update_options_daily.py"
+run_step 1 10 "更新ETF期权数据" "update_options_daily.py"
 
-run_step 2 8 "更新指数数据" "update_index.py"
+run_step 2 10 "更新指数数据" "update_index.py"
 
 # 2. 更新【A股数据】
-run_step 3 8 "更新股票价格数据" "update_astock_daily.py"
+run_step 3 10 "更新股票价格数据" "update_astock_daily.py"
 
-run_step 4 8 "更新股票财务数据" "update_stock_valuation.py"
+run_step 4 10 "更新股票财务数据" "update_stock_valuation.py"
 
-run_step 5 8 "更新指数估值数据" "update_index_valuation.py"
+run_step 5 10 "更新指数估值数据" "update_index_valuation.py"
 
-run_step 6 8 "更新板块资金流数据" "update_sector_flow.py"
+run_step 6 10 "更新板块资金流数据" "update_sector_flow.py"
 
-run_step 7 8 "更新股票成交量排名数据" "update_stock_money_scan.py"
+run_step 7 10 "更新行业板块价格数据" "update_sector_index_price.py"
+
+run_step 8 10 "更新股票成交量排名数据" "update_stock_money_scan.py"
 
 # 3. 更新【波动率数据】
-run_step 8 8 "股票期权IV计算" "calc_iv_oneday.py"
+run_step 9 10 "股票期权IV计算" "calc_iv_oneday.py"
 
+# 4. 选股3号：只补前复权价格；日结由 run_ai_simulation_weekday_2030.sh 执行
+run_step 10 10 "更新选股3号前复权价格" "update_stock_price_qfq.py" "--date" "latest" "--lookback-days" "420" "--portfolio-id" "official_cn_a_etf_v3" "--v3-daily-candidates" "--sleep-sec" "0.05"
 
 
 # 7. 结束

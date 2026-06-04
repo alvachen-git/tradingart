@@ -1,5 +1,12 @@
 import unittest
+import os
 from unittest.mock import MagicMock, patch
+
+os.environ.setdefault("DB_HOST", "127.0.0.1")
+os.environ.setdefault("DB_PORT", "3306")
+os.environ.setdefault("DB_USER", "test")
+os.environ.setdefault("DB_PASSWORD", "test")
+os.environ.setdefault("DB_NAME", "test")
 
 import ai_simulation_service as svc
 import pandas as pd
@@ -50,6 +57,90 @@ class TestAISimulationService(unittest.TestCase):
 
         self.assertEqual(out["600519.SH"]["trade_date"], "20260528")
         self.assertEqual(out["600519.SH"]["close"], 1500.0)
+        self.assertEqual(out["600519.SH"]["price_mode"], "raw")
+        sql_text = str(mock_read_sql.call_args.args[0])
+        self.assertIn("FROM stock_price s", sql_text)
+
+    @patch("ai_simulation_service.pd.read_sql")
+    def test_fetch_price_snapshot_v3_uses_qfq_table(self, mock_read_sql):
+        mock_read_sql.return_value = pd.DataFrame(
+            [
+                {
+                    "ts_code": "002837.SZ",
+                    "trade_date": "20260514",
+                    "name": "英维克",
+                    "close_price": 78.48,
+                    "amount": 570_700.0,
+                    "vol": 540_500.0,
+                }
+            ]
+        )
+        fake_engine = MagicMock()
+        fake_engine.connect.return_value.__enter__.return_value = MagicMock()
+        fake_engine.connect.return_value.__exit__.return_value = False
+
+        with patch("ai_simulation_service.engine", fake_engine):
+            out = svc._fetch_price_snapshot(
+                ["002837.SZ"],
+                "20260514",
+                portfolio_id=svc.OFFICIAL_PORTFOLIO_3_ID,
+            )
+
+        self.assertEqual(out["002837.SZ"]["close"], 78.48)
+        self.assertEqual(out["002837.SZ"]["price_mode"], "qfq")
+        sql_text = str(mock_read_sql.call_args.args[0])
+        self.assertIn("FROM stock_price_qfq s", sql_text)
+
+    @patch("ai_simulation_service.pd.read_sql")
+    def test_fetch_price_snapshot_v3_missing_qfq_does_not_fallback_to_raw(self, mock_read_sql):
+        mock_read_sql.return_value = pd.DataFrame()
+        fake_engine = MagicMock()
+        fake_engine.connect.return_value.__enter__.return_value = MagicMock()
+        fake_engine.connect.return_value.__exit__.return_value = False
+
+        with patch("ai_simulation_service.engine", fake_engine):
+            out = svc._fetch_price_snapshot(
+                ["002837.SZ"],
+                "20260514",
+                portfolio_id="backtest_v3_unit",
+            )
+
+        self.assertEqual(out, {})
+        self.assertEqual(mock_read_sql.call_count, 1)
+        sql_text = str(mock_read_sql.call_args.args[0])
+        self.assertIn("FROM stock_price_qfq s", sql_text)
+        self.assertNotIn("FROM stock_price s", sql_text)
+
+    @patch("ai_simulation_service.pd.read_sql")
+    def test_fetch_price_snapshot_v1_still_uses_raw_stock_price(self, mock_read_sql):
+        mock_read_sql.return_value = pd.DataFrame(
+            [
+                {
+                    "ts_code": "002837.SZ",
+                    "trade_date": "20260514",
+                    "name": "英维克",
+                    "close_price": 102.20,
+                    "amount": 570_700.0,
+                    "vol": 540_500.0,
+                }
+            ]
+        )
+        fake_engine = MagicMock()
+        fake_engine.connect.return_value.__enter__.return_value = MagicMock()
+        fake_engine.connect.return_value.__exit__.return_value = False
+
+        with patch("ai_simulation_service.engine", fake_engine):
+            out = svc._fetch_price_snapshot(
+                ["002837.SZ"],
+                "20260514",
+                portfolio_id=svc.OFFICIAL_PORTFOLIO_ID,
+            )
+
+        self.assertEqual(out["002837.SZ"]["close"], 102.20)
+        self.assertEqual(out["002837.SZ"]["price_mode"], "raw")
+        sql_text = str(mock_read_sql.call_args.args[0])
+        self.assertIn("FROM stock_price s", sql_text)
+        self.assertNotIn("FROM stock_price_qfq s", sql_text)
 
     def test_stale_price_symbols_flags_missing_or_old_prices(self):
         price_map = {
@@ -252,6 +343,52 @@ class TestAISimulationService(unittest.TestCase):
         self.assertIn("300750.SZ", out["sells_md"])
         self.assertIn("明天继续盯什么", out["risk_md"])
         self.assertIsInstance(out.get("next_watchlist"), list)
+
+    @patch("ai_simulation_service._load_recent_diary_snippets", return_value=[])
+    def test_build_review_payload_v3_has_food_diet_and_proud_profit_persona(self, _snippets):
+        out = svc._build_review_payload(
+            trade_date="20260529",
+            nav_prev=1_000_000.0,
+            nav_now=1_004_000.0,
+            executed_trades=[],
+            orders_audited=[],
+            risk_notes=[],
+            ai_payload={"summary": "资金主线仍在观察", "risk_notes": "控制追高风险"},
+            candidates_df=pd.DataFrame(
+                [
+                    {"symbol": "000001.SZ", "name": "平安银行", "industry": "银行", "score": 75, "pct_chg": 0.5, "amount": 2e9},
+                ]
+            ),
+            final_positions={},
+            config={"review_use_llm": 0, "model_name": "qwen3.5-plus"},
+            tool_calls=[],
+            portfolio_id=svc.OFFICIAL_PORTFOLIO_3_ID,
+        )
+
+        self.assertIn("复盘日记", out["summary_md"])
+        self.assertTrue(any(k in out["summary_md"] for k in ["好吃", "减肥", "热量", "晚饭", "自律", "嘴馋"]))
+        self.assertIn("骄傲", out["summary_md"])
+        self.assertNotIn("五月天", out["summary_md"])
+
+    @patch("ai_simulation_service._load_recent_diary_snippets", return_value=[])
+    def test_build_review_payload_v3_self_mocks_when_losing(self, _snippets):
+        out = svc._build_review_payload(
+            trade_date="20260530",
+            nav_prev=1_000_000.0,
+            nav_now=996_000.0,
+            executed_trades=[],
+            orders_audited=[],
+            risk_notes=[],
+            ai_payload={"summary": "资金主线分歧扩大", "risk_notes": "控制回撤"},
+            candidates_df=pd.DataFrame(),
+            final_positions={},
+            config={"review_use_llm": 0, "model_name": "qwen3.5-plus"},
+            tool_calls=[],
+            portfolio_id=svc.OFFICIAL_PORTFOLIO_3_ID,
+        )
+
+        self.assertIn("复盘日记", out["summary_md"])
+        self.assertTrue(any(k in out["summary_md"] for k in ["自嘲", "市场没请我吃饭", "少点了一道菜"]))
 
     @patch("ai_simulation_service._load_recent_diary_snippets", return_value=[])
     @patch.dict("os.environ", {"DASHSCOPE_API_KEY": "test-key"})

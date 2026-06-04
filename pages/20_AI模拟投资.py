@@ -22,6 +22,9 @@ from ai_simulation_service import (
 from ui_components import inject_sidebar_toggle_style
 
 
+TRADE_WINDOW_DAYS = 30
+
+
 def _safe_float(value) -> float:
     try:
         return float(value)
@@ -135,7 +138,7 @@ def _render_holdings_table(pos_df: pd.DataFrame) -> str:
 
 def _render_trades_table(trades_df: pd.DataFrame) -> str:
     if trades_df.empty:
-        return '<div class="empty-box">最近2周暂无交易记录</div>'
+        return '<div class="empty-box">最近1个月暂无交易记录</div>'
 
     side_map = {"buy": "买入", "sell": "卖出"}
     df = trades_df.copy()
@@ -147,10 +150,10 @@ def _render_trades_table(trades_df: pd.DataFrame) -> str:
     valid_dt = df["trade_date_dt"].dropna()
     if not valid_dt.empty:
         latest_dt = valid_dt.max()
-        cutoff_dt = latest_dt - pd.Timedelta(days=13)
+        cutoff_dt = latest_dt - pd.Timedelta(days=TRADE_WINDOW_DAYS - 1)
         df = df[df["trade_date_dt"] >= cutoff_dt]
     if df.empty:
-        return '<div class="empty-box">最近2周暂无交易记录</div>'
+        return '<div class="empty-box">最近1个月暂无交易记录</div>'
 
     df["created_at_dt"] = pd.to_datetime(df.get("created_at"), errors="coerce")
     df = df.sort_values(["trade_date_dt", "created_at_dt"], ascending=[False, False], kind="stable")
@@ -722,7 +725,7 @@ snapshot_trade_date = str(snapshot.get("trade_date") or "")
 snapshot_trade_date_view = _fmt_trade_date(snapshot_trade_date)
 
 pos_df = get_positions(OFFICIAL_PORTFOLIO_ID, as_of_date=snapshot_trade_date, strict_as_of=True)
-trades_df = get_trades(OFFICIAL_PORTFOLIO_ID, days=20)
+trades_df = get_trades(OFFICIAL_PORTFOLIO_ID, days=TRADE_WINDOW_DAYS)
 closed_trade_extremes = get_closed_trade_extremes(OFFICIAL_PORTFOLIO_ID, days=9999, limit=3)
 review_dates = get_review_dates(OFFICIAL_PORTFOLIO_ID, limit=260)
 if not review_dates and snapshot_trade_date:

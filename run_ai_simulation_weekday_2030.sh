@@ -54,10 +54,22 @@ rc=0
   echo "script_dir: ${SCRIPT_DIR}"
   echo "python: ${PY_BIN}"
 
-  if "${PY_BIN}" ai_simulation_service.py; then
+  echo "phase 1/2: run AI stock 1号/2号"
+  if AI_SIM_SKIP_V3=1 "${PY_BIN}" ai_simulation_service.py; then
     rc=0
   else
     rc=$?
+  fi
+
+  if [[ ${rc} -eq 0 ]]; then
+    echo "phase 2/2: run AI stock 3号"
+    if "${PY_BIN}" run_ai_simulation_v3_daily.py --run-only --decision-mode llm_fallback --force; then
+      rc=0
+    else
+      rc=$?
+    fi
+  else
+    echo "skip AI stock 3号 because 1号/2号 phase failed (exit=${rc})"
   fi
 
   echo "AI simulation job end: $(date '+%Y-%m-%d %H:%M:%S %Z') (exit=${rc})"
