@@ -1,10 +1,46 @@
 import pandas as pd
 
 import market_tools
+import option_delta_tools
+import volume_oi_tools
 
 
 def _invoke_snapshot(query: str) -> str:
     return market_tools.get_market_snapshot.invoke(query)
+
+
+def test_etf_option_alias_prefers_kc50_over_embedded_50etf():
+    name, code = market_tools.resolve_etf_option_underlying("科创板50ETF12月 1.8 认沽")
+
+    assert code == "588000.SH"
+    assert name == "科创板50ETF"
+
+
+def test_etf_option_alias_accepts_kc50_common_typo():
+    name, code = market_tools.resolve_etf_option_underlying("科创版50ETF12月 1.8 认沽")
+
+    assert code == "588000.SH"
+    assert name == "科创版50ETF"
+
+
+def test_etf_option_alias_keeps_plain_50etf():
+    name, code = market_tools.resolve_etf_option_underlying("50ETF 12月 2.9 认沽")
+
+    assert code == "510050.SH"
+    assert name == "50ETF"
+
+
+def test_volume_oi_etf_alias_prefers_kc50_over_embedded_50etf():
+    code, display = volume_oi_tools.get_etf_underlying("科创50ETF期权持仓最大")
+
+    assert code == "588000.SH"
+    assert display == "科创50ETF"
+
+
+def test_delta_etf_alias_prefers_kc50_over_embedded_50etf():
+    code = option_delta_tools.detect_etf_underlying("科创板50ETF12月 1.8 认沽")
+
+    assert code == "588000.SH"
 
 
 def test_futures_product_snapshot_uses_dominant_month_not_far_month(monkeypatch):

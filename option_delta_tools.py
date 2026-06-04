@@ -19,16 +19,24 @@ except Exception:  # pragma: no cover
     vectorized_delta = None
 
 ETF_UNDERLYING_MAP = {
-    "50ETF": "510050.SH",
-    "上证50": "510050.SH",
-    "300ETF": "510300.SH",
-    "沪深300": "510300.SH",
+    "科创板50ETF": "588000.SH",
+    "科创版50ETF": "588000.SH",
+    "科创50ETF": "588000.SH",
+    "科创板50": "588000.SH",
+    "科创版50": "588000.SH",
+    "科创50": "588000.SH",
+    "科创板": "588000.SH",
+    "创业板ETF": "159915.SZ",
+    "创业板": "159915.SZ",
+    "中证500ETF": "510500.SH",
     "500ETF": "510500.SH",
     "中证500": "510500.SH",
-    "创业板": "159915.SZ",
-    "创业板ETF": "159915.SZ",
-    "科创50": "588000.SH",
-    "科创50ETF": "588000.SH",
+    "沪深300ETF": "510300.SH",
+    "300ETF": "510300.SH",
+    "沪深300": "510300.SH",
+    "上证50ETF": "510050.SH",
+    "50ETF": "510050.SH",
+    "上证50": "510050.SH",
 }
 
 ETF_MULTIPLIER = 10000
@@ -134,8 +142,9 @@ class OptionLeg:
 
 def detect_etf_underlying(text: str, symbol_hint: str = "") -> str:
     text_u = f"{symbol_hint} {text}".upper()
-    for name, code in ETF_UNDERLYING_MAP.items():
-        if name.upper() in text_u:
+    alias_items = sorted(ETF_UNDERLYING_MAP.items(), key=lambda kv: len(str(kv[0])), reverse=True)
+    for name, code in alias_items:
+        if str(name).upper() in text_u:
             return code
 
     m = re.search(r"(510\d{3}|159\d{3}|588\d{3})", text_u)
