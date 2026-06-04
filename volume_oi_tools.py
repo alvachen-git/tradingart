@@ -57,11 +57,24 @@ COMMODITY_MAP = {
 }
 
 ETF_MAP = {
-    '50ETF': ('510050.SH', '50ETF'), '上证50': ('510050.SH', '50ETF'),
-    '300ETF': ('510300.SH', '300ETF'), '沪深300': ('510300.SH', '300ETF'),
-    '500ETF': ('510500.SH', '500ETF'), '中证500': ('510500.SH', '500ETF'),
-    '创业板': ('159915.SZ', '创业板ETF'), '创业板ETF': ('159915.SZ', '创业板ETF'),
-    '科创50': ('588000.SH', '科创50ETF'), '科创板': ('588000.SH', '科创50ETF'),
+    '科创板50ETF': ('588000.SH', '科创50ETF'),
+    '科创版50ETF': ('588000.SH', '科创50ETF'),
+    '科创50ETF': ('588000.SH', '科创50ETF'),
+    '科创板50': ('588000.SH', '科创50ETF'),
+    '科创版50': ('588000.SH', '科创50ETF'),
+    '科创50': ('588000.SH', '科创50ETF'),
+    '科创板': ('588000.SH', '科创50ETF'),
+    '创业板ETF': ('159915.SZ', '创业板ETF'),
+    '创业板': ('159915.SZ', '创业板ETF'),
+    '中证500ETF': ('510500.SH', '500ETF'),
+    '500ETF': ('510500.SH', '500ETF'),
+    '中证500': ('510500.SH', '500ETF'),
+    '沪深300ETF': ('510300.SH', '300ETF'),
+    '300ETF': ('510300.SH', '300ETF'),
+    '沪深300': ('510300.SH', '300ETF'),
+    '上证50ETF': ('510050.SH', '50ETF'),
+    '50ETF': ('510050.SH', '50ETF'),
+    '上证50': ('510050.SH', '50ETF'),
 }
 
 CODE_TO_NAME_MAP = {
@@ -151,8 +164,11 @@ def get_commodity_prefix(query):
 
 def get_etf_underlying(query):
     """从查询中提取ETF标的"""
-    for name, (code, display) in ETF_MAP.items():
-        if name in query.upper(): return code, display
+    query_upper = str(query or "").upper()
+    alias_items = sorted(ETF_MAP.items(), key=lambda kv: len(str(kv[0])), reverse=True)
+    for name, (code, display) in alias_items:
+        if str(name).upper() in query_upper:
+            return code, display
     return None, None
 
 

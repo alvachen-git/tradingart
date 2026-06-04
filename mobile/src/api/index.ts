@@ -129,6 +129,78 @@ export interface ReportItem {
   published_at: string
 }
 
+export interface SafeStockMobileRender {
+  type: 'safe_stock_report'
+  hero: {
+    title: string
+    trade_date: string
+    generated_at: string
+    market_note: string
+  }
+  sectors: Array<Record<string, string>>
+  buys: Array<Record<string, string>>
+  watches: Array<Record<string, string>>
+  tracking: Array<Record<string, string>>
+}
+
+export interface ExpiryOptionMobileRender {
+  type: 'expiry_option_radar'
+  hero: {
+    title: string
+    subtitle: string
+    intro: string
+  }
+  items: Array<{
+    name: string
+    days_left: string
+    strategy: string
+    trend: string
+    reason: string
+    price: string
+    contracts: Array<Record<string, string>>
+  }>
+  risks: string[]
+}
+
+export interface BrokerPositionMobileRender {
+  type: 'broker_position_report'
+  hero: {
+    title: string
+    subtitle: string
+  }
+  core_signals: Array<Record<string, string>>
+  institution_day: {
+    longs: Array<Record<string, string>>
+    shorts: Array<Record<string, string>>
+  }
+  institution_5d: {
+    longs: Array<Record<string, string>>
+    shorts: Array<Record<string, string>>
+  }
+  foreign_notes: string[]
+  contra: {
+    longs: Array<Record<string, string>>
+    shorts: Array<Record<string, string>>
+  }
+  commentary: string[]
+}
+
+export type ReportMobileRender =
+  | SafeStockMobileRender
+  | ExpiryOptionMobileRender
+  | BrokerPositionMobileRender
+
+export interface ReportDetail {
+  id: number
+  title: string
+  summary?: string
+  content: string
+  channel_name: string
+  channel_code?: string
+  published_at: string
+  mobile_render?: ReportMobileRender
+}
+
 export interface AiNavPoint {
   trade_date: string
   nav: number
@@ -208,7 +280,7 @@ export const intelApi = {
   },
 
   detail: (id: number) =>
-    request<{ id: number; title: string; summary?: string; content: string; channel_name: string; published_at: string }>(
+    request<ReportDetail>(
       'GET', `/api/intel/report/${id}`
     ),
 

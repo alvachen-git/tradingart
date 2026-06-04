@@ -38,6 +38,36 @@ engine = get_db_engine()
 ensure_unified_stock_view(engine)
 STOCK_DAILY_SOURCE = get_stock_price_source(engine)
 
+ETF_OPTION_CODE_MAP = {
+    '科创板50ETF': '588000.SH',
+    '科创版50ETF': '588000.SH',
+    '科创50ETF': '588000.SH',
+    '科创板50': '588000.SH',
+    '科创版50': '588000.SH',
+    '科创50': '588000.SH',
+    '科创板': '588000.SH',
+    '创业板ETF': '159915.SZ',
+    '创业板': '159915.SZ',
+    '中证500ETF': '510500.SH',
+    '500ETF': '510500.SH',
+    '中证500': '510500.SH',
+    '沪深300ETF': '510300.SH',
+    '300ETF': '510300.SH',
+    '沪深300': '510300.SH',
+    '上证50ETF': '510050.SH',
+    '50ETF': '510050.SH',
+    '上证50': '510050.SH',
+}
+
+
+def resolve_etf_option_underlying(query: str):
+    query_upper = str(query or "").upper()
+    alias_items = sorted(ETF_OPTION_CODE_MAP.items(), key=lambda kv: len(str(kv[0])), reverse=True)
+    for name, code in alias_items:
+        if str(name).upper() in query_upper:
+            return name, code
+    return "", None
+
 
 # --- 2. 定義 AI 調用工具時的參數結構 ---
 class PriceStatsInput(BaseModel):
@@ -331,17 +361,6 @@ def tool_query_specific_option(query: str):
     from symbol_map import COMMON_ALIASES  # 导入现有映射
 
     # ==========================================
-    #  1. ETF期权映射
-    # ==========================================
-    ETF_CODE_MAP = {
-        '50ETF': '510050.SH', '上证50': '510050.SH',
-        '300ETF': '510300.SH', '沪深300': '510300.SH',
-        '500ETF': '510500.SH', '中证500': '510500.SH',
-        '创业板': '159915.SZ', '创业板ETF': '159915.SZ',
-        '科创50': '588000.SH', '科创板': '588000.SH', '科创50ETF': '588000.SH'
-    }
-
-    # ==========================================
     #  2. 判断是ETF期权还是商品期权
     # ==========================================
     query_upper = query.upper()
@@ -351,12 +370,9 @@ def tool_query_specific_option(query: str):
     is_commodity_option = False
 
     # 先检查ETF
-    for name, code in ETF_CODE_MAP.items():
-        if name.upper() in query_upper:
-            target_code = code
-            target_name = name
-            is_etf_option = True
-            break
+    target_name, target_code = resolve_etf_option_underlying(query)
+    if target_code:
+        is_etf_option = True
 
     # 再检查商品（使用 COMMON_ALIASES）
     if not target_code:

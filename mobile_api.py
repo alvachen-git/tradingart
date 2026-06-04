@@ -63,6 +63,7 @@ mobile_api.py — 爱波塔手机端专用 FastAPI 后端
 import base64
 import difflib
 import hashlib
+import html as html_lib
 import io
 import json
 import math
@@ -6659,6 +6660,35 @@ _INTEL_CHANNEL_CODE_ALIASES = {
     "expiry_option_report": "expiry_option_radar",
 }
 
+_SAFE_STOCK_HEADER_KEY_MAP = {
+    "排名": "rank",
+    "板块": "sector",
+    "类型": "type",
+    "分数": "score",
+    "资金改善": "money_improve",
+    "流入天数": "inflow_days",
+    "近窗涨幅": "recent_change",
+    "代码": "symbol",
+    "名称": "name",
+    "板块排名": "sector_rank",
+    "价格": "price",
+    "信号/说明": "note",
+    "当前状态": "status",
+    "已持有天数": "hold_days",
+    "今日操作": "action",
+    "收益": "return_pct",
+    "原因": "reason",
+}
+
+_BROKER_POSITION_HEADER_KEY_MAP = {
+    "品种": "product",
+    "合计": "total",
+    "明细": "details",
+    "合计净多": "total",
+    "合计净空": "total",
+    "潜在信号": "signal",
+}
+
 
 def _normalize_intel_channel_code(code: Optional[str]) -> Optional[str]:
     raw = str(code or "").strip().lower()
@@ -6673,6 +6703,320 @@ def _extract_published_at(payload: dict) -> str:
     if ts is None:
         ts = payload.get("published_at", "")
     return str(ts or "")
+
+
+def _plain_from_html_fragment(raw: Any) -> str:
+    text_value = str(raw or "")
+    if not text_value:
+        return ""
+    text_value = re.sub(r"<style[\s\S]*?</style>", "", text_value, flags=re.IGNORECASE)
+    text_value = re.sub(r"<script[\s\S]*?</script>", "", text_value, flags=re.IGNORECASE)
+    text_value = re.sub(r"<br\s*/?>", "\n", text_value, flags=re.IGNORECASE)
+    text_value = re.sub(r"<[^>]+>", " ", text_value)
+    text_value = html_lib.unescape(text_value)
+    return re.sub(r"[ \t\r\f\v]+", " ", text_value).strip()
+
+
+def _extract_first_html_text(pattern: str, html_text: str) -> str:
+    match = re.search(pattern, html_text, flags=re.IGNORECASE | re.DOTALL)
+    return _plain_from_html_fragment(match.group(1)) if match else ""
+
+
+def _parse_html_table_rows(table_html: str, key_map: Optional[Dict[str, str]] = None) -> List[Dict[str, str]]:
+    headers = [
+        _plain_from_html_fragment(cell)
+        for cell in re.findall(r"<th[^>]*>([\s\S]*?)</th>", table_html, flags=re.IGNORECASE)
+    ]
+    lookup = key_map or {}
+    keys = [lookup.get(h, h) for h in headers]
+    rows: List[Dict[str, str]] = []
+    for tr_html in re.findall(r"<tr[^>]*>([\s\S]*?)</tr>", table_html, flags=re.IGNORECASE):
+        cells = re.findall(r"<td[^>]*>([\s\S]*?)</td>", tr_html, flags=re.IGNORECASE)
+        if not cells:
+            continue
+        item: Dict[str, str] = {}
+        for idx, cell in enumerate(cells):
+            key = keys[idx] if idx < len(keys) else f"col_{idx}"
+            item[str(key)] = _plain_from_html_fragment(cell)
+        rows.append(item)
+    return rows
+
+
+def _parse_safe_stock_table_rows(table_html: str) -> List[Dict[str, str]]:
+    return _parse_html_table_rows(table_html, _SAFE_STOCK_HEADER_KEY_MAP)
+
+
+def _extract_tables_from_html(html_text: str) -> List[str]:
+    return re.findall(r"<table[^>]*>([\s\S]*?)</table>", html_text or "", flags=re.IGNORECASE)
+
+
+def _extract_safe_stock_section_rows(html_text: str, section_title: str) -> List[Dict[str, str]]:
+    section_match = re.search(
+        rf"<h2[^>]*>\s*{re.escape(section_title)}\s*</h2>([\s\S]*?)(?=<h2[^>]*>|<div\s+class=['\"]risk['\"]|</div>\s*</body>|</body>|$)",
+        html_text,
+        flags=re.IGNORECASE,
+    )
+    if not section_match:
+        return []
+    table_match = re.search(r"<table[^>]*>([\s\S]*?)</table>", section_match.group(1), flags=re.IGNORECASE)
+    if not table_match:
+        return []
+    return _parse_safe_stock_table_rows(table_match.group(1))
+
+
+def _extract_h2_section_html(html_text: str, section_title: str) -> str:
+    for match in re.finditer(r"<h2[^>]*>([\s\S]*?)</h2>", html_text or "", flags=re.IGNORECASE):
+        title = _plain_from_html_fragment(match.group(1))
+        if section_title not in title:
+            continue
+        start = match.end()
+        next_h2 = re.search(r"<h2[^>]*>", html_text[start:], flags=re.IGNORECASE)
+        end = start + next_h2.start() if next_h2 else len(html_text)
+        return html_text[start:end]
+    return ""
+
+
+def _split_plain_lines(raw: str) -> List[str]:
+    return [
+        line.strip(" \t\r\n-•")
+        for line in str(raw or "").splitlines()
+        if line.strip(" \t\r\n-•")
+    ]
+
+
+def _build_safe_stock_mobile_render(html_text: Any) -> Optional[Dict[str, Any]]:
+    raw = str(html_text or "")
+    if not raw or "小爱选股晚报" not in raw:
+        return None
+    try:
+        title = _extract_first_html_text(r"<h1[^>]*>([\s\S]*?)</h1>", raw) or "小爱选股晚报"
+        meta = _extract_first_html_text(r"<div[^>]*class=['\"][^'\"]*\bmuted\b[^'\"]*['\"][^>]*>([\s\S]*?)</div>", raw)
+        market_note = _extract_first_html_text(
+            r"<div[^>]*class=['\"][^'\"]*\bmarket-note\b[^'\"]*['\"][^>]*>([\s\S]*?)</div>",
+            raw,
+        )
+        trade_date = ""
+        generated_at = ""
+        if meta:
+            trade_match = re.search(r"交易日[:：]\s*([^·\s]+)", meta)
+            time_match = re.search(r"生成时间[:：]\s*(.+)$", meta)
+            trade_date = trade_match.group(1).strip() if trade_match else ""
+            generated_at = time_match.group(1).strip() if time_match else ""
+
+        payload = {
+            "type": "safe_stock_report",
+            "hero": {
+                "title": title,
+                "trade_date": trade_date,
+                "generated_at": generated_at,
+                "market_note": market_note,
+            },
+            "sectors": _extract_safe_stock_section_rows(raw, "资金回流"),
+            "buys": _extract_safe_stock_section_rows(raw, "可买标的"),
+            "watches": _extract_safe_stock_section_rows(raw, "观察标的"),
+            "tracking": _extract_safe_stock_section_rows(raw, "已买跟踪"),
+        }
+        if not any(payload.get(k) for k in ("sectors", "buys", "watches", "tracking")):
+            return None
+        return payload
+    except Exception:
+        return None
+
+
+def _build_expiry_option_mobile_render(html_text: Any) -> Optional[Dict[str, Any]]:
+    raw = str(html_text or "")
+    if not raw or "末日期权晚报" not in raw:
+        return None
+    try:
+        title = _extract_first_html_text(r"<h1[^>]*>([\s\S]*?)</h1>", raw) or "末日期权晚报"
+        subtitle = _extract_first_html_text(r"<div[^>]*class=['\"][^'\"]*\bheader\b[^'\"]*['\"][^>]*>[\s\S]*?<p[^>]*>([\s\S]*?)</p>", raw)
+        intro = ""
+        intro_match = re.search(
+            r"<div[^>]*class=['\"][^'\"]*\bcard\b[^'\"]*['\"][^>]*>[\s\S]*?<p[^>]*>([\s\S]*?)</p>",
+            raw,
+            flags=re.IGNORECASE,
+        )
+        if intro_match:
+            intro = _plain_from_html_fragment(intro_match.group(1))
+
+        items: List[Dict[str, Any]] = []
+        block_pattern = (
+            r"<div[^>]*style=['\"][^'\"]*margin-bottom\s*:\s*20px[^'\"]*['\"][^>]*>"
+            r"([\s\S]*?<h2[^>]*class=['\"][^'\"]*\bsection-title\b[^'\"]*['\"][^>]*>[\s\S]*?</h2>[\s\S]*?"
+            r"<div[^>]*class=['\"][^'\"]*\bcard\b[^'\"]*['\"][^>]*>[\s\S]*?</div>\s*)</div>"
+        )
+        for block in re.findall(block_pattern, raw, flags=re.IGNORECASE):
+            h2_match = re.search(r"<h2[^>]*>([\s\S]*?)</h2>", block, flags=re.IGNORECASE)
+            if not h2_match:
+                continue
+            heading = _plain_from_html_fragment(h2_match.group(1))
+            if not heading or "风险提示" in heading:
+                continue
+            days_match = re.search(r"剩余\s*([0-9]+)\s*天", heading)
+            days_left = days_match.group(1) if days_match else ""
+            strategy = ""
+            for candidate in ("买看涨", "买看跌", "卖看跌", "卖看涨", "牛市价差", "熊市价差", "双卖", "蝴蝶", "铁鹰"):
+                if candidate in heading:
+                    strategy = candidate
+                    break
+            name = heading
+            if days_match:
+                name = name[: days_match.start()]
+            if strategy:
+                name = name.replace(strategy, "")
+            name = re.sub(r"^[^\w\u4e00-\u9fff]+", "", name).strip(" ｜|")
+
+            fields: Dict[str, str] = {}
+            for label, value in re.findall(
+                r"<span[^>]*class=['\"][^'\"]*\blabel\b[^'\"]*['\"][^>]*>([\s\S]*?)</span>\s*"
+                r"<span[^>]*class=['\"][^'\"]*\bvalue\b[^'\"]*['\"][^>]*>([\s\S]*?)</span>",
+                block,
+                flags=re.IGNORECASE,
+            ):
+                fields[_plain_from_html_fragment(label)] = _plain_from_html_fragment(value)
+
+            contracts: List[Dict[str, str]] = []
+            for contract_name_html, meta_html in re.findall(
+                r"<div[^>]*class=['\"][^'\"]*\bcontract-name\b[^'\"]*['\"][^>]*>([\s\S]*?)</div>\s*"
+                r"<div[^>]*class=['\"][^'\"]*\bcontract-meta\b[^'\"]*['\"][^>]*>([\s\S]*?)</div>",
+                block,
+                flags=re.IGNORECASE,
+            ):
+                contract_name = _plain_from_html_fragment(contract_name_html)
+                meta_values = [
+                    _plain_from_html_fragment(x)
+                    for x in re.findall(r"<span[^>]*>([\s\S]*?)</span>", meta_html, flags=re.IGNORECASE)
+                ]
+                if contract_name or meta_values:
+                    contracts.append({
+                        "name": contract_name,
+                        "premium": meta_values[0] if meta_values else "",
+                        "holding": meta_values[1] if len(meta_values) > 1 else "",
+                    })
+
+            if name or fields or contracts:
+                items.append({
+                    "name": name or "标的",
+                    "days_left": days_left,
+                    "strategy": strategy,
+                    "trend": fields.get("趋势研判", ""),
+                    "reason": fields.get("策略理由", ""),
+                    "price": fields.get("标的现价", ""),
+                    "contracts": contracts,
+                })
+
+        risk_text = _extract_first_html_text(
+            r"<div[^>]*class=['\"][^'\"]*\brisk-box\b[^'\"]*['\"][^>]*>[\s\S]*?<p[^>]*>([\s\S]*?)</p>",
+            raw,
+        )
+        risks = _split_plain_lines(risk_text) if risk_text else []
+        payload = {
+            "type": "expiry_option_radar",
+            "hero": {
+                "title": title,
+                "subtitle": subtitle,
+                "intro": intro,
+            },
+            "items": items,
+            "risks": risks,
+        }
+        if not items and not intro:
+            return None
+        return payload
+    except Exception:
+        return None
+
+
+def _parse_broker_signal_items(section_html: str) -> List[Dict[str, str]]:
+    items: List[Dict[str, str]] = []
+    for item_html in re.findall(
+        r"<div[^>]*class=['\"][^'\"]*\bsignal-item\b[^'\"]*['\"][^>]*>([\s\S]*?)</div>",
+        section_html or "",
+        flags=re.IGNORECASE,
+    ):
+        title = _extract_first_html_text(r"<strong[^>]*>([\s\S]*?)</strong>", item_html)
+        detail = _plain_from_html_fragment(re.sub(r"<strong[^>]*>[\s\S]*?</strong>", "", item_html, flags=re.IGNORECASE))
+        if title or detail:
+            items.append({"title": title, "detail": detail})
+    return items
+
+
+def _parse_broker_table(section_html: str, index: int) -> List[Dict[str, str]]:
+    tables = _extract_tables_from_html(section_html)
+    if index < 0 or index >= len(tables):
+        return []
+    return _parse_html_table_rows(tables[index], _BROKER_POSITION_HEADER_KEY_MAP)
+
+
+def _parse_broker_5d_items(section_html: str, direction_title: str) -> List[Dict[str, str]]:
+    section_text = _plain_from_html_fragment(section_html)
+    start = section_text.find(direction_title)
+    if start < 0:
+        return []
+    tail = section_text[start + len(direction_title):]
+    other_title = "累计做空" if direction_title == "累计做多" else "累计做多"
+    other_pos = tail.find(other_title)
+    if other_pos >= 0:
+        tail = tail[:other_pos]
+    items: List[Dict[str, str]] = []
+    for line in _split_plain_lines(tail):
+        match = re.search(r"([0-9]+)\.\s*([^\s]+)\s+([+-][0-9,]+手)\s*(\(约[+-]?[0-9.]+亿\))?", line)
+        if match:
+            items.append({
+                "rank": match.group(1),
+                "product": match.group(2),
+                "change": match.group(3),
+                "value": match.group(4) or "",
+            })
+    return items
+
+
+def _build_broker_position_mobile_render(html_text: Any) -> Optional[Dict[str, Any]]:
+    raw = str(html_text or "")
+    if not raw or ("期货商持仓" not in raw and "持仓数据流" not in raw):
+        return None
+    try:
+        title = _extract_first_html_text(r"<h1[^>]*>([\s\S]*?)</h1>", raw) or "持仓晚报"
+        subtitle = _extract_first_html_text(r"<p[^>]*class=['\"][^'\"]*\bsub-text\b[^'\"]*['\"][^>]*>([\s\S]*?)</p>", raw)
+        core_section = _extract_h2_section_html(raw, "今日核心信号")
+        institution_day = _extract_h2_section_html(raw, "机构当日动向")
+        institution_5d = _extract_h2_section_html(raw, "机构5日累计布局")
+        foreign_section = _extract_h2_section_html(raw, "外资风向标")
+        contra_section = _extract_h2_section_html(raw, "反指标信号")
+        comment_section = _extract_h2_section_html(raw, "AI毒舌点评")
+
+        foreign_text = _plain_from_html_fragment(foreign_section)
+        commentary = _plain_from_html_fragment(comment_section)
+        payload = {
+            "type": "broker_position_report",
+            "hero": {
+                "title": title,
+                "subtitle": subtitle,
+            },
+            "core_signals": _parse_broker_signal_items(core_section),
+            "institution_day": {
+                "longs": _parse_broker_table(institution_day, 0),
+                "shorts": _parse_broker_table(institution_day, 1),
+            },
+            "institution_5d": {
+                "longs": _parse_broker_5d_items(institution_5d, "累计做多"),
+                "shorts": _parse_broker_5d_items(institution_5d, "累计做空"),
+            },
+            "foreign_notes": _split_plain_lines(foreign_text),
+            "contra": {
+                "longs": _parse_broker_table(contra_section, 0),
+                "shorts": _parse_broker_table(contra_section, 1),
+            },
+            "commentary": _split_plain_lines(commentary),
+        }
+        if not any(
+            payload.get(key)
+            for key in ("core_signals", "foreign_notes", "commentary")
+        ) and not payload["institution_day"]["longs"] and not payload["contra"]["longs"]:
+            return None
+        return payload
+    except Exception:
+        return None
 
 
 def _is_production_env() -> bool:
@@ -6936,6 +7280,19 @@ def intel_report_detail(
             raise HTTPException(status_code=403, detail="该内容需要订阅后查看")
     # 统一返回字段，避免客户端被 publish_time/published_at 命名差异影响
     content["published_at"] = _extract_published_at(content)
+    channel_code = str(content.get("channel_code") or "").strip().lower()
+    if channel_code == "safe_stock_report":
+        mobile_render = _build_safe_stock_mobile_render(content.get("content") or "")
+        if mobile_render:
+            content["mobile_render"] = mobile_render
+    elif channel_code == "expiry_option_radar":
+        mobile_render = _build_expiry_option_mobile_render(content.get("content") or "")
+        if mobile_render:
+            content["mobile_render"] = mobile_render
+    elif channel_code == "broker_position_report":
+        mobile_render = _build_broker_position_mobile_render(content.get("content") or "")
+        if mobile_render:
+            content["mobile_render"] = mobile_render
     return content
 
 

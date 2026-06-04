@@ -69,7 +69,11 @@ INTEL_PACKAGE_PRODUCT = {
     "name": "情报套餐",
     "icon": "🧠",
     "points_monthly": 999,
-    "includes": [item["code"] for item in REPORT_PRODUCTS],
+    "includes": [
+        item["code"]
+        for item in REPORT_PRODUCTS
+        if item["code"] != "safe_stock_report"
+    ],
 }
 
 ALIPAY_NOTIFY_URL = os.getenv("ALIPAY_NOTIFY_URL", "https://www.aiprota.com/api/alipay/notify")

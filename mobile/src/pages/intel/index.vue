@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, computed, watch, nextTick, getCurrentInstance } from 'vue'
+import { ref, onMounted, computed } from 'vue'
 import { onShow, onReachBottom, onPullDownRefresh } from '@dcloudio/uni-app'
 import {
   intelApi,
@@ -11,6 +11,7 @@ import {
   type UserProfile,
 } from '../../api/index'
 import { formatAiForMobile } from '../../utils/ai_mobile_formatter'
+import { formatBeijingDateTime } from '../../utils/time'
 import { useAuthStore } from '../../store/auth'
 import BottomNav from '../../components/BottomNav.vue'
 
@@ -21,11 +22,13 @@ const activeMainTab = ref<MainTab>('intel')
 
 const channels = [
   { code: '', label: '全部' },
+  { code: 'safe_stock_report', label: '小爱选股' },
   { code: 'daily_report', label: '复盘晚报' },
   { code: 'trade_signal', label: '盘面观察' },
   { code: 'fund_flow_report', label: '资金流晚报' },
   { code: 'expiry_option_radar', label: '末日晚报' },
   { code: 'broker_position_report', label: '持仓晚报' },
+  { code: 'macro_risk_radar', label: '宏观周报' },
 ]
 
 // ── 情报列表 ───────────────────────────────────────────────
@@ -41,7 +44,6 @@ const allowedChannelCodes = ref<Set<string>>(new Set())
 // ── AI日记 ─────────────────────────────────────────────────
 const AI_OVERVIEW_CACHE_KEY = 'intel_ai_overview_cache_v2'
 const AI_OVERVIEW_TTL_MS = 20 * 60 * 1000
-const vm = getCurrentInstance()
 
 const aiOverview = ref<AiOverviewPayload | null>(null)
 const aiReview = ref<AiReviewPayload | null>(null)
@@ -51,6 +53,15 @@ const aiReviewLoading = ref(false)
 const aiError = ref('')
 const aiCacheTs = ref(0)
 const selectedReviewDate = ref('')
+const activeChartPoint = ref<{
+  td: string
+  xPct: number
+  lineStyle: string
+  tooltipStyle: string
+  nav: string
+  hs: string
+  zz: string
+} | null>(null)
 
 const currentChannelLabel = computed(() => {
   const cur = channels.find((c) => c.code === activeChannel.value)
@@ -66,6 +77,11 @@ const INTEL_ACCESS_CODES = new Set(
 const reviewDates = computed(() => aiOverview.value?.review_dates || [])
 const selectedReviewLabel = computed(() => {
   return selectedReviewDate.value ? formatTradeDate(selectedReviewDate.value) : '选择复盘日'
+})
+const reviewDateLabels = computed(() => reviewDates.value.map((d) => formatTradeDate(d)))
+const selectedReviewIndex = computed(() => {
+  const idx = reviewDates.value.findIndex((d) => d === selectedReviewDate.value)
+  return idx >= 0 ? idx : 0
 })
 
 const snapshot = computed(() => aiOverview.value?.snapshot || {})
@@ -95,14 +111,14 @@ const navChart = computed(() => {
   if (rows.length < 2) return null
 
   const width = 680
-  const height = 220
-  const padX = 20
-  const padY = 16
+  const height = 300
+  const padX = 48
+  const padY = 18
   const innerW = width - padX * 2
   const innerH = height - padY * 2
   const initialCap = toNum(snapshot.value.initial_capital, 1_000_000)
 
-  const values = rows.map((r: any) => {
+  const rawRows = rows.map((r: any) => {
     let nav = toNum(r.nav_norm, NaN)
     if (!Number.isFinite(nav) || nav <= 0) {
       const rawNav = toNum(r.nav, 0)
@@ -116,6 +132,31 @@ const navChart = computed(() => {
     }
   })
 
+  const normalizeLine = (series: number[]) => {
+    const valid = series.filter((v) => Number.isFinite(v) && v > 0)
+    const base = valid[0] || 1
+    let hasSeenValid = false
+    let last = 1
+    return series.map((v) => {
+      if (!Number.isFinite(v) || v <= 0) return hasSeenValid ? last : 1
+      const next = v / base
+      if (!Number.isFinite(next) || next <= 0) return last
+      hasSeenValid = true
+      last = next
+      return next
+    })
+  }
+
+  const navSeries = normalizeLine(rawRows.map((r) => r.nav))
+  const hsSeries = normalizeLine(rawRows.map((r) => r.hs))
+  const zzSeries = normalizeLine(rawRows.map((r) => r.zz))
+  const values = rawRows.map((r, idx) => ({
+    td: r.td,
+    nav: navSeries[idx],
+    hs: hsSeries[idx],
+    zz: zzSeries[idx],
+  }))
+
   const all = values.flatMap((v) => [v.nav, v.hs, v.zz]).filter((v) => Number.isFinite(v))
   if (!all.length) return null
 
@@ -126,21 +167,92 @@ const navChart = computed(() => {
     minV -= 0.01
     maxV += 0.01
   }
+  const padding = Math.max((maxV - minV) * 0.08, 0.005)
+  minV -= padding
+  maxV += padding
 
   const toPoint = (idx: number, v: number) => {
     const x = padX + (values.length <= 1 ? 0 : (idx * innerW) / (values.length - 1))
     const y = padY + ((maxV - v) / (maxV - minV)) * innerH
-    return `${x.toFixed(1)},${y.toFixed(1)}`
+    return { x, y }
   }
+
+  const makePoints = (key: 'nav' | 'hs' | 'zz') => values.map((v, i) => toPoint(i, v[key]))
+  const pointString = (points: Array<{ x: number; y: number }>) =>
+    points.map((p) => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' ')
+  const makeSegments = (
+    points: Array<{ x: number; y: number }>,
+    color: string,
+    widthPx: number,
+    prefix: string,
+  ) => {
+    const segments: Array<{ key: string; style: string }> = []
+    for (let i = 1; i < points.length; i += 1) {
+      const prev = points[i - 1]
+      const cur = points[i]
+      const dx = cur.x - prev.x
+      const dy = cur.y - prev.y
+      const len = Math.sqrt(dx * dx + dy * dy)
+      if (!Number.isFinite(len) || len <= 0) continue
+      const angle = Math.atan2(dy, dx) * (180 / Math.PI)
+      segments.push({
+        key: `${prefix}-${i}`,
+        style: [
+          `left:${(prev.x / width) * 100}%`,
+          `top:${(prev.y / height) * 100}%`,
+          `width:${(len / width) * 100}%`,
+          `height:${widthPx}px`,
+          `background:${color}`,
+          `transform:rotate(${angle.toFixed(2)}deg)`,
+        ].join(';'),
+      })
+    }
+    return segments
+  }
+
+  const navPoints = makePoints('nav')
+  const hsPoints = makePoints('hs')
+  const zzPoints = makePoints('zz')
+  const pointItems = values.map((v, idx) => {
+    const point = navPoints[idx]
+    const xPct = (point.x / width) * 100
+    return {
+      td: v.td,
+      xPct,
+      lineStyle: `left:${xPct}%`,
+      tooltipStyle: xPct > 58 ? `right:${Math.max(100 - xPct + 2, 4)}%` : `left:${Math.min(xPct + 2, 58)}%`,
+      nav: v.nav.toFixed(3),
+      hs: v.hs.toFixed(3),
+      zz: v.zz.toFixed(3),
+    }
+  })
+  const hitZones = pointItems.map((point, idx) => {
+    const prevX = idx > 0 ? pointItems[idx - 1].xPct : point.xPct
+    const nextX = idx < pointItems.length - 1 ? pointItems[idx + 1].xPct : point.xPct
+    const left = idx === 0 ? 0 : (prevX + point.xPct) / 2
+    const right = idx === pointItems.length - 1 ? 100 : (point.xPct + nextX) / 2
+    return {
+      key: `hit-${idx}-${point.td}`,
+      style: `left:${left}%;width:${Math.max(right - left, 0.6)}%`,
+      point,
+    }
+  })
 
   return {
     width,
     height,
-    navPoints: values.map((v, i) => toPoint(i, v.nav)).join(' '),
-    hsPoints: values.map((v, i) => toPoint(i, v.hs)).join(' '),
-    zzPoints: values.map((v, i) => toPoint(i, v.zz)).join(' '),
+    navPoints: pointString(navPoints),
+    hsPoints: pointString(hsPoints),
+    zzPoints: pointString(zzPoints),
+    segments: [
+      ...makeSegments(navPoints, '#f5c518', 2, 'nav'),
+      ...makeSegments(hsPoints, '#3cc8ff', 2, 'hs'),
+      ...makeSegments(zzPoints, '#2ecb88', 2, 'zz'),
+    ],
+    hitZones,
     min: minV,
     max: maxV,
+    mid: (minV + maxV) / 2,
     start: values[0].td,
     end: values[values.length - 1].td,
     latestNav: values[values.length - 1].nav,
@@ -148,60 +260,6 @@ const navChart = computed(() => {
     latestZz: values[values.length - 1].zz,
   }
 })
-
-function parseChartPoints(points: string): Array<{ x: number; y: number }> {
-  return String(points || '')
-    .split(' ')
-    .map((pair) => pair.trim())
-    .filter(Boolean)
-    .map((pair) => {
-      const [x, y] = pair.split(',')
-      return { x: Number(x), y: Number(y) }
-    })
-    .filter((p) => Number.isFinite(p.x) && Number.isFinite(p.y))
-}
-
-function drawMpPolyline(ctx: any, points: Array<{ x: number; y: number }>, color: string, width: number) {
-  if (!points.length) return
-  ctx.beginPath()
-  ctx.setStrokeStyle(color)
-  ctx.setLineWidth(width)
-  points.forEach((p, idx) => {
-    if (idx === 0) ctx.moveTo(p.x, p.y)
-    else ctx.lineTo(p.x, p.y)
-  })
-  ctx.stroke()
-}
-
-function drawMpNavChart() {
-  // #ifndef MP-WEIXIN
-  return
-  // #endif
-  // #ifdef MP-WEIXIN
-  const chart = navChart.value
-  if (!chart || activeMainTab.value !== 'ai') return
-  const ctx = uni.createCanvasContext('aiNavCanvas', vm)
-  const w = chart!.width
-  const h = chart!.height
-
-  ctx.clearRect(0, 0, w, h)
-
-  ctx.setStrokeStyle('rgba(74, 106, 159, 0.35)')
-  ctx.setLineWidth(1)
-  for (let i = 0; i <= 3; i += 1) {
-    const y = 16 + ((h - 32) * i) / 3
-    ctx.beginPath()
-    ctx.moveTo(20, y)
-    ctx.lineTo(w - 20, y)
-    ctx.stroke()
-  }
-
-  drawMpPolyline(ctx, parseChartPoints(chart!.navPoints), '#f5c518', 3)
-  drawMpPolyline(ctx, parseChartPoints(chart!.hsPoints), '#3cc8ff', 2)
-  drawMpPolyline(ctx, parseChartPoints(chart!.zzPoints), '#2ecb88', 2)
-  ctx.draw()
-  // #endif
-}
 
 onShow(() => {
   if (!auth.isLoggedIn) {
@@ -235,11 +293,28 @@ onPullDownRefresh(async () => {
 
 async function toggleAiTab() {
   if (activeMainTab.value === 'ai') {
+    clearChartPoint()
     activeMainTab.value = 'intel'
     return
   }
   activeMainTab.value = 'ai'
   await ensureAiOverview(false)
+}
+
+function showChartPoint(point: {
+  td: string
+  xPct: number
+  lineStyle: string
+  tooltipStyle: string
+  nav: string
+  hs: string
+  zz: string
+}) {
+  activeChartPoint.value = point
+}
+
+function clearChartPoint() {
+  activeChartPoint.value = null
 }
 
 async function loadReports(reset = false) {
@@ -325,6 +400,7 @@ function isCacheFresh(ts: number): boolean {
 }
 
 function applyOverview(payload: AiOverviewPayload) {
+  clearChartPoint()
   aiOverview.value = payload
   const latest = payload.latest_review
   if (latest && latest.has_data !== false) {
@@ -390,20 +466,14 @@ async function ensureAiOverview(force = false) {
   await fetchAiOverview(false)
 }
 
-function openReviewPicker() {
-  if (!reviewDates.value.length) return
-  uni.showActionSheet({
-    itemList: reviewDates.value.map((d) => formatTradeDate(d)),
-    success: async (res) => {
-      const idx = Number(res.tapIndex)
-      if (Number.isNaN(idx) || idx < 0 || idx >= reviewDates.value.length) return
-      const target = reviewDates.value[idx]
-      if (!target) return
-      if (selectedReviewDate.value === target && aiReview.value?.trade_date === target) return
-      selectedReviewDate.value = target
-      await loadAiReview(target)
-    },
-  })
+async function handleReviewDateChange(e: any) {
+  const idx = Number(e?.detail?.value ?? 0)
+  if (Number.isNaN(idx) || idx < 0 || idx >= reviewDates.value.length) return
+  const target = reviewDates.value[idx]
+  if (!target) return
+  if (selectedReviewDate.value === target && aiReview.value?.trade_date === target) return
+  selectedReviewDate.value = target
+  await loadAiReview(target)
 }
 
 async function loadAiReview(tradeDate: string) {
@@ -482,11 +552,6 @@ function goRecharge() {
   uni.navigateTo({ url: '/pages/recharge/index' })
 }
 
-function formatDate(s: string) {
-  if (!s) return ''
-  return s.slice(0, 16).replace('T', ' ')
-}
-
 function formatReportTitle(title: string) {
   return String(title || '')
     .replace(/期货商持仓晚报/g, '持仓晚报')
@@ -561,20 +626,6 @@ function toneClass(v: any): string {
   return 'flat'
 }
 
-watch(
-  [navChart, activeMainTab],
-  async ([chart, tab]) => {
-    // #ifndef MP-WEIXIN
-    return
-    // #endif
-    // #ifdef MP-WEIXIN
-    if (!chart || tab !== 'ai') return
-    await nextTick()
-    drawMpNavChart()
-    // #endif
-  },
-  { immediate: true },
-)
 </script>
 
 <template>
@@ -605,7 +656,7 @@ watch(
           <view v-if="canAccessReport(item)">
             <view class="card-top">
               <view class="channel-badge">{{ formatChannelName(item.channel_name) }}</view>
-              <text class="date-text">{{ formatDate(item.published_at) }}</text>
+              <text class="date-text">{{ formatBeijingDateTime(item.published_at) }}</text>
             </view>
             <text class="card-title">{{ formatReportTitle(item.title) }}</text>
             <text class="card-summary">{{ stripHtml(item.summary) }}</text>
@@ -693,10 +744,19 @@ watch(
         <view class="ai-card">
           <view class="panel-head">
             <text class="panel-title">复盘日记</text>
-            <view class="picker-trigger" @tap="openReviewPicker">
-              <text class="picker-label">{{ selectedReviewLabel }}</text>
-              <text class="picker-arrow">▾</text>
-            </view>
+            <picker
+              class="review-date-picker"
+              mode="selector"
+              :range="reviewDateLabels"
+              :value="selectedReviewIndex"
+              :disabled="!reviewDates.length || aiReviewLoading"
+              @change="handleReviewDateChange"
+            >
+              <view class="picker-trigger">
+                <text class="picker-label">{{ selectedReviewLabel }}</text>
+                <text class="picker-arrow">▾</text>
+              </view>
+            </picker>
           </view>
 
           <view v-if="aiReviewLoading" class="center-tip">
@@ -729,21 +789,58 @@ watch(
           </view>
 
           <view v-if="navChart" class="chart-wrap">
-            <!-- #ifdef MP-WEIXIN -->
-            <canvas
-              canvas-id="aiNavCanvas"
-              class="chart-canvas"
-              :width="navChart.width"
-              :height="navChart.height"
-            />
-            <!-- #endif -->
-            <!-- #ifndef MP-WEIXIN -->
-            <svg class="chart-svg" :viewBox="`0 0 ${navChart.width} ${navChart.height}`" :width="navChart.width" :height="navChart.height" preserveAspectRatio="none">
-              <polyline :points="navChart.navPoints" fill="none" stroke="#f5c518" stroke-width="3" stroke-linejoin="round" stroke-linecap="round" />
-              <polyline :points="navChart.hsPoints" fill="none" stroke="#3cc8ff" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" />
-              <polyline :points="navChart.zzPoints" fill="none" stroke="#2ecb88" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" />
-            </svg>
-            <!-- #endif -->
+            <view class="chart-plot">
+              <view class="chart-y-labels">
+                <text>{{ navChart.max.toFixed(2) }}</text>
+                <text>{{ navChart.mid.toFixed(2) }}</text>
+                <text>{{ navChart.min.toFixed(2) }}</text>
+              </view>
+              <view class="chart-grid-line top"></view>
+              <view class="chart-grid-line middle"></view>
+              <view class="chart-grid-line bottom"></view>
+              <!-- #ifdef MP-WEIXIN -->
+              <view class="chart-lines">
+                <view
+                  v-for="segment in navChart.segments"
+                  :key="segment.key"
+                  class="chart-segment"
+                  :style="segment.style"
+                />
+              </view>
+              <!-- #endif -->
+              <!-- #ifndef MP-WEIXIN -->
+              <svg class="chart-svg" :viewBox="`0 0 ${navChart.width} ${navChart.height}`" :width="navChart.width" :height="navChart.height" preserveAspectRatio="none">
+                <polyline :points="navChart.navPoints" fill="none" stroke="#f5c518" stroke-width="3" stroke-linejoin="round" stroke-linecap="round" />
+                <polyline :points="navChart.hsPoints" fill="none" stroke="#3cc8ff" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" />
+                <polyline :points="navChart.zzPoints" fill="none" stroke="#2ecb88" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" />
+              </svg>
+              <!-- #endif -->
+              <view class="chart-hit-layer">
+                <view
+                  v-for="zone in navChart.hitZones"
+                  :key="zone.key"
+                  class="chart-hit-zone"
+                  :style="zone.style"
+                  @longpress.stop="showChartPoint(zone.point)"
+                />
+              </view>
+              <view v-if="activeChartPoint" class="chart-crosshair" :style="activeChartPoint.lineStyle"></view>
+              <view v-if="activeChartPoint" class="chart-tooltip" :style="activeChartPoint.tooltipStyle">
+                <text class="tooltip-date">{{ formatTradeDate(activeChartPoint.td) }}</text>
+                <view class="tooltip-row">
+                  <text class="dot nav"></text>
+                  <text>组合 {{ activeChartPoint.nav }}</text>
+                </view>
+                <view class="tooltip-row">
+                  <text class="dot hs"></text>
+                  <text>沪深300 {{ activeChartPoint.hs }}</text>
+                </view>
+                <view class="tooltip-row">
+                  <text class="dot zz"></text>
+                  <text>中证1000 {{ activeChartPoint.zz }}</text>
+                </view>
+              </view>
+            </view>
             <view class="chart-legend">
               <text class="legend-item">组合 {{ navChart.latestNav.toFixed(3) }}</text>
               <text class="legend-item">沪深300 {{ navChart.latestHs.toFixed(3) }}</text>
@@ -1061,6 +1158,10 @@ watch(
   background: #102038;
 }
 
+.review-date-picker {
+  flex-shrink: 0;
+}
+
 .picker-label {
   color: #9bc3ff;
   font-size: 22rpx;
@@ -1097,22 +1198,142 @@ watch(
   padding: 10rpx;
 }
 
-.chart-svg {
-  width: 100%;
-  height: 220rpx;
+.chart-plot {
+  position: relative;
+  height: 300rpx;
+  overflow: hidden;
 }
 
-.chart-canvas {
-  width: 100%;
-  height: 220rpx;
+.chart-lines {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+}
+
+.chart-segment {
+  position: absolute;
+  border-radius: 999rpx;
+  transform-origin: left center;
+}
+
+.chart-grid-line {
+  position: absolute;
+  left: 7%;
+  right: 3%;
+  height: 1px;
+  background: rgba(74, 106, 159, 0.35);
+  z-index: 0;
+}
+
+.chart-grid-line.top {
+  top: 18%;
+}
+
+.chart-grid-line.middle {
+  top: 50%;
+}
+
+.chart-grid-line.bottom {
+  top: 82%;
+}
+
+.chart-hit-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+}
+
+.chart-hit-zone {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+}
+
+.chart-crosshair {
+  position: absolute;
+  top: 8rpx;
+  bottom: 12rpx;
+  z-index: 4;
+  width: 1px;
+  background: rgba(155, 195, 255, 0.75);
+}
+
+.chart-tooltip {
+  position: absolute;
+  top: 14rpx;
+  z-index: 5;
+  min-width: 190rpx;
+  padding: 10rpx 12rpx;
+  border: 1px solid rgba(95, 141, 205, 0.75);
+  border-radius: 10rpx;
+  background: rgba(9, 18, 34, 0.94);
+  box-shadow: 0 8rpx 20rpx rgba(0, 0, 0, 0.25);
+}
+
+.tooltip-date {
   display: block;
+  color: #ecf3ff;
+  font-size: 20rpx;
+  font-weight: 600;
+  margin-bottom: 6rpx;
+}
+
+.tooltip-row {
+  display: flex;
+  align-items: center;
+  gap: 8rpx;
+  color: #b9c9e4;
+  font-size: 20rpx;
+  line-height: 1.5;
+}
+
+.dot {
+  width: 10rpx;
+  height: 10rpx;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.dot.nav {
+  background: #f5c518;
+}
+
+.dot.hs {
+  background: #3cc8ff;
+}
+
+.dot.zz {
+  background: #2ecb88;
+}
+
+.chart-svg {
+  width: 100%;
+  height: 300rpx;
+}
+
+.chart-y-labels {
+  position: absolute;
+  left: 0;
+  top: 6rpx;
+  bottom: 10rpx;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+}
+
+.chart-y-labels text {
+  color: #6f819e;
+  font-size: 18rpx;
+  line-height: 1;
 }
 
 .chart-legend {
   display: flex;
   flex-wrap: wrap;
   gap: 14rpx;
-  margin-top: 8rpx;
+  margin-top: 10rpx;
+  padding-left: 4rpx;
 }
 
 .legend-item {
