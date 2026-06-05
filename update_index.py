@@ -13,6 +13,137 @@ db_url = f"mysql+pymysql://{os.getenv('DB_USER')}:{os.getenv('DB_PASSWORD')}@{os
 engine = create_engine(db_url)
 TUSHARE_TOKEN = os.getenv("TUSHARE_TOKEN")
 pro = ts.pro_api(TUSHARE_TOKEN) if TUSHARE_TOKEN else None
+DEFAULT_INDEX_UPDATE_ALERT_EMAIL = "alvachenart@163.com"
+
+_PROXY_ENV_KEYS = (
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+)
+_NO_PROXY_ENV_KEYS = ("NO_PROXY", "no_proxy")
+
+
+def _clear_proxy_env_for_market_fetch():
+    """Avoid letting AkShare inherit broken local/server proxy settings."""
+    cleared = []
+    for key in _PROXY_ENV_KEYS:
+        if os.environ.pop(key, None):
+            cleared.append(key)
+    for key in _NO_PROXY_ENV_KEYS:
+        if os.environ.get(key) != "*":
+            os.environ[key] = "*"
+            cleared.append(key)
+    return cleared
+
+
+def _hk_spot_code_candidates(ts_code):
+    code = str(ts_code or "").strip().upper()
+    if not code:
+        return []
+    candidates = [code]
+    if code.startswith("HK") and len(code) > 2:
+        candidates.append(code[2:])
+    else:
+        candidates.append(f"HK{code}")
+    return list(dict.fromkeys(candidates))
+
+
+def _match_hk_spot_index_row(df_spot, ts_code):
+    if df_spot is None or df_spot.empty or "代码" not in df_spot.columns:
+        return None
+    candidates = set(_hk_spot_code_candidates(ts_code))
+    codes = df_spot["代码"].astype(str).str.strip().str.upper()
+    matched = df_spot[codes.isin(candidates)]
+    if matched.empty:
+        return None
+    return matched.iloc[0]
+
+
+def _split_alert_recipients(raw_value):
+    if not raw_value:
+        return []
+    return [part.strip() for part in str(raw_value).replace(";", ",").split(",") if part.strip()]
+
+
+def _index_update_alert_recipients(alert_email=None):
+    configured = alert_email or os.getenv("INDEX_UPDATE_ALERT_EMAIL") or os.getenv("INDEX_UPDATE_ALERT_EMAILS")
+    recipients = _split_alert_recipients(configured)
+    return recipients or [DEFAULT_INDEX_UPDATE_ALERT_EMAIL]
+
+
+def _should_send_hk_update_alert(start_date, end_date, now=None):
+    now = now or datetime.now()
+    today = now.strftime("%Y%m%d")
+    if str(start_date) != str(end_date) or str(end_date) != today:
+        return False
+    # 港股 16:00 收盘，16:20 后仍未写到今天才告警。
+    return (now.hour, now.minute) >= (16, 20)
+
+
+def _build_hk_update_alert(subject_date, failures, generated_at=None):
+    generated_at = generated_at or datetime.now()
+    rows = []
+    for item in failures:
+        source_errors = item.get("source_errors") or []
+        source_error_html = "<br>".join(source_errors[-6:]) if source_errors else "无"
+        rows.append(
+            "<tr>"
+            f"<td>{item.get('ts_code', '')}</td>"
+            f"<td>{item.get('name', '')}</td>"
+            f"<td>{item.get('reason', '')}</td>"
+            f"<td>{item.get('latest_date') or '-'}</td>"
+            f"<td>{item.get('source') or '-'}</td>"
+            f"<td>{source_error_html}</td>"
+            "</tr>"
+        )
+    table_rows = "\n".join(rows)
+    subject = f"【TradingArt告警】港股指数更新失败 {subject_date}"
+    html = f"""
+    <div style="font-family: Arial, sans-serif; line-height: 1.6;">
+      <h2>TradingArt 港股指数更新失败</h2>
+      <p>目标日期：<strong>{subject_date}</strong></p>
+      <p>生成时间：{generated_at.strftime('%Y-%m-%d %H:%M:%S')}</p>
+      <table border="1" cellspacing="0" cellpadding="6" style="border-collapse: collapse;">
+        <thead>
+          <tr>
+            <th>代码</th>
+            <th>名称</th>
+            <th>失败原因</th>
+            <th>源端最新日期</th>
+            <th>选中来源</th>
+            <th>源端错误摘要</th>
+          </tr>
+        </thead>
+        <tbody>
+          {table_rows}
+        </tbody>
+      </table>
+      <p>请检查服务器定时任务日志、AkShare/Tushare 数据源、代理环境和 index_price 最新日期。</p>
+    </div>
+    """
+    return subject, html
+
+
+def _send_hk_update_failure_alert(failures, start_date, end_date, alert_email=None, email_sender=None):
+    if not failures:
+        return True
+    recipients = _index_update_alert_recipients(alert_email)
+    subject, html = _build_hk_update_alert(end_date, failures)
+    if email_sender is None:
+        from email_utils2 import send_email as email_sender
+    ok = True
+    for recipient in recipients:
+        try:
+            sent = bool(email_sender(recipient, subject, html))
+        except Exception as exc:
+            sent = False
+            print(f"❌ 港股指数更新告警邮件异常: {recipient} | {exc}")
+        print(f"{'✅' if sent else '❌'} 港股指数更新告警邮件: {recipient}")
+        ok = ok and sent
+    return ok
 
 
 def init_index_table():
@@ -101,7 +232,7 @@ def fetch_and_save_indices(start_date, end_date):
             print(f"   [x] {name} 异常: {e}")
 
 
-def fetch_and_save_hk_indices(start_date, end_date):
+def fetch_and_save_hk_indices(start_date, end_date, send_alert=True, alert_email=None, email_sender=None):
     """
     抓取港股核心指数 (使用 AkShare)
     并自动计算涨跌幅
@@ -117,9 +248,15 @@ def fetch_and_save_hk_indices(start_date, end_date):
         'HSTECH': '恒生科技指数'
     }
 
+    cleared_proxy_keys = _clear_proxy_env_for_market_fetch()
+    if cleared_proxy_keys:
+        print(f"   [i] 港股指数抓取已清理代理环境变量: {','.join(cleared_proxy_keys)}")
+
     print(f"🚀 [港股] 开始拉取指数数据: {start_date} 至 {end_date} ...")
+    failures = []
 
     for symbol, name in hk_indices.items():
+        source_errors = []
         try:
             # 1. 拉取数据（多源容错）
             source_used = None
@@ -152,12 +289,9 @@ def fetch_and_save_hk_indices(start_date, end_date):
                 df_spot = ak.stock_hk_index_spot_sina()
                 if df_spot is None or df_spot.empty:
                     return pd.DataFrame()
-                code_map = {'HSI': 'hkHSI', 'HSTECH': 'hkHSTECH'}
-                target_code = code_map.get(ts_code, f'hk{ts_code}')
-                one = df_spot[df_spot['代码'].astype(str).str.upper() == str(target_code).upper()]
-                if one.empty:
+                row = _match_hk_spot_index_row(df_spot, ts_code)
+                if row is None:
                     return pd.DataFrame()
-                row = one.iloc[0]
                 return pd.DataFrame([{
                     'date': today_str,
                     'open': row.get('今开', 0),
@@ -193,6 +327,7 @@ def fetch_and_save_hk_indices(start_date, end_date):
                                 )
                                 time.sleep(wait_s)
                             else:
+                                source_errors.append(f"{source_name}: {retry_err}")
                                 print(
                                     f"   [x] {name} {source_name} 第 {attempt}/{max_retries} 次失败: {retry_err}"
                                 )
@@ -201,6 +336,7 @@ def fetch_and_save_hk_indices(start_date, end_date):
                         continue
 
                     if raw_df is None or raw_df.empty:
+                        source_errors.append(f"{source_name}: empty")
                         print(f"   [-] {name} {source_name} 返回空数据")
                         continue
 
@@ -210,6 +346,7 @@ def fetch_and_save_hk_indices(start_date, end_date):
                         one_df["close"] = one_df["latest"]
 
                     if 'date' not in one_df.columns or 'close' not in one_df.columns:
+                        source_errors.append(f"{source_name}: missing columns {one_df.columns.tolist()}")
                         print(f"   [!] {name} {source_name} 缺少关键列: {one_df.columns.tolist()}")
                         continue
 
@@ -217,6 +354,7 @@ def fetch_and_save_hk_indices(start_date, end_date):
                     one_df['trade_date'] = pd.to_datetime(one_df['date'], errors='coerce').dt.strftime('%Y%m%d')
                     one_df = one_df.dropna(subset=['trade_date']).copy()
                     if one_df.empty:
+                        source_errors.append(f"{source_name}: invalid dates")
                         print(f"   [-] {name} {source_name} 日期解析后为空")
                         continue
 
@@ -224,10 +362,19 @@ def fetch_and_save_hk_indices(start_date, end_date):
                     print(f"   [i] {name} {source_name} 最新日期: {latest_from_source}")
                     source_results.append((latest_from_source, source_name, one_df))
                 except Exception as source_err:
+                    source_errors.append(f"{source_name}: {source_err}")
                     print(f"   [x] {name} {source_name} 异常: {source_err}")
                     continue
 
             if not source_results:
+                failures.append({
+                    "ts_code": symbol,
+                    "name": name,
+                    "reason": "所有数据源均不可用",
+                    "latest_date": None,
+                    "source": None,
+                    "source_errors": source_errors,
+                })
                 print(f"   [-] {name} 所有数据源均不可用")
                 continue
 
@@ -235,6 +382,7 @@ def fetch_and_save_hk_indices(start_date, end_date):
             source_results.sort(key=lambda x: x[0], reverse=True)
             latest_from_source, source_used, df = source_results[0]
             if latest_from_source < end_date:
+                source_errors.append(f"all_sources_latest={latest_from_source} < target={end_date}")
                 print(
                     f"   [!] {name} 所有源最新仅到 {latest_from_source}，目标结束日期为 {end_date}"
                 )
@@ -261,6 +409,14 @@ def fetch_and_save_hk_indices(start_date, end_date):
             df_filtered = df.loc[mask].copy()
 
             if df_filtered.empty:
+                failures.append({
+                    "ts_code": symbol,
+                    "name": name,
+                    "reason": "目标区间无可写入数据",
+                    "latest_date": latest_from_source,
+                    "source": source_used,
+                    "source_errors": source_errors,
+                })
                 print(
                     f"   [-] {name} 区间内无数据 (source={source_used}, latest={latest_from_source}, target={start_date}~{end_date})"
                 )
@@ -289,6 +445,15 @@ def fetch_and_save_hk_indices(start_date, end_date):
                     df_filtered[c] = 0
 
             replace_dates = sorted(df_filtered['trade_date'].dropna().astype(str).unique().tolist())
+            if str(end_date) not in replace_dates:
+                failures.append({
+                    "ts_code": symbol,
+                    "name": name,
+                    "reason": "未写入目标日期",
+                    "latest_date": latest_from_source,
+                    "source": source_used,
+                    "source_errors": source_errors,
+                })
             with engine.connect() as conn:
                 trans = conn.begin()
                 try:
@@ -305,7 +470,20 @@ def fetch_and_save_hk_indices(start_date, end_date):
             time.sleep(1)
 
         except Exception as e:
+            failures.append({
+                "ts_code": symbol,
+                "name": name,
+                "reason": f"更新异常: {e}",
+                "latest_date": None,
+                "source": None,
+                "source_errors": source_errors,
+            })
             print(f"   [x] {name} 异常: {e}")
+
+    if send_alert and failures and _should_send_hk_update_alert(start_date, end_date):
+        _send_hk_update_failure_alert(failures, start_date, end_date, alert_email=alert_email, email_sender=email_sender)
+
+    return failures
 
 
 if __name__ == "__main__":
