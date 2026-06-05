@@ -1,8 +1,9 @@
 import argparse
 import os
 import time
+from collections import Counter, defaultdict
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
 import tushare as ts
@@ -60,9 +61,9 @@ def _build_record(row: pd.Series, latest: pd.Series, result: Dict) -> Dict:
     }
 
 
-def _upsert_records(engine, records: List[Dict]):
+def _upsert_records(engine, records: List[Dict]) -> Tuple[int, List[str]]:
     if not records:
-        return 0
+        return 0, []
     sql = text(
         """
         REPLACE INTO daily_stock_screener
@@ -71,9 +72,54 @@ def _upsert_records(engine, records: List[Dict]):
         (:trade_date, :ts_code, :name, :industry, :close, :pct_chg, :ma_trend, :pattern, :score, :ai_summary)
         """
     )
-    with engine.begin() as conn:
-        conn.execute(sql, records)
-    return len(records)
+    try:
+        with engine.begin() as conn:
+            conn.execute(sql, records)
+        return len(records), []
+    except Exception as batch_exc:
+        print(f"   ⚠️ 批量写入失败，自动降级为逐条写入: {batch_exc}")
+
+    written = 0
+    write_errors: List[str] = []
+    for row in records:
+        try:
+            with engine.begin() as conn:
+                conn.execute(sql, row)
+            written += 1
+        except Exception as exc:
+            if len(write_errors) < 8:
+                write_errors.append(f"{row.get('ts_code')}: {exc}")
+    return written, write_errors
+
+
+def _add_skip(
+    skip_stats: Counter,
+    skip_samples: Dict[str, List[str]],
+    reason: str,
+    ts_code: str,
+    detail: str = "",
+) -> None:
+    skip_stats[reason] += 1
+    samples = skip_samples[reason]
+    if len(samples) < 5:
+        samples.append(f"{ts_code}{' | ' + detail if detail else ''}")
+
+
+def _print_skip_summary(skip_stats: Counter, skip_samples: Dict[str, List[str]], indent: str = "   ") -> None:
+    if not skip_stats:
+        return
+    reason_names = {
+        "empty_daily": "Tushare无日线",
+        "insufficient_kline": "K线不足30根",
+        "not_trade_date": "当天无交易/最新K线非当日",
+        "calc_error": "计算异常",
+        "write_error": "写库异常",
+    }
+    parts = [f"{reason_names.get(k, k)} {v}" for k, v in skip_stats.most_common()]
+    print(f"{indent}↪ 跳过统计: " + "；".join(parts))
+    for reason, samples in skip_samples.items():
+        if samples:
+            print(f"{indent}   - {reason_names.get(reason, reason)}样例: " + "；".join(samples))
 
 
 def _get_trade_dates(pro, start_date: str, end_date: str) -> List[str]:
@@ -127,6 +173,7 @@ def run_backfill(
     total_written = 0
     total_attempt = 0
     total_error = 0
+    total_skip_stats: Counter = Counter()
 
     for d in trade_dates:
         print(f"\n📆 处理交易日 {d}")
@@ -147,22 +194,31 @@ def run_backfill(
 
         records: List[Dict] = []
         error_samples: List[str] = []
+        skip_stats: Counter = Counter()
+        skip_samples: Dict[str, List[str]] = defaultdict(list)
 
         for i, (_, row) in enumerate(candidates.iterrows(), start=1):
             ts_code = row["ts_code"]
             try:
                 df = _fetch_daily_with_retry(pro, ts_code=ts_code, end_date=d, limit=100, retries=retries)
-                if df is None or df.empty or len(df) < 30:
+                if df is None or df.empty:
+                    _add_skip(skip_stats, skip_samples, "empty_daily", ts_code)
+                    continue
+                if len(df) < 30:
+                    latest_trade_date = str(df.iloc[0].get("trade_date", "")) if not df.empty else "-"
+                    _add_skip(skip_stats, skip_samples, "insufficient_kline", ts_code, f"rows={len(df)}, latest={latest_trade_date}")
                     continue
                 kdf = _prepare_kline_df(df)
                 latest = kdf.iloc[-1]
                 if str(latest["trade_date"]) != d:
+                    _add_skip(skip_stats, skip_samples, "not_trade_date", ts_code, f"latest={latest['trade_date']}")
                     continue
                 result = kline_algo.calculate_kline_signals(kdf)
                 records.append(_build_record(row, latest, result))
                 total_attempt += 1
             except Exception as e:
                 total_error += 1
+                _add_skip(skip_stats, skip_samples, "calc_error", ts_code, str(e)[:120])
                 if len(error_samples) < 8:
                     error_samples.append(f"{ts_code}: {e}")
             if i % 200 == 0:
@@ -173,9 +229,16 @@ def run_backfill(
         if dry_run:
             print(f"   ✅ dry_run: 预计写入 {len(records)} 条")
         else:
-            written = _upsert_records(engine, records)
+            written, write_errors = _upsert_records(engine, records)
+            if write_errors:
+                skip_stats["write_error"] += len(write_errors)
+                total_error += len(write_errors)
+                skip_samples["write_error"].extend(write_errors[:5])
             total_written += written
             print(f"   ✅ 当日写入 {written} 条")
+
+        total_skip_stats.update(skip_stats)
+        _print_skip_summary(skip_stats, skip_samples)
 
         if error_samples:
             print("   ⚠️ 失败样例:")
@@ -184,6 +247,8 @@ def run_backfill(
 
     print("\n========================================")
     print(f"🏁 回补结束 | 实际写入: {total_written} | 计算记录: {total_attempt} | 错误数: {total_error}")
+    if total_skip_stats:
+        print("📌 全局跳过统计: " + "；".join([f"{k}={v}" for k, v in total_skip_stats.most_common()]))
     print("========================================")
 
 
