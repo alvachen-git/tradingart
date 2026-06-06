@@ -31,6 +31,10 @@ import update_astock_daily as upd
 
 
 class TestUpdateAstockDaily(unittest.TestCase):
+    def test_normalize_akshare_code_preserves_leading_zeroes(self):
+        self.assertEqual(upd._normalize_akshare_code(1), "000001.SZ")
+        self.assertEqual(upd._normalize_akshare_code("600519"), "600519.SH")
+
     def test_standardize_akshare_df_converts_amount_to_tushare_unit(self):
         raw = pd.DataFrame(
             [
@@ -114,6 +118,128 @@ class TestUpdateAstockDaily(unittest.TestCase):
         self.assertTrue(result.fallback_used)
         self.assertEqual(result.rows_saved, 1)
 
+    @patch("update_astock_daily.fetch_and_save_data")
+    @patch("update_astock_daily._fetch_akshare_spot_df")
+    @patch("update_astock_daily._save_price_rows", return_value=2)
+    @patch("update_astock_daily._fetch_tushare_bulk_df")
+    def test_bulk_update_uses_tushare_bulk_when_complete(
+        self, mock_bulk, mock_save, mock_spot, mock_symbol
+    ):
+        mock_bulk.return_value = pd.DataFrame(
+            [
+                {
+                    "trade_date": "20260604",
+                    "ts_code": "600519.SH",
+                    "name": "Moutai",
+                    "open_price": 10,
+                    "high_price": 11,
+                    "low_price": 9,
+                    "close_price": 10.5,
+                    "vol": 1,
+                    "amount": 2,
+                    "pct_chg": 3,
+                },
+                {
+                    "trade_date": "20260604",
+                    "ts_code": "000001.SZ",
+                    "name": "Ping An",
+                    "open_price": 4,
+                    "high_price": 4.1,
+                    "low_price": 3.9,
+                    "close_price": 4.0,
+                    "vol": 1,
+                    "amount": 2,
+                    "pct_chg": 3,
+                },
+            ]
+        )
+
+        results, stats = upd.fetch_and_save_targets_bulk(
+            ["600519.SH", "000001.SZ"], "20260604", "S", sleep_seconds=0
+        )
+
+        self.assertEqual({r.source for r in results}, {"tushare_bulk"})
+        self.assertEqual(stats["tushare_bulk_saved"], 2)
+        mock_save.assert_called_once()
+        mock_spot.assert_not_called()
+        mock_symbol.assert_not_called()
+
+    @patch("update_astock_daily.fetch_and_save_data")
+    @patch("update_astock_daily._fetch_akshare_spot_df")
+    @patch("update_astock_daily._save_price_rows", return_value=1)
+    @patch("update_astock_daily._fetch_tushare_bulk_df")
+    def test_bulk_update_uses_akshare_spot_for_missing_symbols(
+        self, mock_bulk, mock_save, mock_spot, mock_symbol
+    ):
+        mock_bulk.return_value = pd.DataFrame(
+            [
+                {
+                    "trade_date": "20260604",
+                    "ts_code": "600519.SH",
+                    "name": "Moutai",
+                    "open_price": 10,
+                    "high_price": 11,
+                    "low_price": 9,
+                    "close_price": 10.5,
+                    "vol": 1,
+                    "amount": 2,
+                    "pct_chg": 3,
+                }
+            ]
+        )
+        mock_spot.return_value = pd.DataFrame(
+            [
+                {
+                    "trade_date": "20260604",
+                    "ts_code": "000001.SZ",
+                    "name": "Ping An",
+                    "open_price": 4,
+                    "high_price": 4.1,
+                    "low_price": 3.9,
+                    "close_price": 4.0,
+                    "vol": 1,
+                    "amount": 2,
+                    "pct_chg": 3,
+                }
+            ]
+        )
+
+        results, stats = upd.fetch_and_save_targets_bulk(
+            ["600519.SH", "000001.SZ"], "20260604", "S", sleep_seconds=0
+        )
+
+        by_symbol = {r.ts_code: r for r in results}
+        self.assertEqual(by_symbol["600519.SH"].source, "tushare_bulk")
+        self.assertEqual(by_symbol["000001.SZ"].source, "akshare_spot")
+        self.assertTrue(by_symbol["000001.SZ"].fallback_used)
+        self.assertEqual(stats["akshare_spot_saved"], 1)
+        mock_symbol.assert_not_called()
+
+    @patch("update_astock_daily.fetch_and_save_data")
+    @patch("update_astock_daily._fetch_akshare_spot_df")
+    @patch("update_astock_daily._fetch_tushare_bulk_df")
+    def test_bulk_update_falls_back_to_symbol_fetch_after_source_errors(
+        self, mock_bulk, mock_spot, mock_symbol
+    ):
+        mock_bulk.side_effect = RuntimeError("bulk timeout")
+        mock_spot.side_effect = RuntimeError("spot disconnected")
+        mock_symbol.return_value = upd.FetchResult(
+            "600519.SH",
+            "S",
+            source="",
+            rows_saved=0,
+            error="Tushare error: symbol timeout; AkShare error: history disconnected",
+        )
+
+        results, stats = upd.fetch_and_save_targets_bulk(["600519.SH"], "20260604", "S", sleep_seconds=0)
+
+        self.assertEqual(len(results), 1)
+        self.assertFalse(results[0].ok)
+        self.assertTrue(results[0].fallback_used)
+        self.assertIn("tushare_bulk: bulk timeout", results[0].error)
+        self.assertEqual(stats["symbol_fetch_count"], 1)
+        self.assertEqual(stats["final_missing"], 1)
+
     def test_build_alert_html_contains_recovery_commands(self):
         report = {
             "trade_date": "20260529",
@@ -130,6 +256,21 @@ class TestUpdateAstockDaily(unittest.TestCase):
             },
             "failures": [upd.FetchResult("510300.SH", "E", error="empty")],
             "fallback_used": [],
+            "update_stats": [
+                {
+                    "asset_type": "S",
+                    "target_count": 100,
+                    "tushare_bulk_ok": True,
+                    "tushare_bulk_rows": 5000,
+                    "tushare_bulk_saved": 90,
+                    "akshare_spot_used": True,
+                    "akshare_spot_rows": 5000,
+                    "akshare_spot_saved": 5,
+                    "symbol_fetch_count": 5,
+                    "symbol_fetch_saved": 0,
+                    "final_missing": 5,
+                }
+            ],
             "ai_missing": [
                 {
                     "portfolio_id": "official_cn_a_etf_v1",
@@ -144,6 +285,8 @@ class TestUpdateAstockDaily(unittest.TestCase):
         self.assertIn("update_astock_daily.py", html)
         self.assertIn("rerun_ai_simulation.py --trade-date 20260529", html)
         self.assertIn("600519.SH", html)
+        self.assertIn("tushare bulk ok", html)
+        self.assertIn("5000", html)
 
 
 if __name__ == "__main__":

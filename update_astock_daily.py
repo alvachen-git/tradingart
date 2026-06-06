@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 from datetime import datetime, timedelta
 from html import escape
 import time
-from typing import Any, Dict, Iterable, List, Optional, Sequence
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from astock_target_supplements import merge_a_share_targets
 
@@ -47,6 +47,10 @@ class FetchResult:
     @property
     def ok(self) -> bool:
         return self.rows_saved > 0
+
+
+def _empty_price_df() -> pd.DataFrame:
+    return pd.DataFrame(columns=TARGET_COLS)
 
 
 def get_engine():
@@ -134,6 +138,25 @@ def _standardize_tushare_df(df: pd.DataFrame, ts_code: str, code_name: str) -> p
     return _prepare_save_df(out)
 
 
+def _standardize_tushare_bulk_df(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    out = out.rename(
+        columns={
+            "open": "open_price",
+            "high": "high_price",
+            "low": "low_price",
+            "close": "close_price",
+        }
+    )
+    if "ts_code" not in out.columns:
+        return _empty_price_df()
+    out["ts_code"] = out["ts_code"].map(normalize_symbol)
+    out["trade_date"] = out["trade_date"].map(compact_trade_date)
+    name_map = get_name_map()
+    out["name"] = out["ts_code"].map(name_map).fillna(out["ts_code"])
+    return _prepare_save_df(out)
+
+
 def _standardize_akshare_df(df: pd.DataFrame, ts_code: str, code_name: str) -> pd.DataFrame:
     out = df.copy()
     out = out.rename(
@@ -156,6 +179,56 @@ def _standardize_akshare_df(df: pd.DataFrame, ts_code: str, code_name: str) -> p
     return _prepare_save_df(out)
 
 
+def _pick_column(df: pd.DataFrame, names: Sequence[str]) -> Optional[str]:
+    for name in names:
+        if name in df.columns:
+            return name
+    return None
+
+
+def _normalize_akshare_code(value: Any) -> str:
+    raw = str(value or "").strip().upper().replace(" ", "")
+    if "." in raw:
+        return normalize_symbol(raw)
+    digits = re.sub(r"[^0-9]", "", raw)
+    if digits and len(digits) < 6:
+        raw = digits.zfill(6)
+    return normalize_symbol(raw)
+
+
+def _standardize_akshare_spot_df(df: pd.DataFrame, trade_date: str) -> pd.DataFrame:
+    if df is None or df.empty:
+        return _empty_price_df()
+    out = pd.DataFrame()
+    raw = df.copy()
+    code_col = _pick_column(raw, ["代码", "证券代码", "基金代码"])
+    if not code_col:
+        return _empty_price_df()
+    out["ts_code"] = raw[code_col].map(_normalize_akshare_code)
+    out["trade_date"] = compact_trade_date(trade_date)
+
+    name_col = _pick_column(raw, ["名称", "证券简称", "基金简称"])
+    out["name"] = raw[name_col] if name_col else out["ts_code"]
+
+    close_col = _pick_column(raw, ["最新价", "收盘", "收盘价"])
+    open_col = _pick_column(raw, ["今开", "开盘", "开盘价"])
+    high_col = _pick_column(raw, ["最高", "最高价"])
+    low_col = _pick_column(raw, ["最低", "最低价"])
+    vol_col = _pick_column(raw, ["成交量"])
+    amount_col = _pick_column(raw, ["成交额"])
+    pct_col = _pick_column(raw, ["涨跌幅"])
+
+    out["close_price"] = raw[close_col] if close_col else 0
+    out["open_price"] = raw[open_col] if open_col else out["close_price"]
+    out["high_price"] = raw[high_col] if high_col else out["close_price"]
+    out["low_price"] = raw[low_col] if low_col else out["close_price"]
+    out["vol"] = raw[vol_col] if vol_col else 0
+    out["amount"] = raw[amount_col] if amount_col else 0
+    out["pct_chg"] = raw[pct_col] if pct_col else 0
+    out["amount"] = pd.to_numeric(out["amount"], errors="coerce") / 1000.0
+    return _prepare_save_df(out)
+
+
 def _fetch_tushare_df(ts_code: str, start_date: str, end_date: str, asset_type: str, code_name: str) -> pd.DataFrame:
     ts_pro = get_pro()
     if asset_type == "S":
@@ -165,6 +238,18 @@ def _fetch_tushare_df(ts_code: str, start_date: str, end_date: str, asset_type: 
     if raw is None or raw.empty:
         return pd.DataFrame(columns=TARGET_COLS)
     return _standardize_tushare_df(raw, ts_code, code_name)
+
+
+def _fetch_tushare_bulk_df(trade_date: str, asset_type: str) -> pd.DataFrame:
+    ts_pro = get_pro()
+    td = compact_trade_date(trade_date)
+    if asset_type == "S":
+        raw = ts_pro.daily(trade_date=td)
+    else:
+        raw = ts_pro.fund_daily(trade_date=td)
+    if raw is None or raw.empty:
+        return _empty_price_df()
+    return _standardize_tushare_bulk_df(raw)
 
 
 def _fetch_akshare_df(ts_code: str, start_date: str, end_date: str, asset_type: str, code_name: str) -> pd.DataFrame:
@@ -181,6 +266,19 @@ def _fetch_akshare_df(ts_code: str, start_date: str, end_date: str, asset_type: 
     if raw is None or raw.empty:
         return pd.DataFrame(columns=TARGET_COLS)
     return _standardize_akshare_df(raw, ts_code, code_name)
+
+
+def _fetch_akshare_spot_df(trade_date: str, asset_type: str) -> pd.DataFrame:
+    try:
+        import akshare as ak
+    except Exception as exc:
+        raise RuntimeError(f"AkShare import failed: {exc}") from exc
+
+    if asset_type == "S":
+        raw = ak.stock_zh_a_spot_em()
+    else:
+        raw = ak.fund_etf_spot_em()
+    return _standardize_akshare_spot_df(raw, trade_date)
 
 
 def _save_price_df(ts_code: str, start_date: str, end_date: str, df_save: pd.DataFrame) -> int:
@@ -209,6 +307,199 @@ def _save_price_df(ts_code: str, start_date: str, end_date: str, df_save: pd.Dat
         "vol": types.Float(), "amount": types.Float(), "pct_chg": types.Float()
     })
     return int(len(df_save))
+
+
+def _save_price_rows(df_save: pd.DataFrame) -> int:
+    if df_save is None or df_save.empty:
+        return 0
+    clean = _prepare_save_df(df_save)
+    if clean.empty:
+        return 0
+    db_engine = get_engine()
+    pairs = (
+        clean[["ts_code", "trade_date"]]
+        .dropna()
+        .drop_duplicates()
+        .to_dict("records")
+    )
+    with db_engine.begin() as conn:
+        for pair in pairs:
+            conn.execute(
+                text(
+                    """
+                    DELETE FROM stock_price
+                    WHERE ts_code = :ts_code
+                      AND trade_date = :trade_date
+                    """
+                ),
+                {"ts_code": pair["ts_code"], "trade_date": pair["trade_date"]},
+            )
+        clean.to_sql("stock_price", conn, if_exists="append", index=False, dtype={
+            "trade_date": types.VARCHAR(8),
+            "ts_code": types.VARCHAR(10),
+            "name": types.VARCHAR(50),
+            "open_price": types.Float(), "high_price": types.Float(), "low_price": types.Float(), "close_price": types.Float(),
+            "vol": types.Float(), "amount": types.Float(), "pct_chg": types.Float()
+        })
+    return int(len(clean))
+
+
+def _unique_symbols(symbols: Sequence[str]) -> List[str]:
+    out: List[str] = []
+    seen = set()
+    for symbol in symbols:
+        normalized = normalize_symbol(symbol)
+        if normalized and normalized not in seen:
+            out.append(normalized)
+            seen.add(normalized)
+    return out
+
+
+def _target_day_rows(df: pd.DataFrame, targets: Sequence[str], trade_date: str) -> pd.DataFrame:
+    if df is None or df.empty:
+        return _empty_price_df()
+    td = compact_trade_date(trade_date)
+    target_set = set(_unique_symbols(targets))
+    out = _prepare_save_df(df)
+    out = out[
+        (out["trade_date"] == td)
+        & (out["ts_code"].isin(target_set))
+        & (out["close_price"] > 0)
+    ].copy()
+    if out.empty:
+        return _empty_price_df()
+    return out.drop_duplicates(["trade_date", "ts_code"], keep="last")
+
+
+def _results_from_saved_rows(
+    df_save: pd.DataFrame,
+    asset_type: str,
+    source: str,
+    *,
+    fallback_used: bool,
+    primary_ok: bool,
+    primary_rows: int = 0,
+) -> List[FetchResult]:
+    results: List[FetchResult] = []
+    if df_save is None or df_save.empty:
+        return results
+    grouped = df_save.groupby("ts_code").size().to_dict()
+    for symbol, row_count in grouped.items():
+        results.append(
+            FetchResult(
+                ts_code=normalize_symbol(symbol),
+                asset_type=asset_type,
+                source=source,
+                primary_ok=primary_ok,
+                fallback_used=fallback_used,
+                rows_saved=int(row_count),
+                primary_rows=primary_rows,
+                has_target_date=True,
+            )
+        )
+    return results
+
+
+def fetch_and_save_targets_bulk(
+    targets: Sequence[str],
+    trade_date: str,
+    asset_type: str,
+    *,
+    sleep_seconds: float = 0.2,
+) -> Tuple[List[FetchResult], Dict[str, Any]]:
+    target_symbols = _unique_symbols(targets)
+    remaining = set(target_symbols)
+    results: List[FetchResult] = []
+    stats: Dict[str, Any] = {
+        "asset_type": asset_type,
+        "target_count": len(target_symbols),
+        "tushare_bulk_ok": False,
+        "tushare_bulk_rows": 0,
+        "tushare_bulk_saved": 0,
+        "tushare_bulk_error": "",
+        "akshare_spot_used": False,
+        "akshare_spot_rows": 0,
+        "akshare_spot_saved": 0,
+        "akshare_spot_error": "",
+        "symbol_fetch_count": 0,
+        "symbol_fetch_saved": 0,
+        "final_missing": 0,
+    }
+    if not target_symbols:
+        return results, stats
+
+    print(f"[*] {asset_type} bulk update target_count={len(target_symbols)} trade_date={trade_date}")
+    try:
+        bulk_df = _fetch_tushare_bulk_df(trade_date, asset_type)
+        stats["tushare_bulk_ok"] = True
+        stats["tushare_bulk_rows"] = int(len(bulk_df))
+        target_df = _target_day_rows(bulk_df, target_symbols, trade_date)
+        if not target_df.empty:
+            stats["tushare_bulk_saved"] = _save_price_rows(target_df)
+            results.extend(
+                _results_from_saved_rows(
+                    target_df,
+                    asset_type,
+                    "tushare_bulk",
+                    fallback_used=False,
+                    primary_ok=True,
+                    primary_rows=stats["tushare_bulk_rows"],
+                )
+            )
+            remaining -= set(target_df["ts_code"].tolist())
+        print(
+            f"[*] {asset_type} tushare_bulk rows={stats['tushare_bulk_rows']} "
+            f"saved={stats['tushare_bulk_saved']} missing={len(remaining)}"
+        )
+    except Exception as exc:
+        stats["tushare_bulk_error"] = str(exc)
+        print(f"[WARN] {asset_type} tushare_bulk failed: {exc}")
+
+    if remaining:
+        stats["akshare_spot_used"] = True
+        try:
+            spot_df = _fetch_akshare_spot_df(trade_date, asset_type)
+            stats["akshare_spot_rows"] = int(len(spot_df))
+            target_df = _target_day_rows(spot_df, sorted(remaining), trade_date)
+            if not target_df.empty:
+                stats["akshare_spot_saved"] = _save_price_rows(target_df)
+                results.extend(
+                    _results_from_saved_rows(
+                        target_df,
+                        asset_type,
+                        "akshare_spot",
+                        fallback_used=True,
+                        primary_ok=stats["tushare_bulk_ok"],
+                        primary_rows=stats["tushare_bulk_rows"],
+                    )
+                )
+                remaining -= set(target_df["ts_code"].tolist())
+            print(
+                f"[*] {asset_type} akshare_spot rows={stats['akshare_spot_rows']} "
+                f"saved={stats['akshare_spot_saved']} missing={len(remaining)}"
+            )
+        except Exception as exc:
+            stats["akshare_spot_error"] = str(exc)
+            print(f"[WARN] {asset_type} akshare_spot failed: {exc}")
+
+    for symbol in sorted(remaining):
+        stats["symbol_fetch_count"] += 1
+        result = fetch_and_save_data(symbol, trade_date, trade_date, asset_type=asset_type)
+        result.fallback_used = True
+        if result.source == "tushare":
+            result.source = "tushare_symbol"
+        elif result.source == "akshare":
+            result.source = "akshare_history"
+        if not result.ok and stats["tushare_bulk_error"]:
+            result.error = f"tushare_bulk: {stats['tushare_bulk_error']}; {result.error}"
+        if result.ok:
+            stats["symbol_fetch_saved"] += result.rows_saved
+        results.append(result)
+        if sleep_seconds > 0:
+            time.sleep(sleep_seconds)
+
+    stats["final_missing"] = len([r for r in results if not r.ok])
+    return results, stats
 
 
 # --- 獲取全市場名稱字典 (用於填補 name) ---
@@ -340,6 +631,7 @@ def validate_update_quality(
     etf_targets: Sequence[str],
     stock_targets: Sequence[str],
     fetch_results: Sequence[FetchResult],
+    update_stats: Optional[Sequence[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     td = compact_trade_date(trade_date)
     etf_set = {normalize_symbol(x) for x in etf_targets if normalize_symbol(x)}
@@ -398,6 +690,7 @@ def validate_update_quality(
         "failures": failures,
         "fallback_used": fallback_used,
         "ai_missing": ai_missing,
+        "update_stats": list(update_stats or []),
     }
 
 
@@ -440,6 +733,25 @@ def build_alert_html(report: Dict[str, Any]) -> str:
     ]
     command_html = "".join(f"<li><code>{escape(cmd)}</code></li>" for cmd in commands)
     issue_html = "".join(f"<li>{escape(issue)}</li>" for issue in report["issues"])
+    stats_rows = []
+    for stats in report.get("update_stats", []):
+        stats_rows.append(
+            "<tr>"
+            f"<td>{escape(str(stats.get('asset_type', '-')))}</td>"
+            f"<td>{stats.get('target_count', 0)}</td>"
+            f"<td>{'YES' if stats.get('tushare_bulk_ok') else 'NO'}</td>"
+            f"<td>{stats.get('tushare_bulk_rows', 0)}</td>"
+            f"<td>{stats.get('tushare_bulk_saved', 0)}</td>"
+            f"<td>{'YES' if stats.get('akshare_spot_used') else 'NO'}</td>"
+            f"<td>{stats.get('akshare_spot_rows', 0)}</td>"
+            f"<td>{stats.get('akshare_spot_saved', 0)}</td>"
+            f"<td>{stats.get('symbol_fetch_count', 0)}</td>"
+            f"<td>{stats.get('symbol_fetch_saved', 0)}</td>"
+            f"<td>{stats.get('final_missing', 0)}</td>"
+            f"<td>{escape(str(stats.get('tushare_bulk_error') or stats.get('akshare_spot_error') or ''))}</td>"
+            "</tr>"
+        )
+    stats_html = "".join(stats_rows) or "<tr><td colspan='12'>None</td></tr>"
 
     return f"""
     <h2>A-stock/ETF daily update alert - {escape(report['trade_date'])}</h2>
@@ -453,6 +765,11 @@ def build_alert_html(report: Dict[str, Any]) -> str:
     </ul>
     <h3>AI positions missing target-date prices</h3>
     <ul>{''.join(ai_missing_html)}</ul>
+    <h3>Update source summary</h3>
+    <table border="1" cellspacing="0" cellpadding="4">
+      <tr><th>type</th><th>targets</th><th>tushare bulk ok</th><th>bulk rows</th><th>bulk saved</th><th>ak spot used</th><th>ak rows</th><th>ak saved</th><th>symbol fetches</th><th>symbol saved</th><th>missing</th><th>error</th></tr>
+      {stats_html}
+    </table>
     <h3>Failed symbols</h3>
     <table border="1" cellspacing="0" cellpadding="4">
       <tr><th>ts_code</th><th>type</th><th>source</th><th>fallback</th><th>rows</th><th>error</th></tr>
@@ -498,6 +815,17 @@ def print_quality_summary(report: Dict[str, Any]) -> None:
         f"etf={coverage['etf_present']}/{coverage['etf_target']} ({coverage['etf']:.1%})"
     )
     print(f"Fallback used: {len(report['fallback_used'])}, failures: {len(report['failures'])}")
+    for stats in report.get("update_stats", []):
+        print(
+            "Source summary: "
+            f"type={stats.get('asset_type')} targets={stats.get('target_count')} "
+            f"tushare_bulk_ok={stats.get('tushare_bulk_ok')} "
+            f"bulk_rows={stats.get('tushare_bulk_rows')} bulk_saved={stats.get('tushare_bulk_saved')} "
+            f"akshare_spot_used={stats.get('akshare_spot_used')} "
+            f"ak_rows={stats.get('akshare_spot_rows')} ak_saved={stats.get('akshare_spot_saved')} "
+            f"symbol_fetches={stats.get('symbol_fetch_count')} "
+            f"symbol_saved={stats.get('symbol_fetch_saved')} missing={stats.get('final_missing')}"
+        )
     if report["ai_missing"]:
         for item in report["ai_missing"]:
             print(
@@ -600,9 +928,10 @@ if __name__ == "__main__":
                    "159865.SZ" # 养殖ETF (猪肉)
 
                    ]
-    for code in ETF_TARGETS:
-        fetch_results.append(fetch_and_save_data(code, start, today, asset_type='E'))
-        time.sleep(0.3)
+    update_stats = []
+    etf_results, etf_stats = fetch_and_save_targets_bulk(ETF_TARGETS, today, asset_type='E', sleep_seconds=0.3)
+    fetch_results.extend(etf_results)
+    update_stats.append(etf_stats)
 
     # 2. 個股 (茅台在這裡！)
     STOCK_TARGETS = [
@@ -2883,11 +3212,11 @@ if __name__ == "__main__":
     ]
     STOCK_TARGETS = build_stock_targets(STOCK_TARGETS)
     print(f"[*] 個股更新目標: {len(STOCK_TARGETS)} 只 (含中证2000缺口补充和强制补充)")
-    for code in STOCK_TARGETS:
-        fetch_results.append(fetch_and_save_data(code, start, today, asset_type='S'))
-        time.sleep(0.5)
+    stock_results, stock_stats = fetch_and_save_targets_bulk(STOCK_TARGETS, today, asset_type='S', sleep_seconds=0.5)
+    fetch_results.extend(stock_results)
+    update_stats.append(stock_stats)
 
-    quality_report = validate_update_quality(today, ETF_TARGETS, STOCK_TARGETS, fetch_results)
+    quality_report = validate_update_quality(today, ETF_TARGETS, STOCK_TARGETS, fetch_results, update_stats)
     print_quality_summary(quality_report)
     if quality_report["is_abnormal"]:
         send_quality_alert(quality_report)
