@@ -369,7 +369,7 @@ def _is_post_close_capture_window() -> bool:
 def _safe_float(v, default: float = 0.0) -> float:
     try:
         f = float(v)
-        return f if f == f else default
+        return f if f == f and math.isfinite(f) else default
     except (TypeError, ValueError):
         return default
 
@@ -7779,10 +7779,11 @@ def market_options(username: str = Depends(get_current_user)):
             iv_rank = row.get("IV Rank", 0)
             is_expiring = str(iv_rank).strip() == "快到期"
             raw_iv = _safe_float(row.get("当前IV"), 0.0)
-            try:
-                iv_rank_num = float(iv_rank) if iv_rank not in ("快到期", None, "") else IV_RANK_EXPIRING
-            except Exception:
-                iv_rank_num = IV_RANK_EXPIRING
+            iv_rank_num = (
+                _safe_float(iv_rank, IV_RANK_EXPIRING)
+                if iv_rank not in ("快到期", None, "")
+                else IV_RANK_EXPIRING
+            )
 
             # 提取品种代码（合约格式如 "m2605 (豆粕)"，取括号前的字母部分）
             name_str = str(row.get("合约", ""))
@@ -7880,7 +7881,7 @@ def market_options(username: str = Depends(get_current_user)):
                     db_trade_day_map = latest_price_df.set_index("code")["td"].astype(str).to_dict()
                     for r in records:
                         code = r["name"].split("(")[0].strip().lower()
-                        r["cur_price"] = round(float(price_map.get(code, 0) or 0), 2)
+                        r["cur_price"] = round(_safe_float(price_map.get(code, 0), 0.0), 2)
                         r["_db_td"] = str(db_trade_day_map.get(code) or "")
             except Exception:
                 pass  # 价格查询失败不影响其他字段
