@@ -7,6 +7,7 @@
 3. 按综合评分排名
 """
 
+import math
 import pandas as pd
 import os
 import streamlit as st
@@ -174,6 +175,118 @@ def _format_us_pct(value: float) -> str:
         return "N/A"
 
 
+_US_STOCK_OHLCV_REQUIRED = {"date", "symbol", "high", "low", "close", "volume"}
+
+
+def _safe_float(value):
+    try:
+        if pd.isna(value):
+            return None
+        number = float(value)
+    except Exception:
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _is_large_bearish_candle(row, pct_chg: float) -> bool:
+    open_p = _safe_float(row.get("open"))
+    close = _safe_float(row.get("close"))
+    high = _safe_float(row.get("high"))
+    low = _safe_float(row.get("low"))
+    if None in (open_p, close, high, low) or high <= low or open_p <= 0:
+        return False
+
+    body = abs(close - open_p)
+    candle_range = high - low
+    intraday_drop = (close / open_p - 1) * 100
+    return close < open_p and body / candle_range >= 0.55 and (intraday_drop <= -2.0 or pct_chg <= -2.0)
+
+
+def _is_bearish_engulfing(prev_row, latest_row) -> bool:
+    prev_open = _safe_float(prev_row.get("open"))
+    prev_close = _safe_float(prev_row.get("close"))
+    latest_open = _safe_float(latest_row.get("open"))
+    latest_close = _safe_float(latest_row.get("close"))
+    if None in (prev_open, prev_close, latest_open, latest_close):
+        return False
+
+    prev_body = abs(prev_close - prev_open)
+    latest_body = abs(latest_close - latest_open)
+    if prev_open <= 0 or latest_open <= 0 or prev_body <= 0 or latest_body <= 0:
+        return False
+
+    prev_is_bullish = prev_close > prev_open * 1.001
+    latest_is_bearish = latest_close < latest_open * 0.999
+    body_engulfed = latest_open >= prev_close * 0.995 and latest_close <= prev_open * 1.005
+    return prev_is_bullish and latest_is_bearish and body_engulfed and latest_body >= prev_body * 0.8
+
+
+def _is_falling_three_methods(group: pd.DataFrame) -> bool:
+    if group is None or len(group) < 5 or "open" not in group.columns:
+        return False
+
+    candles = group.sort_values("date").tail(5).reset_index(drop=True)
+    first = candles.iloc[0]
+    final = candles.iloc[-1]
+    first_open = _safe_float(first.get("open"))
+    first_close = _safe_float(first.get("close"))
+    first_high = _safe_float(first.get("high"))
+    first_low = _safe_float(first.get("low"))
+    final_open = _safe_float(final.get("open"))
+    final_close = _safe_float(final.get("close"))
+    if None in (first_open, first_close, first_high, first_low, final_open, final_close):
+        return False
+
+    first_range = first_high - first_low
+    first_body = abs(first_close - first_open)
+    if first_range <= 0 or not (first_close < first_open) or first_body / first_range < 0.45:
+        return False
+
+    for _, mid in candles.iloc[1:4].iterrows():
+        mid_open = _safe_float(mid.get("open"))
+        mid_close = _safe_float(mid.get("close"))
+        mid_high = _safe_float(mid.get("high"))
+        mid_low = _safe_float(mid.get("low"))
+        if None in (mid_open, mid_close, mid_high, mid_low):
+            return False
+        mid_body = abs(mid_close - mid_open)
+        if mid_body > first_body * 0.75:
+            return False
+        if mid_high > first_open * 1.015 or mid_low < first_close * 0.985:
+            return False
+
+    return final_close < final_open and final_close <= first_close * 0.998
+
+
+def _prepare_us_stock_ohlcv(df: pd.DataFrame, latest_date):
+    if df is None or df.empty:
+        return pd.DataFrame(), None, "数据不足：stock_prices 没有可用美股日线。"
+
+    missing = _US_STOCK_OHLCV_REQUIRED - set(df.columns)
+    if missing:
+        return pd.DataFrame(), None, f"数据不足：stock_prices 缺少字段 {', '.join(sorted(missing))}。"
+
+    work = df.copy()
+    work["date"] = pd.to_datetime(work["date"], errors="coerce")
+    latest_ts = pd.to_datetime(latest_date, errors="coerce")
+    if pd.isna(latest_ts):
+        return pd.DataFrame(), None, "数据不足：无法识别最新美股交易日。"
+
+    for col in ["high", "low", "close", "volume"]:
+        work[col] = pd.to_numeric(work[col], errors="coerce")
+    if "open" in work.columns:
+        work["open"] = pd.to_numeric(work["open"], errors="coerce")
+    else:
+        work["open"] = pd.NA
+    work["symbol"] = work["symbol"].astype(str).str.upper().str.strip()
+    work = work.dropna(subset=["date", "symbol", "high", "low", "close"]).sort_values(["symbol", "date"])
+    work = work[work["date"] <= latest_ts]
+    if work.empty:
+        return pd.DataFrame(), None, "数据不足：最新交易日前没有可用日线。"
+
+    return work, latest_ts, ""
+
+
 def _build_us_stock_technical_candidates(
     df: pd.DataFrame,
     latest_date,
@@ -182,27 +295,9 @@ def _build_us_stock_technical_candidates(
     min_bars: int = 80,
 ) -> tuple[pd.DataFrame, str]:
     """Build lightweight US stock bottom-breakout candidates from OHLCV rows."""
-    if df is None or df.empty:
-        return pd.DataFrame(), "数据不足：stock_prices 没有可用美股日线。"
-
-    required = {"date", "symbol", "high", "low", "close", "volume"}
-    missing = required - set(df.columns)
-    if missing:
-        return pd.DataFrame(), f"数据不足：stock_prices 缺少字段 {', '.join(sorted(missing))}。"
-
-    work = df.copy()
-    work["date"] = pd.to_datetime(work["date"], errors="coerce")
-    latest_ts = pd.to_datetime(latest_date, errors="coerce")
-    if pd.isna(latest_ts):
-        return pd.DataFrame(), "数据不足：无法识别最新美股交易日。"
-
-    for col in ["high", "low", "close", "volume"]:
-        work[col] = pd.to_numeric(work[col], errors="coerce")
-    work["symbol"] = work["symbol"].astype(str).str.upper().str.strip()
-    work = work.dropna(subset=["date", "symbol", "high", "low", "close"]).sort_values(["symbol", "date"])
-    work = work[work["date"] <= latest_ts]
-    if work.empty:
-        return pd.DataFrame(), "数据不足：最新交易日前没有可用日线。"
+    work, latest_ts, warning = _prepare_us_stock_ohlcv(df, latest_date)
+    if warning:
+        return pd.DataFrame(), warning
 
     rows = []
     for symbol, group in work.groupby("symbol"):
@@ -301,6 +396,147 @@ def _build_us_stock_technical_candidates(
     return result.drop(columns=["_bucket_order", "_score"]), ""
 
 
+def _build_us_stock_bearish_candidates(
+    df: pd.DataFrame,
+    latest_date,
+    *,
+    limit: int = 10,
+    min_bars: int = 80,
+) -> tuple[pd.DataFrame, str]:
+    """Build lightweight US stock bearish-breakdown candidates from OHLCV rows."""
+    work, latest_ts, warning = _prepare_us_stock_ohlcv(df, latest_date)
+    if warning:
+        return pd.DataFrame(), warning
+
+    rows = []
+    for symbol, group in work.groupby("symbol"):
+        group = group.sort_values("date").tail(max(120, min_bars + 40)).copy()
+        if len(group) < min_bars:
+            continue
+        latest = group.iloc[-1]
+        if latest["date"].normalize() != latest_ts.normalize():
+            continue
+
+        prior = group.iloc[:-1]
+        if len(prior) < 60:
+            continue
+
+        prev_close = float(prior.iloc[-1]["close"])
+        close = float(latest["close"])
+        high60 = float(group.tail(60)["high"].max())
+        prior20_low = float(prior.tail(20)["low"].min())
+        ma60 = float(group.tail(60)["close"].mean())
+        vol20 = float(prior.tail(20)["volume"].mean() or 0)
+        volume = float(latest.get("volume") or 0)
+
+        if prev_close <= 0 or close <= 0 or high60 <= 0:
+            continue
+
+        pct_chg = (close / prev_close - 1) * 100
+        drawdown_pct = (close / high60 - 1) * 100
+        breakdown_20d = prior20_low > 0 and close <= prior20_low * 0.998
+        lose_ma60 = prev_close > ma60 >= close
+        below_ma60 = close < ma60
+        volume_ratio = volume / vol20 if vol20 > 0 else None
+        volume_down = pct_chg < 0 and volume_ratio is not None and volume_ratio >= 1.2
+        sharp_drop = pct_chg <= -5.0 and drawdown_pct <= -8.0
+        distance_from_ma60_pct = (close / ma60 - 1) * 100 if ma60 > 0 else None
+        bearish_engulfing = _is_bearish_engulfing(prior.iloc[-1], latest)
+        falling_three = _is_falling_three_methods(group.tail(5))
+        large_bearish_candle = _is_large_bearish_candle(latest, pct_chg)
+        bearish_kline = bearish_engulfing or falling_three or large_bearish_candle
+        late_chase_risk = (
+            pct_chg <= -8.0
+            or drawdown_pct <= -35.0
+            or (distance_from_ma60_pct is not None and distance_from_ma60_pct <= -15.0)
+        )
+
+        if not (
+            (breakdown_20d and (bearish_kline or volume_down))
+            or (below_ma60 and bearish_kline)
+            or sharp_drop
+        ):
+            continue
+
+        status_parts = []
+        if breakdown_20d:
+            status_parts.append("跌破前20日低点")
+        if lose_ma60:
+            status_parts.append("跌破60日线")
+        elif below_ma60:
+            status_parts.append("低于60日线")
+        if volume_ratio is not None:
+            if volume_ratio >= 1.5:
+                status_parts.append("放量下跌")
+            elif volume_ratio >= 1.0:
+                status_parts.append("量能温和")
+            else:
+                status_parts.append("量能未放大")
+        if bearish_engulfing:
+            status_parts.append("空头吞噬")
+        if falling_three:
+            status_parts.append("下降三法")
+        if large_bearish_candle:
+            status_parts.append("大阴线确认")
+        if pct_chg <= -5:
+            status_parts.append("当日急跌")
+        if late_chase_risk:
+            status_parts.append("追空偏晚")
+
+        if late_chase_risk:
+            bucket = "急跌需等反抽确认"
+            bucket_order = 3
+        elif breakdown_20d and bearish_kline:
+            bucket = "破位做空优先观察"
+            bucket_order = 1
+        elif breakdown_20d or (below_ma60 and bearish_kline):
+            bucket = "弱势延续观察"
+            bucket_order = 2
+        else:
+            bucket = "急跌需等反抽确认"
+            bucket_order = 3
+
+        score = abs(drawdown_pct) + max(0.0, -pct_chg) * 2
+        if breakdown_20d:
+            score += 25
+        if below_ma60:
+            score += 12
+        if bearish_engulfing:
+            score += 18
+        if falling_three:
+            score += 20
+        if large_bearish_candle:
+            score += 10
+        if volume_ratio is not None:
+            score += min(volume_ratio, 3.0) * 6
+        if bucket_order == 3:
+            score -= 18
+        if late_chase_risk:
+            score -= 25
+
+        rows.append(
+            {
+                "分层": bucket,
+                "代码": f"{symbol}.US",
+                "最新价": close,
+                "涨跌幅": pct_chg,
+                "距60日高点回撤": drawdown_pct,
+                "跌破位": prior20_low if breakdown_20d else ma60,
+                "距60日线": distance_from_ma60_pct,
+                "量能比": volume_ratio,
+                "当前状态": "；".join(status_parts) if status_parts else "观察",
+                "_bucket_order": bucket_order,
+                "_score": score,
+            }
+        )
+
+    result = pd.DataFrame(rows)
+    if result.empty:
+        return result, ""
+    result = result.sort_values(["_bucket_order", "_score"], ascending=[True, False]).head(max(1, min(30, int(limit or 10))))
+    return result.drop(columns=["_bucket_order", "_score"]), ""
+
+
 def _format_us_stock_technical_candidates(df: pd.DataFrame, latest_date, warning: str = "") -> str:
     date_text = pd.to_datetime(latest_date).strftime("%Y-%m-%d") if latest_date else "未知"
     if warning:
@@ -339,11 +575,50 @@ def _format_us_stock_technical_candidates(df: pd.DataFrame, latest_date, warning
     )
 
 
+def _format_us_stock_bearish_candidates(df: pd.DataFrame, latest_date, warning: str = "") -> str:
+    date_text = pd.to_datetime(latest_date).strftime("%Y-%m-%d") if latest_date else "未知"
+    if warning:
+        return (
+            "结论：数据不足\n"
+            f"- 数据日期：{date_text}\n"
+            f"- 原因：{warning}\n"
+            "- 提醒：美股筛选使用日线 EOD 数据，不代表盘中实时行情。"
+        )
+    if df is None or df.empty:
+        return (
+            "结论：暂无符合条件候选\n"
+            f"- 数据日期：{date_text}\n"
+            "- 筛选条件：跌破前20日低点或低于60日线，并伴随空头吞噬、下降三法、大阴线或放量确认。\n"
+            "- 可放宽条件：改看弱势延续、只看低于60日线，或扩大美股池。\n"
+            "- 提醒：美股筛选使用日线 EOD 数据；做空还需确认券源、借券成本和隔夜跳空风险。"
+        )
+
+    display = df.copy()
+    display["最新价"] = display["最新价"].map(lambda x: f"{float(x):.2f}")
+    display["涨跌幅"] = display["涨跌幅"].map(_format_us_pct)
+    display["距60日高点回撤"] = display["距60日高点回撤"].map(lambda x: f"{float(x):.1f}%")
+    display["跌破位"] = display["跌破位"].map(lambda x: f"{float(x):.2f}")
+    display["距60日线"] = display["距60日线"].map(lambda x: "N/A" if pd.isna(x) else f"{float(x):+.1f}%")
+    display["量能比"] = display["量能比"].map(lambda x: "N/A" if pd.isna(x) else f"{float(x):.2f}x")
+    bucket_counts = display["分层"].value_counts().to_dict() if "分层" in display.columns else {}
+    bucket_summary = "；".join(f"{name}{count}只" for name, count in bucket_counts.items()) or "未分层"
+
+    return (
+        "结论：美股看跌/做空观察候选如下，需按分层解读\n"
+        f"- 数据日期：{date_text}\n"
+        "- 筛选条件：跌破前20日低点或低于60日线，并伴随空头吞噬、下降三法、大阴线或放量确认。\n"
+        f"- 候选分层：{bucket_summary}\n"
+        "- 定位：候选观察名单，不是直接做空指令；已将单日急跌过深、距60日线过远或60日高点回撤过大的标的降级为等反抽确认。\n\n"
+        f"{display.to_markdown(index=False)}\n\n"
+        "- 提醒：美股筛选使用日线 EOD 数据；做空前还要确认券源、借券成本、止损位和隔夜跳空风险。"
+    )
+
+
 @tool
 def search_us_stocks_by_technical_setup(setup: str = "bottom_breakout", limit: int = 10, min_bars: int = 80):
     """
     【美股轻量技术筛选】
-    基于 stock_prices 美股日线筛选底部起来、刚突破、横盘突破等候选股。
+    基于 stock_prices 美股日线筛选底部起来、刚突破、横盘突破或看跌破位候选股。
     """
     if engine is None:
         return "结论：数据不足\n- 原因：数据库连接失败，无法获取美股日线。\n- 提醒：美股筛选使用日线 EOD 数据。"
@@ -355,13 +630,33 @@ def search_us_stocks_by_technical_setup(setup: str = "bottom_breakout", limit: i
             return "结论：数据不足\n- 原因：stock_prices 没有美股日线。\n- 提醒：美股筛选使用日线 EOD 数据。"
 
         start_date = pd.to_datetime(latest_date) - pd.Timedelta(days=260)
+        select_open = ""
+        try:
+            with engine.connect() as conn:
+                columns = conn.execute(text("SHOW COLUMNS FROM stock_prices")).fetchall()
+            column_names = {str(row[0]).lower() for row in columns}
+            if "open" in column_names:
+                select_open = "open,"
+        except Exception:
+            select_open = ""
+
         sql = """
-            SELECT date, UPPER(symbol) AS symbol, high, low, close, volume
+            SELECT date, UPPER(symbol) AS symbol, {select_open} high, low, close, volume
             FROM stock_prices
             WHERE date >= :start_date AND date <= :latest_date
-        """
+        """.format(select_open=select_open)
         with engine.connect() as conn:
             df = pd.read_sql(text(sql), conn, params={"start_date": start_date.date(), "latest_date": latest_date})
+
+        normalized_setup = str(setup or "bottom_breakout").strip().lower()
+        if normalized_setup in {"bearish_breakdown", "short", "bearish", "breakdown"}:
+            candidates, warning = _build_us_stock_bearish_candidates(
+                df,
+                latest_date,
+                limit=limit,
+                min_bars=min_bars,
+            )
+            return _format_us_stock_bearish_candidates(candidates, latest_date, warning)
 
         candidates, warning = _build_us_stock_technical_candidates(
             df,

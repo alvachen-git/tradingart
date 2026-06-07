@@ -73,7 +73,36 @@ class TestChatRouting(unittest.TestCase):
         self.assertEqual(classify_chat_mode("推荐一些美股"), CHAT_MODE_ANALYSIS)
         self.assertEqual(classify_chat_mode("推荐一些美股，最好是从底部起来刚突破的"), CHAT_MODE_ANALYSIS)
         self.assertEqual(classify_chat_mode("推荐一些美股，偏技术面强一点"), CHAT_MODE_ANALYSIS)
+        self.assertEqual(classify_chat_mode("帮我找适合做空的美股，给我3只名称"), CHAT_MODE_ANALYSIS)
         self.assertEqual(classify_chat_mode("推荐一些A股，最好是从底部起来刚突破的"), CHAT_MODE_ANALYSIS)
+
+    def test_current_stock_selection_overrides_followup_knowledge_policy(self):
+        self.assertEqual(
+            classify_chat_mode(
+                "帮我找适合做空的美股",
+                is_followup=True,
+                recent_context="用户: 适合做空的标的有什么特征\nAI: 做空要看基本面、估值和技术面。",
+                followup_task_policy={
+                    "recommended_chat_mode": CHAT_MODE_KNOWLEDGE,
+                    "override_level": "force",
+                },
+            ),
+            CHAT_MODE_ANALYSIS,
+        )
+
+    def test_current_option_scenario_overrides_followup_knowledge_policy(self):
+        self.assertEqual(
+            classify_chat_mode(
+                "如果创业板ETF周一-10%开盘，IV会到多少，平值认沽涨多少",
+                is_followup=True,
+                recent_context="用户: 解释一下IV\nAI: IV是隐含波动率。",
+                followup_task_policy={
+                    "recommended_chat_mode": CHAT_MODE_KNOWLEDGE,
+                    "override_level": "force",
+                },
+            ),
+            CHAT_MODE_ANALYSIS,
+        )
 
     def test_stock_selection_followup_routes_to_analysis(self):
         self.assertEqual(
@@ -306,12 +335,16 @@ class TestChatRouting(unittest.TestCase):
         self.assertFalse(is_pure_option_data_query("300ETF期权波动率高吗，适合卖方吗"))
         self.assertFalse(is_pure_option_data_query("创业板卖认沽如何处理"))
         self.assertFalse(is_pure_option_data_query("300ETF期权怎么看"))
+        self.assertFalse(is_pure_option_data_query("如果创业板ETF周一-10%开盘，IV会到多少，平值认沽涨多少"))
 
     def test_detect_market_data_query(self):
         self.assertTrue(is_market_data_query("查看甲醇2609的iv波动率"))
         self.assertTrue(is_market_data_query("甲醇2609价格多少"))
         self.assertTrue(is_market_data_query("白银最新价多少"))
+        self.assertTrue(is_market_data_query("创业板ETF期权IV现在多少"))
         self.assertFalse(is_market_data_query("甲醇2609波动率高吗，适合卖方吗"))
+        self.assertFalse(is_market_data_query("如果创业板ETF周一-10%开盘，IV会到多少，平值认沽涨多少"))
+        self.assertFalse(is_market_data_query("如果黄金跌破支撑，后面怎么看"))
         self.assertFalse(is_market_data_query("解释一下IV"))
 
 

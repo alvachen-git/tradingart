@@ -118,6 +118,11 @@ class AnalysisTaskPolicyTest(unittest.TestCase):
         self.assertEqual(policy.task_type, TASK_TYPE_OPTION_STRATEGY_WITH_SUBJECT)
         self.assertEqual(policy.recommended_plan, ("analyst", "strategist"))
 
+    def test_option_scenario_projection_with_subject_keeps_strategy_policy(self):
+        policy = classify_analysis_task_type("如果创业板ETF周一-10%开盘，IV会到多少，平值认沽涨多少")
+        self.assertEqual(policy.task_type, TASK_TYPE_OPTION_STRATEGY_WITH_SUBJECT)
+        self.assertEqual(policy.recommended_plan, ("analyst", "strategist"))
+
     def test_futures_broker_signal_task_type(self):
         for query in [
             "螺纹钢现在从期货商正反指标看偏多还是偏空？",
@@ -155,6 +160,7 @@ class AnalysisTaskPolicyTest(unittest.TestCase):
             "推荐一些美股",
             "推荐一些美股，最好是从底部起来刚突破的",
             "推荐一些美股，偏技术面强一点",
+            "帮我找适合做空的美股，给我3只名称",
             "推荐一些A股，最好是从底部起来刚突破的",
         ]:
             with self.subTest(query=query):

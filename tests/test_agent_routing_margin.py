@@ -35,6 +35,25 @@ def test_option_data_plus_strategy_query_does_not_force_monitor_only():
     assert out == plan
 
 
+def test_option_scenario_projection_is_not_forced_to_monitor_only():
+    plan = ["monitor"]
+    out = agent_core._enforce_option_data_monitor_routing(
+        "如果创业板ETF周一-10%开盘，IV会到多少，平值认沽涨多少",
+        plan,
+    )
+    assert out == plan
+
+
+def test_option_scenario_projection_recovers_strategy_route_from_monitor_only():
+    plan, symbol = agent_core._apply_analysis_task_policy(
+        "如果创业板ETF周一-10%开盘，IV会到多少，平值认沽涨多少",
+        ["monitor"],
+        "",
+    )
+    assert plan == ["analyst", "strategist"]
+    assert symbol == ""
+
+
 def test_fundamental_and_technical_query_forces_analyst_and_researcher():
     out = agent_core._enforce_research_analyst_routing(
         "中天科技的基本面和技术面分析下",
@@ -119,7 +138,8 @@ def test_screener_node_us_stock_selection_uses_us_tool_then_llm_reasoning(monkey
 
     class FakeUsScreener:
         @staticmethod
-        def invoke(_params):
+        def invoke(params):
+            seen["params"] = params
             return (
                 "结论：美股技术候选如下，需按分层解读\n"
                 "- 数据日期：2026-05-22\n\n"
@@ -139,8 +159,52 @@ def test_screener_node_us_stock_selection_uses_us_tool_then_llm_reasoning(monkey
     assert "【精选股票】" in content
     assert "AAA.US" in content
     assert "EXT.US 技术面强但已不早" in content
+    assert seen["params"] == {"setup": "bottom_breakout", "limit": 10}
     assert "只能使用" in seen["prompt"]
     assert "底部刚突破优先观察" in seen["prompt"]
+
+
+def test_screener_node_us_stock_short_selection_uses_bearish_setup(monkeypatch):
+    seen = {}
+
+    class FakeLLM:
+        def invoke(self, prompt, *_args, **_kwargs):
+            seen["prompt"] = prompt
+
+            class Response:
+                content = (
+                    "【精选股票】\n"
+                    "结论：BRK.US 和 WEA.US 更贴近做空观察候选。\n"
+                    "- 数据日期：2026-05-22，美股日线 EOD。"
+                )
+
+            return Response()
+
+    class FakeUsScreener:
+        @staticmethod
+        def invoke(params):
+            seen["params"] = params
+            return (
+                "结论：美股看跌/做空观察候选如下，需按分层解读\n"
+                "- 数据日期：2026-05-22\n\n"
+                "| 分层 | 代码 | 当前状态 |\n"
+                "|:---|:---|:---|\n"
+                "| 破位做空优先观察 | BRK.US | 跌破前20日低点 |\n"
+                "| 弱势延续观察 | WEA.US | 低于60日线 |"
+            )
+
+    monkeypatch.setattr(agent_core, "search_us_stocks_by_technical_setup", FakeUsScreener)
+
+    out = agent_core.screener_node(
+        {"user_query": "帮我找适合做空的美股，给我3只名称", "symbol": ""},
+        FakeLLM(),
+    )
+    content = out["messages"][0].content
+    assert "【精选股票】" in content
+    assert "BRK.US" in content
+    assert seen["params"] == {"setup": "bearish_breakdown", "limit": 3}
+    assert "看跌/做空观察候选" in seen["prompt"]
+    assert "底部刚突破优先观察" not in seen["prompt"]
 
 
 def test_screener_node_us_stock_selection_falls_back_when_llm_fails(monkeypatch):
