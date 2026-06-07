@@ -2,6 +2,7 @@ import re
 from typing import Final
 
 from agent_prompt_policy import (
+    TASK_TYPE_OPTION_STRATEGY_WITH_SUBJECT,
     TASK_TYPE_STOCK_SELECTION,
     TASK_TYPE_TECHNICAL_CONCEPT,
     classify_analysis_task_type,
@@ -75,11 +76,13 @@ STOCK_SELECTION_ACTION_KEYWORDS = (
 
 STOCK_SELECTION_SUBJECT_KEYWORDS = (
     "股票", "个股", "概念股", "龙头股", "强势股", "弱势股", "标的",
+    "A股", "a股", "美股", "纳斯达克", "纽交所", "US stock", "us stock",
 )
 
 STOCK_SELECTION_PATTERN_KEYWORDS = (
     "放量突破", "成交量异常", "成交量放大", "量能异动", "放量", "缩量", "换手率异常",
     "技术形态", "形态比较强", "形态强", "红三兵", "多头吞噬", "均线多头",
+    "突破", "刚突破", "底部起来", "底部反弹", "底部突破", "横盘突破",
 )
 
 STOCK_SELECTION_CONCEPT_KEYWORDS = (
@@ -118,7 +121,7 @@ PORTFOLIO_META_QUERY_EXCLUDED_KEYWORDS = (
 TECHNICAL_KNOWLEDGE_KEYWORDS = (
     "k线", "均线", "图表", "技术面", "技术分析", "真假突破", "假突破", "假跌破",
     "支撑位", "阻力位", "成交量", "回踩", "趋势线", "多头陷阱", "空头陷阱",
-    "止损", "止盈", "仓位管理", "突破四原则", "放量突破",
+    "止损", "止盈", "仓位管理", "突破四原则", "放量突破", "底部突破", "横盘突破",
 )
 
 MARKET_SUBJECT_KEYWORDS = (
@@ -138,11 +141,16 @@ OPTION_DATA_INTENT_KEYWORDS = (
     "rank", "几档", "多不多", "够不够", "贵吗", "便宜吗",
 )
 
+SCENARIO_PROJECTION_KEYWORDS = (
+    "如果", "假如", "假设", "情景", "推演", "压力测试", "会到多少", "涨多少", "跌多少",
+    "开盘跌", "开盘涨", "跳空", "大幅下跌", "大幅上涨",
+)
+
 OPTION_DATA_EXCLUDED_KEYWORDS = (
     "策略", "建议", "怎么做", "怎么办", "怎么看", "适合", "能买吗", "能不能买", "买入", "卖出",
     "开仓", "平仓", "移仓", "调仓", "对冲", "行情", "走势", "技术面", "基本面", "宏观", "新闻",
     "影响", "利好", "利空", "如何处理",
-)
+) + SCENARIO_PROJECTION_KEYWORDS
 
 MARKET_DATA_SUBJECT_KEYWORDS = (
     "iv", "隐含波动率", "波动率", "iv rank", "ivrank", "价格", "现价", "最新价", "报价", "收盘",
@@ -563,6 +571,9 @@ def classify_chat_mode(
         focus_mode_hint=focus_mode_hint,
         is_followup=is_followup,
     )
+    if has_stock_selection or analysis_task_policy.task_type == TASK_TYPE_OPTION_STRATEGY_WITH_SUBJECT:
+        return CHAT_MODE_ANALYSIS
+
     if policy_mode in {CHAT_MODE_SIMPLE, CHAT_MODE_KNOWLEDGE, CHAT_MODE_ANALYSIS} and policy_override in {"force", "suggest"}:
         if policy_mode != CHAT_MODE_ANALYSIS:
             return policy_mode
@@ -606,9 +617,6 @@ def classify_chat_mode(
     correction_suggests_facts = any(keyword in correction_signal_text for keyword in CORRECTION_FACT_HINTS)
     correction_prompt_suggests_facts = any(keyword in correction_prompt_text for keyword in CORRECTION_FACT_HINTS)
     correction_prompt_suggests_analysis = any(keyword in correction_prompt_text for keyword in CORRECTION_ANALYSIS_HINTS)
-
-    if has_stock_selection:
-        return CHAT_MODE_ANALYSIS
 
     if effective_followup_goal == EXECUTE_SUGGESTED_ACTION_GOAL and any(
         hint in recent_context_lower for hint in STOCK_SELECTION_FOLLOWUP_CONTEXT_HINTS
