@@ -17,7 +17,7 @@ import BottomNav from '../../components/BottomNav.vue'
 
 const auth = useAuthStore()
 
-type MainTab = 'intel' | 'ai'
+type MainTab = 'intel' | 'ai' | 'ai2'
 const activeMainTab = ref<MainTab>('intel')
 
 const channels = [
@@ -42,8 +42,20 @@ const intelAccessChecking = ref(false)
 const allowedChannelCodes = ref<Set<string>>(new Set())
 
 // ── AI日记 ─────────────────────────────────────────────────
-const AI_OVERVIEW_CACHE_KEY = 'intel_ai_overview_cache_v2'
+const AI_OVERVIEW_CACHE_PREFIX = 'intel_ai_overview_cache_v3'
 const AI_OVERVIEW_TTL_MS = 20 * 60 * 1000
+const AI_PORTFOLIOS = {
+  ai: {
+    id: 'official_cn_a_etf_v1',
+    label: 'AI日记',
+    subtitle: '千问模型搭配交易汇训练',
+  },
+  ai2: {
+    id: 'official_cn_a_etf_v3',
+    label: 'AI日记2',
+    subtitle: '选股3号 · 行业突破模型',
+  },
+} as const
 
 const aiOverview = ref<AiOverviewPayload | null>(null)
 const aiReview = ref<AiReviewPayload | null>(null)
@@ -67,6 +79,10 @@ const currentChannelLabel = computed(() => {
   const cur = channels.find((c) => c.code === activeChannel.value)
   return cur?.label || '全部'
 })
+const isAiTab = computed(() => activeMainTab.value === 'ai' || activeMainTab.value === 'ai2')
+const currentAiPortfolio = computed(() => AI_PORTFOLIOS[activeMainTab.value === 'ai2' ? 'ai2' : 'ai'])
+const currentAiLabel = computed(() => currentAiPortfolio.value.label)
+const currentAiCacheKey = computed(() => `${AI_OVERVIEW_CACHE_PREFIX}_${currentAiPortfolio.value.id}`)
 
 const INTEL_ACCESS_CODES = new Set(
   channels
@@ -283,7 +299,7 @@ onPullDownRefresh(async () => {
   try {
     if (activeMainTab.value === 'intel') {
       await loadReports(true)
-    } else {
+    } else if (isAiTab.value) {
       await ensureAiOverview(true)
     }
   } finally {
@@ -291,14 +307,28 @@ onPullDownRefresh(async () => {
   }
 })
 
-async function toggleAiTab() {
-  if (activeMainTab.value === 'ai') {
+async function switchMainTab(tab: MainTab) {
+  if (tab === 'intel') {
     clearChartPoint()
     activeMainTab.value = 'intel'
     return
   }
-  activeMainTab.value = 'ai'
+
+  const nextPortfolioId = AI_PORTFOLIOS[tab].id
+  activeMainTab.value = tab
+  if (aiOverview.value?.portfolio_id && aiOverview.value.portfolio_id !== nextPortfolioId) {
+    resetAiState()
+  }
   await ensureAiOverview(false)
+}
+
+function resetAiState() {
+  clearChartPoint()
+  aiOverview.value = null
+  aiReview.value = null
+  aiError.value = ''
+  aiCacheTs.value = 0
+  selectedReviewDate.value = ''
 }
 
 function showChartPoint(point: {
@@ -373,7 +403,7 @@ function openChannelPicker() {
 
 function readAiCache(): { ts: number; data: AiOverviewPayload } | null {
   try {
-    const raw = uni.getStorageSync(AI_OVERVIEW_CACHE_KEY)
+    const raw = uni.getStorageSync(currentAiCacheKey.value)
     if (!raw) return null
     const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw
     if (!parsed || typeof parsed !== 'object') return null
@@ -389,7 +419,7 @@ function writeAiCache(payload: AiOverviewPayload) {
   const entry = { ts: Date.now(), data: payload }
   aiCacheTs.value = entry.ts
   try {
-    uni.setStorageSync(AI_OVERVIEW_CACHE_KEY, JSON.stringify(entry))
+    uni.setStorageSync(currentAiCacheKey.value, JSON.stringify(entry))
   } catch {
     // ignore storage failure
   }
@@ -427,6 +457,7 @@ async function fetchAiOverview(silent = false) {
       trades_days: 20,
       positions_limit: 24,
       review_limit: 260,
+      portfolio_id: currentAiPortfolio.value.id,
     })
     applyOverview(payload)
     writeAiCache(payload)
@@ -480,7 +511,7 @@ async function loadAiReview(tradeDate: string) {
   if (!tradeDate || aiReviewLoading.value) return
   aiReviewLoading.value = true
   try {
-    const payload = await aiSimApi.review(tradeDate)
+    const payload = await aiSimApi.review(tradeDate, currentAiPortfolio.value.id)
     aiReview.value = payload
   } catch (e: any) {
     uni.showToast({ title: e.message || '复盘加载失败', icon: 'none' })
@@ -543,7 +574,7 @@ async function syncAccessAndBootstrap() {
   if (activeMainTab.value === 'intel' && !reports.value.length && !reportLoading.value) {
     await loadReports(true)
   }
-  if (activeMainTab.value === 'ai' && !aiOverview.value && !aiLoading.value) {
+  if (isAiTab.value && !aiOverview.value && !aiLoading.value) {
     await ensureAiOverview(false)
   }
 }
@@ -635,8 +666,11 @@ function toneClass(v: any): string {
         <text class="filter-label">{{ currentChannelLabel }}</text>
         <text class="filter-arrow">▾</text>
       </view>
-      <view class="ai-tab" :class="{ active: activeMainTab === 'ai' }" @tap="toggleAiTab">
+      <view class="ai-tab" :class="{ active: activeMainTab === 'ai' }" @tap="switchMainTab('ai')">
         AI日记
+      </view>
+      <view class="ai-tab" :class="{ active: activeMainTab === 'ai2' }" @tap="switchMainTab('ai2')">
+        AI日记2
       </view>
     </view>
 
@@ -688,7 +722,7 @@ function toneClass(v: any): string {
       </view>
 
       <view v-else-if="aiLoading" class="center-tip">
-        <text class="muted-text">AI日记加载中...</text>
+        <text class="muted-text">{{ currentAiLabel }}加载中...</text>
       </view>
 
       <view v-else-if="aiError && !aiOverview" class="center-tip">
@@ -701,7 +735,7 @@ function toneClass(v: any): string {
 
       <view v-else>
         <view class="ai-meta">
-          <text class="meta-text">千问模型搭配交易汇训练</text>
+          <text class="meta-text">{{ currentAiPortfolio.subtitle }}</text>
           <text class="meta-text">更新：{{ aiOverview.fetched_at || '-' }}</text>
           <text v-if="aiSyncing" class="meta-text">同步中...</text>
         </view>

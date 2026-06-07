@@ -289,18 +289,25 @@ export const intelApi = {
 }
 
 export const aiSimApi = {
-  overview: (params?: { nav_days?: number; trades_days?: number; positions_limit?: number; review_limit?: number }) => {
+  overview: (params?: {
+    nav_days?: number
+    trades_days?: number
+    positions_limit?: number
+    review_limit?: number
+    portfolio_id?: string
+  }) => {
     const qs = toQuery({
       nav_days: params?.nav_days,
       trades_days: params?.trades_days,
       positions_limit: params?.positions_limit,
       review_limit: params?.review_limit,
+      portfolio_id: params?.portfolio_id,
     })
     return request<AiOverviewPayload>('GET', `/api/intel/ai/overview${qs}`)
   },
 
-  review: (tradeDate?: string) => {
-    const qs = toQuery({ trade_date: tradeDate })
+  review: (tradeDate?: string, portfolioId?: string) => {
+    const qs = toQuery({ trade_date: tradeDate, portfolio_id: portfolioId })
     return request<AiReviewPayload>('GET', `/api/intel/ai/review${qs}`)
   },
 }

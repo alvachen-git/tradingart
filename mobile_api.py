@@ -145,6 +145,7 @@ import data_engine as de
 from user_profile_memory import build_profile_memory_context
 from ai_simulation_service import (
     OFFICIAL_PORTFOLIO_ID,
+    OFFICIAL_PORTFOLIO_3_ID,
     compute_sharpe_ratio_from_nav as ai_compute_sharpe_ratio_from_nav,
     get_closed_trade_extremes as ai_get_closed_trade_extremes,
     get_daily_review as ai_get_daily_review,
@@ -7037,6 +7038,26 @@ def _normalize_trade_date_input(raw: Optional[str]) -> Optional[str]:
     return digits
 
 
+def _normalize_ai_portfolio_id(raw: Optional[str]) -> str:
+    if raw is not None and not isinstance(raw, (str, int, float)):
+        default = getattr(raw, "default", None)
+        raw = default if isinstance(default, (str, int, float)) else None
+    value = str(raw or "").strip().lower()
+    if not value or value in {OFFICIAL_PORTFOLIO_ID.lower(), "v1", "ai1", "ai_diary", "official"}:
+        return OFFICIAL_PORTFOLIO_ID
+    if value in {
+        OFFICIAL_PORTFOLIO_3_ID.lower(),
+        "v3",
+        "ai3",
+        "ai_diary2",
+        "ai_diary_2",
+        "stock3",
+        "选股3号",
+    }:
+        return OFFICIAL_PORTFOLIO_3_ID
+    raise HTTPException(status_code=400, detail="portfolio_id 不支持")
+
+
 def _json_safe_value(value: Any):
     if value is None:
         return None
@@ -7130,6 +7151,7 @@ def intel_ai_overview(
     trades_days: int = 20,
     positions_limit: int = 24,
     review_limit: int = 260,
+    portfolio_id: str = Query(default=OFFICIAL_PORTFOLIO_ID),
     username: str = Depends(get_current_user),
 ):
     """
@@ -7137,17 +7159,18 @@ def intel_ai_overview(
     - snapshot / nav_series / positions / trades / latest_review / review_dates / watchlist
     """
     _ = username  # 仅鉴权，不做用户隔离
+    pid = _normalize_ai_portfolio_id(portfolio_id)
     nav_days = min(250, max(30, int(nav_days)))
     trades_days = min(40, max(5, int(trades_days)))
     positions_limit = min(50, max(5, int(positions_limit)))
     review_limit = min(260, max(20, int(review_limit)))
 
     try:
-        snapshot = _json_safe_value(ai_get_latest_snapshot(OFFICIAL_PORTFOLIO_ID)) or {}
+        snapshot = _json_safe_value(ai_get_latest_snapshot(pid)) or {}
         if not snapshot.get("has_data"):
             return {
                 "has_data": False,
-                "portfolio_id": OFFICIAL_PORTFOLIO_ID,
+                "portfolio_id": pid,
                 "snapshot": snapshot,
                 "review_dates": [],
                 "latest_review": {
@@ -7167,13 +7190,13 @@ def intel_ai_overview(
             }
 
         snapshot_trade_date = str(snapshot.get("trade_date") or "")
-        review_dates = ai_get_review_dates(OFFICIAL_PORTFOLIO_ID, limit=review_limit) or []
+        review_dates = ai_get_review_dates(pid, limit=review_limit) or []
         if snapshot_trade_date and snapshot_trade_date not in review_dates:
             review_dates = [snapshot_trade_date] + list(review_dates)
 
         latest_review_date = review_dates[0] if review_dates else snapshot_trade_date
         latest_review = _json_safe_value(
-            ai_get_daily_review(OFFICIAL_PORTFOLIO_ID, trade_date=latest_review_date)
+            ai_get_daily_review(pid, trade_date=latest_review_date)
         ) or {
             "has_data": False,
             "summary_md": "暂无复盘数据。",
@@ -7183,7 +7206,7 @@ def intel_ai_overview(
             "next_watchlist": [],
         }
 
-        nav_df = ai_get_nav_series(OFFICIAL_PORTFOLIO_ID, days=nav_days)
+        nav_df = ai_get_nav_series(pid, days=nav_days)
         nav_rows = _df_records_jsonable(nav_df, limit=nav_days)
         if snapshot.get("sharpe_ratio") is None:
             snapshot["sharpe_ratio"] = ai_compute_sharpe_ratio_from_nav(nav_df)
@@ -7201,14 +7224,14 @@ def intel_ai_overview(
         positions = []
         if snapshot_position_value > 0:
             pos_df = ai_get_positions(
-                OFFICIAL_PORTFOLIO_ID,
+                pid,
                 as_of_date=snapshot_trade_date or None,
                 strict_as_of=True,
             )
             # 仅在快照显示有持仓时，才允许回退到最近可用持仓，避免口径错位。
             if getattr(pos_df, "empty", True):
                 pos_df = ai_get_positions(
-                    OFFICIAL_PORTFOLIO_ID,
+                    pid,
                     as_of_date=snapshot_trade_date or None,
                     strict_as_of=False,
                 )
@@ -7216,13 +7239,13 @@ def intel_ai_overview(
         for row in positions:
             row["trade_date"] = str(row.get("trade_date") or snapshot_trade_date)
 
-        trades = _df_records_jsonable(ai_get_trades(OFFICIAL_PORTFOLIO_ID, days=trades_days), limit=trades_days * 20)
+        trades = _df_records_jsonable(ai_get_trades(pid, days=trades_days), limit=trades_days * 20)
         for row in trades:
             row["trade_date"] = str(row.get("trade_date") or "")
             if row.get("created_at") is not None:
                 row["created_at"] = str(row.get("created_at"))
         closed_trade_extremes = _json_safe_value(
-            ai_get_closed_trade_extremes(OFFICIAL_PORTFOLIO_ID, days=9999, limit=3)
+            ai_get_closed_trade_extremes(pid, days=9999, limit=3)
         ) or {"top_gains": [], "top_losses": []}
 
         watchlist = latest_review.get("next_watchlist") if isinstance(latest_review, dict) else []
@@ -7231,7 +7254,7 @@ def intel_ai_overview(
 
         return {
             "has_data": True,
-            "portfolio_id": OFFICIAL_PORTFOLIO_ID,
+            "portfolio_id": pid,
             "snapshot": snapshot,
             "review_dates": [str(d) for d in review_dates],
             "latest_review": latest_review,
@@ -7251,13 +7274,15 @@ def intel_ai_overview(
 @app.get("/api/intel/ai/review", tags=["情报站"])
 def intel_ai_review(
     trade_date: Optional[str] = None,
+    portfolio_id: str = Query(default=OFFICIAL_PORTFOLIO_ID),
     username: str = Depends(get_current_user),
 ):
     """获取 AI炒股复盘（日级）。trade_date 可选，格式 YYYYMMDD。"""
     _ = username
     td = _normalize_trade_date_input(trade_date)
+    pid = _normalize_ai_portfolio_id(portfolio_id)
     try:
-        review = ai_get_daily_review(OFFICIAL_PORTFOLIO_ID, trade_date=td)
+        review = ai_get_daily_review(pid, trade_date=td)
         return _json_safe_value(review)
     except HTTPException:
         raise
@@ -7741,6 +7766,9 @@ def market_options(username: str = Depends(get_current_user)):
     """
     try:
         df = de.get_comprehensive_market_data()
+        if isinstance(df, dict) and df.get("error"):
+            print(f"[market_options] data_error: {df.get('error')}", flush=True)
+            return {"items": [], "updated_at": ""}
         if df is None or (hasattr(df, 'empty') and df.empty):
             return {"items": [], "updated_at": ""}
 
@@ -7750,7 +7778,7 @@ def market_options(username: str = Depends(get_current_user)):
         for _, row in df.iterrows():
             iv_rank = row.get("IV Rank", 0)
             is_expiring = str(iv_rank).strip() == "快到期"
-            raw_iv = float(row.get("当前IV", 0) or 0)
+            raw_iv = _safe_float(row.get("当前IV"), 0.0)
             try:
                 iv_rank_num = float(iv_rank) if iv_rank not in ("快到期", None, "") else IV_RANK_EXPIRING
             except Exception:
@@ -7766,7 +7794,7 @@ def market_options(username: str = Depends(get_current_user)):
             # IV变动(日)：优先使用综合数据，缺失时走历史回退计算
             iv_chg_raw = row.get("IV变动(日)", None)
             iv_chg_missing = _is_missing_value(iv_chg_raw)
-            raw_iv_chg = 0.0 if iv_chg_missing else float(iv_chg_raw or 0)
+            raw_iv_chg = 0.0 if iv_chg_missing else _safe_float(iv_chg_raw, 0.0)
 
             # IV Rank 状态归一化：
             # -2: 无期权；-1: 快到期；-3: 有期权但缺IV；>=0: 正常分位
@@ -7783,10 +7811,10 @@ def market_options(username: str = Depends(get_current_user)):
                 "iv":           round(raw_iv, 1),
                 "iv_rank":      iv_rank_num,
                 "iv_chg_1d":    round(raw_iv_chg, 2),
-                "pct_1d":       round(float(row.get("涨跌%(日)", 0) or 0), 2),
-                "pct_5d":       round(float(row.get("涨跌%(5日)", 0) or 0), 2),
-                "retail_chg":   int(row.get("散户变动(日)", 0) or 0),
-                "inst_chg":     int(row.get("机构变动(日)", 0) or 0),
+                "pct_1d":       round(_safe_float(row.get("涨跌%(日)"), 0.0), 2),
+                "pct_5d":       round(_safe_float(row.get("涨跌%(5日)"), 0.0), 2),
+                "retail_chg":   int(_safe_float(row.get("散户变动(日)"), 0.0)),
+                "inst_chg":     int(_safe_float(row.get("机构变动(日)"), 0.0)),
                 "cur_price":    0.0,  # 下面批量回填
                 "_iv_chg_missing": iv_chg_missing,
             })

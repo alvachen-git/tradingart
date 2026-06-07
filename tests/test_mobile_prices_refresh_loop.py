@@ -290,6 +290,35 @@ class TestMobilePricesRefreshLoop(unittest.TestCase):
         self.assertEqual(row["iv_rank"], 9.0)
         self.assertEqual(row["iv_chg_1d"], 0.69)
 
+    def test_market_options_tolerates_dirty_numeric_cells(self):
+        df = pd.DataFrame([
+            {
+                "合约": "M2609 (豆粕)",
+                "当前IV": "--",
+                "IV Rank": "N/A",
+                "IV变动(日)": "--",
+                "涨跌%(日)": "",
+                "涨跌%(5日)": "None",
+                "散户变动(日)": "—",
+                "机构变动(日)": None,
+            }
+        ])
+        empty_df = pd.DataFrame()
+        with patch.object(mobile_api.de, "get_comprehensive_market_data", return_value=df), patch.object(
+            mobile_api, "_get_option_product_codes", return_value={"m"}
+        ), patch.object(
+            mobile_api, "_load_shared_prices_payload", return_value={"items": [], "contracts": {}, "refreshed_ts": 0}
+        ), patch(
+            "pandas.read_sql", side_effect=[empty_df, empty_df]
+        ):
+            out = mobile_api.market_options(username="u1")
+
+        self.assertTrue(out.get("items"))
+        row = out["items"][0]
+        self.assertEqual(row["iv"], 0.0)
+        self.assertEqual(row["pct_1d"], 0.0)
+        self.assertEqual(row["retail_chg"], 0)
+
     def test_fresh_live_contracts_map_drops_stale_snapshot(self):
         stale_payload = {
             "contracts": {"SC2605": {"price": 622.6, "pct": 0.0}},

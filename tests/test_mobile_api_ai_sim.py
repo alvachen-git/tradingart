@@ -24,6 +24,14 @@ class TestMobileApiAiSim(unittest.TestCase):
         self.assertEqual(out["positions"], [])
         self.assertEqual(out["trades"], [])
 
+    def test_overview_accepts_v3_portfolio_for_ai_diary2(self):
+        with patch.object(mobile_api, "ai_get_latest_snapshot", return_value={"has_data": False}) as mocked_snapshot:
+            out = mobile_api.intel_ai_overview(portfolio_id="official_cn_a_etf_v3", username="u1")
+
+        self.assertFalse(out["has_data"])
+        self.assertEqual(out["portfolio_id"], mobile_api.OFFICIAL_PORTFOLIO_3_ID)
+        self.assertEqual(mocked_snapshot.call_args.args[0], mobile_api.OFFICIAL_PORTFOLIO_3_ID)
+
     def test_overview_aggregates_and_clamps_params(self):
         nav_df = pd.DataFrame([
             {
@@ -174,6 +182,17 @@ class TestMobileApiAiSim(unittest.TestCase):
 
         self.assertTrue(out["has_data"])
         self.assertEqual(mocked_review.call_args.kwargs["trade_date"], "20260327")
+
+    def test_review_accepts_ai_diary2_alias(self):
+        with patch.object(
+            mobile_api,
+            "ai_get_daily_review",
+            return_value={"has_data": True, "trade_date": "20260327"},
+        ) as mocked_review:
+            out = mobile_api.intel_ai_review(trade_date="20260327", portfolio_id="ai_diary2", username="u1")
+
+        self.assertTrue(out["has_data"])
+        self.assertEqual(mocked_review.call_args.args[0], mobile_api.OFFICIAL_PORTFOLIO_3_ID)
 
     def test_review_rejects_invalid_date(self):
         with self.assertRaises(HTTPException) as cm:
