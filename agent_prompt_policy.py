@@ -297,6 +297,13 @@ STOCK_SELECTION_SUBJECT_KEYWORDS: Tuple[str, ...] = (
     "龙头股",
     "强势股",
     "弱势股",
+    "A股",
+    "a股",
+    "美股",
+    "纳斯达克",
+    "纽交所",
+    "US stock",
+    "us stock",
 )
 
 STOCK_SELECTION_QUESTION_PHRASES: Tuple[str, ...] = (
@@ -330,6 +337,12 @@ STOCK_SELECTION_PATTERN_KEYWORDS: Tuple[str, ...] = (
     "红三兵",
     "多头吞噬",
     "均线多头",
+    "突破",
+    "刚突破",
+    "底部起来",
+    "底部反弹",
+    "底部突破",
+    "横盘突破",
 )
 
 STOCK_SELECTION_CONCEPT_KEYWORDS: Tuple[str, ...] = (
@@ -403,6 +416,8 @@ TECHNICAL_CONCEPT_KEYWORDS: Tuple[str, ...] = (
     "仓位管理",
     "突破四原则",
     "放量突破",
+    "底部突破",
+    "横盘突破",
 )
 
 COMPANY_ENTITY_SUFFIXES: Tuple[str, ...] = (

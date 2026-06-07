@@ -432,8 +432,14 @@ def _apply_analysis_task_policy(
             filtered = ["analyst"]
         return filtered, "" if policy.clear_symbol else current_symbol
 
-    if policy.task_type == TASK_TYPE_OPTION_STRATEGY_WITH_SUBJECT and not current_plan:
-        return list(policy.recommended_plan), current_symbol
+    if policy.task_type == TASK_TYPE_OPTION_STRATEGY_WITH_SUBJECT:
+        if not current_plan or set(current_plan).issubset({"monitor", "chatter"}):
+            return list(policy.recommended_plan), current_symbol
+        if "strategist" not in current_plan:
+            return list(policy.recommended_plan), current_symbol
+        if "analyst" not in current_plan:
+            return ["analyst"] + [step for step in current_plan if step != "analyst"], current_symbol
+        return current_plan, current_symbol
 
     return current_plan, "" if policy.clear_symbol else current_symbol
 
@@ -3645,6 +3651,44 @@ def _is_us_stock_selection_query(query: str) -> bool:
     return bool(has_action or has_stock_word)
 
 
+_US_STOCK_BEARISH_SETUP_KEYWORDS = (
+    "做空", "看跌", "空头", "破位", "弱势", "下跌", "下行", "short", "bearish",
+)
+
+
+def _infer_us_stock_technical_setup(query: str) -> str:
+    text = str(query or "").strip()
+    lower = text.lower()
+    if any(keyword in text or keyword in lower for keyword in _US_STOCK_BEARISH_SETUP_KEYWORDS):
+        return "bearish_breakdown"
+    return "bottom_breakout"
+
+
+def _extract_requested_candidate_limit(query: str, default: int = 10) -> int:
+    text = str(query or "")
+    match = re.search(r"(\d{1,2})\s*(?:只|支|个|个名称|只名称|支名称)", text)
+    if match:
+        return max(1, min(20, int(match.group(1))))
+
+    chinese_digits = {
+        "一": 1,
+        "二": 2,
+        "两": 2,
+        "三": 3,
+        "四": 4,
+        "五": 5,
+        "六": 6,
+        "七": 7,
+        "八": 8,
+        "九": 9,
+        "十": 10,
+    }
+    for digit, value in chinese_digits.items():
+        if re.search(rf"{digit}\s*(?:只|支|个|个名称|只名称|支名称)", text):
+            return value
+    return default
+
+
 def _should_reason_us_stock_screener_result(result_text: str) -> bool:
     text = str(result_text or "").strip()
     if not text:
@@ -3654,7 +3698,39 @@ def _should_reason_us_stock_screener_result(result_text: str) -> bool:
     return "| 代码" in text and ".US" in text
 
 
-def _build_us_stock_screener_reasoning_prompt(query: str, result_text: str) -> str:
+def _build_us_stock_screener_reasoning_prompt(query: str, result_text: str, setup: str = "bottom_breakout") -> str:
+    is_bearish = str(setup or "").strip().lower() == "bearish_breakdown"
+    if is_bearish:
+        task_rules = """
+【看跌候选要求】
+1. 结论必须围绕“看跌/做空观察候选”，不得改写成底部突破或做多观察。
+2. 不要给直接做空指令，只能说“候选观察”“更适合跟踪”“需要确认”。
+3. 必须提醒：做空还需确认券源、借券成本、止损位和隔夜跳空风险。
+
+【输出格式】
+【精选股票】
+结论：一句话概括这批候选是否贴近用户要的“做空/看跌观察”。
+- 数据日期：沿用工具里的日期，并注明美股日线 EOD。
+- 优先观察：列用户要求数量内最贴近的候选，说明破位/弱势理由。
+- 需要等待确认：只列急跌或量能不足的代表。
+- 怎么看下一步：1 句，强调反抽、止损和券源确认。
+""".strip()
+    else:
+        task_rules = """
+【做多候选要求】
+1. 结论必须围绕“底部起来刚突破/做多观察候选”，不得改写成做空观察。
+2. 不要给买入指令，只能说“候选观察”“更适合跟踪”“需要确认”。
+3. 如果候选属于“强势延续但不算底部刚启动”，要明确说它技术面强，但不完全符合“底部刚突破”。
+4. 如果优先观察层为空，要明确说“当前库里没有特别标准的底部刚突破，只能看相对接近的观察名单”。
+
+【输出格式】
+【精选股票】
+结论：一句话概括这批候选是否真正贴近用户要的“底部起来刚突破”。
+- 数据日期：沿用工具里的日期，并注明美股日线 EOD。
+- 优先观察：列 1-4 只最贴近的，说明理由。
+- 偏强但已不早/量能不足：只列需要提醒的代表，不要展开太长。
+- 怎么看下一步：1 句，强调回踩和量能确认。
+""".strip()
     return f"""
 你是 TradingArt 的美股技术筛选解释员。现在已经有一个确定性筛选工具给出了候选事实表。
 
@@ -3666,27 +3742,18 @@ def _build_us_stock_screener_reasoning_prompt(query: str, result_text: str) -> s
 
 【硬规则】
 1. 只能使用“确定性筛选结果”里的股票代码、数字和分层，不得新增股票，不得改写数字。
-2. 不要给买入/卖出指令，只能说“候选观察”“更适合跟踪”“需要确认”。
-3. 必须保留数据日期，并说明这是美股日线 EOD 数据，不是盘中实时行情。
-4. 如果候选属于“强势延续但不算底部刚启动”，要明确说它技术面强，但不完全符合“底部刚突破”。
-5. 如果优先观察层为空，要明确说“当前库里没有特别标准的底部刚突破，只能看相对接近的观察名单”。
-6. 回答要简洁，不要写通用技术课，不要解释一堆无关术语。
+2. 必须保留数据日期，并说明这是美股日线 EOD 数据，不是盘中实时行情。
+3. 回答要简洁，不要写通用技术课，不要解释一堆无关术语。
 
-【输出格式】
-【精选股票】
-结论：一句话概括这批候选是否真正贴近用户要的“底部起来刚突破”。
-- 数据日期：沿用工具里的日期，并注明美股日线 EOD。
-- 优先观察：列 1-4 只最贴近的，说明理由。
-- 偏强但已不早/量能不足：只列需要提醒的代表，不要展开太长。
-- 怎么看下一步：1 句，强调回踩和量能确认。
+{task_rules}
 """.strip()
 
 
-def _reason_us_stock_screener_result(query: str, result_text: str, llm) -> str:
+def _reason_us_stock_screener_result(query: str, result_text: str, llm, setup: str = "bottom_breakout") -> str:
     if not _should_reason_us_stock_screener_result(result_text):
         return f"【精选股票】\n{result_text}"
     try:
-        response = llm.invoke(_build_us_stock_screener_reasoning_prompt(query, result_text))
+        response = llm.invoke(_build_us_stock_screener_reasoning_prompt(query, result_text, setup=setup))
         content = str(getattr(response, "content", response) or "").strip()
         if content:
             return content if content.startswith("【精选股票】") else f"【精选股票】\n{content}"
@@ -3715,10 +3782,13 @@ def screener_node(state: AgentState, llm):
 
     if _is_us_stock_selection_query(query):
         try:
-            us_result = search_us_stocks_by_technical_setup.invoke({"setup": "bottom_breakout", "limit": 10})
+            setup = _infer_us_stock_technical_setup(query)
+            limit = _extract_requested_candidate_limit(query, default=10)
+            us_result = search_us_stocks_by_technical_setup.invoke({"setup": setup, "limit": limit})
         except Exception as e:
             us_result = f"结论：数据不足\n- 原因：美股筛选工具调用失败：{e}"
-        final_result = _reason_us_stock_screener_result(query, us_result, llm)
+            setup = "bottom_breakout"
+        final_result = _reason_us_stock_screener_result(query, us_result, llm, setup=setup)
         return {
             "messages": [HumanMessage(content=final_result)],
             "symbol": state.get("symbol", ""),
