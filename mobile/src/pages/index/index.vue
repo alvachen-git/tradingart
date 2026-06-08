@@ -10,8 +10,9 @@ const auth = useAuthStore()
 
 interface UIMessage {
   id: number
-  role: 'user' | 'assistant' | 'loading'
+  role: 'user' | 'assistant' | 'loading' | 'status'
   content: string
+  taskId?: string
 }
 
 interface PendingTaskRecord {
@@ -30,14 +31,23 @@ let pollingTaskId = ''
 let pollingStartedAtMs = 0
 let pollingSessionVersion = 0
 let pollingRequestInFlight = false
+let backgroundPollTimer: ReturnType<typeof setInterval> | null = null
+let backgroundPollingTaskId = ''
+let backgroundPollingStartedAtMs = 0
+let backgroundPollingSessionVersion = 0
+let backgroundPollingRequestInFlight = false
 let uiSessionVersion = 0
 
 const CHAT_HISTORY_VERSION = 'v2'
 const HISTORY_KEY = computed(() => `chat_history_${CHAT_HISTORY_VERSION}_${auth.username}`)
 const LEGACY_HISTORY_KEYS = computed(() => [`chat_history_${auth.username}`])
 const PENDING_KEY = computed(() => `chat_pending_${auth.username}`)
+const BACKGROUND_PENDING_KEY = computed(() => `chat_background_pending_${auth.username}`)
 const POLL_INTERVAL_MS = 3000
 const POLL_TIMEOUT_MS = 400 * 1000
+const BACKGROUND_POLL_TIMEOUT_MS = 900 * 1000
+const BACKGROUND_TIMEOUT_MESSAGE = '深度分析暂时还没完成，我先保留上面的快速判断；你可以继续提问，稍后也可以再回来查看。'
+const BACKGROUND_STATUS_MESSAGE = '深度分析中，完成后会自动补充；你可以继续提问。'
 const SHARE_TITLE = '爱波塔-懂期权的AI'
 const SHARE_PATH = '/pages/login/index'
 const DEFAULT_GREETING_BODY =
@@ -51,9 +61,8 @@ function sanitizeComplianceCopy(text: string) {
 }
 
 function markAiContent(content: string) {
-  const text = sanitizeComplianceCopy(content).trim()
-  if (!text) return '【AI生成】'
-  return text.startsWith('【AI生成】') ? text : `【AI生成】\n${text}`
+  const text = sanitizeComplianceCopy(content).replace(/^【AI生成】\s*/, '').trim()
+  return text || 'AI暂时没有返回内容'
 }
 
 function normalizeAssistantHistory(list: UIMessage[]) {
@@ -131,6 +140,34 @@ function clearPendingTask() {
   pollingStartedAtMs = 0
 }
 
+function readBackgroundPendingTask(): PendingTaskRecord | null {
+  try {
+    const raw = uni.getStorageSync(BACKGROUND_PENDING_KEY.value)
+    if (!raw) return null
+    const parsed = JSON.parse(raw)
+    const taskId = String(parsed?.task_id || '').trim()
+    if (!taskId) return null
+    const submittedAt = Number(parsed?.submitted_at_ms || 0)
+    return {
+      task_id: taskId,
+      submitted_at_ms: submittedAt > 0 ? submittedAt : Date.now(),
+      question_text: String(parsed?.question_text || ''),
+    }
+  } catch {
+    return null
+  }
+}
+
+function writeBackgroundPendingTask(task: PendingTaskRecord) {
+  uni.setStorageSync(BACKGROUND_PENDING_KEY.value, JSON.stringify(task))
+}
+
+function clearBackgroundPendingTask() {
+  uni.removeStorageSync(BACKGROUND_PENDING_KEY.value)
+  backgroundPollingTaskId = ''
+  backgroundPollingStartedAtMs = 0
+}
+
 function isStaleSession(sessionVersion: number) {
   return sessionVersion !== uiSessionVersion
 }
@@ -188,7 +225,7 @@ function loadHistory() {
 }
 
 function saveHistory() {
-  const toSave = messages.value.filter(m => m.role !== 'loading').slice(-40)
+  const toSave = messages.value.filter(m => m.role !== 'loading' && m.role !== 'status').slice(-40)
   uni.setStorageSync(HISTORY_KEY.value, JSON.stringify(toSave))
 }
 
@@ -239,6 +276,48 @@ async function send() {
       return
     }
 
+    if (submitRes?.delivery_mode === 'hybrid') {
+      const task_id = String(submitRes?.task_id || '').trim()
+      if (!task_id) {
+        throw new Error('任务提交失败：未返回 task_id')
+      }
+      if (isStaleSession(sessionVersion)) {
+        try {
+          await chatApi.cancel(task_id, 'clear')
+        } catch {
+          // ignore
+        }
+        return
+      }
+      const quickResult = submitRes?.quick_result || {}
+      const quickText = String(
+        quickResult?.response || quickResult?.answer || quickResult?.error || '我先开始后台深度分析，稍后补充。',
+      ).trim()
+      replaceLoading(loadingId, markAiContent(quickText))
+      saveHistory()
+      sending.value = false
+
+      const previousBackground = readBackgroundPendingTask()
+      if (previousBackground?.task_id && previousBackground.task_id !== task_id) {
+        try {
+          await chatApi.cancel(previousBackground.task_id, 'clear')
+        } catch {
+          // ignore
+        }
+        removeBackgroundStatusMessage(previousBackground.task_id)
+      }
+      stopBackgroundPoll()
+      const pending: PendingTaskRecord = {
+        task_id,
+        submitted_at_ms: Date.now(),
+        question_text: text,
+      }
+      writeBackgroundPendingTask(pending)
+      ensureBackgroundStatusMessage(task_id)
+      pollBackgroundStatus(task_id, pending.submitted_at_ms, sessionVersion)
+      return
+    }
+
     const task_id = String(submitRes?.task_id || '').trim()
     if (!task_id) {
       throw new Error('任务提交失败：未返回 task_id')
@@ -272,19 +351,29 @@ function ensureLoadingBubble(): number {
   return loadingId
 }
 
+function hasAssistantForTask(taskId: string): boolean {
+  const tid = String(taskId || '').trim()
+  if (!tid) return false
+  return messages.value.some(m => m.role === 'assistant' && m.taskId === tid)
+}
+
 function applyTaskSuccess(taskId: string, loadingId: number, result: any, sessionVersion: number) {
   if (isStaleSession(sessionVersion)) return
   stopPoll()
   clearPendingTask()
-  void taskId
   const aiText = result?.response || result?.answer || JSON.stringify(result || {})
-  replaceLoading(loadingId, markAiContent(aiText))
+  replaceLoading(loadingId, markAiContent(aiText), taskId)
   saveHistory()
   sending.value = false
 }
 
-function appendAssistantMessage(content: string) {
-  messages.value.push({ id: ++msgCounter, role: 'assistant', content: markAiContent(content) })
+function appendAssistantMessage(content: string, taskId = '') {
+  const tid = String(taskId || '').trim()
+  if (tid && hasAssistantForTask(tid)) return
+  const message: UIMessage = tid
+    ? { id: ++msgCounter, role: 'assistant', content: markAiContent(content), taskId: tid }
+    : { id: ++msgCounter, role: 'assistant', content: markAiContent(content) }
+  messages.value.push(message)
   scrollToBottom()
 }
 
@@ -304,6 +393,47 @@ function applyTaskError(taskId: string, loadingId: number, errorText: string | u
   sending.value = false
 }
 
+function applyBackgroundTaskSuccess(taskId: string, result: any, sessionVersion: number) {
+  if (isStaleSession(sessionVersion)) return
+  stopBackgroundPoll()
+  clearBackgroundPendingTask()
+  removeBackgroundStatusMessage(taskId)
+  const aiText = String(result?.response || result?.answer || JSON.stringify(result || {})).trim()
+  appendAssistantMessage(`【深度补充】\n${aiText || '深度分析已完成，但暂时没有返回内容。'}`, taskId)
+  saveHistory()
+}
+
+function applyBackgroundTaskError(taskId: string, errorText: string | undefined, sessionVersion: number) {
+  if (isStaleSession(sessionVersion)) return
+  stopBackgroundPoll()
+  clearBackgroundPendingTask()
+  removeBackgroundStatusMessage(taskId)
+  const msg = String(errorText || '').trim() || BACKGROUND_TIMEOUT_MESSAGE
+  appendAssistantMessage(msg.includes('重新提问') ? BACKGROUND_TIMEOUT_MESSAGE : msg, taskId)
+  saveHistory()
+}
+
+function removeBackgroundStatusMessage(taskId = '') {
+  const tid = String(taskId || '').trim()
+  messages.value = messages.value.filter(m => !(m.role === 'status' && (!tid || m.taskId === tid)))
+}
+
+function ensureBackgroundStatusMessage(taskId: string) {
+  const tid = String(taskId || '').trim()
+  if (!tid) return
+  const existing = messages.value.some(m => m.role === 'status' && m.taskId === tid)
+  if (existing) return
+  // 当前只允许一个后台深度任务，避免多个旧状态同时悬挂在聊天流里。
+  removeBackgroundStatusMessage()
+  messages.value.push({
+    id: ++msgCounter,
+    role: 'status',
+    content: BACKGROUND_STATUS_MESSAGE,
+    taskId: tid,
+  })
+  scrollToBottom()
+}
+
 function normalizePendingSnapshot(snapshot: ChatPendingResponse): ChatStatusResponse {
   const status = String(snapshot?.status || 'pending').toLowerCase()
   if (status === 'success') {
@@ -312,14 +442,19 @@ function normalizePendingSnapshot(snapshot: ChatPendingResponse): ChatStatusResp
       progress: '已完成',
       result: snapshot?.result || {},
       error: null,
+      delivery_mode: snapshot?.delivery_mode,
+      chat_mode: snapshot?.chat_mode,
     }
   }
   if (status === 'error' || status === 'canceled' || status === 'timeout') {
+    const isHybrid = snapshot?.delivery_mode === 'hybrid'
     return {
       status: 'error',
       progress: '任务失败',
       result: null,
-      error: snapshot?.error || (status === 'timeout' ? 'AI思考太久，请重新提问。' : '任务失败'),
+      error: snapshot?.error || (status === 'timeout' && isHybrid ? BACKGROUND_TIMEOUT_MESSAGE : status === 'timeout' ? 'AI思考太久，请重新提问。' : '任务失败'),
+      delivery_mode: snapshot?.delivery_mode,
+      chat_mode: snapshot?.chat_mode,
       code: status === 'timeout' ? 'task_timeout' : status === 'canceled' ? 'task_canceled' : undefined,
     }
   }
@@ -328,6 +463,8 @@ function normalizePendingSnapshot(snapshot: ChatPendingResponse): ChatStatusResp
     progress: '处理中',
     result: null,
     error: null,
+    delivery_mode: snapshot?.delivery_mode,
+    chat_mode: snapshot?.chat_mode,
   }
 }
 
@@ -350,11 +487,31 @@ async function resolveTaskSnapshot(
   pollStatus(taskId, loadingId, startedAtMs, sessionVersion)
 }
 
+async function resolveBackgroundTaskSnapshot(
+  taskId: string,
+  snapshot: ChatStatusResponse,
+  startedAtMs: number,
+  sessionVersion: number,
+) {
+  if (isStaleSession(sessionVersion)) return
+  if (snapshot.status === 'success') {
+    applyBackgroundTaskSuccess(taskId, snapshot.result, sessionVersion)
+    return
+  }
+  if (snapshot.status === 'error') {
+    applyBackgroundTaskError(taskId, snapshot.error || BACKGROUND_TIMEOUT_MESSAGE, sessionVersion)
+    return
+  }
+  pollBackgroundStatus(taskId, startedAtMs, sessionVersion)
+}
+
 // 回到页面时恢复未完成任务（优先以服务端状态为准）
 async function resumePendingTask() {
   const sessionVersion = uiSessionVersion
   stopPoll()
+  stopBackgroundPoll()
   const localPending = readPendingTask()
+  const localBackground = readBackgroundPendingTask()
   let remotePending: ChatPendingResponse | null = null
   try {
     remotePending = await chatApi.pending()
@@ -368,6 +525,21 @@ async function resumePendingTask() {
 
   if (remotePending?.has_task && remotePending.task_id) {
     taskId = String(remotePending.task_id)
+    if (remotePending.delivery_mode === 'hybrid') {
+      startedAtMs = localBackground?.task_id === taskId
+        ? Number(localBackground?.submitted_at_ms || Date.now())
+        : Date.now()
+      writeBackgroundPendingTask({
+        task_id: taskId,
+        submitted_at_ms: startedAtMs,
+        question_text: localBackground?.question_text || '',
+      })
+      ensureBackgroundStatusMessage(taskId)
+      await resolveBackgroundTaskSnapshot(taskId, normalizePendingSnapshot(remotePending), startedAtMs, sessionVersion)
+      sending.value = false
+      return
+    }
+
     startedAtMs = localPending?.task_id === taskId
       ? Number(localPending?.submitted_at_ms || Date.now())
       : Date.now()
@@ -382,6 +554,26 @@ async function resumePendingTask() {
     scrollToBottom()
     await resolveTaskSnapshot(taskId, loadingId, normalizePendingSnapshot(remotePending), startedAtMs, sessionVersion)
     return
+  }
+
+  if (localBackground?.task_id) {
+    ensureBackgroundStatusMessage(localBackground.task_id)
+    try {
+      const status = await chatApi.status(localBackground.task_id)
+      if (isStaleSession(sessionVersion)) return
+      await resolveBackgroundTaskSnapshot(
+        localBackground.task_id,
+        status,
+        Number(localBackground.submitted_at_ms || Date.now()),
+        sessionVersion,
+      )
+    } catch {
+      pollBackgroundStatus(
+        localBackground.task_id,
+        Number(localBackground.submitted_at_ms || Date.now()),
+        sessionVersion,
+      )
+    }
   }
 
   if (!localPending?.task_id) {
@@ -446,6 +638,41 @@ function pollStatus(taskId: string, loadingId: number, startedAtMs: number, sess
   }, POLL_INTERVAL_MS)
 }
 
+function pollBackgroundStatus(taskId: string, startedAtMs: number, sessionVersion: number) {
+  if (isStaleSession(sessionVersion)) return
+  stopBackgroundPoll()
+  backgroundPollingTaskId = taskId
+  backgroundPollingStartedAtMs = startedAtMs
+  backgroundPollingSessionVersion = sessionVersion
+  backgroundPollingRequestInFlight = false
+  backgroundPollTimer = setInterval(async () => {
+    if (isStaleSession(sessionVersion)) {
+      stopBackgroundPoll(sessionVersion)
+      return
+    }
+    if (Date.now() - backgroundPollingStartedAtMs >= BACKGROUND_POLL_TIMEOUT_MS) {
+      applyBackgroundTaskError(taskId, BACKGROUND_TIMEOUT_MESSAGE, sessionVersion)
+      return
+    }
+
+    if (backgroundPollingRequestInFlight) return
+    backgroundPollingRequestInFlight = true
+    try {
+      const res = await chatApi.status(taskId)
+      if (isStaleSession(sessionVersion)) return
+      if (res.status === 'success') {
+        applyBackgroundTaskSuccess(taskId, res.result, sessionVersion)
+      } else if (res.status === 'error') {
+        applyBackgroundTaskError(taskId, res.error || BACKGROUND_TIMEOUT_MESSAGE, sessionVersion)
+      }
+    } catch {
+      // 后台补充不因单次网络波动结束；下一轮继续尝试。
+    } finally {
+      backgroundPollingRequestInFlight = false
+    }
+  }, POLL_INTERVAL_MS)
+}
+
 function stopPoll(expectedSessionVersion?: number) {
   if (typeof expectedSessionVersion === 'number' && expectedSessionVersion !== pollingSessionVersion) {
     return
@@ -457,20 +684,47 @@ function stopPoll(expectedSessionVersion?: number) {
   pollingRequestInFlight = false
 }
 
+function stopBackgroundPoll(expectedSessionVersion?: number) {
+  if (typeof expectedSessionVersion === 'number' && expectedSessionVersion !== backgroundPollingSessionVersion) {
+    return
+  }
+  if (backgroundPollTimer) { clearInterval(backgroundPollTimer); backgroundPollTimer = null }
+  backgroundPollingTaskId = ''
+  backgroundPollingStartedAtMs = 0
+  backgroundPollingSessionVersion = 0
+  backgroundPollingRequestInFlight = false
+}
+
 function pausePollingForBackground() {
   const hasPending = !!readPendingTask()
-  if (!hasPending) return
-  stopPoll()
+  const hasBackgroundPending = !!readBackgroundPendingTask()
+  if (!hasPending && !hasBackgroundPending) return
+  if (hasPending) stopPoll()
+  if (hasBackgroundPending) stopBackgroundPoll()
   // 让 onShow 可以正常触发 resume，不被旧 sending 状态拦住
   sending.value = false
 }
 
-function replaceLoading(loadingId: number, content: string) {
+function replaceLoading(loadingId: number, content: string, taskId = '') {
+  const tid = String(taskId || '').trim()
   const idx = messages.value.findIndex(m => m.id === loadingId)
+  if (tid) {
+    const existingAssistantIdx = messages.value.findIndex(m => m.role === 'assistant' && m.taskId === tid)
+    if (existingAssistantIdx !== -1) {
+      if (idx !== -1 && idx !== existingAssistantIdx) {
+        messages.value.splice(idx, 1)
+      }
+      scrollToBottom()
+      return
+    }
+  }
+  const assistantMessage: UIMessage = tid
+    ? { id: loadingId, role: 'assistant', content, taskId: tid }
+    : { id: loadingId, role: 'assistant', content }
   if (idx !== -1) {
-    messages.value[idx] = { id: loadingId, role: 'assistant', content }
+    messages.value[idx] = assistantMessage
   } else {
-    messages.value.push({ id: ++msgCounter, role: 'assistant', content })
+    messages.value.push(tid ? { ...assistantMessage, id: ++msgCounter } : { id: ++msgCounter, role: 'assistant', content })
   }
   scrollToBottom()
 }
@@ -488,20 +742,30 @@ function clearChat() {
     success: async (res) => {
       if (res.confirm) {
         const pending = readPendingTask()
-        const taskIdToCancel = pending?.task_id || pollingTaskId
+        const backgroundPending = readBackgroundPendingTask()
+        const taskIdsToCancel = Array.from(new Set(
+          [pending?.task_id, pollingTaskId, backgroundPending?.task_id, backgroundPollingTaskId]
+            .map(id => String(id || '').trim())
+            .filter(Boolean),
+        ))
         uiSessionVersion += 1
         stopPoll()
+        stopBackgroundPoll()
         clearPendingTask()
+        clearBackgroundPendingTask()
+        removeBackgroundStatusMessage()
         sending.value = false
         messages.value = []
         expandedMap.value = {}
         uni.removeStorageSync(HISTORY_KEY.value)
         loadHistory()
-        if (taskIdToCancel) {
-          try {
-            await chatApi.cancel(taskIdToCancel, 'clear')
-          } catch {
-            // ignore
+        for (const taskIdToCancel of taskIdsToCancel) {
+          if (taskIdToCancel) {
+            try {
+              await chatApi.cancel(taskIdToCancel, 'clear')
+            } catch {
+              // ignore
+            }
           }
         }
       }
@@ -547,6 +811,12 @@ onShareTimeline(() => ({
             <view class="dot" />
             <view class="dot" />
           </view>
+        </view>
+
+        <!-- 后台深度分析状态 -->
+        <view v-else-if="msg.role === 'status'" class="status-bubble">
+          <view class="status-dot" />
+          <text class="status-text">{{ msg.content }}</text>
         </view>
 
         <!-- AI 消息 -->
@@ -655,7 +925,7 @@ onShareTimeline(() => ({
 }
 
 .msg-row.user { justify-content: flex-end; }
-.msg-row.assistant, .msg-row.loading { justify-content: flex-start; }
+.msg-row.assistant, .msg-row.loading, .msg-row.status { justify-content: flex-start; }
 
 .bubble {
   max-width: 86%;
@@ -702,6 +972,32 @@ onShareTimeline(() => ({
   padding: 24rpx 28rpx;
 }
 
+.status-bubble {
+  max-width: 86%;
+  display: flex;
+  align-items: center;
+  gap: 12rpx;
+  padding: 14rpx 18rpx;
+  border-radius: 999rpx;
+  border: 1px solid rgba(142, 164, 209, 0.28);
+  background: rgba(22, 32, 53, 0.72);
+}
+
+.status-dot {
+  width: 12rpx;
+  height: 12rpx;
+  border-radius: 50%;
+  background: #f5c518;
+  animation: pulse 1.4s ease-in-out infinite;
+  flex-shrink: 0;
+}
+
+.status-text {
+  font-size: 23rpx;
+  line-height: 1.45;
+  color: #8ea4d1;
+}
+
 .dot-wave { display: flex; gap: 10rpx; align-items: center; }
 
 .dot {
@@ -717,6 +1013,11 @@ onShareTimeline(() => ({
 @keyframes bounce {
   0%, 80%, 100% { transform: translateY(0); opacity: 0.4; }
   40% { transform: translateY(-10rpx); opacity: 1; }
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 0.35; transform: scale(0.86); }
+  50% { opacity: 1; transform: scale(1.08); }
 }
 
 /* 输入栏 */

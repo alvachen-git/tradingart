@@ -108,6 +108,77 @@ class TestMobileApiChatMemoryAsync(unittest.TestCase):
         self.assertIn("context_payload", mocked_create.call_args.kwargs)
         self.assertIn("has_portfolio", mocked_create.call_args.kwargs)
 
+    def test_chat_submit_market_move_returns_hybrid(self):
+        fake_redis = _FakeRedis()
+        body = mobile_api.ChatSubmitRequest(prompt="美股为什么大跌", history=[])
+        with patch.object(mobile_api, "_redis", fake_redis), patch.object(
+            mobile_api.de, "get_user_profile", return_value={}
+        ), patch.object(
+            mobile_api, "_build_mobile_context_payload", return_value={"is_followup": False}
+        ), patch.object(
+            mobile_api, "classify_chat_mode", return_value=mobile_api.CHAT_MODE_ANALYSIS
+        ), patch.object(
+            mobile_api, "_detect_mobile_has_portfolio", return_value=False
+        ), patch.object(
+            mobile_api.TaskManager, "create_task", return_value="task-hybrid"
+        ) as mocked_create, patch.object(
+            mobile_api.TaskManager, "get_task_meta", return_value={"status": "pending", "progress": "正在分析..."}
+        ), patch.object(
+            mobile_api, "_generate_market_move_quick_answer", return_value=("快速判断内容", "template", 3)
+        ) as mocked_quick:
+            out = mobile_api.chat_submit(body=body, username="u1")
+
+        self.assertEqual(out["delivery_mode"], "hybrid")
+        self.assertEqual(out["task_id"], "task-hybrid")
+        self.assertEqual(out["quick_result"]["response"], "快速判断内容")
+        self.assertEqual(out["quick_result"]["source"], "template")
+        self.assertEqual(out["background"]["progress"], "正在分析...")
+        mocked_quick.assert_called_once()
+        ctx = mocked_create.call_args.kwargs.get("context_payload") or {}
+        self.assertEqual(ctx.get("delivery_mode"), "hybrid")
+        state = json.loads(fake_redis.get(mobile_api._mobile_chat_state_key("task-hybrid")))
+        self.assertEqual(state.get("delivery_mode"), "hybrid")
+        self.assertEqual(state.get("quick_answer_source"), "template")
+
+    def test_chat_submit_personal_position_move_does_not_use_hybrid(self):
+        fake_redis = _FakeRedis()
+        body = mobile_api.ChatSubmitRequest(prompt="帮我看我的持仓为什么大跌，要不要卖", history=[])
+        with patch.object(mobile_api, "_redis", fake_redis), patch.object(
+            mobile_api.de, "get_user_profile", return_value={}
+        ), patch.object(
+            mobile_api, "_build_mobile_context_payload", return_value={"is_followup": False}
+        ), patch.object(
+            mobile_api, "classify_chat_mode", return_value=mobile_api.CHAT_MODE_ANALYSIS
+        ), patch.object(
+            mobile_api, "_detect_mobile_has_portfolio", return_value=True
+        ), patch.object(
+            mobile_api.TaskManager, "create_task", return_value="task-normal"
+        ), patch.object(
+            mobile_api.TaskManager, "get_task_meta", return_value={"status": "pending"}
+        ), patch.object(
+            mobile_api, "_generate_market_move_quick_answer"
+        ) as mocked_quick:
+            out = mobile_api.chat_submit(body=body, username="u1")
+
+        self.assertEqual(out["delivery_mode"], "task")
+        mocked_quick.assert_not_called()
+        state = json.loads(fake_redis.get(mobile_api._mobile_chat_state_key("task-normal")))
+        self.assertEqual(state.get("delivery_mode"), "task")
+
+    def test_generate_market_move_quick_answer_falls_back_to_template(self):
+        with patch.object(
+            mobile_api, "build_deepseek_flash_llm", side_effect=RuntimeError("llm down")
+        ):
+            text, source, elapsed_ms = mobile_api._generate_market_move_quick_answer(
+                "纳指为什么跳水",
+                {"focus_entity": "纳指"},
+            )
+
+        self.assertEqual(source, "template")
+        self.assertGreaterEqual(elapsed_ms, 0)
+        self.assertIn("快速判断", text)
+        self.assertIn("纳指", text)
+
     def test_chat_submit_builds_followup_context_from_history(self):
         fake_redis = _FakeRedis()
         history = [
@@ -727,6 +798,45 @@ class TestMobileApiChatMemoryAsync(unittest.TestCase):
         state = json.loads(fake_redis.get(mobile_api._mobile_chat_state_key(task_id)))
         self.assertEqual(state.get("status"), "timeout")
         mocked_clear.assert_called_with("u1", task_id)
+
+    def test_chat_status_hybrid_uses_background_timeout_threshold(self):
+        fake_redis = _FakeRedis()
+        task_id = "task-hybrid-pending"
+        old_created = (datetime.now() - timedelta(seconds=10)).isoformat()
+        fake_redis.setex(
+            mobile_api._mobile_chat_state_key(task_id),
+            86400,
+            json.dumps(
+                {
+                    "task_id": task_id,
+                    "user_id": "u1",
+                    "status": "pending",
+                    "delivery_mode": "hybrid",
+                    "chat_mode": mobile_api.CHAT_MODE_ANALYSIS,
+                    "created_at": old_created,
+                    "updated_at": old_created,
+                    "progress": "后台深度分析中",
+                },
+                ensure_ascii=False,
+            ),
+        )
+
+        with patch.object(mobile_api, "_redis", fake_redis), patch.object(
+            mobile_api, "_MOBILE_CHAT_MAX_PENDING_SECONDS", 1
+        ), patch.object(
+            mobile_api, "_MOBILE_CHAT_BACKGROUND_MAX_PENDING_SECONDS", 999
+        ), patch.object(
+            mobile_api.TaskManager, "get_task_status", return_value={"status": "pending"}
+        ), patch.object(
+            mobile_api.TaskManager, "complete_user_task"
+        ) as mocked_clear:
+            out = mobile_api.chat_status(task_id=task_id, username="u1")
+
+        self.assertEqual(out["status"], "pending")
+        self.assertEqual(out.get("delivery_mode"), "hybrid")
+        state = json.loads(fake_redis.get(mobile_api._mobile_chat_state_key(task_id)))
+        self.assertEqual(state.get("status"), "pending")
+        mocked_clear.assert_not_called()
 
     def test_chat_pending_returns_terminal_once(self):
         fake_redis = _FakeRedis()

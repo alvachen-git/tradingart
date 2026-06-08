@@ -65,6 +65,8 @@ export interface ChatStatusResponse {
   progress: string
   result: any
   error: string | null
+  delivery_mode?: 'task' | 'hybrid' | string
+  chat_mode?: string
   code?: 'task_timeout' | 'task_stale' | 'task_canceled' | string
 }
 
@@ -93,12 +95,34 @@ export interface ChatSubmitTaskResponse {
   chat_mode?: string
 }
 
-export type ChatSubmitResponse = ChatSubmitImmediateResponse | ChatSubmitTaskResponse
+export interface ChatSubmitHybridResponse {
+  delivery_mode: 'hybrid'
+  task_id: string
+  message: string
+  chat_mode?: string
+  trace_id?: string
+  answer_id?: string
+  quick_result: {
+    status: 'success' | 'error'
+    response?: string
+    answer?: string
+    source?: 'llm' | 'template' | string
+    error?: string | null
+  }
+  background?: {
+    status?: 'pending' | 'processing' | 'success' | 'error' | 'queued' | string
+    progress?: string
+  }
+}
+
+export type ChatSubmitResponse = ChatSubmitImmediateResponse | ChatSubmitTaskResponse | ChatSubmitHybridResponse
 
 export interface ChatPendingResponse {
   has_task: boolean
   task_id?: string
   status?: 'pending' | 'processing' | 'success' | 'error' | 'canceled' | 'timeout'
+  delivery_mode?: 'task' | 'hybrid' | string
+  chat_mode?: string
   result?: any
   error?: string
   updated_at?: string

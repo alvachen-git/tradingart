@@ -80,7 +80,7 @@ import uuid
 import wave
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
-from typing import Optional, List, Any, Dict, Tuple
+from typing import Optional, List, Any, Dict, Tuple, Mapping
 
 import redis
 from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, Form, Query, Request, Response, WebSocket, WebSocketDisconnect
@@ -196,6 +196,9 @@ _MOBILE_CHAT_RESULT_KEY_PREFIX = "mobile:chat:result:"
 _MOBILE_CHAT_LAST_TASK_KEY_PREFIX = "mobile:user:last_task:"
 _MOBILE_CHAT_RESULT_TTL_SECONDS = int(str(os.getenv("MOBILE_CHAT_RESULT_TTL_SECONDS", "86400")).strip() or 86400)
 _MOBILE_CHAT_MAX_PENDING_SECONDS = int(str(os.getenv("MOBILE_CHAT_MAX_PENDING_SECONDS", "400")).strip() or 400)
+_MOBILE_CHAT_BACKGROUND_MAX_PENDING_SECONDS = int(
+    str(os.getenv("MOBILE_CHAT_BACKGROUND_MAX_PENDING_SECONDS", "900")).strip() or 900
+)
 _CHAT_FEEDBACK_SCHEMA_LOCK = threading.Lock()
 _CHAT_FEEDBACK_SCHEMA_READY = False
 _CHAT_FEEDBACK_SCHEMA_ENGINE_ID = ""
@@ -4906,6 +4909,171 @@ def _safe_json_loads(raw: Any) -> dict:
         return {}
 
 
+_MARKET_MOVE_EXPLAIN_KEYWORDS = (
+    "为什么", "原因", "怎么回事", "咋回事", "为何", "为啥", "怎么看",
+    "什么情况", "发生了什么", "异动原因",
+)
+_MARKET_MOVE_KEYWORDS = (
+    "大跌", "暴跌", "下跌", "跌", "跳水", "回落", "杀跌", "走弱",
+    "大涨", "暴涨", "上涨", "涨", "拉升", "反弹", "走强", "冲高",
+)
+_MARKET_MOVE_UP_KEYWORDS = ("大涨", "暴涨", "上涨", "涨", "拉升", "反弹", "走强", "冲高")
+_MARKET_MOVE_DOWN_KEYWORDS = ("大跌", "暴跌", "下跌", "跌", "跳水", "回落", "杀跌", "走弱")
+_MARKET_MOVE_PERSONAL_EXCLUDE_KEYWORDS = (
+    "我的", "我持有", "我买", "我卖", "持仓", "仓位", "账户", "净值", "收益", "亏损",
+    "浮盈", "浮亏", "调仓", "加仓", "减仓", "买入", "卖出", "开仓", "平仓", "止损",
+    "止盈", "要不要", "该不该", "能买吗", "能不能买", "可以买吗", "适合买",
+)
+_MARKET_MOVE_SUBJECT_KEYWORDS = (
+    "美股", "A股", "a股", "港股", "日股", "欧股", "纳指", "纳斯达克", "标普", "道指",
+    "沪深300", "中证500", "中证1000", "上证", "创业板", "科创", "恒生", "恒科",
+    "黄金", "白银", "原油", "铜", "沪铜", "螺纹", "铁矿", "焦煤", "焦炭", "商品",
+    "期货", "指数", "ETF", "etf", "股票", "美元", "美债", "人民币", "英伟达", "特斯拉",
+    "苹果", "微软", "谷歌", "亚马逊", "Meta", "meta", "英特尔",
+)
+_MARKET_MOVE_TARGET_STOPWORDS = (
+    "为什么", "为何", "为啥", "怎么回事", "咋回事", "怎么看", "什么情况", "发生了什么",
+    "今天", "今日", "今晚", "昨天", "最近", "近期", "现在", "当前", "这两天", "这几天",
+    "这么", "那么", "突然", "一直", "又", "会", "还", "呢", "吗", "啊", "了", "的",
+)
+
+
+def _extract_market_move_direction(prompt_text: str) -> str:
+    text = str(prompt_text or "")
+    if any(keyword in text for keyword in _MARKET_MOVE_DOWN_KEYWORDS):
+        return "下跌"
+    if any(keyword in text for keyword in _MARKET_MOVE_UP_KEYWORDS):
+        return "上涨"
+    return "异动"
+
+
+def _extract_market_move_target(prompt_text: str, context_payload: Mapping[str, Any] | None = None) -> str:
+    payload = context_payload or {}
+    focus_entity = str(payload.get("focus_entity") or "").strip()
+    if focus_entity:
+        return focus_entity[:24]
+
+    text = str(prompt_text or "").strip()
+    for keyword in sorted(_MARKET_MOVE_EXPLAIN_KEYWORDS + _MARKET_MOVE_KEYWORDS, key=len, reverse=True):
+        text = text.replace(keyword, " ")
+    for keyword in _MARKET_MOVE_TARGET_STOPWORDS:
+        text = text.replace(keyword, " ")
+    text = re.sub(r"[，。！？、,.!?；;：:\s]+", " ", text).strip()
+    chunks = [chunk.strip(" -_/（）()[]【】") for chunk in text.split(" ") if chunk.strip()]
+    for chunk in chunks:
+        if 2 <= len(chunk) <= 24:
+            return chunk
+    return ""
+
+
+def _has_market_move_subject(prompt_text: str, context_payload: Mapping[str, Any] | None = None) -> bool:
+    text = str(prompt_text or "")
+    if any(keyword in text for keyword in _MARKET_MOVE_SUBJECT_KEYWORDS):
+        return True
+    if re.search(r"\b[A-Z]{1,6}(?:\.[A-Z]{1,4})?\b", text):
+        return True
+    if re.search(r"\b\d{6}(?:\.(?:SH|SZ|BJ))?\b", text, flags=re.I):
+        return True
+    return bool(_extract_market_move_target(text, context_payload))
+
+
+def _is_market_move_quick_answer_candidate(
+    prompt_text: str,
+    chat_mode: str,
+    context_payload: Mapping[str, Any] | None = None,
+) -> bool:
+    if chat_mode != CHAT_MODE_ANALYSIS:
+        return False
+    text = str(prompt_text or "").strip()
+    if not text:
+        return False
+    if any(keyword in text for keyword in _MARKET_MOVE_PERSONAL_EXCLUDE_KEYWORDS):
+        return False
+    has_explain_intent = any(keyword in text for keyword in _MARKET_MOVE_EXPLAIN_KEYWORDS)
+    has_move_word = any(keyword in text for keyword in _MARKET_MOVE_KEYWORDS)
+    if not (has_explain_intent and has_move_word):
+        return False
+    return _has_market_move_subject(text, context_payload)
+
+
+def _build_market_move_quick_template(
+    prompt_text: str,
+    context_payload: Mapping[str, Any] | None = None,
+) -> str:
+    target = _extract_market_move_target(prompt_text, context_payload) or "这个市场"
+    direction = _extract_market_move_direction(prompt_text)
+    return (
+        f"快速判断：关于{target}{direction}，先看三条线："
+        "一是利率、美元和流动性是否压缩风险偏好；"
+        "二是权重资产、行业主线或财报预期有没有被重新定价；"
+        "三是新闻、政策或资金流是否触发了短线集中反应。"
+        "我先给这个初步框架，后台会继续核实最新盘面和消息，稍后补充更完整分析。"
+    )
+
+
+def _extract_llm_response_text(response: Any) -> str:
+    if hasattr(response, "content"):
+        return str(getattr(response, "content") or "").strip()
+    if isinstance(response, dict):
+        return str(response.get("content") or response.get("text") or response.get("response") or "").strip()
+    return str(response or "").strip()
+
+
+def _generate_market_move_quick_answer(
+    prompt_text: str,
+    context_payload: Mapping[str, Any] | None = None,
+) -> Tuple[str, str, int]:
+    started_at = time.time()
+    fallback = _build_market_move_quick_template(prompt_text, context_payload)
+    target = _extract_market_move_target(prompt_text, context_payload) or "这个市场"
+    direction = _extract_market_move_direction(prompt_text)
+    recent_context = str((context_payload or {}).get("recent_context") or "").strip()
+    focus_topic = str((context_payload or {}).get("focus_topic") or "").strip()
+    prompt = (
+        "你是爱波塔小程序的交易问答助手。请给用户一个很短的市场异动快速判断。\n"
+        "硬性要求：\n"
+        "1. 只输出 120-220 字中文，不分点超过 3 条。\n"
+        "2. 不编造实时行情、具体新闻、具体数字；没有数据就说先按框架判断。\n"
+        "3. 不给具体买卖、仓位、止损建议。\n"
+        "4. 结尾说明后台会继续做深度分析。\n\n"
+        f"用户问题：{prompt_text}\n"
+        f"识别对象：{target}\n"
+        f"识别方向：{direction}\n"
+        f"当前焦点：{focus_topic or '无'}\n"
+        f"近期上下文：{recent_context[:500] if recent_context else '无'}"
+    )
+    try:
+        llm = build_deepseek_flash_llm(
+            streaming=False,
+            temperature=0.2,
+            timeout=8,
+            max_retries=0,
+            max_tokens=320,
+        )
+        response_text = _extract_llm_response_text(llm.invoke(prompt)).strip()
+        elapsed_ms = int((time.time() - started_at) * 1000)
+        if response_text:
+            return response_text, "llm", elapsed_ms
+    except Exception as exc:
+        print(f"[mobile-chat] hybrid quick llm fallback err={exc}", flush=True)
+    elapsed_ms = int((time.time() - started_at) * 1000)
+    return fallback, "template", elapsed_ms
+
+
+def _is_hybrid_delivery_state(state: Mapping[str, Any] | None) -> bool:
+    return str((state or {}).get("delivery_mode") or "").strip().lower() == "hybrid"
+
+
+def _mobile_chat_timeout_seconds_for_state(state: Mapping[str, Any] | None) -> int:
+    return _MOBILE_CHAT_BACKGROUND_MAX_PENDING_SECONDS if _is_hybrid_delivery_state(state) else _MOBILE_CHAT_MAX_PENDING_SECONDS
+
+
+def _mobile_chat_timeout_error_for_state(state: Mapping[str, Any] | None) -> str:
+    if _is_hybrid_delivery_state(state):
+        return "深度分析暂时还没完成，我先保留上面的快速判断；你可以继续提问，稍后也可以再回来查看。"
+    return "AI思考太久，请重新提问。"
+
+
 def _read_mobile_chat_state(task_id: str) -> dict:
     try:
         return _safe_json_loads(_redis.get(_mobile_chat_state_key(task_id)))
@@ -4930,15 +5098,18 @@ def _write_mobile_chat_state(
 ):
     existing = _read_mobile_chat_state(task_id)
     now_iso = datetime.now().isoformat()
-    payload = {
-        "task_id": task_id,
-        "user_id": str(user_id or ""),
-        "status": str(status or "").strip() or "pending",
-        "error": str(error or "").strip(),
-        "created_at": str(existing.get("created_at") or now_iso),
-        "updated_at": now_iso,
-        "finished_at": now_iso if finished else str(existing.get("finished_at") or ""),
-    }
+    payload = dict(existing) if isinstance(existing, dict) else {}
+    payload.update(
+        {
+            "task_id": task_id,
+            "user_id": str(user_id or ""),
+            "status": str(status or "").strip() or "pending",
+            "error": str(error or "").strip(),
+            "created_at": str(existing.get("created_at") or now_iso),
+            "updated_at": now_iso,
+            "finished_at": now_iso if finished else str(existing.get("finished_at") or ""),
+        }
+    )
     if isinstance(extra_fields, dict):
         for key, value in extra_fields.items():
             if value is None:
@@ -5019,10 +5190,13 @@ def _build_mobile_chat_success_response(result_payload: dict, state: Optional[di
     chat_mode = str(state.get("chat_mode") or "").strip()
     if chat_mode:
         payload["chat_mode"] = chat_mode
+    delivery_mode = str(state.get("delivery_mode") or "").strip()
+    if delivery_mode:
+        payload["delivery_mode"] = delivery_mode
     return payload
 
 
-def _build_mobile_chat_error_response(err_msg: str, code: str = "") -> dict:
+def _build_mobile_chat_error_response(err_msg: str, code: str = "", state: Optional[dict] = None) -> dict:
     payload = {
         "status": "error",
         "progress": "任务失败",
@@ -5031,6 +5205,13 @@ def _build_mobile_chat_error_response(err_msg: str, code: str = "") -> dict:
     }
     if code:
         payload["code"] = code
+    state = state if isinstance(state, dict) else {}
+    delivery_mode = str(state.get("delivery_mode") or "").strip()
+    if delivery_mode:
+        payload["delivery_mode"] = delivery_mode
+    chat_mode = str(state.get("chat_mode") or "").strip()
+    if chat_mode:
+        payload["chat_mode"] = chat_mode
     return payload
 
 
@@ -5236,27 +5417,29 @@ def _build_mobile_chat_runtime_snapshot(task_id: str, username: str) -> dict:
         msg = str(state.get("error") or "").strip()
         if not msg:
             if status_name == "timeout":
-                msg = "AI思考太久，请重新提问。"
+                msg = _mobile_chat_timeout_error_for_state(state)
             elif status_name == "canceled":
                 msg = "任务已取消。"
             else:
                 msg = "分析失败，请稍后重试。"
-        return _build_mobile_chat_error_response(msg, code=f"task_{status_name}")
+        return _build_mobile_chat_error_response(msg, code=f"task_{status_name}", state=state)
 
     created_ts = _parse_iso_ts(state.get("created_at")) if state else 0.0
     if created_ts > 0 and status_name in {"pending", "processing"}:
         elapsed = time.time() - created_ts
-        if elapsed >= _MOBILE_CHAT_MAX_PENDING_SECONDS:
+        timeout_seconds = _mobile_chat_timeout_seconds_for_state(state)
+        if elapsed >= timeout_seconds:
+            timeout_msg = _mobile_chat_timeout_error_for_state(state)
             _write_mobile_chat_state(
                 task_id=task_id,
                 user_id=str(state.get("user_id") or username),
                 status="timeout",
-                error="AI思考太久，请重新提问。",
+                error=timeout_msg,
                 finished=True,
             )
             TaskManager.complete_user_task(username, task_id)
             _clear_mobile_chat_last_task_if_matches(username, task_id)
-            return _build_mobile_chat_error_response("AI思考太久，请重新提问。", code="task_timeout")
+            return _build_mobile_chat_error_response(timeout_msg, code="task_timeout", state=state)
 
     if status_name in {"pending", "processing"} and state:
         chat_mode = str(state.get("chat_mode") or CHAT_MODE_ANALYSIS).strip() or CHAT_MODE_ANALYSIS
@@ -5273,6 +5456,9 @@ def _build_mobile_chat_runtime_snapshot(task_id: str, username: str) -> dict:
             payload["trace_id"] = trace_id
         if answer_id:
             payload["answer_id"] = answer_id
+        delivery_mode = str(state.get("delivery_mode") or "").strip()
+        if delivery_mode:
+            payload["delivery_mode"] = delivery_mode
         return payload
 
     return {}
@@ -6157,6 +6343,16 @@ def chat_submit(
             },
         }
 
+    hybrid_candidate = _is_market_move_quick_answer_candidate(
+        normalized_prompt,
+        chat_mode,
+        context_payload,
+    )
+    if hybrid_candidate:
+        context_payload["delivery_mode"] = "hybrid"
+        context_payload["quick_answer_target"] = _extract_market_move_target(normalized_prompt, context_payload)
+        context_payload["quick_answer_direction"] = _extract_market_move_direction(normalized_prompt)
+
     try:
         if chat_mode == CHAT_MODE_KNOWLEDGE:
             task_id = TaskManager.create_knowledge_task(
@@ -6192,6 +6388,23 @@ def chat_submit(
                 break
         progress_text = f"排队中，前面还有 {queue_ahead} 个问题" if queue_ahead > 0 else "排队中，等待开始处理..."
 
+    delivery_mode = "hybrid" if hybrid_candidate else "task"
+    quick_response = ""
+    quick_source = ""
+    quick_elapsed_ms = 0
+    if hybrid_candidate:
+        quick_response, quick_source, quick_elapsed_ms = _generate_market_move_quick_answer(
+            normalized_prompt,
+            context_payload,
+        )
+        print(
+            "[mobile-chat] hybrid_quick "
+            f"trace_id={trace_id} task_id={task_id} chat_mode={chat_mode} "
+            f"quick_source={quick_source} quick_ms={quick_elapsed_ms} "
+            f"background_status={task_state}",
+            flush=True,
+        )
+
     _write_mobile_chat_state(
         task_id=task_id,
         user_id=username,
@@ -6206,6 +6419,9 @@ def chat_submit(
             "feedback_allowed": False,
             "chat_mode": chat_mode,
             "progress": progress_text,
+            "delivery_mode": delivery_mode,
+            "quick_answer_source": quick_source,
+            "quick_answer_ms": quick_elapsed_ms,
         },
     )
     _set_mobile_chat_last_task(username, task_id)
@@ -6218,6 +6434,24 @@ def chat_submit(
         submit_message = progress_text
     else:
         submit_message = "任务已提交，正在整理知识回答..." if chat_mode == CHAT_MODE_KNOWLEDGE else "任务已提交，正在分析..."
+    if hybrid_candidate:
+        return {
+            "delivery_mode": "hybrid",
+            "task_id": task_id,
+            "message": "已先给快速判断，后台继续深度分析...",
+            "chat_mode": chat_mode,
+            "trace_id": trace_id,
+            "answer_id": answer_id,
+            "quick_result": {
+                "status": "success",
+                "response": quick_response,
+                "source": quick_source or "template",
+            },
+            "background": {
+                "status": task_state or "pending",
+                "progress": progress_text,
+            },
+        }
     return {
         "delivery_mode": "task",
         "task_id": task_id,
@@ -6322,17 +6556,20 @@ def chat_status(task_id: str, username: str = Depends(get_current_user)):
         # 兼容旧任务（尚未写入 state），根据用户 pending 元信息做超时兜底
         pending_meta = TaskManager.get_user_pending_task(username) or {}
         start_ts = float(pending_meta.get("start_time") or 0.0)
-        if start_ts > 0 and (time.time() - start_ts) >= _MOBILE_CHAT_MAX_PENDING_SECONDS:
+        state_for_timeout = _read_mobile_chat_state(task_id)
+        timeout_seconds = _mobile_chat_timeout_seconds_for_state(state_for_timeout)
+        if start_ts > 0 and (time.time() - start_ts) >= timeout_seconds:
+            timeout_msg = _mobile_chat_timeout_error_for_state(state_for_timeout)
             _write_mobile_chat_state(
                 task_id=task_id,
                 user_id=username,
                 status="timeout",
-                error="AI思考太久，请重新提问。",
+                error=timeout_msg,
                 finished=True,
             )
             TaskManager.complete_user_task(username, task_id)
             _clear_mobile_chat_last_task_if_matches(username, task_id)
-            return _build_mobile_chat_error_response("AI思考太久，请重新提问。", code="task_timeout")
+            return _build_mobile_chat_error_response(timeout_msg, code="task_timeout", state=state_for_timeout)
     if status_name == "success":
         refreshed = _build_mobile_chat_runtime_snapshot(task_id=task_id, username=username)
         if refreshed:
@@ -6381,6 +6618,9 @@ def chat_pending(username: str = Depends(get_current_user)):
     chat_mode = str(snapshot.get("chat_mode") or state.get("chat_mode") or "").strip()
     if chat_mode:
         payload["chat_mode"] = chat_mode
+    delivery_mode = str(snapshot.get("delivery_mode") or state.get("delivery_mode") or "").strip()
+    if delivery_mode:
+        payload["delivery_mode"] = delivery_mode
     if result_payload is not None:
         payload["result"] = result_payload
     if err_msg:
@@ -6428,7 +6668,7 @@ def chat_cancel(
     if reason == "clear":
         err_msg = "已清空并取消当前任务。"
     elif reason == "timeout":
-        err_msg = "AI思考太久，请重新提问。"
+        err_msg = _mobile_chat_timeout_error_for_state(state)
 
     _write_mobile_chat_state(
         task_id=task_id,

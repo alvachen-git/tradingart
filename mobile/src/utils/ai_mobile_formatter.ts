@@ -201,15 +201,14 @@ function extractPreviewBody(body: string): string {
 export function formatAiForMobile(raw: string): MobileAiFormatted {
   const normalized = normalizeMarkdownToMobile(raw)
   if (!normalized) {
-    return { fullText: '【AI生成】', previewText: '【AI生成】', hasMore: false }
+    return { fullText: '', previewText: '', hasMore: false }
   }
 
-  const hasAiTag = normalized.startsWith('【AI生成】')
-  const body = hasAiTag ? normalized.replace(/^【AI生成】\s*/, '').trim() : normalized.trim()
+  const body = normalized.replace(/^【AI生成】\s*/, '').trim()
   const previewBody = extractPreviewBody(body) || body
 
-  const fullText = hasAiTag ? `【AI生成】\n${body}`.trim() : body
-  const previewText = hasAiTag ? `【AI生成】\n${previewBody}`.trim() : previewBody
+  const fullText = body
+  const previewText = previewBody
   const hasMore = body.trim() !== previewBody.trim() && body.length > previewBody.length
 
   return { fullText, previewText, hasMore }
