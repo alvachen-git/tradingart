@@ -224,6 +224,13 @@ CORRECTION_FACT_HINTS = (
     "定义", "意思", "是什么", "来源", "出处", "日期", "年份", "时间", "公告", "名单", "板块",
 )
 RUNTIME_FACT_HINTS = ("时间", "几点", "几号", "日期", "星期", "周几")
+CONCEPT_EXPLANATION_PREFIXES = (
+    "什么是", "解释", "解释一下", "科普", "科普一下", "怎么理解", "什么意思", "是什么", "原理", "举例",
+)
+ACTIONABLE_CONCEPT_EXCLUSION_KEYWORDS = (
+    "怎么做", "怎么操作", "如何操作", "适合做", "适合买吗", "适合卖吗", "能不能买", "能不能卖",
+    "建议", "推荐", "买入", "卖出", "开仓", "平仓", "调仓", "对冲", "行情", "走势", "涨跌", "影响",
+)
 
 SYMBOL_PATTERN = re.compile(r"\b[A-Z]{1,5}\d{0,4}\b|(?<!\d)\d{6}(?!\d)")
 CONTRACT_PATTERN = re.compile(r"[一-龥]{2,8}\d{3,4}|[A-Za-z]{1,4}\d{3,4}")
@@ -292,6 +299,15 @@ def _recent_context_suggests_knowledge(recent_context: str) -> bool:
     return any(keyword in text for keyword in KNOWLEDGE_PREFIXES) or any(
         phrase in text for phrase in ("什么意思", "是什么", "原理", "举例", "科普", "定义", "区别")
     )
+
+
+def _is_explicit_concept_explanation(text: str) -> bool:
+    lowered = str(text or "").strip().lower()
+    if not lowered:
+        return False
+    if not any(keyword in lowered for keyword in CONCEPT_EXPLANATION_PREFIXES):
+        return False
+    return not any(keyword in lowered for keyword in ACTIONABLE_CONCEPT_EXCLUSION_KEYWORDS)
 
 
 def _recent_context_has_finance_subject(recent_context: str) -> bool:
@@ -571,6 +587,11 @@ def classify_chat_mode(
         focus_mode_hint=focus_mode_hint,
         is_followup=is_followup,
     )
+    if _is_explicit_concept_explanation(text) and (
+        has_finance_subject or has_market_subject or recent_has_finance_subject
+    ):
+        return CHAT_MODE_KNOWLEDGE
+
     if has_stock_selection or analysis_task_policy.task_type == TASK_TYPE_OPTION_STRATEGY_WITH_SUBJECT:
         return CHAT_MODE_ANALYSIS
 

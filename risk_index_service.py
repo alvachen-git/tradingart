@@ -1092,11 +1092,21 @@ def _is_relevant_polymarket_event(event: Dict[str, Any]) -> bool:
     return any(keyword and keyword in searchable for keyword in allowed_keywords)
 
 
-def fetch_polymarket_events(limit: int = 250, timeout: int = 12) -> List[Dict[str, Any]]:
+def fetch_polymarket_events(
+    limit: int = 250,
+    timeout: int = 12,
+    max_pages_override: Optional[int] = None,
+) -> List[Dict[str, Any]]:
     headers = {"User-Agent": "Mozilla/5.0"}
     page_size = max(50, min(int(RISK_INDEX_CONFIG.get("polymarket_fetch_page_size", 200)), 500))
-    max_pages = max(1, int(RISK_INDEX_CONFIG.get("polymarket_fetch_max_pages", 8)))
-    supplemental_max_pages = max(0, int(RISK_INDEX_CONFIG.get("polymarket_supplemental_max_pages", 0)))
+    if max_pages_override is None:
+        max_pages = max(1, int(RISK_INDEX_CONFIG.get("polymarket_fetch_max_pages", 8)))
+    else:
+        max_pages = max(1, int(max_pages_override))
+    if max_pages_override is None:
+        supplemental_max_pages = max(0, int(RISK_INDEX_CONFIG.get("polymarket_supplemental_max_pages", 0)))
+    else:
+        supplemental_max_pages = 0
     target = max(20, int(limit))
     events: List[Dict[str, Any]] = []
     supplemental_events: List[Dict[str, Any]] = []

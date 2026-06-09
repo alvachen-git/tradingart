@@ -837,6 +837,35 @@ def upsert_user_account_total_capital(user_id: str, total_capital, source_text: 
         return False
 
 
+def _normalize_focus_asset_items(value):
+    """
+    将用户画像里的关注品种统一成列表，兼容 LLM 返回字符串或数组。
+    """
+    if value is None:
+        return []
+
+    if isinstance(value, (list, tuple, set)):
+        items = []
+        for item in value:
+            items.extend(_normalize_focus_asset_items(item))
+        return items
+
+    text_value = str(value).strip()
+    if not text_value:
+        return []
+
+    blocked = {"...", "未知", "无", "沒有", "没有", "none", "null", "[]"}
+    items = []
+    for raw in re.split(r"[,，、/;；\s]+", text_value):
+        item = str(raw or "").strip()
+        if not item:
+            continue
+        if item.lower() in blocked or item in blocked:
+            continue
+        items.append(item)
+    return items
+
+
 def update_user_memory_async(user_id, user_input):
     """
     【旁路分析】調用 AI 分析用戶的這句話，提取特徵並更新數據庫
@@ -851,7 +880,8 @@ def update_user_memory_async(user_id, user_input):
     for key in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"]:
         if key in os.environ: os.environ.pop(key, None)
 
-
+    # 画像分析只执行一次；上面的循环只负责清理代理环境变量。
+    if user_id:
         # 3. 讀取舊畫像
         old_profile = get_user_profile(user_id)
         old_assets = old_profile.get('focus_assets', '')  # 假設格式是 "茅台,寧德時代,螺紋鋼"
@@ -962,10 +992,9 @@ def update_user_memory_async(user_id, user_input):
         # --- 【核心優化】關注品種：LRU 策略 (最近最少使用) ---
         # A. 提取新舊列表
         new_assets_str = data.get('assets', '')
-        # 將字符串轉為列表，並去除空值
-        new_items = [x.strip() for x in new_assets_str.split(',') if
-                     x.strip() and x.strip() not in ['...', '未知', '无']]
-        old_items = [x.strip() for x in old_assets.split(',') if x.strip()]
+        # 將字符串/列表轉為列表，並去除空值
+        new_items = _normalize_focus_asset_items(new_assets_str)
+        old_items = _normalize_focus_asset_items(old_assets)
 
         # B. 合併與去重 (保持順序：新 -> 舊)
         final_list = []

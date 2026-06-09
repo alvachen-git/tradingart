@@ -23,6 +23,68 @@ def test_non_margin_query_keeps_plan_unchanged():
     assert out == plan
 
 
+def test_macro_policy_impact_query_drops_researcher_for_static_transmission():
+    out = agent_core._enforce_macro_policy_impact_routing(
+        "美联储加息对黄金白银有什么影响?",
+        ["researcher", "macro_analyst"],
+    )
+    assert out == ["macro_analyst"]
+
+
+def test_latest_macro_policy_impact_query_keeps_researcher():
+    out = agent_core._enforce_macro_policy_impact_routing(
+        "最新美联储加息消息对黄金白银有什么影响?",
+        ["researcher", "macro_analyst"],
+    )
+    assert out == ["researcher", "macro_analyst"]
+
+
+def test_latest_macro_policy_asset_impact_query_is_fast_path_family():
+    assert agent_core._is_macro_policy_asset_impact_query("最新美联储加息消息对黄金白银有什么影响?")
+
+
+def test_macro_policy_impact_fast_path_skips_react_agent(monkeypatch):
+    class FakeTool:
+        def __init__(self, response):
+            self.response = response
+            self.calls = []
+
+        def invoke(self, params):
+            self.calls.append(params)
+            return self.response
+
+    health = FakeTool("宏观健康快照\n| US10Y | 4.56% | fresh |\n| DXY | 120.08 | fresh |")
+    curve = FakeTool("收益率曲线分析\n- 10Y-2Y利差: +0.41% ✅ 正常")
+    anchors = FakeTool("US10Y 趋势: 上行\nDXY 趋势: 上行\nDFII10 最新值: 2.19%")
+
+    def fail_create_agent(*_args, **_kwargs):
+        raise AssertionError("macro fast path should not create ReAct agent")
+
+    monkeypatch.setattr(agent_core, "get_macro_health_snapshot", health)
+    monkeypatch.setattr(agent_core, "analyze_yield_curve", curve)
+    monkeypatch.setattr(agent_core, "get_macro_indicator", anchors)
+    monkeypatch.setattr(agent_core, "create_react_agent", fail_create_agent)
+
+    out = agent_core.macro_analyst_node(
+        {
+            "user_query": "美联储加息对黄金白银有什么影响?",
+            "symbol": "",
+            "symbol_name": "",
+            "news_summary": "暂无最新宏观新闻",
+        },
+        llm=object(),
+    )
+
+    content = out["messages"][0].content
+    assert "宏观快答" in content
+    assert "紧缩交易" in content
+    assert "黄金" in content
+    assert "白银" in content
+    assert out["macro_chart"] == ""
+    assert health.calls == [{"indicator_code": "FEDFUNDS,SOFR,US10Y,US2Y,DXY,DFII10"}]
+    assert anchors.calls == [{"indicator_code": "US10Y,US2Y,DXY,DFII10", "days": 30}]
+
+
 def test_pure_option_data_query_forces_monitor_only():
     plan = ["researcher", "macro_analyst", "analyst", "strategist"]
     out = agent_core._enforce_option_data_monitor_routing("300ETF期权波动率高吗", plan)

@@ -29,7 +29,7 @@ from screener_tool import search_top_stocks, get_available_patterns, search_us_s
 from news_tools import get_financial_news
 from news_rag_interpreter import interpret_market_news_tool
 from fund_flow_tools import tool_get_retail_money_flow
-from polymarket_tool import tool_get_polymarket_sentiment
+from polymarket_tool import reset_polymarket_task_guard, tool_get_polymarket_sentiment
 from plot_tools import draw_chart_tool,draw_macro_compare_chart
 from futures_fund_flow_tools import get_futures_fund_flow, get_futures_fund_ranking, get_futures_margin_profile
 from futures_structure_tools import (
@@ -102,6 +102,7 @@ from agent_prompt_policy import (
 from followup_task_policy import apply_followup_supervisor_policy
 from option_strategy_policy import build_option_strategy_policy
 from chat_context_layers import append_chat_trace_event, has_agent_context, render_agent_context
+from agent_expert_router import build_route_decision
 
 
 def _disable_langsmith_tracing_by_default() -> None:
@@ -123,6 +124,9 @@ class AgentState(TypedDict):
     user_query: str
     completed_steps: Annotated[List[str], operator.add]
     agent_reports: Annotated[Dict[str, str], operator.or_]
+    route_decision: Dict[str, Any]
+    route_confidence: float
+    route_mode: str
 
     # --- 调度控制 ---
     plan: List[str]  # 任务队列，如 ["analyst", "monitor"]
@@ -323,6 +327,18 @@ RESEARCH_ROUTE_KEYWORDS = [
     "业绩", "一季报", "半年报", "中报", "三季报", "年报", "业绩快报", "业绩预告",
     "利好", "利空", "催化", "为什么涨", "为什么跌", "为什么大涨", "为什么大跌", "影响什么",
 ]
+MACRO_POLICY_KEYWORDS = [
+    "美联储", "fed", "fomc", "加息", "降息", "利率", "实际利率", "美元", "美债",
+]
+MACRO_POLICY_ASSET_KEYWORDS = [
+    "黄金", "白银", "金银", "贵金属", "铜", "原油", "股市", "纳指", "美股", "a股", "债券", "美债",
+]
+MACRO_POLICY_IMPACT_KEYWORDS = [
+    "影响", "利好", "利空", "传导", "会怎样", "怎么样", "怎么看", "压制", "支撑",
+]
+MACRO_POLICY_FRESH_RESEARCH_KEYWORDS = [
+    "最新", "最近", "新闻", "消息", "刚刚", "今天", "昨晚", "昨夜", "会议", "纪要", "概率", "预期", "数据",
+]
 TECHNICAL_ROUTE_KEYWORDS = [
     "技术面", "技术分析", "K线", "k线", "均线", "走势", "趋势", "支撑", "压力", "阻力",
     "突破", "破位", "形态",
@@ -374,6 +390,54 @@ def _enforce_research_analyst_routing(query: str, plan: List[str]) -> List[str]:
     return _dedupe_plan(enforced)
 
 
+def _is_macro_policy_asset_impact_query(query: str) -> bool:
+    text = str(query or "").strip()
+    lowered = text.lower()
+    if not text:
+        return False
+    has_policy = _contains_any(text, MACRO_POLICY_KEYWORDS) or _contains_any(lowered, MACRO_POLICY_KEYWORDS)
+    has_asset = _contains_any(text, MACRO_POLICY_ASSET_KEYWORDS) or _contains_any(lowered, MACRO_POLICY_ASSET_KEYWORDS)
+    has_impact = _contains_any(text, MACRO_POLICY_IMPACT_KEYWORDS) or _contains_any(lowered, MACRO_POLICY_IMPACT_KEYWORDS)
+    return bool(has_policy and has_asset and has_impact)
+
+
+def _has_stock_selection_intent_for_macro_guard(query: str) -> bool:
+    text = str(query or "").strip()
+    if not text:
+        return False
+    if _contains_any(text, STOCK_SELECTION_QUERY_KEYWORDS):
+        return True
+    stock_terms = r"(?:美股|股票|个股|候选股|标的|股票名单|股票池)"
+    action_terms = r"(?:推荐|筛选|选|找|列|给我|帮我|挑|挖)"
+    quantity_terms = r"(?:哪些|哪几只|几只|一批|名单|候选)"
+    return bool(
+        re.search(action_terms + r".{0,10}" + stock_terms, text)
+        or re.search(quantity_terms + r".{0,10}" + stock_terms, text)
+        or re.search(stock_terms + r".{0,10}" + quantity_terms, text)
+    )
+
+
+def _is_macro_policy_impact_query(query: str) -> bool:
+    text = str(query or "").strip()
+    lowered = text.lower()
+    if not _is_macro_policy_asset_impact_query(text):
+        return False
+    if _has_stock_selection_intent_for_macro_guard(text):
+        return False
+    has_fresh_research_need = _contains_any(text, MACRO_POLICY_FRESH_RESEARCH_KEYWORDS) or _contains_any(
+        lowered,
+        MACRO_POLICY_FRESH_RESEARCH_KEYWORDS,
+    )
+    return not has_fresh_research_need
+
+
+def _enforce_macro_policy_impact_routing(query: str, plan: List[str]) -> List[str]:
+    current_plan = list(plan or [])
+    if not _is_macro_policy_impact_query(query):
+        return current_plan
+    return ["macro_analyst"]
+
+
 def _is_stock_selection_query_for_agent(query: str) -> bool:
     policy = classify_analysis_task_type(query)
     return policy.task_type == TASK_TYPE_STOCK_SELECTION
@@ -405,6 +469,9 @@ def _apply_analysis_task_policy(
     # 不采信 planner 生成的 symbol 来判定“是否有标的”，它可能正是模型自行补出的默认对象。
     if is_market_data_query(query):
         return ["monitor"], str(symbol or "").strip()
+
+    if _is_macro_policy_impact_query(query):
+        return ["macro_analyst"], ""
 
     policy = classify_analysis_task_type(
         query,
@@ -567,6 +634,23 @@ def _build_execution_batches(plan: List[str]) -> List[List[str]]:
 
     flush_parallel()
     return batches
+
+
+FINALIZER_BYPASS_SINGLE_AGENTS = {"monitor", "screener", "macro_analyst"}
+
+
+def _can_bypass_finalizer(state: AgentState) -> bool:
+    plan = [str(step) for step in (state.get("plan") or []) if str(step).strip()]
+    execution_batches = state.get("execution_batches") or _build_execution_batches(plan)
+    if len(plan) != 1 or len(execution_batches) != 1 or len(execution_batches[0]) != 1:
+        return False
+
+    step = execution_batches[0][0]
+    if step not in FINALIZER_BYPASS_SINGLE_AGENTS:
+        return False
+
+    reports = state.get("agent_reports") or {}
+    return bool(str(reports.get(step, "") or "").strip())
 
 
 def _ensure_analyst_then_strategist(plan: List[str]) -> List[str]:
@@ -2000,6 +2084,18 @@ class PlanningOutput(BaseModel):
         description="执行步骤列表。注意依赖关系：期权(strategist)必须排在分析(analyst)之后。"
     )
     symbol: str = Field(description="核心标的代码。如果是对比问题或无法提取单一标的，请留空", default="")
+    expert_scores: Dict[str, float] = Field(
+        default_factory=dict,
+        description="Optional planner confidence score per expert, 0.0 to 1.0. Leave empty when unsure.",
+    )
+    confidence: float = Field(
+        default=0.0,
+        description="Optional overall route confidence, 0.0 to 1.0. Use 0 when unsure.",
+    )
+    route_reason: str = Field(
+        default="",
+        description="Optional short reason for selecting this route.",
+    )
 
 
 def supervisor_node(state: AgentState, llm):
@@ -2141,6 +2237,7 @@ def supervisor_node(state: AgentState, llm):
 
     final_symbol = str(result.symbol).strip()
     final_plan = _enforce_research_analyst_routing(query, final_plan)
+    final_plan = _enforce_macro_policy_impact_routing(query, final_plan)
     final_plan = _enforce_option_portfolio_isolation(query, final_plan)
     final_plan = _enforce_margin_monitor_routing(query, final_plan)
     final_plan = _enforce_option_data_monitor_routing(query, final_plan)
@@ -2176,9 +2273,47 @@ def supervisor_node(state: AgentState, llm):
     if 'screener' in final_plan:
         final_symbol = ""
 
+    route_tags = []
+    if is_market_data_query(query):
+        route_tags.append("market_data")
+    if is_pure_option_data_query(query):
+        route_tags.append("pure_option_data")
+    if _wants_chart(query):
+        route_tags.append("chart")
+    if has_portfolio and "portfolio_analyst" in final_plan:
+        route_tags.append("portfolio")
+    if is_followup:
+        route_tags.append("followup")
+
+    result_confidence = float(getattr(result, "confidence", 0.0) or 0.0)
+    if 0 < result_confidence < 0.45:
+        route_tags.append("low_confidence")
+
+    route_decision = build_route_decision(
+        query=query,
+        plan=final_plan,
+        symbol=final_symbol,
+        planner_expert_scores=getattr(result, "expert_scores", {}) or {},
+        planner_confidence=result_confidence,
+        planner_reason=str(getattr(result, "route_reason", "") or ""),
+        route_tags=route_tags,
+    )
+    final_plan = route_decision.plan
+    final_symbol = route_decision.symbol
+    route_debug = route_decision.as_dict()
+    print(
+        f"[expert-router] mode={route_decision.route_mode} "
+        f"confidence={route_decision.confidence:.2f} "
+        f"experts={route_decision.selected_expert_count} "
+        f"plan={final_plan}"
+    )
+
     return {
         "plan": final_plan,
         "symbol": final_symbol,
+        "route_decision": route_debug,
+        "route_confidence": route_decision.confidence,
+        "route_mode": route_decision.route_mode,
         "messages": [SystemMessage(content=f"已制定计划: {final_plan}")]
     }
 
@@ -3136,6 +3271,7 @@ def strategist_node(state: AgentState, llm):
 
 # 🟤 5. 情报研究员
 def researcher_node(state: AgentState,llm=None):
+    reset_polymarket_task_guard()
     symbol = state["symbol"]
     symbol_name = state.get("symbol_name", "")
     query = state["user_query"]
@@ -3284,6 +3420,108 @@ def researcher_node(state: AgentState,llm=None):
         }
 
 
+def _invoke_macro_fast_tool(tool_obj, params: Dict[str, Any] | None = None, label: str = "宏观工具") -> str:
+    try:
+        if hasattr(tool_obj, "invoke"):
+            return str(tool_obj.invoke(params or {}) or "").strip()
+        return str(tool_obj(**(params or {})) or "").strip()
+    except Exception as exc:
+        return f"⚠️ {label}获取失败: {exc}"
+
+
+def _extract_macro_report_stance(data_text: str) -> str:
+    text = str(data_text or "")
+    has_positive_spread = bool(re.search(r"10Y-2Y(?:利差)?:\s*\+", text))
+    has_inversion = "倒挂" in text and "未出现倒挂" not in text
+    has_dxy_up = "DXY" in text and "趋势: 上行" in text
+    has_us10y_up = ("US10Y" in text or "10Y" in text) and "趋势: 上行" in text
+
+    if has_inversion:
+        return "衰退/降息预期升温：曲线倒挂会削弱单纯加息逻辑，避险属性可能托底金银。"
+    if has_positive_spread and (has_dxy_up or has_us10y_up):
+        return "紧缩交易：高利率与强美元仍是主线，对利率敏感资产偏压制。"
+    if has_positive_spread:
+        return "高利率但曲线未倒挂：先按紧缩环境处理，等待实际利率或美元转弱确认。"
+    return "中性观察：当前需要同时看实际利率、DXY 与收益率曲线，避免只按单一加息标签下结论。"
+
+
+def _macro_policy_asset_impact_lines(query: str) -> List[str]:
+    text = str(query or "").lower()
+    lines: List[str] = []
+
+    if "黄金" in text or "金银" in text or "gold" in text:
+        lines.append("- 黄金：加息或维持高利率会抬高实际利率和持有成本，通常压制金价；若曲线倒挂、信用压力或避险情绪升温，黄金会获得防守买盘。")
+    if "白银" in text or "金银" in text or "silver" in text:
+        lines.append("- 白银：方向大多跟随黄金，但工业属性和波动率更高；紧缩环境下通常比黄金更容易被需求预期拖累。")
+    if "股市" in text or "美股" in text or "纳指" in text or "a股" in text:
+        lines.append("- 股市：利率上行会压估值，成长股与高久期资产更敏感；若市场转向降息预期，则先看盈利下修是否抵消估值修复。")
+    if "原油" in text or "铜" in text or "商品" in text or "大宗" in text:
+        lines.append("- 大宗商品：紧缩会压需求预期，但供给冲击或美元转弱时可能出现反向支撑。")
+    if not lines:
+        lines.append("- 资产影响：先看实际利率和美元方向。实际利率/DXY上行偏利空，二者回落或避险升温偏利多。")
+    return lines
+
+
+def _build_fast_macro_policy_impact_report(
+    query: str,
+    symbol: str = "",
+    symbol_name: str = "",
+    news_context: str = "",
+) -> str:
+    started_at = time.perf_counter()
+    health = _invoke_macro_fast_tool(
+        get_macro_health_snapshot,
+        {"indicator_code": "FEDFUNDS,SOFR,US10Y,US2Y,DXY,DFII10"},
+        "宏观健康快照",
+    )
+    curve = _invoke_macro_fast_tool(analyze_yield_curve, {}, "收益率曲线")
+    anchors = _invoke_macro_fast_tool(
+        get_macro_indicator,
+        {"indicator_code": "US10Y,US2Y,DXY,DFII10", "days": 30},
+        "核心宏观锚点",
+    )
+
+    combined = "\n".join([health, curve, anchors])
+    stance = _extract_macro_report_stance(combined)
+    asset_lines = _macro_policy_asset_impact_lines(query)
+    elapsed_ms = int((time.perf_counter() - started_at) * 1000)
+    target = f"{symbol_name}({symbol})" if symbol_name or symbol else "宏观资产"
+    context = str(news_context or "").strip()
+    if not context or context.startswith("暂无"):
+        context = "本快答未额外联网追新闻，主要使用本地宏观数据库与收益率曲线快照。"
+
+    return "\n".join(
+        [
+            "### 宏观快答",
+            f"- 标的/资产：{target}",
+            f"- 模式：宏观政策影响快路径，耗时约 {elapsed_ms}ms",
+            f"- 结论：{stance}",
+            "",
+            "### 传导链条",
+            "- 加息/高利率 -> 实际利率上行 -> 无息资产持有成本上升 -> 黄金、白银承压。",
+            "- 加息/高利率 -> 美元走强 -> 以美元计价的大宗商品承压。",
+            "- 如果曲线倒挂、信用压力或衰退担忧升温，避险需求会抵消一部分利率压制。",
+            "",
+            "### 资产影响",
+            *asset_lines,
+            "",
+            "### 数据验证",
+            health,
+            "",
+            curve,
+            "",
+            anchors,
+            "",
+            "### 新闻/上下文",
+            context,
+            "",
+            "### 反向条件",
+            "- 若实际利率（DFII10）明显回落、DXY转弱，金银压力会缓解。",
+            "- 若通胀或就业数据重新强化加息预期，金银反弹更容易遇到压制。",
+        ]
+    )
+
+
 def macro_analyst_node(state: AgentState, llm):
     """
     宏观策略师：全景扫描宏观数据，结合收益率曲线和新闻，判断全球流动性周期。
@@ -3293,6 +3531,19 @@ def macro_analyst_node(state: AgentState, llm):
     symbol_name = state.get("symbol_name", "")
     news_context = state.get("news_summary", "暂无最新宏观新闻")
     current_date = datetime.now().strftime("%Y年%m月%d日")
+
+    if _is_macro_policy_asset_impact_query(user_q) and not _wants_chart(user_q):
+        fast_report = _build_fast_macro_policy_impact_report(
+            user_q,
+            symbol=symbol,
+            symbol_name=symbol_name,
+            news_context=news_context,
+        )
+        return {
+            "messages": [HumanMessage(content=f"【宏观策略】\n{fast_report}")],
+            "macro_view": fast_report,
+            "macro_chart": "",
+        }
 
     # 引入宏观工具 (请确保在文件头部 import 这些工具)
     # from plot_tools import draw_macro_compare_chart
@@ -5091,9 +5342,13 @@ def build_trading_graph(fast_llm, mid_llm, smart_llm):
         update = supervisor_node(state, fast_llm)
         plan = list(update.get("plan", []) or [])
         execution_batches = _build_execution_batches(plan)
+        route_decision = update.get("route_decision", {}) or {}
         print(
             f"[analysis-batches] plan={plan} "
-            f"batches={execution_batches} query={_query_preview(state)}"
+            f"batches={execution_batches} "
+            f"route_mode={route_decision.get('route_mode', '')} "
+            f"route_confidence={route_decision.get('confidence', '')} "
+            f"query={_query_preview(state)}"
         )
         wrapped = dict(update)
         wrapped["execution_batches"] = execution_batches
@@ -5107,6 +5362,9 @@ def build_trading_graph(fast_llm, mid_llm, smart_llm):
                 "plan": plan,
                 "batches": execution_batches,
                 "symbol": str(update.get("symbol", "") or ""),
+                "route_mode": route_decision.get("route_mode", ""),
+                "route_confidence": route_decision.get("confidence", ""),
+                "selected_expert_count": route_decision.get("selected_expert_count", ""),
             },
         )
         return wrapped
@@ -5168,6 +5426,14 @@ def build_trading_graph(fast_llm, mid_llm, smart_llm):
         execution_batches = state.get("execution_batches") or _build_execution_batches(state.get("plan", []))
         current_batch_index = int(state.get("current_batch_index", 0) or 0)
         if current_batch_index >= len(execution_batches):
+            if _can_bypass_finalizer(state):
+                plan = list(state.get("plan", []) or [])
+                print(
+                    f"[analysis-batch-next] batch={current_batch_index} "
+                    f"next=end reason=single_expert_bypass plan={plan} "
+                    f"query={_query_preview(state)}"
+                )
+                return END
             print(
                 f"[analysis-batch-next] batch={current_batch_index} "
                 f"next=finalizer query={_query_preview(state)}"
