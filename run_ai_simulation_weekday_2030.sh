@@ -54,7 +54,7 @@ rc=0
   echo "script_dir: ${SCRIPT_DIR}"
   echo "python: ${PY_BIN}"
 
-  echo "phase 1/2: run AI stock 1号/2号"
+  echo "phase 1/3: run AI stock 1号/2号"
   if AI_SIM_SKIP_V3=1 "${PY_BIN}" ai_simulation_service.py; then
     rc=0
   else
@@ -62,11 +62,22 @@ rc=0
   fi
 
   if [[ ${rc} -eq 0 ]]; then
-    echo "phase 2/2: run AI stock 3号"
-    if "${PY_BIN}" run_ai_simulation_v3_daily.py --run-only --decision-mode llm_fallback --force; then
+    echo "phase 2/3: prepare AI stock 3号 sector OHLC"
+    if "${PY_BIN}" update_sector_index_price.py --lookback-days 10; then
       rc=0
     else
       rc=$?
+    fi
+
+    if [[ ${rc} -eq 0 ]]; then
+      echo "phase 3/3: run AI stock 3号"
+      if "${PY_BIN}" run_ai_simulation_v3_daily.py --decision-mode llm_fallback --force; then
+        rc=0
+      else
+        rc=$?
+      fi
+    else
+      echo "skip AI stock 3号 because sector OHLC prepare failed (exit=${rc})"
     fi
   else
     echo "skip AI stock 3号 because 1号/2号 phase failed (exit=${rc})"

@@ -5,7 +5,7 @@ import os
 import re
 import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Dict, Iterable, List, Optional
 
 import pandas as pd
@@ -58,6 +58,33 @@ def normalize_trade_date(value: Optional[str]) -> str:
     if len(cleaned) != 8:
         raise ValueError(f"非法日期格式: {value}, 期望 YYYYMMDD")
     return cleaned
+
+
+def date_days_ago(end_date: str, days: int) -> str:
+    end_dt = datetime.strptime(normalize_trade_date(end_date), "%Y%m%d").date()
+    return (end_dt - timedelta(days=max(0, int(days)))).strftime("%Y%m%d")
+
+
+def resolve_update_dates(
+    *,
+    date: str = "",
+    start_date: str = "",
+    end_date: str = "",
+    lookback_days: int = 0,
+) -> tuple[str, str, str]:
+    """Return (start_date, end_date, trade_date_for_sector_names)."""
+    if date:
+        single = normalize_trade_date(date)
+        return single, single, single
+
+    resolved_end = normalize_trade_date(end_date or None)
+    if start_date:
+        resolved_start = normalize_trade_date(start_date)
+    elif int(lookback_days or 0) > 0:
+        resolved_start = date_days_ago(resolved_end, int(lookback_days))
+    else:
+        resolved_start = resolved_end
+    return resolved_start, resolved_end, resolved_end
 
 
 def normalize_sector_name(value: Any) -> str:
@@ -399,12 +426,15 @@ def run_update(
 
     rows_written = 0
     price_errors: List[str] = []
+    empty_price_sectors: List[str] = []
     for idx, match in enumerate(matched):
         try:
             if idx > 0 and daily_interval_sec > 0:
                 time.sleep(daily_interval_sec)
             raw = fetch_ths_daily_with_retry(pro, match.ths_code, start_date=start_date, end_date=end_date)
             price_df = transform_ths_daily_df(raw, match)
+            if price_df.empty:
+                empty_price_sectors.append(match.sector_name)
             if dry_run:
                 rows_written += len(price_df)
             else:
@@ -430,6 +460,8 @@ def run_update(
         "rows_written": rows_written,
         "dry_run": dry_run,
         "price_errors": price_errors,
+        "empty_price_count": len(empty_price_sectors),
+        "empty_price_sectors": empty_price_sectors[:30],
     }
 
 
@@ -441,6 +473,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sector-type", default=DEFAULT_SECTOR_TYPE, help="板块类型，默认行业")
     parser.add_argument("--dry-run", action="store_true", help="只拉取和转换，不写入数据库")
     parser.add_argument(
+        "--lookback-days",
+        type=int,
+        default=0,
+        help="未指定 --date/--start-date 时，从结束日向前滚动补最近 N 个自然日，避免接口延迟造成永久缺口",
+    )
+    parser.add_argument(
         "--sleep",
         type=float,
         default=DEFAULT_THS_DAILY_INTERVAL_SEC,
@@ -451,13 +489,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = build_parser().parse_args()
-    if args.date:
-        start_date = end_date = normalize_trade_date(args.date)
-        trade_date_for_sectors = start_date
-    else:
-        start_date = normalize_trade_date(args.start_date or None)
-        end_date = normalize_trade_date(args.end_date or start_date)
-        trade_date_for_sectors = end_date
+    start_date, end_date, trade_date_for_sectors = resolve_update_dates(
+        date=str(args.date or ""),
+        start_date=str(args.start_date or ""),
+        end_date=str(args.end_date or ""),
+        lookback_days=int(args.lookback_days or 0),
+    )
 
     result = run_update(
         start_date=start_date,

@@ -90,6 +90,7 @@ V3_SECTOR_TYPE = "行业"
 V3_BREAKOUT_TOKENS = ("平台突破", "小区间突破", "小区间强势突破", "创新高", "波动转折(多头)")
 V3_BEARISH_TOKENS = ("假突破", "跌破", "空头", "诱多")
 V3_SECTOR_EXIT_TOKENS = ("假突破", "跌破", "空头吞噬")
+V3_SINGLE_CHAR_SECTOR_KEYWORDS = {"钨", "铜", "铝", "锂", "钴", "镍", "锡", "锌", "铅", "钼", "锑", "钛", "硅"}
 V3_BEAR_LOSS_REDUCE_THRESHOLD = -0.02
 V3_MARKET_INDEX_CODES = ("000300.SH", "000688.SH")
 V3_MARKET_BUDGET_BY_STATE = {"strong": 0.30, "range": 0.20, "bear": 0.10}
@@ -1145,7 +1146,7 @@ def _fetch_v3_sector_ohlc_history(
         """
     )
     with engine.connect() as conn:
-        return pd.read_sql(
+        df = pd.read_sql(
             sql,
             conn,
             params={
@@ -1155,6 +1156,12 @@ def _fetch_v3_sector_ohlc_history(
                 "lim": int(max(limit, V3_SECTOR_BREAKOUT_MIN_BARS)),
             },
         )
+    if df.empty:
+        return df
+    latest_ohlc_date = str(df["trade_date"].max() or "")
+    if latest_ohlc_date < str(trade_date):
+        return pd.DataFrame()
+    return df
 
 
 def _is_v3_sector_breakout(ohlc_df: pd.DataFrame) -> Dict[str, Any]:
@@ -1294,7 +1301,7 @@ def _sector_keyword_candidates_v3(name: Any) -> List[str]:
         generic = {"其他", "综合", "服务", "设备", "制造", "配套", "零部", "部件", "专业", "工业"}
         if head2 not in generic:
             tokens.append(head2)
-    return list(dict.fromkeys([x for x in tokens if len(x) >= 2]))
+    return list(dict.fromkeys([x for x in tokens if len(x) >= 2 or x in V3_SINGLE_CHAR_SECTOR_KEYWORDS]))
 
 
 def _build_v3_sector_matchers(top_sectors: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -1331,7 +1338,8 @@ def _match_v2_sector_rank(industry: Any, sector_matchers: List[Dict[str, Any]], 
         for item in sector_matchers:
             rank = int(item.get("rank") or 999)
             for kw in item.get("keywords") or []:
-                if len(str(kw)) >= 2 and str(kw) in haystack:
+                keyword = str(kw)
+                if (len(keyword) >= 2 or keyword in V3_SINGLE_CHAR_SECTOR_KEYWORDS) and keyword in haystack:
                     return rank
     return 999
 

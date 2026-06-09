@@ -3,6 +3,7 @@ import os
 from unittest.mock import patch
 
 import pandas as pd
+from sqlalchemy import create_engine, text
 
 os.environ.setdefault("DB_HOST", "127.0.0.1")
 os.environ.setdefault("DB_PORT", "3306")
@@ -151,6 +152,48 @@ class TestAISimulationV3(unittest.TestCase):
         self.assertEqual(missing["reason"], "missing_sector_ohlc")
         self.assertFalse(short["is_breakout"])
         self.assertEqual(short["reason"], "insufficient_sector_ohlc")
+
+    def test_fetch_v3_sector_ohlc_history_rejects_stale_latest_date(self):
+        test_engine = create_engine("sqlite:///:memory:")
+        with test_engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE sector_index_price (
+                      trade_date TEXT NOT NULL,
+                      ths_code TEXT NOT NULL,
+                      sector_name TEXT NOT NULL,
+                      sector_type TEXT NOT NULL,
+                      open_price REAL,
+                      high_price REAL,
+                      low_price REAL,
+                      close_price REAL,
+                      pct_chg REAL,
+                      vol REAL,
+                      amount REAL
+                    )
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO sector_index_price (
+                      trade_date, ths_code, sector_name, sector_type,
+                      open_price, high_price, low_price, close_price, pct_chg, vol, amount
+                    ) VALUES
+                    ('20260317', '881001.TI', '半导体', '行业', 10, 11, 9, 10.5, 1, 100, 1000),
+                    ('20260318', '881001.TI', '半导体', '行业', 10.5, 12, 10, 11.5, 2, 120, 1200)
+                    """
+                )
+            )
+
+        with patch("ai_simulation_service.engine", test_engine):
+            current = svc._fetch_v3_sector_ohlc_history("半导体", "20260318", limit=2)
+            stale = svc._fetch_v3_sector_ohlc_history("半导体", "20260319", limit=2)
+
+        self.assertEqual(len(current), 2)
+        self.assertTrue(stale.empty)
 
     def test_v3_market_gate_budget_by_regime(self):
         strong = svc._classify_v3_market_gate(make_index_history("strong"))
@@ -472,6 +515,56 @@ class TestAISimulationV3(unittest.TestCase):
         self.assertNotIn("服务", svc._sector_keyword_candidates_v3("热力服务"))
         self.assertIn("通信", svc._sector_keyword_candidates_v3("通信线缆及配套"))
         self.assertNotIn("配套", svc._sector_keyword_candidates_v3("通信线缆及配套"))
+        self.assertIn("钨", svc._sector_keyword_candidates_v3("钨"))
+
+    @patch("ai_simulation_service._is_valid_universe_symbol", return_value=True)
+    @patch("ai_simulation_service._fetch_price_snapshot")
+    @patch("ai_simulation_service._fetch_profile_match_text", return_value={})
+    @patch("ai_simulation_service.pd.read_sql")
+    @patch("ai_simulation_service._latest_screener_date", return_value="20260603")
+    @patch("ai_simulation_service._get_v3_breakout_sectors")
+    def test_build_v3_candidate_pool_matches_single_char_resource_sector(
+        self,
+        mock_breakout,
+        _mock_screener_date,
+        mock_read_sql,
+        _mock_profile,
+        mock_price,
+        _mock_valid,
+    ):
+        class DummyConn:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+        mock_breakout.return_value = [
+            {"industry": "钨", "rank": 1, "score": 0.9, "breakout_score": 135}
+        ]
+        mock_read_sql.return_value = pd.DataFrame(
+            [
+                {
+                    "ts_code": "000657.SZ",
+                    "name": "中钨高新",
+                    "industry": "小金属",
+                    "score": 90,
+                    "close": 70,
+                    "pct_chg": 2.0,
+                    "pattern": "5日平台突破",
+                    "ma_trend": "均线多头排列",
+                    "main_net_amount": 88000,
+                }
+            ]
+        )
+        mock_price.return_value = {"000657.SZ": {"name": "中钨高新", "close": 70, "amount": 1_000_000, "vol": 1000}}
+
+        with patch.object(svc.engine, "connect", return_value=DummyConn()):
+            df, _notes = svc._build_candidate_pool_v3("20260603", {})
+
+        self.assertEqual(len(df), 1)
+        self.assertEqual(df.iloc[0]["industry"], "钨")
+        self.assertEqual(df.iloc[0]["symbol"], "000657.SZ")
 
     @patch("ai_simulation_service.kline_algo.calculate_kline_signals")
     @patch("ai_simulation_service._fetch_v3_sector_ohlc_history")

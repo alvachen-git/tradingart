@@ -7,6 +7,20 @@ import update_sector_index_price as upd
 
 
 class TestSectorIndexPrice(unittest.TestCase):
+    def test_resolve_update_dates_uses_lookback_when_start_missing(self):
+        start, end, sector_date = upd.resolve_update_dates(end_date="20260608", lookback_days=7)
+
+        self.assertEqual(start, "20260601")
+        self.assertEqual(end, "20260608")
+        self.assertEqual(sector_date, "20260608")
+
+    def test_resolve_update_dates_date_overrides_lookback(self):
+        start, end, sector_date = upd.resolve_update_dates(date="20260608", lookback_days=7)
+
+        self.assertEqual(start, "20260608")
+        self.assertEqual(end, "20260608")
+        self.assertEqual(sector_date, "20260608")
+
     def test_match_sector_catalog_exact_and_suffix(self):
         catalog = pd.DataFrame(
             [

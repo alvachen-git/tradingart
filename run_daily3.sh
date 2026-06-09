@@ -57,7 +57,7 @@ run_step 5 10 "更新指数估值数据" "update_index_valuation.py"
 
 run_step 6 10 "更新板块资金流数据" "update_sector_flow.py"
 
-run_step 7 10 "更新行业板块价格数据" "update_sector_index_price.py"
+run_step 7 10 "更新行业板块价格数据" "update_sector_index_price.py" "--lookback-days" "10"
 
 run_step 8 10 "更新股票成交量排名数据" "update_stock_money_scan.py"
 
