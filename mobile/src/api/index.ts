@@ -219,6 +219,7 @@ export interface DailyReportMobileRender {
   fund_flow: Array<Record<string, string>>
   commodities: Array<Record<string, string>>
   volatility: string
+  volatility_items?: Array<Record<string, string>>
   bull_stock: string
   risk_warning: string
   tomorrow_strategy: string

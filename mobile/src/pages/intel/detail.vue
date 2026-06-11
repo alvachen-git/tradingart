@@ -179,6 +179,28 @@ function splitParagraphs(raw: string) {
     .filter(Boolean)
 }
 
+function recordList(items?: Array<Record<string, string>>) {
+  return Array.isArray(items) ? items : []
+}
+
+function percentValue(raw: string) {
+  const n = Number(String(raw || '').replace('%', '').trim())
+  if (!Number.isFinite(n)) return 0
+  return Math.max(0, Math.min(100, n))
+}
+
+function ivBarStyle(raw: string) {
+  const width = Math.max(8, Math.min(100, percentValue(raw) * 2))
+  return `width:${width}%`
+}
+
+function ivLevelClass(raw: string) {
+  const text = String(raw || '')
+  if (/极高|偏高|高/.test(text)) return 'high'
+  if (/极低|偏低|低/.test(text)) return 'low'
+  return 'mid'
+}
+
 function sectionCount(items?: Array<Record<string, string>>) {
   return Array.isArray(items) ? items.length : 0
 }
@@ -222,26 +244,26 @@ function listCount(items?: unknown[]) {
           <text v-for="line in splitParagraphs(dailyReportRender.headline)" :key="`headline-${line}`" class="daily-lead-text">{{ line }}</text>
         </view>
 
-        <view v-if="dailyReportRender.fund_flow.length" class="daily-section">
+        <view v-if="recordList(dailyReportRender.fund_flow).length" class="daily-section">
           <view class="section-head">
             <text class="section-title">资金暗流</text>
-            <text class="section-count">{{ dailyReportRender.fund_flow.length }} 条线索</text>
+            <text class="section-count">{{ recordList(dailyReportRender.fund_flow).length }} 条线索</text>
           </view>
           <view class="daily-insight-list">
-            <view v-for="item in dailyReportRender.fund_flow" :key="`flow-${getField(item, 'title')}`" class="daily-insight-card">
+            <view v-for="item in recordList(dailyReportRender.fund_flow)" :key="`flow-${getField(item, 'title')}`" class="daily-insight-card">
               <text class="daily-card-title">{{ getField(item, 'title', '资金线索') }}</text>
               <text v-for="line in splitParagraphs(getField(item, 'body', '暂无说明'))" :key="`flow-line-${getField(item, 'title')}-${line}`" class="daily-card-text">{{ line }}</text>
             </view>
           </view>
         </view>
 
-        <view v-if="dailyReportRender.commodities.length" class="daily-section">
+        <view v-if="recordList(dailyReportRender.commodities).length" class="daily-section">
           <view class="section-head">
             <text class="section-title">商品期货全景</text>
-            <text class="section-count">{{ dailyReportRender.commodities.length }} 个品种</text>
+            <text class="section-count">{{ recordList(dailyReportRender.commodities).length }} 个品种</text>
           </view>
           <view class="commodity-list">
-            <view v-for="(item, idx) in dailyReportRender.commodities" :key="`commodity-${getField(item, 'title')}-${idx}`" class="commodity-card">
+            <view v-for="(item, idx) in recordList(dailyReportRender.commodities)" :key="`commodity-${getField(item, 'title')}-${idx}`" class="commodity-card">
               <view class="commodity-top">
                 <text class="commodity-name">{{ getField(item, 'title', '商品') }}</text>
                 <text v-if="getField(item, 'badge', '')" class="market-badge" :class="marketBiasClass(getField(item, 'badge'))">{{ getField(item, 'badge') }}</text>
@@ -253,12 +275,26 @@ function listCount(items?: unknown[]) {
           </view>
         </view>
 
-        <view v-if="dailyReportRender.volatility" class="daily-section">
+        <view v-if="dailyReportRender.volatility || recordList(dailyReportRender.volatility_items).length" class="daily-section">
           <view class="section-head">
             <text class="section-title">期权波动率</text>
           </view>
-          <view class="daily-text-panel">
-            <text v-for="line in splitParagraphs(dailyReportRender.volatility)" :key="`vol-${line}`" class="daily-card-text">{{ line }}</text>
+          <view class="daily-text-panel volatility-panel">
+            <view v-if="recordList(dailyReportRender.volatility_items).length" class="iv-list">
+              <view v-for="item in recordList(dailyReportRender.volatility_items)" :key="`iv-${getField(item, 'name')}`" class="iv-row">
+                <view class="iv-row-head">
+                  <text class="iv-name">{{ getField(item, 'name') }}</text>
+                  <view class="iv-value-wrap">
+                    <text class="iv-value">{{ getField(item, 'value') }}</text>
+                    <text class="iv-level" :class="ivLevelClass(getField(item, 'level'))">{{ getField(item, 'level') }}</text>
+                  </view>
+                </view>
+                <view class="iv-track">
+                  <view class="iv-bar" :class="ivLevelClass(getField(item, 'level'))" :style="ivBarStyle(getField(item, 'value'))" />
+                </view>
+              </view>
+            </view>
+            <text v-for="line in splitParagraphs(dailyReportRender.volatility)" :key="`vol-${line}`" class="daily-card-text volatility-summary">{{ line }}</text>
           </view>
         </view>
 
@@ -692,7 +728,7 @@ function listCount(items?: unknown[]) {
 .daily-report-body {
   display: flex;
   flex-direction: column;
-  gap: 30rpx;
+  gap: 36rpx;
 }
 
 .daily-hero {
@@ -726,7 +762,7 @@ function listCount(items?: unknown[]) {
 
 .daily-lead {
   border-left: 6rpx solid #f5c518;
-  padding: 4rpx 0 4rpx 20rpx;
+  padding: 6rpx 0 6rpx 22rpx;
 }
 
 .daily-lead-text,
@@ -734,22 +770,28 @@ function listCount(items?: unknown[]) {
 .daily-strategy-text {
   display: block;
   color: #dbe7f5;
-  font-size: 28rpx;
-  line-height: 1.72;
+  font-size: 26rpx;
+  font-weight: 400;
+  line-height: 1.88;
   word-break: break-word;
+}
+
+.daily-lead-text,
+.daily-card-text {
+  margin-bottom: 10rpx;
 }
 
 .daily-section {
   display: flex;
   flex-direction: column;
-  gap: 14rpx;
+  gap: 18rpx;
 }
 
 .daily-insight-list,
 .commodity-list {
   display: flex;
   flex-direction: column;
-  gap: 14rpx;
+  gap: 18rpx;
 }
 
 .daily-insight-card,
@@ -758,7 +800,7 @@ function listCount(items?: unknown[]) {
   border: 1px solid rgba(62, 90, 140, 0.52);
   border-radius: 14rpx;
   background: rgba(19, 28, 46, 0.88);
-  padding: 18rpx;
+  padding: 22rpx;
 }
 
 .daily-insight-card {
@@ -768,10 +810,10 @@ function listCount(items?: unknown[]) {
 .daily-card-title {
   display: block;
   color: #ecf3ff;
-  font-size: 29rpx;
+  font-size: 28rpx;
   font-weight: 800;
   line-height: 1.35;
-  margin-bottom: 10rpx;
+  margin-bottom: 14rpx;
 }
 
 .commodity-top {
@@ -825,15 +867,117 @@ function listCount(items?: unknown[]) {
 .commodity-lines {
   display: flex;
   flex-direction: column;
-  gap: 6rpx;
+  gap: 10rpx;
 }
 
 .commodity-line {
   display: block;
   color: #aebbd0;
-  font-size: 26rpx;
-  line-height: 1.58;
+  font-size: 25rpx;
+  font-weight: 400;
+  line-height: 1.68;
   word-break: break-word;
+}
+
+.volatility-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 20rpx;
+}
+
+.iv-list {
+  display: flex;
+  flex-direction: column;
+  gap: 18rpx;
+}
+
+.iv-row {
+  padding-bottom: 4rpx;
+}
+
+.iv-row-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18rpx;
+  margin-bottom: 10rpx;
+}
+
+.iv-name {
+  min-width: 0;
+  color: #ecf3ff;
+  font-size: 27rpx;
+  font-weight: 700;
+  line-height: 1.35;
+}
+
+.iv-value-wrap {
+  display: flex;
+  align-items: center;
+  gap: 10rpx;
+  flex-shrink: 0;
+}
+
+.iv-value {
+  color: #e7eef8;
+  font-size: 25rpx;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+
+.iv-level {
+  min-width: 54rpx;
+  text-align: center;
+  border-radius: 999rpx;
+  padding: 4rpx 10rpx;
+  font-size: 21rpx;
+  font-weight: 800;
+  line-height: 1.25;
+}
+
+.iv-level.low {
+  color: #bfdbfe;
+  background: rgba(59, 130, 246, 0.14);
+}
+
+.iv-level.mid {
+  color: #fde68a;
+  background: rgba(245, 158, 11, 0.14);
+}
+
+.iv-level.high {
+  color: #fecaca;
+  background: rgba(239, 68, 68, 0.15);
+}
+
+.iv-track {
+  height: 12rpx;
+  overflow: hidden;
+  border-radius: 999rpx;
+  background: rgba(8, 18, 35, 0.84);
+}
+
+.iv-bar {
+  height: 100%;
+  border-radius: 999rpx;
+  background: #f5c518;
+}
+
+.iv-bar.low {
+  background: #3b82f6;
+}
+
+.iv-bar.mid {
+  background: #f5c518;
+}
+
+.iv-bar.high {
+  background: #ef4444;
+}
+
+.volatility-summary {
+  color: #c8d4e7;
+  margin-bottom: 0;
 }
 
 .daily-text-panel.warning {

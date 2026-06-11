@@ -155,7 +155,14 @@ class TestMobileApiIntelAccess(unittest.TestCase):
         </div>
         <div>
           <h2 class="section-title"><span></span> ⚖️ 期权波动率</h2>
-          <div class="glass-card"><p>期权波动率处于偏低区间，方向确认前谨慎追价。</p></div>
+          <div class="glass-card"><p>
+            沪深300ETF<br>19.43% 低<br>
+            中证500ETF<br>25.97% 中<br>
+            创业板ETF<br>34.65% 高<br>
+            科创50ETF<br>43.82% 极高<br>
+            上证50ETF<br>16.92% 极低<br>
+            科创50期权IV高达43.82%，居五大宽基之首，短期风险尚未完全释放。
+          </p></div>
         </div>
         <div>
           <h2 class="section-title"><span></span> 🐂 每日牛股</h2>
@@ -246,6 +253,11 @@ class TestMobileApiIntelAccess(unittest.TestCase):
         self.assertEqual(out["commodities"][1]["title"], "🥈 白银")
         self.assertEqual(out["commodities"][1]["badge"], "看空")
         self.assertIn("隐含波动率", out["commodities"][1]["body"])
+        self.assertEqual(out["volatility_items"][0]["name"], "沪深300ETF")
+        self.assertEqual(out["volatility_items"][0]["value"], "19.43%")
+        self.assertEqual(out["volatility_items"][3]["level"], "极高")
+        self.assertIn("五大宽基之首", out["volatility"])
+        self.assertNotIn("沪深300ETF", out["volatility"])
         self.assertIn("轻仓", out["tomorrow_strategy"])
         self.assertNotIn("爱波塔 · 最懂期权", out["tomorrow_strategy"])
 

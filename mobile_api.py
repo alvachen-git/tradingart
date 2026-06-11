@@ -7130,6 +7130,40 @@ def _daily_first_paragraph_text(html_text: str, section_title: str) -> str:
     return _extract_first_html_block_text(r"<p[^>]*>([\s\S]*?)</p>", section_html) or _plain_block_from_html(section_html)
 
 
+def _parse_daily_volatility(section_html: str) -> Tuple[List[Dict[str, str]], str]:
+    lines = _split_plain_lines(_plain_block_from_html(section_html))
+    items: List[Dict[str, str]] = []
+    summary_lines: List[str] = []
+    level_pattern = r"(极低|偏低|低|中|偏高|高|极高)"
+    idx = 0
+    while idx < len(lines):
+        line = lines[idx]
+        combined = re.match(rf"^(.+?)\s+([0-9]+(?:\.[0-9]+)?)%\s*{level_pattern}$", line)
+        if combined:
+            items.append({
+                "name": combined.group(1).strip(),
+                "value": f"{combined.group(2)}%",
+                "level": combined.group(3),
+            })
+            idx += 1
+            continue
+
+        next_line = lines[idx + 1] if idx + 1 < len(lines) else ""
+        metric = re.match(rf"^([0-9]+(?:\.[0-9]+)?)%\s*{level_pattern}$", next_line)
+        if metric and "%" not in line and len(line) <= 24:
+            items.append({
+                "name": line,
+                "value": f"{metric.group(1)}%",
+                "level": metric.group(2),
+            })
+            idx += 2
+            continue
+
+        summary_lines.append(line)
+        idx += 1
+    return items, "\n".join(summary_lines).strip()
+
+
 def _parse_daily_card_blocks(section_html: str) -> List[Dict[str, str]]:
     blocks = re.findall(r"<td[^>]*>([\s\S]*?)</td>", section_html or "", flags=re.IGNORECASE)
     if not blocks:
@@ -7180,6 +7214,8 @@ def _build_daily_report_mobile_render(html_text: Any) -> Optional[Dict[str, Any]
         )
         fund_flow_section = _extract_h2_section_html(raw, "资金暗流")
         commodities_section = _extract_h2_section_html(raw, "商品期货全景")
+        volatility_section = _extract_h2_section_html(raw, "期权波动率")
+        volatility_items, volatility_summary = _parse_daily_volatility(volatility_section)
         payload = {
             "type": "daily_report",
             "hero": {
@@ -7189,7 +7225,8 @@ def _build_daily_report_mobile_render(html_text: Any) -> Optional[Dict[str, Any]
             "headline": _daily_section_text(raw, "市场头条"),
             "fund_flow": _parse_daily_card_blocks(fund_flow_section),
             "commodities": _parse_daily_card_blocks(commodities_section),
-            "volatility": _daily_section_text(raw, "期权波动率"),
+            "volatility": volatility_summary,
+            "volatility_items": volatility_items,
             "bull_stock": _daily_section_text(raw, "每日牛股"),
             "risk_warning": _daily_section_text(raw, "风险警示"),
             "tomorrow_strategy": _daily_first_paragraph_text(raw, "明日策略"),
