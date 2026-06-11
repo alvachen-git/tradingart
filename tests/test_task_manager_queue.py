@@ -107,6 +107,39 @@ class TestTaskManagerQueue(unittest.TestCase):
                     context_payload={"chat_mode": task_manager.CHAT_MODE_ANALYSIS},
                 )
 
+    def test_hybrid_queue_limit_rejects_third_task(self):
+        fake_redis = _FakeRedis()
+        fake_analysis = _FakeCeleryTask()
+        fake_tasks_module = types.SimpleNamespace(
+            process_ai_query=fake_analysis,
+            process_knowledge_chat=_FakeCeleryTask(),
+        )
+
+        payload = {
+            "chat_mode": task_manager.CHAT_MODE_ANALYSIS,
+            "delivery_mode": "hybrid",
+        }
+        with patch.object(task_manager, "redis_client", fake_redis), patch.dict(
+            "sys.modules", {"tasks": fake_tasks_module}
+        ):
+            task_manager.TaskManager.create_task(
+                user_id="u1",
+                prompt="q1",
+                context_payload=payload,
+            )
+            task_manager.TaskManager.create_task(
+                user_id="u1",
+                prompt="q2",
+                context_payload=payload,
+            )
+
+            with self.assertRaises(task_manager.UserTaskQueueFullError):
+                task_manager.TaskManager.create_task(
+                    user_id="u1",
+                    prompt="q3",
+                    context_payload=payload,
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

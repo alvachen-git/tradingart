@@ -138,7 +138,7 @@ export const chatApi = {
   pending: () =>
     request<ChatPendingResponse>('GET', '/api/chat/pending'),
 
-  cancel: (task_id?: string, reason: 'clear' | 'timeout' | 'manual' = 'manual') =>
+  cancel: (task_id?: string, reason: 'clear' | 'timeout' | 'manual' | 'queue_limit' = 'manual') =>
     request<{ status: string; task_id?: string; message: string }>('POST', '/api/chat/cancel', { task_id, reason }),
 }
 

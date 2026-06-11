@@ -1,11 +1,14 @@
 from typing import TypedDict, Annotated, List, Union, Literal, Dict, Any, Mapping
 from datetime import datetime
+from contextlib import contextmanager
 import random
 import operator
 import re
 import os
 import glob
 import json
+import signal
+import threading
 import time
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage, AIMessage
 from langgraph.prebuilt import create_react_agent
@@ -164,6 +167,10 @@ class AgentState(TypedDict):
     context_layers: List[Dict[str, Any]]
     context_layer_summary: List[Dict[str, Any]]
     task_id: str
+    delivery_mode: str
+    quick_answer_scenario: str
+    quick_answer_target: str
+    quick_answer_direction: str
 
     news_summary: str  # 情报员填入：新闻摘要 (CPI/非农/美联储)
     macro_view: str  # 宏观分析师填入：宏观定调 (宽松/紧缩)
@@ -388,6 +395,78 @@ def _enforce_research_analyst_routing(query: str, plan: List[str]) -> List[str]:
         enforced.append("researcher")
     enforced.extend(current_plan)
     return _dedupe_plan(enforced)
+
+
+def _enforce_hybrid_background_routing(
+    query: str,
+    plan: List[str],
+    *,
+    delivery_mode: str = "",
+    quick_answer_scenario: str = "",
+) -> List[str]:
+    current_plan = list(plan or [])
+    if str(delivery_mode or "").strip() != "hybrid":
+        return current_plan
+
+    scenario = str(quick_answer_scenario or "").strip()
+    has_technical_need = _contains_any(str(query or ""), TECHNICAL_ROUTE_KEYWORDS)
+    if scenario == "technical" or has_technical_need:
+        return ["analyst"]
+
+    if scenario == "market_move" and "researcher" in current_plan:
+        return ["analyst"]
+    return current_plan
+
+
+_HYBRID_BACKGROUND_SUBJECT_ALIASES: tuple[tuple[str, str, str], ...] = (
+    ("创业板ETF", "159915.SZ", "创业板ETF"),
+    ("创业板指数", "159915.SZ", "创业板ETF"),
+    ("创业板指", "159915.SZ", "创业板ETF"),
+    ("创业板", "159915.SZ", "创业板ETF"),
+    ("科创50ETF", "588000.SH", "科创50ETF"),
+    ("科创板50", "588000.SH", "科创50ETF"),
+    ("科创50", "588000.SH", "科创50ETF"),
+    ("沪深300ETF", "510300.SH", "300ETF"),
+    ("300ETF", "510300.SH", "300ETF"),
+    ("沪深300", "510300.SH", "300ETF"),
+    ("中证500ETF", "510500.SH", "500ETF"),
+    ("500ETF", "510500.SH", "500ETF"),
+    ("中证500", "510500.SH", "500ETF"),
+    ("上证50ETF", "510050.SH", "50ETF"),
+    ("50ETF", "510050.SH", "50ETF"),
+    ("上证50", "510050.SH", "50ETF"),
+)
+
+
+def _resolve_hybrid_background_subject_lock(
+    query: str,
+    *,
+    delivery_mode: str = "",
+    quick_answer_target: str = "",
+    focus_entity: str = "",
+) -> tuple[str, str]:
+    if str(delivery_mode or "").strip() != "hybrid":
+        return "", ""
+
+    candidates = [
+        str(quick_answer_target or "").strip(),
+        str(focus_entity or "").strip(),
+        str(query or "").strip(),
+    ]
+    for text in candidates:
+        if not text:
+            continue
+        for alias, symbol, name in _HYBRID_BACKGROUND_SUBJECT_ALIASES:
+            if alias in text:
+                return symbol, name
+
+    explicit_code = re.search(r"(?<!\d)(\d{6})(?:\.(SH|SZ|BJ))?(?!\d)", str(query or ""), flags=re.I)
+    if explicit_code:
+        code = explicit_code.group(1)
+        suffix = (explicit_code.group(2) or "").upper()
+        return f"{code}.{suffix}" if suffix else code, ""
+
+    return "", ""
 
 
 def _is_macro_policy_asset_impact_query(query: str) -> bool:
@@ -1748,6 +1827,48 @@ def _invoke_search_web_for_researcher(query: str) -> str:
     return str(search_web.invoke({"query": query}) or "")
 
 
+class _NodeTimeoutError(TimeoutError):
+    pass
+
+
+def _get_researcher_node_timeout_seconds() -> int:
+    raw_value = str(os.getenv("RESEARCHER_NODE_TIMEOUT_SECONDS", "120") or "").strip()
+    try:
+        value = int(float(raw_value))
+    except Exception:
+        value = 120
+    return max(10, value)
+
+
+@contextmanager
+def _wall_clock_timeout(seconds: int, label: str = "node"):
+    safe_seconds = int(seconds or 0)
+    if (
+        safe_seconds <= 0
+        or threading.current_thread() is not threading.main_thread()
+        or not hasattr(signal, "SIGALRM")
+        or not hasattr(signal, "setitimer")
+    ):
+        yield
+        return
+
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    previous_timer = signal.setitimer(signal.ITIMER_REAL, 0)
+
+    def _handle_timeout(_signum, _frame):
+        raise _NodeTimeoutError(f"{label} exceeded {safe_seconds}s")
+
+    signal.signal(signal.SIGALRM, _handle_timeout)
+    signal.setitimer(signal.ITIMER_REAL, safe_seconds)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
+        if previous_timer and previous_timer[0] > 0:
+            signal.setitimer(signal.ITIMER_REAL, previous_timer[0], previous_timer[1])
+
+
 def build_generalist_tools():
     return [
         interpret_market_news_tool,
@@ -1887,6 +2008,8 @@ def _state_context_payload(state: Mapping[str, Any], *, recent_context_override:
         "followup_route_context": str(state.get("followup_route_context", "") or ""),
         "correction_intent": bool(state.get("correction_intent", False)),
         "intent_domain": str(state.get("intent_domain", "") or ""),
+        "quick_answer_target": str(state.get("quick_answer_target", "") or ""),
+        "quick_answer_direction": str(state.get("quick_answer_direction", "") or ""),
     }
     context_layers = state.get("context_layers")
     if isinstance(context_layers, list):
@@ -2237,6 +2360,12 @@ def supervisor_node(state: AgentState, llm):
 
     final_symbol = str(result.symbol).strip()
     final_plan = _enforce_research_analyst_routing(query, final_plan)
+    final_plan = _enforce_hybrid_background_routing(
+        query,
+        final_plan,
+        delivery_mode=str(state.get("delivery_mode", "") or ""),
+        quick_answer_scenario=str(state.get("quick_answer_scenario", "") or ""),
+    )
     final_plan = _enforce_macro_policy_impact_routing(query, final_plan)
     final_plan = _enforce_option_portfolio_isolation(query, final_plan)
     final_plan = _enforce_margin_monitor_routing(query, final_plan)
@@ -2254,6 +2383,14 @@ def supervisor_node(state: AgentState, llm):
         recent_context="\n".join(part for part in (recent_context, followup_action_context, followup_route_context) if part),
     )
     final_plan = _dedupe_plan(final_plan)
+    locked_symbol, locked_symbol_name = _resolve_hybrid_background_subject_lock(
+        query,
+        delivery_mode=str(state.get("delivery_mode", "") or ""),
+        quick_answer_target=str(state.get("quick_answer_target", "") or ""),
+        focus_entity=str(state.get("focus_entity", "") or ""),
+    )
+    if locked_symbol and any(step in final_plan for step in ("analyst", "monitor", "strategist", "generalist")):
+        final_symbol = locked_symbol
 
     # 简单的正则判断是否为 A 股个股代码 (6开头沪市主板/科创, 0开头深市, 3开头创业板, 8/4开头北交所)
     # ETF 通常是 51, 56, 58, 159 开头
@@ -2311,6 +2448,7 @@ def supervisor_node(state: AgentState, llm):
     return {
         "plan": final_plan,
         "symbol": final_symbol,
+        "symbol_name": locked_symbol_name,
         "route_decision": route_debug,
         "route_confidence": route_decision.confidence,
         "route_mode": route_decision.route_mode,
@@ -3271,6 +3409,27 @@ def strategist_node(state: AgentState, llm):
 
 # 🟤 5. 情报研究员
 def researcher_node(state: AgentState,llm=None):
+    timeout_seconds = _get_researcher_node_timeout_seconds()
+    try:
+        with _wall_clock_timeout(timeout_seconds, "researcher"):
+            return _researcher_node_impl(state, llm)
+    except _NodeTimeoutError:
+        query = str(state.get("user_query", "") or "").strip()
+        return {
+            "messages": [
+                HumanMessage(
+                    content=(
+                        "【情报】\n"
+                        f"情报研究超过 {timeout_seconds} 秒，已停止深度联网扩展。"
+                        "先保留快速判断，后续可单独追问更具体的新闻、政策或板块线索。"
+                        f"\n\n本次问题：{query[:120]}"
+                    )
+                )
+            ]
+        }
+
+
+def _researcher_node_impl(state: AgentState,llm=None):
     reset_polymarket_task_guard()
     symbol = state["symbol"]
     symbol_name = state.get("symbol_name", "")

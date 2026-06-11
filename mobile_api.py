@@ -197,7 +197,7 @@ _MOBILE_CHAT_LAST_TASK_KEY_PREFIX = "mobile:user:last_task:"
 _MOBILE_CHAT_RESULT_TTL_SECONDS = int(str(os.getenv("MOBILE_CHAT_RESULT_TTL_SECONDS", "86400")).strip() or 86400)
 _MOBILE_CHAT_MAX_PENDING_SECONDS = int(str(os.getenv("MOBILE_CHAT_MAX_PENDING_SECONDS", "400")).strip() or 400)
 _MOBILE_CHAT_BACKGROUND_MAX_PENDING_SECONDS = int(
-    str(os.getenv("MOBILE_CHAT_BACKGROUND_MAX_PENDING_SECONDS", "900")).strip() or 900
+    str(os.getenv("MOBILE_CHAT_BACKGROUND_MAX_PENDING_SECONDS", "3600")).strip() or 3600
 )
 _CHAT_FEEDBACK_SCHEMA_LOCK = threading.Lock()
 _CHAT_FEEDBACK_SCHEMA_READY = False
@@ -4662,6 +4662,11 @@ def _build_mobile_context_payload(
 
     if not should_include_recent_context:
         recent_context = ""
+        recent_context_for_focus = ""
+        recent_focus_entity = ""
+        recent_focus_topic = ""
+        recent_focus_mode_hint = ""
+        target_anchor = {}
     else:
         recent_context = recent_context_for_focus
 
@@ -4694,10 +4699,11 @@ def _build_mobile_context_payload(
         recent_context=recent_context_for_focus,
         recent_focus_topic=focus_topic,
     )
+    policy_followup_goal = followup_goal if (is_followup or should_include_recent_context or lookup_followup or pronoun_followup) else ""
     followup_task_policy = _classify_followup_task_policy(
         prompt_text,
         is_followup=bool(is_followup),
-        followup_goal=followup_goal,
+        followup_goal=policy_followup_goal,
         recent_context=recent_context_for_focus,
         target_anchor=target_anchor,
         focus_topic=focus_topic,
@@ -4923,11 +4929,25 @@ _MARKET_MOVE_PERSONAL_EXCLUDE_KEYWORDS = (
     "我的", "我持有", "我买", "我卖", "持仓", "仓位", "账户", "净值", "收益", "亏损",
     "浮盈", "浮亏", "调仓", "加仓", "减仓", "买入", "卖出", "开仓", "平仓", "止损",
     "止盈", "要不要", "该不该", "能买吗", "能不能买", "可以买吗", "适合买",
+    "目标价", "止损位", "止盈位", "怎么调", "如何调", "调一下", "具体操作",
+    "该买", "该卖", "买吗", "卖吗", "做多", "做空",
+)
+_HYBRID_OPTION_EXCLUDE_KEYWORDS = (
+    "期权", "认购", "认沽", "行权价", "牛市价差", "熊市价差", "跨式", "宽跨", "勒式",
+    "蝶式", "铁鹰", "卖方", "买方", "IV", "iv", "波动率", "Delta", "delta",
+    "Gamma", "gamma", "Vega", "vega", "Theta", "theta", "权利金",
+)
+_TECHNICAL_ANALYSIS_KEYWORDS = (
+    "技术面", "技术分析", "走势", "趋势", "形态", "K线", "k线", "均线", "支撑",
+    "压力", "阻力", "突破", "跌破", "回踩", "放量", "缩量", "量能", "MACD",
+    "macd", "RSI", "rsi", "偏多", "偏空", "强弱", "走强", "走弱",
 )
 _MARKET_MOVE_SUBJECT_KEYWORDS = (
     "美股", "A股", "a股", "港股", "日股", "欧股", "纳指", "纳斯达克", "标普", "道指",
     "沪深300", "中证500", "中证1000", "上证", "创业板", "科创", "恒生", "恒科",
     "黄金", "白银", "原油", "铜", "沪铜", "螺纹", "铁矿", "焦煤", "焦炭", "商品",
+    "螺纹钢", "热卷", "玻璃", "纯碱", "甲醇", "豆粕", "菜粕", "棕榈油", "豆油",
+    "橡胶", "PTA", "pta", "PVC", "pvc", "沪银", "沪金", "沪铝", "沪锌", "沪镍",
     "期货", "指数", "ETF", "etf", "股票", "美元", "美债", "人民币", "英伟达", "特斯拉",
     "苹果", "微软", "谷歌", "亚马逊", "Meta", "meta", "英特尔",
 )
@@ -4935,6 +4955,9 @@ _MARKET_MOVE_TARGET_STOPWORDS = (
     "为什么", "为何", "为啥", "怎么回事", "咋回事", "怎么看", "什么情况", "发生了什么",
     "今天", "今日", "今晚", "昨天", "最近", "近期", "现在", "当前", "这两天", "这几天",
     "这么", "那么", "突然", "一直", "又", "会", "还", "呢", "吗", "啊", "了", "的",
+    "技术面", "技术分析", "走势", "趋势", "形态", "K线", "k线", "均线", "支撑",
+    "压力", "阻力", "突破", "跌破", "回踩", "放量", "缩量", "量能", "MACD",
+    "macd", "RSI", "rsi", "偏多", "偏空", "强弱",
 )
 
 
@@ -4945,6 +4968,26 @@ def _extract_market_move_direction(prompt_text: str) -> str:
     if any(keyword in text for keyword in _MARKET_MOVE_UP_KEYWORDS):
         return "上涨"
     return "异动"
+
+
+def _detect_hybrid_quick_scenario(prompt_text: str) -> str:
+    text = str(prompt_text or "")
+    if any(keyword in text for keyword in _TECHNICAL_ANALYSIS_KEYWORDS):
+        return "technical"
+    return "market_move"
+
+
+def _extract_hybrid_quick_bias(prompt_text: str) -> str:
+    text = str(prompt_text or "")
+    if any(keyword in text for keyword in ("跌破", "跳水", "杀跌", "走弱", "回落", "下跌", "大跌", "暴跌")):
+        return "短线偏弱"
+    if any(keyword in text for keyword in ("突破", "放量", "拉升", "走强", "反弹", "上涨", "大涨", "暴涨")):
+        return "短线偏强"
+    if any(keyword in text for keyword in ("偏空", "压力", "阻力")):
+        return "偏谨慎"
+    if any(keyword in text for keyword in ("偏多", "支撑")):
+        return "偏观察反弹"
+    return "先按震荡观察"
 
 
 def _extract_market_move_target(prompt_text: str, context_payload: Mapping[str, Any] | None = None) -> str:
@@ -4989,11 +5032,17 @@ def _is_market_move_quick_answer_candidate(
         return False
     if any(keyword in text for keyword in _MARKET_MOVE_PERSONAL_EXCLUDE_KEYWORDS):
         return False
+    if any(keyword in text for keyword in _HYBRID_OPTION_EXCLUDE_KEYWORDS):
+        return False
+    has_subject = _has_market_move_subject(text, context_payload)
     has_explain_intent = any(keyword in text for keyword in _MARKET_MOVE_EXPLAIN_KEYWORDS)
     has_move_word = any(keyword in text for keyword in _MARKET_MOVE_KEYWORDS)
-    if not (has_explain_intent and has_move_word):
-        return False
-    return _has_market_move_subject(text, context_payload)
+    has_technical_intent = any(keyword in text for keyword in _TECHNICAL_ANALYSIS_KEYWORDS)
+    if has_explain_intent and has_move_word and has_subject:
+        return True
+    if has_technical_intent and has_subject:
+        return True
+    return False
 
 
 def _build_market_move_quick_template(
@@ -5002,8 +5051,18 @@ def _build_market_move_quick_template(
 ) -> str:
     target = _extract_market_move_target(prompt_text, context_payload) or "这个市场"
     direction = _extract_market_move_direction(prompt_text)
+    scenario = _detect_hybrid_quick_scenario(prompt_text)
+    bias = _extract_hybrid_quick_bias(prompt_text)
+    if scenario == "technical":
+        return (
+            f"快速判断：{target}先按技术面看，初步倾向是{bias}。"
+            "需要重点核对三点：趋势是否仍在关键均线或前高前低附近延续；"
+            "量能是否配合突破、回踩或跌破；"
+            "支撑压力位附近有没有重新放量确认。"
+            "这只是快速框架，后台会继续核实最新盘面后补充完整分析。"
+        )
     return (
-        f"快速判断：关于{target}{direction}，先看三条线："
+        f"快速判断：关于{target}{direction}，初步倾向是{bias}，先看三条线："
         "一是利率、美元和流动性是否压缩风险偏好；"
         "二是权重资产、行业主线或财报预期有没有被重新定价；"
         "三是新闻、政策或资金流是否触发了短线集中反应。"
@@ -5027,18 +5086,24 @@ def _generate_market_move_quick_answer(
     fallback = _build_market_move_quick_template(prompt_text, context_payload)
     target = _extract_market_move_target(prompt_text, context_payload) or "这个市场"
     direction = _extract_market_move_direction(prompt_text)
+    scenario = _detect_hybrid_quick_scenario(prompt_text)
+    bias = _extract_hybrid_quick_bias(prompt_text)
     recent_context = str((context_payload or {}).get("recent_context") or "").strip()
     focus_topic = str((context_payload or {}).get("focus_topic") or "").strip()
     prompt = (
-        "你是爱波塔小程序的交易问答助手。请给用户一个很短的市场异动快速判断。\n"
+        "你是爱波塔小程序的交易问答助手。请给用户一个很短的股票、期货或技术分析快速判断。\n"
         "硬性要求：\n"
         "1. 只输出 120-220 字中文，不分点超过 3 条。\n"
-        "2. 不编造实时行情、具体新闻、具体数字；没有数据就说先按框架判断。\n"
-        "3. 不给具体买卖、仓位、止损建议。\n"
-        "4. 结尾说明后台会继续做深度分析。\n\n"
+        "2. 可以给保守的初步倾向，但必须说明待后台核实；不要把快答写成最终结论。\n"
+        "3. 不编造实时行情、具体新闻、具体数字；没有数据就说先按框架判断。\n"
+        "4. 不给具体买卖、仓位、止损、目标价或开仓建议。\n"
+        "5. 期权策略不在本轮快答范围内；如果出现期权语境，只提示后台深度分析。\n"
+        "6. 结尾说明后台会继续做深度分析。\n\n"
         f"用户问题：{prompt_text}\n"
         f"识别对象：{target}\n"
         f"识别方向：{direction}\n"
+        f"快答场景：{scenario}\n"
+        f"初步倾向参考：{bias}\n"
         f"当前焦点：{focus_topic or '无'}\n"
         f"近期上下文：{recent_context[:500] if recent_context else '无'}"
     )
@@ -6350,6 +6415,7 @@ def chat_submit(
     )
     if hybrid_candidate:
         context_payload["delivery_mode"] = "hybrid"
+        context_payload["quick_answer_scenario"] = _detect_hybrid_quick_scenario(normalized_prompt)
         context_payload["quick_answer_target"] = _extract_market_move_target(normalized_prompt, context_payload)
         context_payload["quick_answer_direction"] = _extract_market_move_direction(normalized_prompt)
 
@@ -6557,6 +6623,11 @@ def chat_status(task_id: str, username: str = Depends(get_current_user)):
         pending_meta = TaskManager.get_user_pending_task(username) or {}
         start_ts = float(pending_meta.get("start_time") or 0.0)
         state_for_timeout = _read_mobile_chat_state(task_id)
+        if str(status.get("delivery_mode") or "").strip() and not str(state_for_timeout.get("delivery_mode") or "").strip():
+            state_for_timeout = {
+                **state_for_timeout,
+                "delivery_mode": str(status.get("delivery_mode") or "").strip(),
+            }
         timeout_seconds = _mobile_chat_timeout_seconds_for_state(state_for_timeout)
         if start_ts > 0 and (time.time() - start_ts) >= timeout_seconds:
             timeout_msg = _mobile_chat_timeout_error_for_state(state_for_timeout)

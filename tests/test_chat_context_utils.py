@@ -22,6 +22,23 @@ class TestChatContextUtils(unittest.TestCase):
     def test_short_numeric_followup_is_recognized_as_followup(self):
         self.assertTrue(ctx.infer_followup_intent("我要详细数值"))
 
+    def test_explicit_technical_subject_is_not_marked_as_followup(self):
+        self.assertFalse(ctx.infer_followup_intent("汇川技术技术面怎么看"))
+        self.assertEqual(ctx.extract_focus_entity("汇川技术技术面怎么看"), "汇川技术")
+
+    def test_explicit_new_subject_does_not_inherit_recent_context(self):
+        self.assertFalse(
+            ctx.should_preserve_recent_context(
+                "汇川技术技术面怎么看",
+                is_followup=False,
+                semantic_related=False,
+                is_same_domain=True,
+                recent_turns=[{"role": "user", "content": "科创50为什么大涨"}],
+                recent_focus_entity="科创50",
+                recent_focus_topic="异动原因",
+            )
+        )
+
     def test_preserve_recent_context_for_short_pronoun_followup(self):
         self.assertTrue(
             ctx.should_preserve_recent_context(
@@ -38,6 +55,8 @@ class TestChatContextUtils(unittest.TestCase):
     def test_extract_focus_entity_supports_common_market_entities(self):
         self.assertEqual(ctx.extract_focus_entity("为什么今晚英特尔涨这么多？"), "英特尔")
         self.assertEqual(ctx.extract_focus_entity("特斯拉为什么大跌"), "特斯拉")
+        self.assertEqual(ctx.extract_focus_entity("创业板为什么大跌"), "创业板")
+        self.assertEqual(ctx.extract_focus_entity("科创50为什么大涨"), "科创50")
 
     def test_infer_focus_topic_supports_price_move_reason(self):
         self.assertEqual(ctx.infer_focus_topic("为什么今晚英特尔涨这么多？"), ("异动原因", "price_move_reason"))

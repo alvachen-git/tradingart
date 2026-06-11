@@ -44,6 +44,7 @@ USER_ACTIVE_TASK_PREFIX = "user_active_task:"
 USER_TASK_QUEUE_PREFIX = "user_task_queue:"
 TASK_META_TTL_SEC = 7200
 USER_MAX_QUEUED_TASKS = 2
+USER_MAX_HYBRID_QUEUED_TASKS = 1
 
 
 class UserTaskQueueFullError(RuntimeError):
@@ -246,8 +247,10 @@ class TaskManager:
             queue_ids = TaskManager._load_queue_ids(user_id)
 
         if active_task_id:
-            if len(queue_ids) >= USER_MAX_QUEUED_TASKS:
-                raise UserTaskQueueFullError(active_count=1, queued_count=len(queue_ids), max_queued=USER_MAX_QUEUED_TASKS)
+            delivery_mode = str(task_meta.get("delivery_mode") or "task").strip().lower()
+            max_queued = USER_MAX_HYBRID_QUEUED_TASKS if delivery_mode == "hybrid" else USER_MAX_QUEUED_TASKS
+            if len(queue_ids) >= max_queued:
+                raise UserTaskQueueFullError(active_count=1, queued_count=len(queue_ids), max_queued=max_queued)
 
             task_meta = dict(task_meta)
             task_meta["status"] = "queued"
@@ -289,6 +292,9 @@ class TaskManager:
     ):
         """创建后台任务；若当前用户已有 active task，则先进入用户级队列。"""
         chat_mode = str((context_payload or {}).get("chat_mode") or CHAT_MODE_ANALYSIS)
+        delivery_mode = str((context_payload or {}).get("delivery_mode") or "task").strip().lower()
+        if delivery_mode not in {"task", "hybrid"}:
+            delivery_mode = "task"
         task_id = str(uuid4())
         task_meta = {
             "task_id": task_id,
@@ -299,7 +305,7 @@ class TaskManager:
             "context_payload": context_payload or {},
             "status": "queued",
             "chat_mode": chat_mode,
-            "delivery_mode": "task",
+            "delivery_mode": delivery_mode,
             "task_type": "analysis",
             "created_at": datetime.now().isoformat(),
             "start_time": 0.0,

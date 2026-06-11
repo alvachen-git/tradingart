@@ -21,6 +21,64 @@ def test_non_option_query_keeps_plan_unchanged():
     assert out == plan
 
 
+def test_hybrid_market_move_background_avoids_slow_researcher_only_route():
+    out = agent_core._enforce_hybrid_background_routing(
+        "科创50为什么大涨",
+        ["researcher"],
+        delivery_mode="hybrid",
+        quick_answer_scenario="market_move",
+    )
+    assert out == ["analyst"]
+
+
+def test_hybrid_technical_background_uses_analyst_route():
+    out = agent_core._enforce_hybrid_background_routing(
+        "汇川技术技术面怎么看",
+        ["researcher"],
+        delivery_mode="hybrid",
+        quick_answer_scenario="technical",
+    )
+    assert out == ["analyst"]
+
+
+def test_hybrid_index_subject_lock_overrides_stale_stock_symbol():
+    symbol, symbol_name = agent_core._resolve_hybrid_background_subject_lock(
+        "创业板为什么大跌",
+        delivery_mode="hybrid",
+        quick_answer_target="创业板",
+        focus_entity="",
+    )
+    assert symbol == "159915.SZ"
+    assert symbol_name == "创业板ETF"
+
+
+def test_hybrid_subject_lock_ignores_non_hybrid_tasks():
+    symbol, symbol_name = agent_core._resolve_hybrid_background_subject_lock(
+        "创业板为什么大跌",
+        delivery_mode="task",
+        quick_answer_target="创业板",
+        focus_entity="",
+    )
+    assert symbol == ""
+    assert symbol_name == ""
+
+
+def test_researcher_node_returns_fallback_when_timeout_is_raised(monkeypatch):
+    monkeypatch.setattr(agent_core, "_get_researcher_node_timeout_seconds", lambda: 10)
+
+    def _raise_timeout(_state, _llm=None):
+        raise agent_core._NodeTimeoutError("researcher exceeded 10s")
+
+    monkeypatch.setattr(agent_core, "_researcher_node_impl", _raise_timeout)
+    out = agent_core.researcher_node(
+        {"user_query": "科创50为什么大涨", "symbol": "科创50", "symbol_name": "科创50"},
+        llm=None,
+    )
+    content = out["messages"][0].content
+    assert "超过 10 秒" in content
+    assert "科创50为什么大涨" in content
+
+
 def test_option_position_query_detection():
     assert agent_core._is_option_position_query("创业板期权持仓怎么调？")
     assert agent_core._is_option_position_query("创业板4月3.2认购买方23张，目前这个持仓怎么调整比较好")

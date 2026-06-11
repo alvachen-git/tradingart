@@ -33,9 +33,9 @@ let pollingSessionVersion = 0
 let pollingRequestInFlight = false
 let backgroundPollTimer: ReturnType<typeof setInterval> | null = null
 let backgroundPollingTaskId = ''
-let backgroundPollingStartedAtMs = 0
+let backgroundPollingTaskIds: string[] = []
 let backgroundPollingSessionVersion = 0
-let backgroundPollingRequestInFlight = false
+const backgroundPollingInFlightTaskIds = new Set<string>()
 let uiSessionVersion = 0
 
 const CHAT_HISTORY_VERSION = 'v2'
@@ -45,9 +45,11 @@ const PENDING_KEY = computed(() => `chat_pending_${auth.username}`)
 const BACKGROUND_PENDING_KEY = computed(() => `chat_background_pending_${auth.username}`)
 const POLL_INTERVAL_MS = 3000
 const POLL_TIMEOUT_MS = 400 * 1000
-const BACKGROUND_POLL_TIMEOUT_MS = 900 * 1000
+const BACKGROUND_POLL_TIMEOUT_MS = 60 * 60 * 1000
+const MAX_BACKGROUND_PENDING_TASKS = 2
 const BACKGROUND_TIMEOUT_MESSAGE = '深度分析暂时还没完成，我先保留上面的快速判断；你可以继续提问，稍后也可以再回来查看。'
 const BACKGROUND_STATUS_MESSAGE = '深度分析中，完成后会自动补充；你可以继续提问。'
+const BACKGROUND_LIMIT_MESSAGE = '前面已有深度分析在处理中，请等其中一个完成后再继续发起深度问题。'
 const SHARE_TITLE = '爱波塔-懂期权的AI'
 const SHARE_PATH = '/pages/login/index'
 const DEFAULT_GREETING_BODY =
@@ -140,32 +142,70 @@ function clearPendingTask() {
   pollingStartedAtMs = 0
 }
 
-function readBackgroundPendingTask(): PendingTaskRecord | null {
-  try {
-    const raw = uni.getStorageSync(BACKGROUND_PENDING_KEY.value)
-    if (!raw) return null
-    const parsed = JSON.parse(raw)
-    const taskId = String(parsed?.task_id || '').trim()
-    if (!taskId) return null
-    const submittedAt = Number(parsed?.submitted_at_ms || 0)
-    return {
-      task_id: taskId,
-      submitted_at_ms: submittedAt > 0 ? submittedAt : Date.now(),
-      question_text: String(parsed?.question_text || ''),
-    }
-  } catch {
-    return null
+function normalizePendingTaskRecord(parsed: any): PendingTaskRecord | null {
+  const taskId = String(parsed?.task_id || '').trim()
+  if (!taskId) return null
+  const submittedAt = Number(parsed?.submitted_at_ms || 0)
+  return {
+    task_id: taskId,
+    submitted_at_ms: submittedAt > 0 ? submittedAt : Date.now(),
+    question_text: String(parsed?.question_text || ''),
   }
 }
 
+function readBackgroundPendingTasks(): PendingTaskRecord[] {
+  try {
+    const raw = uni.getStorageSync(BACKGROUND_PENDING_KEY.value)
+    if (!raw) return []
+    const parsed = JSON.parse(raw)
+    const source = Array.isArray(parsed) ? parsed : [parsed]
+    const out: PendingTaskRecord[] = []
+    const seen = new Set<string>()
+    for (const item of source) {
+      const record = normalizePendingTaskRecord(item)
+      if (!record || seen.has(record.task_id)) continue
+      seen.add(record.task_id)
+      out.push(record)
+    }
+    return out
+  } catch {
+    return []
+  }
+}
+
+function writeBackgroundPendingTasks(tasks: PendingTaskRecord[]) {
+  const out: PendingTaskRecord[] = []
+  const seen = new Set<string>()
+  for (const task of tasks) {
+    const record = normalizePendingTaskRecord(task)
+    if (!record || seen.has(record.task_id)) continue
+    seen.add(record.task_id)
+    out.push(record)
+  }
+  if (!out.length) {
+    uni.removeStorageSync(BACKGROUND_PENDING_KEY.value)
+    return
+  }
+  uni.setStorageSync(BACKGROUND_PENDING_KEY.value, JSON.stringify(out.slice(-8)))
+}
+
 function writeBackgroundPendingTask(task: PendingTaskRecord) {
-  uni.setStorageSync(BACKGROUND_PENDING_KEY.value, JSON.stringify(task))
+  const record = normalizePendingTaskRecord(task)
+  if (!record) return
+  const existing = readBackgroundPendingTasks().filter(item => item.task_id !== record.task_id)
+  writeBackgroundPendingTasks([...existing, record])
+}
+
+function removeBackgroundPendingTask(taskId: string) {
+  const tid = String(taskId || '').trim()
+  if (!tid) return
+  writeBackgroundPendingTasks(readBackgroundPendingTasks().filter(item => item.task_id !== tid))
 }
 
 function clearBackgroundPendingTask() {
   uni.removeStorageSync(BACKGROUND_PENDING_KEY.value)
   backgroundPollingTaskId = ''
-  backgroundPollingStartedAtMs = 0
+  backgroundPollingTaskIds = []
 }
 
 function isStaleSession(sessionVersion: number) {
@@ -289,6 +329,23 @@ async function send() {
         }
         return
       }
+      const activeBackgroundTasks = readBackgroundPendingTasks()
+      if (
+        activeBackgroundTasks.length >= MAX_BACKGROUND_PENDING_TASKS &&
+        !activeBackgroundTasks.some(item => item.task_id === task_id)
+      ) {
+        try {
+          await chatApi.cancel(task_id, 'queue_limit')
+        } catch {
+          // ignore
+        }
+        replaceLoading(loadingId, BACKGROUND_LIMIT_MESSAGE)
+        saveHistory()
+        sending.value = false
+        return
+      }
+      stopPoll()
+      clearPendingTask()
       const quickResult = submitRes?.quick_result || {}
       const quickText = String(
         quickResult?.response || quickResult?.answer || quickResult?.error || '我先开始后台深度分析，稍后补充。',
@@ -297,16 +354,6 @@ async function send() {
       saveHistory()
       sending.value = false
 
-      const previousBackground = readBackgroundPendingTask()
-      if (previousBackground?.task_id && previousBackground.task_id !== task_id) {
-        try {
-          await chatApi.cancel(previousBackground.task_id, 'clear')
-        } catch {
-          // ignore
-        }
-        removeBackgroundStatusMessage(previousBackground.task_id)
-      }
-      stopBackgroundPoll()
       const pending: PendingTaskRecord = {
         task_id,
         submitted_at_ms: Date.now(),
@@ -395,22 +442,22 @@ function applyTaskError(taskId: string, loadingId: number, errorText: string | u
 
 function applyBackgroundTaskSuccess(taskId: string, result: any, sessionVersion: number) {
   if (isStaleSession(sessionVersion)) return
-  stopBackgroundPoll()
-  clearBackgroundPendingTask()
+  removeBackgroundPendingTask(taskId)
   removeBackgroundStatusMessage(taskId)
   const aiText = String(result?.response || result?.answer || JSON.stringify(result || {})).trim()
   appendAssistantMessage(`【深度补充】\n${aiText || '深度分析已完成，但暂时没有返回内容。'}`, taskId)
   saveHistory()
+  if (!readBackgroundPendingTasks().length) stopBackgroundPoll()
 }
 
 function applyBackgroundTaskError(taskId: string, errorText: string | undefined, sessionVersion: number) {
   if (isStaleSession(sessionVersion)) return
-  stopBackgroundPoll()
-  clearBackgroundPendingTask()
+  removeBackgroundPendingTask(taskId)
   removeBackgroundStatusMessage(taskId)
   const msg = String(errorText || '').trim() || BACKGROUND_TIMEOUT_MESSAGE
   appendAssistantMessage(msg.includes('重新提问') ? BACKGROUND_TIMEOUT_MESSAGE : msg, taskId)
   saveHistory()
+  if (!readBackgroundPendingTasks().length) stopBackgroundPoll()
 }
 
 function removeBackgroundStatusMessage(taskId = '') {
@@ -423,8 +470,6 @@ function ensureBackgroundStatusMessage(taskId: string) {
   if (!tid) return
   const existing = messages.value.some(m => m.role === 'status' && m.taskId === tid)
   if (existing) return
-  // 当前只允许一个后台深度任务，避免多个旧状态同时悬挂在聊天流里。
-  removeBackgroundStatusMessage()
   messages.value.push({
     id: ++msgCounter,
     role: 'status',
@@ -511,7 +556,8 @@ async function resumePendingTask() {
   stopPoll()
   stopBackgroundPoll()
   const localPending = readPendingTask()
-  const localBackground = readBackgroundPendingTask()
+  const localBackgroundTasks = readBackgroundPendingTasks()
+  const localBackground = localBackgroundTasks.length ? localBackgroundTasks[localBackgroundTasks.length - 1] : null
   let remotePending: ChatPendingResponse | null = null
   try {
     remotePending = await chatApi.pending()
@@ -526,6 +572,7 @@ async function resumePendingTask() {
   if (remotePending?.has_task && remotePending.task_id) {
     taskId = String(remotePending.task_id)
     if (remotePending.delivery_mode === 'hybrid') {
+      clearPendingTask()
       startedAtMs = localBackground?.task_id === taskId
         ? Number(localBackground?.submitted_at_ms || Date.now())
         : Date.now()
@@ -536,6 +583,12 @@ async function resumePendingTask() {
       })
       ensureBackgroundStatusMessage(taskId)
       await resolveBackgroundTaskSnapshot(taskId, normalizePendingSnapshot(remotePending), startedAtMs, sessionVersion)
+      const remainingBackgroundTasks = readBackgroundPendingTasks()
+      if (remainingBackgroundTasks.length) {
+        for (const task of remainingBackgroundTasks) ensureBackgroundStatusMessage(task.task_id)
+        const firstTask = remainingBackgroundTasks[0]
+        pollBackgroundStatus(firstTask.task_id, Number(firstTask.submitted_at_ms || Date.now()), sessionVersion)
+      }
       sending.value = false
       return
     }
@@ -556,23 +609,35 @@ async function resumePendingTask() {
     return
   }
 
-  if (localBackground?.task_id) {
-    ensureBackgroundStatusMessage(localBackground.task_id)
+  if (localBackgroundTasks.length) {
+    for (const task of localBackgroundTasks) {
+      ensureBackgroundStatusMessage(task.task_id)
+    }
+    const latestBackground = localBackgroundTasks[localBackgroundTasks.length - 1]
     try {
-      const status = await chatApi.status(localBackground.task_id)
+      const status = await chatApi.status(latestBackground.task_id)
       if (isStaleSession(sessionVersion)) return
       await resolveBackgroundTaskSnapshot(
-        localBackground.task_id,
+        latestBackground.task_id,
         status,
-        Number(localBackground.submitted_at_ms || Date.now()),
+        Number(latestBackground.submitted_at_ms || Date.now()),
         sessionVersion,
       )
     } catch {
-      pollBackgroundStatus(
-        localBackground.task_id,
-        Number(localBackground.submitted_at_ms || Date.now()),
-        sessionVersion,
-      )
+      // 单次恢复查询失败不结束后台补充；统一轮询所有本地未完成任务。
+    }
+    const remainingBackgroundTasks = readBackgroundPendingTasks()
+    if (remainingBackgroundTasks.length) {
+      const firstTask = remainingBackgroundTasks[0]
+      pollBackgroundStatus(firstTask.task_id, Number(firstTask.submitted_at_ms || Date.now()), sessionVersion)
+    }
+    if (
+      localPending?.task_id &&
+      Number(localPending.submitted_at_ms || 0) <= Number(localBackground?.submitted_at_ms || 0)
+    ) {
+      clearPendingTask()
+      sending.value = false
+      return
     }
   }
 
@@ -640,35 +705,48 @@ function pollStatus(taskId: string, loadingId: number, startedAtMs: number, sess
 
 function pollBackgroundStatus(taskId: string, startedAtMs: number, sessionVersion: number) {
   if (isStaleSession(sessionVersion)) return
-  stopBackgroundPoll()
+  void startedAtMs
+  const pendingTasks = readBackgroundPendingTasks()
+  if (!pendingTasks.length) return
   backgroundPollingTaskId = taskId
-  backgroundPollingStartedAtMs = startedAtMs
+  backgroundPollingTaskIds = pendingTasks.map(task => task.task_id)
   backgroundPollingSessionVersion = sessionVersion
-  backgroundPollingRequestInFlight = false
+  if (backgroundPollTimer) return
   backgroundPollTimer = setInterval(async () => {
     if (isStaleSession(sessionVersion)) {
       stopBackgroundPoll(sessionVersion)
       return
     }
-    if (Date.now() - backgroundPollingStartedAtMs >= BACKGROUND_POLL_TIMEOUT_MS) {
-      applyBackgroundTaskError(taskId, BACKGROUND_TIMEOUT_MESSAGE, sessionVersion)
+    const tasks = readBackgroundPendingTasks()
+    backgroundPollingTaskIds = tasks.map(task => task.task_id)
+    if (!tasks.length) {
+      stopBackgroundPoll(sessionVersion)
       return
     }
 
-    if (backgroundPollingRequestInFlight) return
-    backgroundPollingRequestInFlight = true
-    try {
-      const res = await chatApi.status(taskId)
-      if (isStaleSession(sessionVersion)) return
-      if (res.status === 'success') {
-        applyBackgroundTaskSuccess(taskId, res.result, sessionVersion)
-      } else if (res.status === 'error') {
-        applyBackgroundTaskError(taskId, res.error || BACKGROUND_TIMEOUT_MESSAGE, sessionVersion)
+    for (const task of tasks) {
+      const currentTaskId = String(task.task_id || '').trim()
+      if (!currentTaskId) continue
+      const currentStartedAt = Number(task.submitted_at_ms || Date.now())
+      if (Date.now() - currentStartedAt >= BACKGROUND_POLL_TIMEOUT_MS) {
+        applyBackgroundTaskError(currentTaskId, BACKGROUND_TIMEOUT_MESSAGE, sessionVersion)
+        continue
       }
-    } catch {
-      // 后台补充不因单次网络波动结束；下一轮继续尝试。
-    } finally {
-      backgroundPollingRequestInFlight = false
+      if (backgroundPollingInFlightTaskIds.has(currentTaskId)) continue
+      backgroundPollingInFlightTaskIds.add(currentTaskId)
+      try {
+        const res = await chatApi.status(currentTaskId)
+        if (isStaleSession(sessionVersion)) return
+        if (res.status === 'success') {
+          applyBackgroundTaskSuccess(currentTaskId, res.result, sessionVersion)
+        } else if (res.status === 'error') {
+          applyBackgroundTaskError(currentTaskId, res.error || BACKGROUND_TIMEOUT_MESSAGE, sessionVersion)
+        }
+      } catch {
+        // 后台补充不因单次网络波动结束；下一轮继续尝试。
+      } finally {
+        backgroundPollingInFlightTaskIds.delete(currentTaskId)
+      }
     }
   }, POLL_INTERVAL_MS)
 }
@@ -690,14 +768,14 @@ function stopBackgroundPoll(expectedSessionVersion?: number) {
   }
   if (backgroundPollTimer) { clearInterval(backgroundPollTimer); backgroundPollTimer = null }
   backgroundPollingTaskId = ''
-  backgroundPollingStartedAtMs = 0
+  backgroundPollingTaskIds = []
   backgroundPollingSessionVersion = 0
-  backgroundPollingRequestInFlight = false
+  backgroundPollingInFlightTaskIds.clear()
 }
 
 function pausePollingForBackground() {
   const hasPending = !!readPendingTask()
-  const hasBackgroundPending = !!readBackgroundPendingTask()
+  const hasBackgroundPending = readBackgroundPendingTasks().length > 0
   if (!hasPending && !hasBackgroundPending) return
   if (hasPending) stopPoll()
   if (hasBackgroundPending) stopBackgroundPoll()
@@ -742,9 +820,15 @@ function clearChat() {
     success: async (res) => {
       if (res.confirm) {
         const pending = readPendingTask()
-        const backgroundPending = readBackgroundPendingTask()
+        const backgroundPendingTasks = readBackgroundPendingTasks()
         const taskIdsToCancel = Array.from(new Set(
-          [pending?.task_id, pollingTaskId, backgroundPending?.task_id, backgroundPollingTaskId]
+          [
+            pending?.task_id,
+            pollingTaskId,
+            ...backgroundPendingTasks.map(task => task.task_id),
+            backgroundPollingTaskId,
+            ...backgroundPollingTaskIds,
+          ]
             .map(id => String(id || '').trim())
             .filter(Boolean),
         ))
