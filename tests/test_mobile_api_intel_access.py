@@ -108,6 +108,76 @@ class TestMobileApiIntelAccess(unittest.TestCase):
     </body></html>
     """
 
+    DAILY_REPORT_HTML = """
+    <html><body>
+      <div class="main-container">
+        <div class="glass-header">
+          <h1>📊 爱波塔复盘晚报</h1>
+          <p>20260601 星期一 | 深度复盘</p>
+        </div>
+        <div>
+          <h2 class="section-title"><span></span> 🚀 市场头条</h2>
+          <div class="glass-card"><p>指数震荡走高，成交温和放大，主线仍围绕科技与资源。</p></div>
+        </div>
+        <div>
+          <h2 class="section-title"><span></span> 💰 资金暗流</h2>
+          <table class="two-col-table"><tr>
+            <td width="50%">
+              <div class="glass-card">
+                <h4>📈 股票板块</h4>
+                <p>半导体材料板块单日净流入+12.9亿领涨，资金借新题材抢筹。</p>
+              </div>
+            </td>
+            <td width="50%">
+              <div class="glass-card">
+                <h4>📊 期货商持仓</h4>
+                <p>海通、东证、国泰君安今日罕见形成做多共识，白银净多增仓。</p>
+              </div>
+            </td>
+          </tr></table>
+        </div>
+        <div>
+          <h2 class="section-title"><span></span> 🏆 商品期货全景</h2>
+          <table class="two-col-table"><tr>
+            <td width="50%">
+              <div class="glass-card">
+                <div><span>🪙 黄金</span><span>看空</span></div>
+                <p>形态：【下降三法】+放量下跌<br>隐含波动率：26.48%（偏低，Rank 36.6%）</p>
+              </div>
+            </td>
+            <td width="50%">
+              <div class="glass-card">
+                <div><span>🥈 白银</span><span>看空</span></div>
+                <p>形态：【下降三法】+旗形破位<br>隐含波动率：52.08%（偏低，Rank 25.7%）</p>
+              </div>
+            </td>
+          </tr></table>
+        </div>
+        <div>
+          <h2 class="section-title"><span></span> ⚖️ 期权波动率</h2>
+          <div class="glass-card"><p>期权波动率处于偏低区间，方向确认前谨慎追价。</p></div>
+        </div>
+        <div>
+          <h2 class="section-title"><span></span> 🐂 每日牛股</h2>
+          <div class="glass-card"><p>重点观察有资金连续回流且形态刚突破的标的。</p></div>
+        </div>
+        <div>
+          <h2 class="section-title"><span></span> 🐻 风险警示</h2>
+          <div class="glass-card"><p>回避高位放量滞涨与量价背离品种。</p></div>
+        </div>
+        <div>
+          <div class="glass-card">
+            <h2>💡 明日策略</h2>
+            <p>轻仓跟踪资金回流方向，等待确认后再加仓。</p>
+          </div>
+        </div>
+        <div>
+          <p>爱波塔 · 最懂期权的AI | www.aiprota.com</p>
+        </div>
+      </div>
+    </body></html>
+    """
+
     def test_intel_reports_normalizes_channel_alias_and_maps_published_at(self):
         fake_rows = [
             {
@@ -163,6 +233,21 @@ class TestMobileApiIntelAccess(unittest.TestCase):
         self.assertIn("外资集中加多", out["foreign_notes"][0])
         self.assertEqual(out["contra"]["longs"][0]["product"], "甲醇")
         self.assertIn("别上头", out["commentary"][0])
+
+    def test_daily_report_mobile_render_parses_mobile_sections(self):
+        out = mobile_api._build_daily_report_mobile_render(self.DAILY_REPORT_HTML)
+
+        self.assertIsNotNone(out)
+        self.assertEqual(out["type"], "daily_report")
+        self.assertIn("复盘晚报", out["hero"]["title"])
+        self.assertIn("科技", out["headline"])
+        self.assertEqual(out["fund_flow"][0]["title"], "📈 股票板块")
+        self.assertIn("半导体材料", out["fund_flow"][0]["body"])
+        self.assertEqual(out["commodities"][1]["title"], "🥈 白银")
+        self.assertEqual(out["commodities"][1]["badge"], "看空")
+        self.assertIn("隐含波动率", out["commodities"][1]["body"])
+        self.assertIn("轻仓", out["tomorrow_strategy"])
+        self.assertNotIn("爱波塔 · 最懂期权", out["tomorrow_strategy"])
 
     def test_safe_stock_report_detail_attaches_mobile_render(self):
         with patch.object(
@@ -226,6 +311,27 @@ class TestMobileApiIntelAccess(unittest.TestCase):
         self.assertIn("mobile_render", out)
         self.assertEqual(out["mobile_render"]["type"], "broker_position_report")
         self.assertEqual(out["mobile_render"]["institution_day"]["longs"][0]["product"], "PTA")
+
+    def test_daily_report_detail_attaches_mobile_render(self):
+        with patch.object(
+            mobile_api.sub_svc,
+            "get_content_by_id",
+            return_value={
+                "id": 15,
+                "channel_id": 1,
+                "channel_code": "daily_report",
+                "channel_name": "复盘晚报",
+                "is_premium": False,
+                "title": "20260601 复盘晚报",
+                "content": self.DAILY_REPORT_HTML,
+                "publish_time": "2026-06-01 20:30:00",
+            },
+        ):
+            out = mobile_api.intel_report_detail(15, username="u1")
+
+        self.assertIn("mobile_render", out)
+        self.assertEqual(out["mobile_render"]["type"], "daily_report")
+        self.assertEqual(out["mobile_render"]["fund_flow"][1]["title"], "📊 期货商持仓")
 
     def test_intel_report_detail_adds_published_at_fallback(self):
         with patch.object(

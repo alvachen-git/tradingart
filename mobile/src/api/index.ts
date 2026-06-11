@@ -209,7 +209,23 @@ export interface BrokerPositionMobileRender {
   commentary: string[]
 }
 
+export interface DailyReportMobileRender {
+  type: 'daily_report'
+  hero: {
+    title: string
+    subtitle: string
+  }
+  headline: string
+  fund_flow: Array<Record<string, string>>
+  commodities: Array<Record<string, string>>
+  volatility: string
+  bull_stock: string
+  risk_warning: string
+  tomorrow_strategy: string
+}
+
 export type ReportMobileRender =
+  | DailyReportMobileRender
   | SafeStockMobileRender
   | ExpiryOptionMobileRender
   | BrokerPositionMobileRender

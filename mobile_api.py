@@ -7096,6 +7096,122 @@ def _split_plain_lines(raw: str) -> List[str]:
     ]
 
 
+def _plain_block_from_html(raw: Any) -> str:
+    text_value = str(raw or "")
+    if not text_value:
+        return ""
+    text_value = re.sub(r"<style[\s\S]*?</style>", "", text_value, flags=re.IGNORECASE)
+    text_value = re.sub(r"<script[\s\S]*?</script>", "", text_value, flags=re.IGNORECASE)
+    text_value = re.sub(r"<!--[\s\S]*?-->", "", text_value)
+    text_value = re.sub(r"<br\s*/?>", "\n", text_value, flags=re.IGNORECASE)
+    text_value = re.sub(
+        r"</?(p|div|section|article|h[1-6]|li|ul|ol|tr|table|blockquote)[^>]*>",
+        "\n",
+        text_value,
+        flags=re.IGNORECASE,
+    )
+    text_value = re.sub(r"<[^>]+>", " ", text_value)
+    text_value = html_lib.unescape(text_value)
+    lines = [re.sub(r"[ \t\r\f\v]+", " ", line).strip() for line in text_value.splitlines()]
+    return "\n".join(line for line in lines if line).strip()
+
+
+def _extract_first_html_block_text(pattern: str, html_text: str) -> str:
+    match = re.search(pattern, html_text, flags=re.IGNORECASE | re.DOTALL)
+    return _plain_block_from_html(match.group(1)) if match else ""
+
+
+def _daily_section_text(html_text: str, section_title: str) -> str:
+    return _plain_block_from_html(_extract_h2_section_html(html_text, section_title))
+
+
+def _daily_first_paragraph_text(html_text: str, section_title: str) -> str:
+    section_html = _extract_h2_section_html(html_text, section_title)
+    return _extract_first_html_block_text(r"<p[^>]*>([\s\S]*?)</p>", section_html) or _plain_block_from_html(section_html)
+
+
+def _parse_daily_card_blocks(section_html: str) -> List[Dict[str, str]]:
+    blocks = re.findall(r"<td[^>]*>([\s\S]*?)</td>", section_html or "", flags=re.IGNORECASE)
+    if not blocks:
+        blocks = re.findall(
+            r"<div[^>]*class=['\"][^'\"]*\bglass-card\b[^'\"]*['\"][^>]*>([\s\S]*?)</div>",
+            section_html or "",
+            flags=re.IGNORECASE,
+        )
+
+    cards: List[Dict[str, str]] = []
+    for block in blocks:
+        title = _extract_first_html_block_text(r"<h4[^>]*>([\s\S]*?)</h4>", block)
+        spans = [
+            _plain_block_from_html(span)
+            for span in re.findall(r"<span[^>]*>([\s\S]*?)</span>", block, flags=re.IGNORECASE)
+        ]
+        spans = [span for span in spans if span]
+        badge = ""
+        if not title and spans:
+            title = spans[0]
+            badge = spans[1] if len(spans) > 1 else ""
+        elif len(spans) >= 2:
+            badge = spans[-1]
+
+        body = _extract_first_html_block_text(r"<p[^>]*>([\s\S]*?)</p>", block)
+        if not body:
+            body_source = re.sub(r"<h4[^>]*>[\s\S]*?</h4>", "", block, flags=re.IGNORECASE)
+            body = _plain_block_from_html(body_source)
+            if title and body.startswith(title):
+                body = body[len(title):].strip()
+            if badge and body.endswith(badge):
+                body = body[: -len(badge)].strip()
+
+        if title or badge or body:
+            cards.append({"title": title, "badge": badge, "body": body})
+    return cards
+
+
+def _build_daily_report_mobile_render(html_text: Any) -> Optional[Dict[str, Any]]:
+    raw = str(html_text or "")
+    if not raw or ("复盘晚报" not in raw and "爱波塔复盘" not in raw):
+        return None
+    try:
+        title = _extract_first_html_text(r"<h1[^>]*>([\s\S]*?)</h1>", raw) or "爱波塔复盘晚报"
+        subtitle = _extract_first_html_text(
+            r"<div[^>]*class=['\"][^'\"]*\bglass-header\b[^'\"]*['\"][^>]*>[\s\S]*?<p[^>]*>([\s\S]*?)</p>",
+            raw,
+        )
+        fund_flow_section = _extract_h2_section_html(raw, "资金暗流")
+        commodities_section = _extract_h2_section_html(raw, "商品期货全景")
+        payload = {
+            "type": "daily_report",
+            "hero": {
+                "title": title,
+                "subtitle": subtitle,
+            },
+            "headline": _daily_section_text(raw, "市场头条"),
+            "fund_flow": _parse_daily_card_blocks(fund_flow_section),
+            "commodities": _parse_daily_card_blocks(commodities_section),
+            "volatility": _daily_section_text(raw, "期权波动率"),
+            "bull_stock": _daily_section_text(raw, "每日牛股"),
+            "risk_warning": _daily_section_text(raw, "风险警示"),
+            "tomorrow_strategy": _daily_first_paragraph_text(raw, "明日策略"),
+        }
+        if not any(
+            payload.get(key)
+            for key in (
+                "headline",
+                "fund_flow",
+                "commodities",
+                "volatility",
+                "bull_stock",
+                "risk_warning",
+                "tomorrow_strategy",
+            )
+        ):
+            return None
+        return payload
+    except Exception:
+        return None
+
+
 def _build_safe_stock_mobile_render(html_text: Any) -> Optional[Dict[str, Any]]:
     raw = str(html_text or "")
     if not raw or "小爱选股晚报" not in raw:
@@ -7619,6 +7735,10 @@ def intel_report_detail(
     channel_code = str(content.get("channel_code") or "").strip().lower()
     if channel_code == "safe_stock_report":
         mobile_render = _build_safe_stock_mobile_render(content.get("content") or "")
+        if mobile_render:
+            content["mobile_render"] = mobile_render
+    elif channel_code == "daily_report":
+        mobile_render = _build_daily_report_mobile_render(content.get("content") or "")
         if mobile_render:
             content["mobile_render"] = mobile_render
     elif channel_code == "expiry_option_radar":

@@ -4,6 +4,7 @@ import { onLoad } from '@dcloudio/uni-app'
 import {
   intelApi,
   type BrokerPositionMobileRender,
+  type DailyReportMobileRender,
   type ExpiryOptionMobileRender,
   type ReportDetail,
   type SafeStockMobileRender,
@@ -51,6 +52,12 @@ const safeStockRender = computed<SafeStockMobileRender | null>(() => {
   return render
 })
 
+const dailyReportRender = computed<DailyReportMobileRender | null>(() => {
+  const render = content.value?.mobile_render
+  if (content.value?.channel_code !== 'daily_report' || render?.type !== 'daily_report') return null
+  return render
+})
+
 const expiryOptionRender = computed<ExpiryOptionMobileRender | null>(() => {
   const render = content.value?.mobile_render
   if (content.value?.channel_code !== 'expiry_option_radar' || render?.type !== 'expiry_option_radar') return null
@@ -64,10 +71,11 @@ const brokerPositionRender = computed<BrokerPositionMobileRender | null>(() => {
 })
 
 const shouldUseSafeStockLayout = computed(() => !!safeStockRender.value)
+const shouldUseDailyReportLayout = computed(() => !!dailyReportRender.value)
 const shouldUseExpiryOptionLayout = computed(() => !!expiryOptionRender.value)
 const shouldUseBrokerPositionLayout = computed(() => !!brokerPositionRender.value)
 const shouldUseMobileLayout = computed(() => (
-  shouldUseSafeStockLayout.value || shouldUseExpiryOptionLayout.value || shouldUseBrokerPositionLayout.value
+  shouldUseSafeStockLayout.value || shouldUseDailyReportLayout.value || shouldUseExpiryOptionLayout.value || shouldUseBrokerPositionLayout.value
 ))
 
 function sanitizeHtmlForMp(html: string): string {
@@ -157,6 +165,20 @@ function strategyClass(raw: string) {
   return 'neutral'
 }
 
+function marketBiasClass(raw: string) {
+  const text = String(raw || '')
+  if (/看多|做多|偏多|上涨|强/.test(text)) return 'bull'
+  if (/看空|做空|偏空|下跌|弱/.test(text)) return 'bear'
+  return 'neutral'
+}
+
+function splitParagraphs(raw: string) {
+  return String(raw || '')
+    .split(/\n+/)
+    .map((line) => line.replace(/\s+/g, ' ').trim())
+    .filter(Boolean)
+}
+
 function sectionCount(items?: Array<Record<string, string>>) {
   return Array.isArray(items) ? items.length : 0
 }
@@ -188,6 +210,81 @@ function listCount(items?: unknown[]) {
 
       <text class="article-title">{{ formatReportTitle(content.title) }}</text>
       <view class="divider" />
+
+      <view v-if="shouldUseDailyReportLayout && dailyReportRender" class="daily-report-body">
+        <view class="daily-hero">
+          <text class="daily-kicker">复盘晚报</text>
+          <text class="daily-title">{{ dailyReportRender.hero.title || '爱波塔复盘晚报' }}</text>
+          <text v-if="dailyReportRender.hero.subtitle" class="daily-subtitle">{{ dailyReportRender.hero.subtitle }}</text>
+        </view>
+
+        <view v-if="dailyReportRender.headline" class="daily-lead">
+          <text v-for="line in splitParagraphs(dailyReportRender.headline)" :key="`headline-${line}`" class="daily-lead-text">{{ line }}</text>
+        </view>
+
+        <view v-if="dailyReportRender.fund_flow.length" class="daily-section">
+          <view class="section-head">
+            <text class="section-title">资金暗流</text>
+            <text class="section-count">{{ dailyReportRender.fund_flow.length }} 条线索</text>
+          </view>
+          <view class="daily-insight-list">
+            <view v-for="item in dailyReportRender.fund_flow" :key="`flow-${getField(item, 'title')}`" class="daily-insight-card">
+              <text class="daily-card-title">{{ getField(item, 'title', '资金线索') }}</text>
+              <text v-for="line in splitParagraphs(getField(item, 'body', '暂无说明'))" :key="`flow-line-${getField(item, 'title')}-${line}`" class="daily-card-text">{{ line }}</text>
+            </view>
+          </view>
+        </view>
+
+        <view v-if="dailyReportRender.commodities.length" class="daily-section">
+          <view class="section-head">
+            <text class="section-title">商品期货全景</text>
+            <text class="section-count">{{ dailyReportRender.commodities.length }} 个品种</text>
+          </view>
+          <view class="commodity-list">
+            <view v-for="(item, idx) in dailyReportRender.commodities" :key="`commodity-${getField(item, 'title')}-${idx}`" class="commodity-card">
+              <view class="commodity-top">
+                <text class="commodity-name">{{ getField(item, 'title', '商品') }}</text>
+                <text v-if="getField(item, 'badge', '')" class="market-badge" :class="marketBiasClass(getField(item, 'badge'))">{{ getField(item, 'badge') }}</text>
+              </view>
+              <view class="commodity-lines">
+                <text v-for="line in splitParagraphs(getField(item, 'body', '暂无说明'))" :key="`commodity-line-${idx}-${line}`" class="commodity-line">{{ line }}</text>
+              </view>
+            </view>
+          </view>
+        </view>
+
+        <view v-if="dailyReportRender.volatility" class="daily-section">
+          <view class="section-head">
+            <text class="section-title">期权波动率</text>
+          </view>
+          <view class="daily-text-panel">
+            <text v-for="line in splitParagraphs(dailyReportRender.volatility)" :key="`vol-${line}`" class="daily-card-text">{{ line }}</text>
+          </view>
+        </view>
+
+        <view v-if="dailyReportRender.bull_stock" class="daily-section">
+          <view class="section-head">
+            <text class="section-title">每日牛股</text>
+          </view>
+          <view class="daily-text-panel">
+            <text v-for="line in splitParagraphs(dailyReportRender.bull_stock)" :key="`bull-${line}`" class="daily-card-text">{{ line }}</text>
+          </view>
+        </view>
+
+        <view v-if="dailyReportRender.risk_warning" class="daily-section">
+          <view class="section-head">
+            <text class="section-title danger">风险警示</text>
+          </view>
+          <view class="daily-text-panel warning">
+            <text v-for="line in splitParagraphs(dailyReportRender.risk_warning)" :key="`risk-${line}`" class="daily-card-text">{{ line }}</text>
+          </view>
+        </view>
+
+        <view v-if="dailyReportRender.tomorrow_strategy" class="daily-strategy">
+          <text class="daily-strategy-title">明日策略</text>
+          <text v-for="line in splitParagraphs(dailyReportRender.tomorrow_strategy)" :key="`strategy-${line}`" class="daily-strategy-text">{{ line }}</text>
+        </view>
+      </view>
 
       <view v-if="shouldUseSafeStockLayout && safeStockRender" class="safe-stock-body">
         <view class="safe-hero">
@@ -590,6 +687,174 @@ function listCount(items?: unknown[]) {
   font-size: 29rpx;
   color: #cccccc;
   line-height: 1.85;
+}
+
+.daily-report-body {
+  display: flex;
+  flex-direction: column;
+  gap: 30rpx;
+}
+
+.daily-hero {
+  padding: 24rpx 0 4rpx;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.18);
+}
+
+.daily-kicker {
+  display: block;
+  color: #f5c518;
+  font-size: 22rpx;
+  font-weight: 700;
+  margin-bottom: 10rpx;
+}
+
+.daily-title {
+  display: block;
+  color: #f8fbff;
+  font-size: 40rpx;
+  font-weight: 800;
+  line-height: 1.28;
+}
+
+.daily-subtitle {
+  display: block;
+  color: #7f8fa8;
+  font-size: 23rpx;
+  line-height: 1.5;
+  margin-top: 12rpx;
+}
+
+.daily-lead {
+  border-left: 6rpx solid #f5c518;
+  padding: 4rpx 0 4rpx 20rpx;
+}
+
+.daily-lead-text,
+.daily-card-text,
+.daily-strategy-text {
+  display: block;
+  color: #dbe7f5;
+  font-size: 28rpx;
+  line-height: 1.72;
+  word-break: break-word;
+}
+
+.daily-section {
+  display: flex;
+  flex-direction: column;
+  gap: 14rpx;
+}
+
+.daily-insight-list,
+.commodity-list {
+  display: flex;
+  flex-direction: column;
+  gap: 14rpx;
+}
+
+.daily-insight-card,
+.commodity-card,
+.daily-text-panel {
+  border: 1px solid rgba(62, 90, 140, 0.52);
+  border-radius: 14rpx;
+  background: rgba(19, 28, 46, 0.88);
+  padding: 18rpx;
+}
+
+.daily-insight-card {
+  border-left: 5rpx solid rgba(245, 197, 24, 0.72);
+}
+
+.daily-card-title {
+  display: block;
+  color: #ecf3ff;
+  font-size: 29rpx;
+  font-weight: 800;
+  line-height: 1.35;
+  margin-bottom: 10rpx;
+}
+
+.commodity-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16rpx;
+  margin-bottom: 10rpx;
+}
+
+.commodity-name {
+  min-width: 0;
+  color: #ecf3ff;
+  font-size: 30rpx;
+  font-weight: 800;
+  line-height: 1.35;
+}
+
+.market-badge {
+  flex-shrink: 0;
+  min-width: 104rpx;
+  text-align: center;
+  border-radius: 999rpx;
+  padding: 7rpx 16rpx;
+  color: #e7eef8;
+  font-size: 23rpx;
+  font-weight: 800;
+  line-height: 1.2;
+  background: rgba(148, 163, 184, 0.15);
+  border: 1px solid rgba(148, 163, 184, 0.28);
+}
+
+.market-badge.bull {
+  color: #fecaca;
+  background: rgba(239, 68, 68, 0.16);
+  border-color: rgba(248, 113, 113, 0.36);
+}
+
+.market-badge.bear {
+  color: #bbf7d0;
+  background: rgba(34, 197, 94, 0.15);
+  border-color: rgba(74, 222, 128, 0.34);
+}
+
+.market-badge.neutral {
+  color: #fde68a;
+  background: rgba(245, 158, 11, 0.14);
+  border-color: rgba(245, 158, 11, 0.32);
+}
+
+.commodity-lines {
+  display: flex;
+  flex-direction: column;
+  gap: 6rpx;
+}
+
+.commodity-line {
+  display: block;
+  color: #aebbd0;
+  font-size: 26rpx;
+  line-height: 1.58;
+  word-break: break-word;
+}
+
+.daily-text-panel.warning {
+  border-color: rgba(239, 68, 68, 0.28);
+  background: rgba(69, 19, 29, 0.28);
+}
+
+.daily-strategy {
+  border: 1px solid rgba(245, 197, 24, 0.34);
+  border-radius: 14rpx;
+  background: rgba(245, 197, 24, 0.08);
+  padding: 20rpx;
+}
+
+.daily-strategy-title {
+  display: block;
+  color: #f5c518;
+  font-size: 31rpx;
+  font-weight: 800;
+  line-height: 1.35;
+  margin-bottom: 10rpx;
 }
 
 .safe-stock-body {
