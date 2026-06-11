@@ -140,6 +140,33 @@ class TestMobileApiChatMemoryAsync(unittest.TestCase):
         self.assertEqual(state.get("delivery_mode"), "hybrid")
         self.assertEqual(state.get("quick_answer_source"), "template")
 
+    def test_chat_submit_stock_futures_and_technical_questions_return_hybrid(self):
+        for prompt in ("螺纹钢为什么大涨", "汇川技术技术面怎么看"):
+            with self.subTest(prompt=prompt):
+                fake_redis = _FakeRedis()
+                body = mobile_api.ChatSubmitRequest(prompt=prompt, history=[])
+                with patch.object(mobile_api, "_redis", fake_redis), patch.object(
+                    mobile_api.de, "get_user_profile", return_value={}
+                ), patch.object(
+                    mobile_api, "_build_mobile_context_payload", return_value={"is_followup": False}
+                ), patch.object(
+                    mobile_api, "classify_chat_mode", return_value=mobile_api.CHAT_MODE_ANALYSIS
+                ), patch.object(
+                    mobile_api, "_detect_mobile_has_portfolio", return_value=False
+                ), patch.object(
+                    mobile_api.TaskManager, "create_task", return_value=f"task-hybrid-{prompt}"
+                ), patch.object(
+                    mobile_api.TaskManager, "get_task_meta", return_value={"status": "pending", "progress": "正在分析..."}
+                ), patch.object(
+                    mobile_api, "_generate_market_move_quick_answer", return_value=("快速判断内容", "template", 5)
+                ) as mocked_quick:
+                    out = mobile_api.chat_submit(body=body, username="u1")
+
+                self.assertEqual(out["delivery_mode"], "hybrid")
+                mocked_quick.assert_called_once()
+                state = json.loads(fake_redis.get(mobile_api._mobile_chat_state_key(f"task-hybrid-{prompt}")))
+                self.assertEqual(state.get("delivery_mode"), "hybrid")
+
     def test_chat_submit_personal_position_move_does_not_use_hybrid(self):
         fake_redis = _FakeRedis()
         body = mobile_api.ChatSubmitRequest(prompt="帮我看我的持仓为什么大跌，要不要卖", history=[])
@@ -165,6 +192,33 @@ class TestMobileApiChatMemoryAsync(unittest.TestCase):
         state = json.loads(fake_redis.get(mobile_api._mobile_chat_state_key("task-normal")))
         self.assertEqual(state.get("delivery_mode"), "task")
 
+    def test_chat_submit_position_adjustment_and_options_do_not_use_hybrid(self):
+        for prompt in ("这个仓位怎么调", "牛市价差怎么做", "300ETF期权IV高不高"):
+            with self.subTest(prompt=prompt):
+                fake_redis = _FakeRedis()
+                body = mobile_api.ChatSubmitRequest(prompt=prompt, history=[])
+                with patch.object(mobile_api, "_redis", fake_redis), patch.object(
+                    mobile_api.de, "get_user_profile", return_value={}
+                ), patch.object(
+                    mobile_api, "_build_mobile_context_payload", return_value={"is_followup": False}
+                ), patch.object(
+                    mobile_api, "classify_chat_mode", return_value=mobile_api.CHAT_MODE_ANALYSIS
+                ), patch.object(
+                    mobile_api, "_detect_mobile_has_portfolio", return_value=True
+                ), patch.object(
+                    mobile_api.TaskManager, "create_task", return_value=f"task-normal-{prompt}"
+                ), patch.object(
+                    mobile_api.TaskManager, "get_task_meta", return_value={"status": "pending"}
+                ), patch.object(
+                    mobile_api, "_generate_market_move_quick_answer"
+                ) as mocked_quick:
+                    out = mobile_api.chat_submit(body=body, username="u1")
+
+                self.assertEqual(out["delivery_mode"], "task")
+                mocked_quick.assert_not_called()
+                state = json.loads(fake_redis.get(mobile_api._mobile_chat_state_key(f"task-normal-{prompt}")))
+                self.assertEqual(state.get("delivery_mode"), "task")
+
     def test_generate_market_move_quick_answer_falls_back_to_template(self):
         with patch.object(
             mobile_api, "build_deepseek_flash_llm", side_effect=RuntimeError("llm down")
@@ -178,6 +232,21 @@ class TestMobileApiChatMemoryAsync(unittest.TestCase):
         self.assertGreaterEqual(elapsed_ms, 0)
         self.assertIn("快速判断", text)
         self.assertIn("纳指", text)
+
+    def test_generate_technical_quick_answer_falls_back_to_template(self):
+        with patch.object(
+            mobile_api, "build_deepseek_flash_llm", side_effect=RuntimeError("llm down")
+        ):
+            text, source, elapsed_ms = mobile_api._generate_market_move_quick_answer(
+                "汇川技术技术面怎么看",
+                {},
+            )
+
+        self.assertEqual(source, "template")
+        self.assertGreaterEqual(elapsed_ms, 0)
+        self.assertIn("快速判断", text)
+        self.assertIn("技术面", text)
+        self.assertIn("后台", text)
 
     def test_chat_submit_builds_followup_context_from_history(self):
         fake_redis = _FakeRedis()
@@ -636,6 +705,24 @@ class TestMobileApiChatMemoryAsync(unittest.TestCase):
         self.assertEqual(out.get("focus_topic"), "异动原因")
         self.assertEqual(out.get("focus_mode_hint"), "price_move_reason")
 
+    def test_mobile_context_treats_explicit_technical_subject_as_new_task(self):
+        history = [
+            {"role": "user", "content": "科创50为什么大涨"},
+            {"role": "assistant", "content": "科创50上涨可能和风险偏好修复、政策预期有关。"},
+        ]
+        out = mobile_api._build_mobile_context_payload(
+            prompt_text="汇川技术技术面怎么看",
+            current_user="u1",
+            history=history,
+        )
+        self.assertFalse(out.get("is_followup"))
+        self.assertEqual(out.get("focus_entity"), "汇川技术")
+        self.assertEqual(out.get("focus_topic"), "盘面分析")
+        self.assertEqual(out.get("recent_context"), "")
+        policy = out.get("followup_task_policy") or {}
+        self.assertEqual(policy.get("followup_intent"), "new_task")
+        self.assertEqual(policy.get("recommended_plan"), [])
+
     def test_mobile_context_extracts_account_total_capital_and_upserts_profile(self):
         with patch.object(mobile_api.de, "parse_account_total_capital", return_value=1200000.0), patch.object(
             mobile_api.de, "upsert_user_account_total_capital", return_value=True
@@ -836,6 +923,33 @@ class TestMobileApiChatMemoryAsync(unittest.TestCase):
         self.assertEqual(out.get("delivery_mode"), "hybrid")
         state = json.loads(fake_redis.get(mobile_api._mobile_chat_state_key(task_id)))
         self.assertEqual(state.get("status"), "pending")
+        mocked_clear.assert_not_called()
+
+    def test_chat_status_hybrid_uses_task_delivery_mode_when_state_missing(self):
+        fake_redis = _FakeRedis()
+        task_id = "task-hybrid-meta-only"
+        pending_meta = {
+            "task_id": task_id,
+            "start_time": mobile_api.time.time() - 10,
+        }
+
+        with patch.object(mobile_api, "_redis", fake_redis), patch.object(
+            mobile_api, "_MOBILE_CHAT_MAX_PENDING_SECONDS", 1
+        ), patch.object(
+            mobile_api, "_MOBILE_CHAT_BACKGROUND_MAX_PENDING_SECONDS", 999
+        ), patch.object(
+            mobile_api.TaskManager,
+            "get_task_status",
+            return_value={"status": "pending", "delivery_mode": "hybrid"},
+        ), patch.object(
+            mobile_api.TaskManager, "get_user_pending_task", return_value=pending_meta
+        ), patch.object(
+            mobile_api.TaskManager, "complete_user_task"
+        ) as mocked_clear:
+            out = mobile_api.chat_status(task_id=task_id, username="u1")
+
+        self.assertEqual(out["status"], "pending")
+        self.assertEqual(out.get("delivery_mode"), "hybrid")
         mocked_clear.assert_not_called()
 
     def test_chat_pending_returns_terminal_once(self):

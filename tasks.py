@@ -797,6 +797,10 @@ def process_ai_query(
             ),
             "vision_position_domain": str(context_payload.get("vision_position_domain", "")),
             "intent_domain": str(context_payload.get("intent_domain", "")),
+            "delivery_mode": str(context_payload.get("delivery_mode", "")),
+            "quick_answer_scenario": str(context_payload.get("quick_answer_scenario", "")),
+            "quick_answer_target": str(context_payload.get("quick_answer_target", "")),
+            "quick_answer_direction": str(context_payload.get("quick_answer_direction", "")),
         }
 
         self.update_state(state='PROCESSING', meta={'progress': '团队正在协作分析...'})
