@@ -12,6 +12,7 @@ CONTEXT_LAYER_TRACE_MAX_EVENTS = int(
 )
 
 _LAYER_LIMITS = {
+    "link_article": 1400,
     "recent_turns": 1200,
     "long_memory": 1500,
     "profile": 1200,
@@ -20,6 +21,7 @@ _LAYER_LIMITS = {
 }
 
 _LAYER_HEADINGS = {
+    "link_article": "链接文章正文",
     "recent_turns": "近期对话历史",
     "long_memory": "相关长期记忆",
     "profile": "用户专属画像",
@@ -27,7 +29,7 @@ _LAYER_HEADINGS = {
     "route_policy": "追问/路由策略",
 }
 
-_LAYER_ORDER = ["recent_turns", "long_memory", "profile", "focus", "route_policy"]
+_LAYER_ORDER = ["link_article", "recent_turns", "long_memory", "profile", "focus", "route_policy"]
 
 
 def _safe_text(value: Any) -> str:
@@ -119,6 +121,25 @@ def _route_layer_content(payload: Mapping[str, Any]) -> str:
     return "\n\n".join(lines)
 
 
+def _link_article_layer_content(payload: Mapping[str, Any]) -> str:
+    link_ctx = payload.get("link_context")
+    if not isinstance(link_ctx, Mapping) or not link_ctx.get("ok"):
+        return ""
+    lines = []
+    url = _safe_text(link_ctx.get("url"))
+    title = _safe_text(link_ctx.get("title"))
+    snippet = _safe_text(link_ctx.get("snippet"))
+    if url:
+        lines.append(f"来源: {url}")
+    if title:
+        lines.append(f"标题: {title}")
+    if snippet:
+        lines.append(f"正文摘要:\n{snippet}")
+    if lines:
+        lines.append("使用要求: 当前问题若要求根据链接/文章回答，必须以本段为第一事实源。")
+    return "\n".join(lines)
+
+
 def build_context_layers(
     context_payload: Mapping[str, Any] | None,
     *,
@@ -128,6 +149,19 @@ def build_context_layers(
     payload = context_payload or {}
     topic = _safe_text(payload.get("intent_domain") or payload.get("recent_domain"))
     layers = []
+
+    link_article_content = _link_article_layer_content(payload)
+    if link_article_content:
+        layers.append(
+            _build_layer(
+                "link_article",
+                link_article_content,
+                source="url_preprocess",
+                include_reason="user_provided_link",
+                topic=topic or "link_article",
+                trust="retrieved_url_content",
+            )
+        )
 
     recent_context = _safe_text(payload.get("recent_context"))
     if recent_context:
@@ -352,6 +386,8 @@ _TRACE_BLOCKED_KEYS = {
     "profile_context",
     "memory_context",
     "recent_context",
+    "link_context",
+    "snippet",
     "response",
     "response_text",
     "answer",
