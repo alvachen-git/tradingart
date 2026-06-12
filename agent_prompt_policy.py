@@ -209,6 +209,7 @@ CHAT_MODE_KNOWLEDGE = "knowledge_chat"
 CHAT_MODE_ANALYSIS = "analysis_chat"
 
 TASK_TYPE_NORMAL = "normal"
+TASK_TYPE_LINK_ARTICLE_STOCK_MAPPING = "link_article_stock_mapping"
 TASK_TYPE_STOCK_SELECTION = "stock_selection"
 TASK_TYPE_SINGLE_STOCK_ANALYSIS = "single_stock_analysis"
 TASK_TYPE_TECHNICAL_CONCEPT = "technical_concept"
@@ -513,6 +514,49 @@ TECHNICAL_NEED_KEYWORDS: Tuple[str, ...] = (
     "形态",
 )
 
+LINK_ARTICLE_SOURCE_HINTS: Tuple[str, ...] = (
+    "http://",
+    "https://",
+    "www.",
+    "【链接参考内容】",
+)
+
+LINK_ARTICLE_ANCHOR_KEYWORDS: Tuple[str, ...] = (
+    "根据这篇文章",
+    "根据这篇报道",
+    "根据这条新闻",
+    "根据这个链接",
+    "根据链接",
+    "根据文章",
+    "这篇文章",
+    "这篇报道",
+    "这条新闻",
+    "这个链接",
+    "原文",
+)
+
+LINK_ARTICLE_STOCK_MAPPING_KEYWORDS: Tuple[str, ...] = (
+    "利好",
+    "受益",
+    "相关",
+    "影响",
+    "催化",
+    "哪些",
+    "有什么",
+    "对应",
+    "映射",
+)
+
+LINK_ARTICLE_STOCK_SUBJECT_KEYWORDS: Tuple[str, ...] = (
+    "A股",
+    "a股",
+    "股票",
+    "个股",
+    "上市公司",
+    "公司",
+    "标的",
+)
+
 
 @dataclass(frozen=True)
 class AnalysisTaskPolicy:
@@ -590,6 +634,25 @@ def _looks_like_stock_selection(query: str) -> bool:
     if has_subject and has_pattern:
         return True
     return "概念股有哪些" in text or "相关股票" in text or "相关个股" in text
+
+
+def _looks_like_link_article_stock_mapping(query: str) -> bool:
+    text = str(query or "").strip()
+    if not text:
+        return False
+    lowered = text.lower()
+    has_link_source = _contains_any(text, LINK_ARTICLE_SOURCE_HINTS) or _contains_any(
+        lowered,
+        LINK_ARTICLE_SOURCE_HINTS,
+    )
+    if not has_link_source:
+        return False
+    has_article_anchor = _contains_any(text, LINK_ARTICLE_ANCHOR_KEYWORDS)
+    if not has_article_anchor:
+        return False
+    has_mapping_intent = _contains_any(text, LINK_ARTICLE_STOCK_MAPPING_KEYWORDS)
+    has_stock_subject = _contains_any(text, LINK_ARTICLE_STOCK_SUBJECT_KEYWORDS)
+    return bool(has_mapping_intent and has_stock_subject)
 
 
 def _looks_like_stock_selection_execution(query: str, recent_context: str) -> bool:
@@ -698,6 +761,16 @@ def classify_analysis_task_type(
             clear_symbol=True,
             hard_override=True,
             reason="用户询问期货商正反指标或席位持仓的多空判断",
+        )
+
+    if _looks_like_link_article_stock_mapping(text):
+        return AnalysisTaskPolicy(
+            task_type=TASK_TYPE_LINK_ARTICLE_STOCK_MAPPING,
+            recommended_chat_mode=CHAT_MODE_ANALYSIS,
+            recommended_plan=("researcher",),
+            clear_symbol=True,
+            hard_override=True,
+            reason="用户要求基于链接文章映射受益 A 股，必须以文章事实为第一来源",
         )
 
     if is_followup and _looks_like_stock_selection_execution(text, recent_context):

@@ -2,6 +2,7 @@ import unittest
 
 from agent_prompt_policy import (
     TASK_TYPE_FUTURES_BROKER_SIGNAL,
+    TASK_TYPE_LINK_ARTICLE_STOCK_MAPPING,
     TASK_TYPE_OPTION_STRATEGY_NEEDS_SUBJECT,
     TASK_TYPE_OPTION_STRATEGY_WITH_SUBJECT,
     TASK_TYPE_SINGLE_STOCK_ANALYSIS,
@@ -80,6 +81,14 @@ class SubjectPolicyTest(unittest.TestCase):
 
 
 class AnalysisTaskPolicyTest(unittest.TestCase):
+    def test_link_article_stock_mapping_preempts_screener(self):
+        query = "https://wallstreetcn.com/articles/3774521 根据这篇文章，利好哪些A股呢"
+        policy = classify_analysis_task_type(query)
+        self.assertEqual(policy.task_type, TASK_TYPE_LINK_ARTICLE_STOCK_MAPPING)
+        self.assertEqual(policy.recommended_plan, ("researcher",))
+        self.assertTrue(policy.clear_symbol)
+        self.assertTrue(policy.hard_override)
+
     def test_stock_selection_task_type(self):
         policy = classify_analysis_task_type("帮我找放量突破的股票")
         self.assertEqual(policy.task_type, TASK_TYPE_STOCK_SELECTION)
