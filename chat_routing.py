@@ -127,7 +127,7 @@ TECHNICAL_KNOWLEDGE_KEYWORDS = (
 MARKET_SUBJECT_KEYWORDS = (
     "策略", "期权", "认购", "认沽", "iv", "delta", "gamma", "vega", "theta",
     "牛市价差", "熊市价差", "跨式", "宽跨", "勒式", "美联储", "降息", "黄金",
-    "白银", "创业板", "etf", "股票", "指数", "铜价", "原油", "波动率",
+    "白银", "创业板", "etf", "股票", "指数", "铜价", "原油", "波动率", "升波", "降波",
 ) + TECHNICAL_KNOWLEDGE_KEYWORDS
 
 OPTION_DATA_SUBJECT_KEYWORDS = (
@@ -195,6 +195,31 @@ MARKET_DIRECTIONAL_VIEW_KEYWORDS = (
 MARKET_DIRECTIONAL_CONTEXT_KEYWORDS = (
     "现在", "当前", "今天", "今日", "最近", "近期", "从", "结合", "根据", "用",
     "持仓", "成交量", "期货商", "席位", "龙虎榜", "资金流", "基差", "库存",
+)
+
+VOLATILITY_DIRECTION_KEYWORDS = (
+    "升波", "降波", "升iv", "降iv", "iv上升", "iv下降", "iv会升", "iv会降",
+    "波动率上升", "波动率下降", "波动率会升", "波动率会降", "隐含波动率上升", "隐含波动率下降",
+)
+
+VOLATILITY_DIRECTION_CONTEXT_KEYWORDS = (
+    "现在", "当前", "今天", "今日", "最近", "近期", "上涨", "下跌", "反弹", "拉升",
+    "大涨", "大跌", "冲高", "回落", "突破", "跌破", "行情", "走势",
+)
+
+VOLATILITY_DIRECTION_UNDERLYING_KEYWORDS = (
+    "中证500", "500etf", "沪深300", "300etf", "上证50", "50etf", "创业板", "创业板etf",
+    "科创50", "科创50etf", "股指", "指数", "etf", "期权", "认购", "认沽", "标的",
+)
+
+VOLATILITY_MECHANISM_QUESTION_KEYWORDS = (
+    "什么情况下", "哪些情况下", "什么情形", "什么场景", "什么因素", "哪些因素",
+    "什么原因", "为什么会", "什么时候会", "何时会", "导致", "触发",
+)
+
+VOLATILITY_MOVE_WORDS = (
+    "上升", "上涨", "升高", "抬升", "走高", "下降", "下跌", "降低", "回落",
+    "升波", "降波", "变化", "变动",
 )
 
 FINANCE_BASE_KEYWORDS = (
@@ -494,6 +519,64 @@ def is_directional_market_view_query(prompt_text: str) -> bool:
     return True
 
 
+def _any_keyword_in_lower(text_lower: str, keywords: tuple[str, ...]) -> bool:
+    return any(str(keyword or "").lower() in text_lower for keyword in keywords)
+
+
+def is_volatility_market_view_query(prompt_text: str) -> bool:
+    text = str(prompt_text or "").strip().lower()
+    raw_text = str(prompt_text or "")
+    if not text:
+        return False
+
+    if not _any_keyword_in_lower(text, VOLATILITY_DIRECTION_KEYWORDS):
+        return False
+
+    has_market_context = _any_keyword_in_lower(
+        text,
+        VOLATILITY_DIRECTION_CONTEXT_KEYWORDS + MARKET_DIRECTIONAL_CONTEXT_KEYWORDS + ANALYSIS_INTENT_KEYWORDS,
+    )
+    has_knowledge_prefix = _any_keyword_in_lower(text, KNOWLEDGE_PREFIXES + CONVERSATIONAL_KNOWLEDGE_PREFIXES)
+    if has_knowledge_prefix and not has_market_context:
+        return False
+
+    has_subject = (
+        bool(CONTRACT_PATTERN.search(raw_text))
+        or bool(SYMBOL_PATTERN.search(raw_text.upper()))
+        or _any_keyword_in_lower(
+            text,
+            VOLATILITY_DIRECTION_UNDERLYING_KEYWORDS + FINANCE_BASE_KEYWORDS + MARKET_SUBJECT_KEYWORDS,
+        )
+    )
+    if not has_subject:
+        return False
+
+    has_decision_intent = any(keyword in text for keyword in ("还是", "会", "可能", "预计", "判断", "怎么看", "看", "倾向", "大概率", "是否"))
+    return has_market_context or has_decision_intent
+
+
+def is_volatility_mechanism_knowledge_query(prompt_text: str) -> bool:
+    text = str(prompt_text or "").strip().lower()
+    if not text:
+        return False
+
+    has_volatility_subject = any(keyword in text for keyword in ("波动率", "隐含波动率", "iv", "升波", "降波"))
+    if not has_volatility_subject:
+        return False
+    if not _any_keyword_in_lower(text, VOLATILITY_MECHANISM_QUESTION_KEYWORDS):
+        return False
+    if not _any_keyword_in_lower(text, VOLATILITY_MOVE_WORDS):
+        return False
+
+    has_current_context = _any_keyword_in_lower(
+        text,
+        VOLATILITY_DIRECTION_CONTEXT_KEYWORDS + MARKET_DIRECTIONAL_CONTEXT_KEYWORDS,
+    )
+    if has_current_context:
+        return False
+    return True
+
+
 def classify_chat_mode(
     prompt_text: str,
     *,
@@ -534,10 +617,16 @@ def classify_chat_mode(
     if has_special_input or has_url:
         return CHAT_MODE_ANALYSIS
 
+    if is_volatility_mechanism_knowledge_query(text):
+        return CHAT_MODE_KNOWLEDGE
+
     if is_market_data_query(text):
         return CHAT_MODE_ANALYSIS
 
     if is_directional_market_view_query(text):
+        return CHAT_MODE_ANALYSIS
+
+    if is_volatility_market_view_query(text):
         return CHAT_MODE_ANALYSIS
 
     if is_broker_signal_analysis_query(text):

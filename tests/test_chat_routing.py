@@ -7,6 +7,8 @@ from chat_routing import (
     classify_chat_mode,
     is_market_data_query,
     is_pure_option_data_query,
+    is_volatility_mechanism_knowledge_query,
+    is_volatility_market_view_query,
 )
 
 
@@ -46,6 +48,20 @@ class TestChatRouting(unittest.TestCase):
         self.assertEqual(classify_chat_mode("查看甲醇2609的iv波动率"), CHAT_MODE_ANALYSIS)
         self.assertEqual(classify_chat_mode("甲醇2609价格多少"), CHAT_MODE_ANALYSIS)
         self.assertEqual(classify_chat_mode("帮我分析我的持仓风险大吗"), CHAT_MODE_ANALYSIS)
+        self.assertEqual(classify_chat_mode("中证500现在上涨是会升波还是降波呢"), CHAT_MODE_ANALYSIS)
+
+    def test_volatility_direction_view_routes_to_analysis_not_knowledge(self):
+        self.assertTrue(is_volatility_market_view_query("中证500现在上涨是会升波还是降波呢"))
+        self.assertTrue(is_volatility_market_view_query("500ETF最近反弹后IV会升还是会降"))
+        self.assertEqual(classify_chat_mode("中证500现在上涨是会升波还是降波呢"), CHAT_MODE_ANALYSIS)
+        self.assertEqual(classify_chat_mode("什么是升波和降波"), CHAT_MODE_KNOWLEDGE)
+
+    def test_volatility_mechanism_question_stays_knowledge(self):
+        self.assertTrue(is_volatility_mechanism_knowledge_query("波动率什么情况下会上升"))
+        self.assertTrue(is_volatility_mechanism_knowledge_query("隐含波动率哪些因素会导致上升"))
+        self.assertEqual(classify_chat_mode("波动率什么情况下会上升"), CHAT_MODE_KNOWLEDGE)
+        self.assertEqual(classify_chat_mode("隐含波动率哪些因素会导致上升"), CHAT_MODE_KNOWLEDGE)
+        self.assertFalse(is_volatility_mechanism_knowledge_query("中证500现在上涨是会升波还是降波呢"))
 
     def test_broker_signal_questions_route_to_analysis(self):
         self.assertEqual(

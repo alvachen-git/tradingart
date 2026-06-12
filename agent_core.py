@@ -81,7 +81,7 @@ from portfolio_tools import (
     analyze_user_trading_style,
     check_portfolio_risks
 )
-from chat_routing import is_market_data_query, is_pure_option_data_query
+from chat_routing import is_market_data_query, is_pure_option_data_query, is_volatility_market_view_query
 from simple_chat_runtime import (
     build_simple_runtime_context,
     format_simple_runtime_context,
@@ -323,7 +323,7 @@ STOCK_SELECTION_QUERY_KEYWORDS = [
 ]
 OPTION_QUERY_KEYWORDS = [
     "期权", "认购", "认沽", "行权价", "波动率", "iv", "delta", "gamma", "vega", "theta",
-    "牛市价差", "熊市价差", "跨式", "宽跨", "勒式",
+    "升波", "降波", "牛市价差", "熊市价差", "跨式", "宽跨", "勒式",
 ]
 OPTION_ACTION_QUERY_KEYWORDS = [
     "策略", "建议", "怎么做", "怎么调", "如何调", "如何做", "怎么操作", "调仓", "仓位", "对冲", "持仓",
@@ -394,6 +394,24 @@ def _enforce_research_analyst_routing(query: str, plan: List[str]) -> List[str]:
     if has_research_need:
         enforced.append("researcher")
     enforced.extend(current_plan)
+    return _dedupe_plan(enforced)
+
+
+def _enforce_volatility_market_view_routing(query: str, plan: List[str]) -> List[str]:
+    """
+    升波/降波是窄口径行情判断：先查行情/IV数据，直接给波动率方向结论。
+    默认不派 analyst，避免把“升降波”问法扩写成完整K线技术分析。
+    """
+    if not is_volatility_market_view_query(query):
+        return list(plan or [])
+
+    wants_strategy = _contains_any(
+        str(query or ""),
+        STRATEGY_QUERY_KEYWORDS + ["买购", "买认购", "买沽", "买认沽", "卖购", "卖认购", "卖沽", "卖认沽", "期权策略"],
+    )
+    enforced = ["monitor"]
+    if wants_strategy:
+        enforced.append("strategist")
     return _dedupe_plan(enforced)
 
 
@@ -546,6 +564,9 @@ def _apply_analysis_task_policy(
     recent_context: str = "",
 ) -> tuple[List[str], str]:
     # 不采信 planner 生成的 symbol 来判定“是否有标的”，它可能正是模型自行补出的默认对象。
+    if is_volatility_market_view_query(query):
+        return _enforce_volatility_market_view_routing(query, plan), str(symbol or "").strip()
+
     if is_market_data_query(query):
         return ["monitor"], str(symbol or "").strip()
 
@@ -1627,6 +1648,8 @@ def _enforce_option_data_monitor_routing(query: str, plan: List[str]) -> List[st
     明确的数据查询问题只派 monitor，避免误上知识解释或宏观/技术/策略整链路。
     例如：IV/波动率高低、分位、到期日、保证金、乘数、价格、最新价。
     """
+    if is_volatility_market_view_query(query):
+        return plan
     if not is_market_data_query(query):
         return plan
     return ["monitor"]
@@ -2284,6 +2307,7 @@ def supervisor_node(state: AgentState, llm):
     1. **追求效率**: 问股票成交量就只派 `screener`；只问期货持仓量或价格就只派 `monitor`；只问新闻或热点就只派 `researcher`；只问技术分析就只派`analyst`；只问行情分析就只派`analyst`。
     1.0 **画像使用**: 【用户专属画像】只辅助路由和个性化表达；“适合我/我的风格/给我讲简单点/用我喜欢的方式解释”等问题，可参考画像决定是否派 `portfolio_analyst`、`strategist` 或 `chatter`。当前问题明确表达优先。
     1.1 **纯期权数据问题**：只问波动率/IV/IV Rank/到期日/剩余天数/行权价/保证金/合约乘数/一手资金占用，这类问题一律只派 `monitor`，不要派 `macro_analyst`、`analyst`、`strategist`、`researcher`。
+    1.2 **升波/降波判断**：凡是问“现在/最近/当前上涨或下跌后会升波还是降波”，这是窄口径行情+IV方向判断，默认只派 `['monitor']` 查 IV/价格并直接回答；不要派 `chatter` 做知识解释，也不要派 `analyst` 展开完整K线技术分析。只有用户同时问“策略/怎么做/开仓/对冲”时，才派 `['monitor', 'strategist']`。
     2. **全套服务**: 如果用户问"全面分析"或"详细分析"，默认路径: ["analyst", "monitor", "researcher","strategist"]。
     3. **持仓相关** (仅当用户已上传持仓时): 如果用户提到"我的持仓"、"我的股票"、"仓位"、"持仓风险"、"持仓分析"、"适合我"、"个性化建议"、"我的风格"、"持仓建议"、"调仓"、"加仓"、"减仓"等关键词，**必须**派 `portfolio_analyst`。
     4. **单品种期权问题**: "500ETF适合价差还是裸买"、"推荐白银期权策略" ->
@@ -2368,6 +2392,7 @@ def supervisor_node(state: AgentState, llm):
     )
     final_plan = _enforce_macro_policy_impact_routing(query, final_plan)
     final_plan = _enforce_option_portfolio_isolation(query, final_plan)
+    final_plan = _enforce_volatility_market_view_routing(query, final_plan)
     final_plan = _enforce_margin_monitor_routing(query, final_plan)
     final_plan = _enforce_option_data_monitor_routing(query, final_plan)
     if _wants_chart(query) and not any(p in final_plan for p in ("analyst", "generalist")):
@@ -2415,6 +2440,8 @@ def supervisor_node(state: AgentState, llm):
         route_tags.append("market_data")
     if is_pure_option_data_query(query):
         route_tags.append("pure_option_data")
+    if is_volatility_market_view_query(query):
+        route_tags.append("volatility_market_view")
     if _wants_chart(query):
         route_tags.append("chart")
     if has_portfolio and "portfolio_analyst" in final_plan:
@@ -2800,6 +2827,7 @@ def monitor_node(state: AgentState, llm):
     current_date = datetime.now().strftime("%Y年%m月%d日 %A")
     latest_trade_date = get_latest_data_date()
     is_pure_option_data = is_pure_option_data_query(user_q)
+    is_volatility_market_view = is_volatility_market_view_query(user_q)
 
     if _is_futures_broker_signal_task(user_q):
         product = _extract_futures_broker_signal_product(user_q)
@@ -2864,6 +2892,18 @@ def monitor_node(state: AgentState, llm):
        - 结尾最多补 1 句：`如果你想结合策略或行情，我再继续展开。`
     9. 纯数据问法下，整段回答控制在 6 行以内，越短越好。
         """
+    volatility_market_view_instruction = ""
+    if is_volatility_market_view:
+        volatility_market_view_instruction = """
+    10. 如果用户问“升波还是降波 / IV会升还是会降”：
+       - 这是窄口径波动率方向判断，不是完整技术分析。
+       - 必须优先调用 `get_commodity_iv_info` 查询当前 IV/IV变化/IV Rank；必要时再调用 `get_market_snapshot` 或 `get_recent_price_series` 确认标的涨跌。
+       - 第一行必须直接回答：`结论：当前更偏【降波/升波/中性不确定】。`
+       - 后面最多 3 条证据，只能引用工具返回的数据：标的涨跌、IV水平/变化、IV Rank或近期变化。
+       - 禁止展开K线、均线、支撑压力、策略部署、Executive Summary、市场深度解析。
+       - 不要给交易建议；最多写 1 句“需要继续盯价格是否放量突破/IV是否反向抬升”。
+       - 整段控制在 6 行以内。
+        """
 
     prompt = f"""
     你是一位追求效率的市场数据监控官**。。只负责查数据给结果。
@@ -2910,6 +2950,7 @@ def monitor_node(state: AgentState, llm):
     7. 用户要“最近N天/最近N个交易日/列表/逐日明细/走势数据表”时，优先用 `get_recent_price_series`，不要只返回 `get_market_snapshot`。
     8. 东证期货、海通期货、中信期货是正指标期货商；中信建投、东方财富、方正中期是反指标期货商。反指标做多是一种利空，反指标做空是一种利多；问正/反指标组最近在哪些商品上做多/做空时，必须调用 get_futures_broker_group_position_moves；只问某期货商加多/加空时，必须先调用 get_futures_broker_indicator_profile。
     {pure_option_data_instruction}
+    {volatility_market_view_instruction}
     """
 
     # 3. 创建临时 Agent (ReAct 模式)

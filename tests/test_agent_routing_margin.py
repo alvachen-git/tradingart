@@ -116,6 +116,44 @@ def test_option_scenario_projection_recovers_strategy_route_from_monitor_only():
     assert symbol == ""
 
 
+def test_volatility_direction_view_forces_monitor_only():
+    out = agent_core._enforce_volatility_market_view_routing(
+        "中证500现在上涨是会升波还是降波呢",
+        ["chatter", "analyst"],
+    )
+    assert out == ["monitor"]
+
+
+def test_volatility_direction_policy_recovers_from_chatter_plan():
+    plan, symbol = agent_core._apply_analysis_task_policy(
+        "中证500现在上涨是会升波还是降波呢",
+        ["chatter", "analyst"],
+        "510500.SH",
+    )
+    assert plan == ["monitor"]
+    assert symbol == "510500.SH"
+
+
+def test_volatility_direction_strategy_question_adds_strategist_without_analyst():
+    plan, symbol = agent_core._apply_analysis_task_policy(
+        "中证500现在上涨是会升波还是降波，期权策略怎么做",
+        ["chatter", "analyst"],
+        "510500.SH",
+    )
+    assert plan == ["monitor", "strategist"]
+    assert symbol == "510500.SH"
+
+
+def test_volatility_direction_monitor_only_can_bypass_finalizer():
+    assert agent_core._can_bypass_finalizer(
+        {
+            "plan": ["monitor"],
+            "execution_batches": [["monitor"]],
+            "agent_reports": {"monitor": "【数据监控】\n结论：当前更偏降波。"},
+        }
+    )
+
+
 def test_fundamental_and_technical_query_forces_analyst_and_researcher():
     out = agent_core._enforce_research_analyst_routing(
         "中天科技的基本面和技术面分析下",
