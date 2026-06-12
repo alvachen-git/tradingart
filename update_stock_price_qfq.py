@@ -165,7 +165,13 @@ def _read_raw_price(engine, ts_code: str, start_date: str, end_date: str) -> pd.
         return pd.read_sql(sql, conn, params={"ts_code": ts_code, "start_date": start_date, "end_date": end_date})
 
 
-def _read_symbols_for_range(engine, start_date: str, end_date: str, portfolio_id: str = "") -> List[str]:
+def _read_symbols_for_range(
+    engine,
+    start_date: str,
+    end_date: str,
+    portfolio_id: str = "",
+    include_watchlist: bool = True,
+) -> List[str]:
     if portfolio_id:
         queries = [
             text(
@@ -186,14 +192,17 @@ def _read_symbols_for_range(engine, start_date: str, end_date: str, portfolio_id
                   AND trade_date <= :end_date
                 """
             ),
-            text(
-                """
-                SELECT DISTINCT symbol AS ts_code
-                FROM ai_sim_watchlist
-                WHERE portfolio_id = :pid
-                """
-            ),
         ]
+        if include_watchlist:
+            queries.append(
+                text(
+                    """
+                    SELECT DISTINCT symbol AS ts_code
+                    FROM ai_sim_watchlist
+                    WHERE portfolio_id = :pid
+                    """
+                )
+            )
         rows = []
         with engine.connect() as conn:
             for sql in queries:
@@ -455,6 +464,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--lookback-days", type=int, default=0, help="未传 --start-date 时，按结束日期向前回看 N 个自然日")
     parser.add_argument("--symbols", default="", help="逗号或空格分隔的代码，如 002837.SZ,600519.SH")
     parser.add_argument("--portfolio-id", default="", help="按组合历史交易/持仓/自选池收集代码")
+    parser.add_argument(
+        "--portfolio-symbol-scope",
+        choices=["all", "trades_positions"],
+        default="all",
+        help="组合代码范围：all 包含自选池；trades_positions 只含历史交易和持仓",
+    )
     parser.add_argument("--all-stock-price-symbols", action="store_true", help="按 stock_price 区间内全部代码补齐")
     parser.add_argument("--v3-daily-candidates", action="store_true", help="加入3号当日资金候选池预备代码")
     parser.add_argument("--candidate-date", default="", help="3号候选池日期，默认 end-date")
@@ -491,7 +506,16 @@ def resolve_cli_dates(args: argparse.Namespace) -> tuple[str, str]:
 def resolve_symbols(engine, args: argparse.Namespace) -> List[str]:
     symbols = parse_symbols(args.symbols)
     if args.portfolio_id:
-        symbols.extend(_read_symbols_for_range(engine, args.start_date, args.end_date, args.portfolio_id))
+        include_watchlist = str(getattr(args, "portfolio_symbol_scope", "all") or "all") == "all"
+        symbols.extend(
+            _read_symbols_for_range(
+                engine,
+                args.start_date,
+                args.end_date,
+                args.portfolio_id,
+                include_watchlist=include_watchlist,
+            )
+        )
     if args.all_stock_price_symbols:
         symbols.extend(_read_symbols_for_range(engine, args.start_date, args.end_date))
     if getattr(args, "v3_daily_candidates", False):
@@ -512,6 +536,7 @@ def run_update(
     v3_daily_candidates: bool = False,
     candidate_date: str = "",
     candidate_limit: int = 800,
+    portfolio_symbol_scope: str = "all",
     dry_run: bool = False,
     sleep_sec: float = 0.2,
 ) -> List[UpdateResult]:
@@ -531,6 +556,7 @@ def run_update(
     args.end_date = end_date
     args.symbols = ",".join(symbols or [])
     args.portfolio_id = portfolio_id
+    args.portfolio_symbol_scope = portfolio_symbol_scope
     args.all_stock_price_symbols = all_stock_price_symbols
     args.v3_daily_candidates = bool(v3_daily_candidates)
     args.candidate_date = candidate_date or end_date
@@ -567,6 +593,7 @@ def main() -> int:
         v3_daily_candidates=bool(args.v3_daily_candidates),
         candidate_date=args.candidate_date or end_date,
         candidate_limit=int(args.candidate_limit),
+        portfolio_symbol_scope=args.portfolio_symbol_scope,
         dry_run=args.dry_run,
         sleep_sec=args.sleep_sec,
     )

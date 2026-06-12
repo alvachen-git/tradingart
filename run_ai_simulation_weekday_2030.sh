@@ -54,15 +54,53 @@ rc=0
   echo "script_dir: ${SCRIPT_DIR}"
   echo "python: ${PY_BIN}"
 
-  echo "phase 1/3: run AI stock 1号/2号"
-  if AI_SIM_SKIP_V3=1 "${PY_BIN}" ai_simulation_service.py; then
+  prepare_qfq_accounting() {
+    local pid="$1"
+    "${PY_BIN}" update_stock_price_qfq.py \
+      --date latest \
+      --lookback-days 460 \
+      --portfolio-id "${pid}" \
+      --portfolio-symbol-scope trades_positions \
+      --sleep-sec 0.05
+  }
+
+  reprice_qfq_accounting() {
+    local pid="$1"
+    "${PY_BIN}" reprice_ai_sim_qfq.py --portfolio-id "${pid}"
+  }
+
+  echo "phase 1/5: preflight qfq prices for AI stock 1号/2号"
+  if prepare_qfq_accounting "official_cn_a_etf_v1" && prepare_qfq_accounting "official_cn_a_etf_v2"; then
     rc=0
   else
     rc=$?
   fi
 
   if [[ ${rc} -eq 0 ]]; then
-    echo "phase 2/3: prepare AI stock 3号 sector OHLC"
+    echo "phase 2/5: run AI stock 1号/2号"
+    if AI_SIM_SKIP_V3=1 "${PY_BIN}" ai_simulation_service.py; then
+      rc=0
+    else
+      rc=$?
+    fi
+  else
+    echo "skip AI stock 1号/2号 because qfq preflight failed (exit=${rc})"
+  fi
+
+  if [[ ${rc} -eq 0 ]]; then
+    echo "phase 3/5: refresh and reprice AI stock 1号/2号 qfq accounting"
+    if prepare_qfq_accounting "official_cn_a_etf_v1" \
+      && prepare_qfq_accounting "official_cn_a_etf_v2" \
+      && reprice_qfq_accounting "official_cn_a_etf_v1" \
+      && reprice_qfq_accounting "official_cn_a_etf_v2"; then
+      rc=0
+    else
+      rc=$?
+    fi
+  fi
+
+  if [[ ${rc} -eq 0 ]]; then
+    echo "phase 4/5: prepare AI stock 3号 sector OHLC"
     if "${PY_BIN}" update_sector_index_price.py --lookback-days 10; then
       rc=0
     else
@@ -70,7 +108,7 @@ rc=0
     fi
 
     if [[ ${rc} -eq 0 ]]; then
-      echo "phase 3/3: run AI stock 3号"
+      echo "phase 5/5: run AI stock 3号"
       if "${PY_BIN}" run_ai_simulation_v3_daily.py --decision-mode llm_fallback --force; then
         rc=0
       else
@@ -80,7 +118,7 @@ rc=0
       echo "skip AI stock 3号 because sector OHLC prepare failed (exit=${rc})"
     fi
   else
-    echo "skip AI stock 3号 because 1号/2号 phase failed (exit=${rc})"
+    echo "skip AI stock 3号 because 1号/2号 qfq accounting phase failed (exit=${rc})"
   fi
 
   echo "AI simulation job end: $(date '+%Y-%m-%d %H:%M:%S %Z') (exit=${rc})"

@@ -864,7 +864,7 @@ st.markdown(
         '<div class="hero-sub">千问模型搭配Georgia训练｜A股 + ETF｜只做多｜每日20:30更新</div>'
         "</div>"
         "</div>"
-        '<div class="hero-note">执行口径：AI自主推理选股，无人工干预，成交价格统一用当日收盘价，不计手续费与滑点。</div>'
+        '<div class="hero-note">执行口径：AI自主推理选股，无人工干预，成交价格统一用当日收盘价；成交、持仓与净值采用前复权模拟计价，不计手续费与滑点。</div>'
         "</div>"
     ),
     unsafe_allow_html=True,
@@ -1162,7 +1162,7 @@ with right:
 st.markdown('<hr class="section-divider" />', unsafe_allow_html=True)
 
 st.markdown('<div class="panel-title">持仓明细</div>', unsafe_allow_html=True)
-st.markdown('<div class="panel-sub">同交易日口径，按市值从高到低</div>', unsafe_allow_html=True)
+st.markdown('<div class="panel-sub">同交易日前复权模拟计价，按市值从高到低</div>', unsafe_allow_html=True)
 st.markdown(_render_holdings_table(pos_df), unsafe_allow_html=True)
 
 st.markdown('<hr class="section-divider" />', unsafe_allow_html=True)

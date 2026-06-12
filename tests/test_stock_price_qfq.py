@@ -61,6 +61,7 @@ class TestStockPriceQfq(unittest.TestCase):
             portfolio_id = "official_cn_a_etf_v3"
             start_date = "20260501"
             end_date = "20260602"
+            portfolio_symbol_scope = "all"
             all_stock_price_symbols = False
             v3_daily_candidates = True
             candidate_date = "20260602"
@@ -74,6 +75,24 @@ class TestStockPriceQfq(unittest.TestCase):
 
         self.assertEqual(out, ["002837.SZ", "300502.SZ", "600522.SH"])
         mock_candidates.assert_called_once()
+
+    def test_resolve_symbols_can_exclude_watchlist_for_portfolio(self):
+        class Args:
+            symbols = ""
+            portfolio_id = "official_cn_a_etf_v2"
+            start_date = "20260501"
+            end_date = "20260602"
+            portfolio_symbol_scope = "trades_positions"
+            all_stock_price_symbols = False
+            v3_daily_candidates = False
+            candidate_date = ""
+            candidate_limit = 3
+
+        with patch("update_stock_price_qfq._read_symbols_for_range", return_value=["300502.SZ"]) as mock_read:
+            out = qfq.resolve_symbols(object(), Args())
+
+        self.assertEqual(out, ["300502.SZ"])
+        self.assertFalse(mock_read.call_args.kwargs["include_watchlist"])
 
 
 if __name__ == "__main__":
