@@ -102,6 +102,30 @@ class TestChatContextLayers(unittest.TestCase):
         rendered = render_agent_context(payload)
         self.assertIn("不作为行情事实来源", rendered)
 
+    def test_attach_context_layers_includes_link_article_first(self):
+        payload = attach_context_layers(
+            {
+                "intent_domain": "general",
+                "link_context": {
+                    "ok": True,
+                    "url": "https://wallstreetcn.com/articles/3774521",
+                    "title": "六氟化钨涨价",
+                    "snippet": "六氟化钨涨价，利好含氟电子特气及高纯钨制品企业。",
+                    "snippet_len": 28,
+                    "source": "url_preprocess",
+                },
+                "recent_context": "旧上下文",
+            },
+            prompt_text="根据这篇文章，利好哪些A股",
+            channel="mobile",
+        )
+
+        self.assertEqual(payload["context_layer_summary"][0]["layer"], "link_article")
+        rendered = render_agent_context(payload)
+        self.assertIn("【链接文章正文】", rendered)
+        self.assertIn("六氟化钨涨价", rendered)
+        self.assertLess(rendered.index("【链接文章正文】"), rendered.index("【近期对话历史】"))
+
     def test_trace_event_writes_summary_only(self):
         fake_redis = _FakeRedis()
 

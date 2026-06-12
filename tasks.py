@@ -30,7 +30,7 @@ for key in [
 from llm_compat import ChatTongyiCompat as ChatTongyi
 from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
 from agent_core import build_trading_graph, knowledge_chatter_node
-from chat_context_layers import append_chat_trace_event
+from chat_context_layers import append_chat_trace_event, attach_context_layers
 from chat_routing import (
     CHAT_MODE_ANALYSIS,
     CHAT_MODE_KNOWLEDGE,
@@ -175,6 +175,33 @@ def _build_link_failure_notice(link_ctx: dict) -> str:
     return (
         f"⚠️ 链接抓取失败（{reason}）。"
         "为避免误判，本轮已停止自动推断。请粘贴正文或关键段落，我再继续精确分析。"
+    )
+
+
+def _build_structured_link_context(link_ctx: dict) -> dict:
+    if not isinstance(link_ctx, dict):
+        link_ctx = {}
+    snippet = str(link_ctx.get("snippet") or "").strip()
+    return {
+        "ok": bool(link_ctx.get("ok")),
+        "url": str(link_ctx.get("url") or "").strip(),
+        "title": str(link_ctx.get("title") or "").strip(),
+        "snippet": snippet,
+        "snippet_len": len(snippet),
+        "error_code": str(link_ctx.get("error_code") or "").strip(),
+        "error_message": str(link_ctx.get("error_message") or "").strip(),
+        "source": "url_preprocess",
+    }
+
+
+def _build_link_reference_block(link_ctx: dict) -> str:
+    ctx = _build_structured_link_context(link_ctx)
+    return (
+        "【链接参考内容】\n"
+        f"来源: {ctx.get('url', '')}\n"
+        f"标题: {ctx.get('title') or '未提取到标题'}\n"
+        f"摘要:\n{ctx.get('snippet', '')}\n"
+        "请优先基于以上链接内容回答；若信息不足，再补充常识并明确说明不确定项。"
     )
 
 
@@ -625,7 +652,7 @@ def process_ai_query(
     """后台处理 AI 查询"""
     try:
         task_id = str(getattr(getattr(self, "request", None), "id", "") or "").strip()
-        context_payload = context_payload or {}
+        context_payload = dict(context_payload or {})
         _append_task_trace_event(
             task_id,
             "context_built",
@@ -683,18 +710,44 @@ def process_ai_query(
                     }
 
                 if link_ctx.get("ok"):
-                    link_ref_block = (
-                        f"【链接参考内容】\n"
-                        f"来源: {link_ctx.get('url', '')}\n"
-                        f"标题: {link_ctx.get('title', '未提取到标题')}\n"
-                        f"摘要:\n{link_ctx.get('snippet', '')}\n"
-                        "请优先基于以上链接内容回答；若信息不足，再补充常识并明确说明不确定项。"
+                    structured_link_ctx = _build_structured_link_context(link_ctx)
+                    context_payload["link_context"] = structured_link_ctx
+                    context_payload = attach_context_layers(
+                        context_payload,
+                        prompt_text=prompt,
+                        channel=str(context_payload.get("context_layer_channel") or ""),
                     )
+                    link_ref_block = _build_link_reference_block(structured_link_ctx)
                     prompt_for_graph = f"{prompt}\n\n{link_ref_block}".strip()
+                    _append_task_trace_event(
+                        task_id,
+                        "url_preprocessed",
+                        {
+                            "url_present": True,
+                            "fetch_ok": True,
+                            "url": structured_link_ctx.get("url", ""),
+                            "title_len": len(str(structured_link_ctx.get("title") or "")),
+                            "snippet_len": int(structured_link_ctx.get("snippet_len") or 0),
+                            "source": structured_link_ctx.get("source", ""),
+                        },
+                    )
                     print(f"[URL_PREPROCESS] 链接正文注入成功: {link_ctx.get('url', '')}")
                 elif link_ctx.get("error_code") != "no_url":
+                    structured_link_ctx = _build_structured_link_context(link_ctx)
+                    context_payload["link_context"] = structured_link_ctx
                     link_failure_notice = _build_link_failure_notice(link_ctx)
                     url_fetch_blocked = True
+                    _append_task_trace_event(
+                        task_id,
+                        "url_preprocessed",
+                        {
+                            "url_present": True,
+                            "fetch_ok": False,
+                            "url": structured_link_ctx.get("url", ""),
+                            "error_code": structured_link_ctx.get("error_code", ""),
+                            "error_message_len": len(str(structured_link_ctx.get("error_message") or "")),
+                        },
+                    )
                     print(
                         f"[URL_PREPROCESS] 链接正文注入失败: "
                         f"{link_ctx.get('error_code')} | {link_ctx.get('error_message')}"
@@ -801,6 +854,11 @@ def process_ai_query(
             "quick_answer_scenario": str(context_payload.get("quick_answer_scenario", "")),
             "quick_answer_target": str(context_payload.get("quick_answer_target", "")),
             "quick_answer_direction": str(context_payload.get("quick_answer_direction", "")),
+            "link_context": (
+                context_payload.get("link_context")
+                if isinstance(context_payload.get("link_context"), dict)
+                else {}
+            ),
         }
 
         self.update_state(state='PROCESSING', meta={'progress': '团队正在协作分析...'})

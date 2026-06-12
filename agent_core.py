@@ -88,6 +88,7 @@ from simple_chat_runtime import (
     maybe_answer_simple_runtime_question,
 )
 from agent_prompt_policy import (
+    TASK_TYPE_LINK_ARTICLE_STOCK_MAPPING,
     TASK_TYPE_OPTION_STRATEGY_NEEDS_SUBJECT,
     TASK_TYPE_OPTION_STRATEGY_WITH_SUBJECT,
     TASK_TYPE_FUTURES_BROKER_SIGNAL,
@@ -171,6 +172,7 @@ class AgentState(TypedDict):
     quick_answer_scenario: str
     quick_answer_target: str
     quick_answer_direction: str
+    link_context: Dict[str, Any]
 
     news_summary: str  # 情报员填入：新闻摘要 (CPI/非农/美联储)
     macro_view: str  # 宏观分析师填入：宏观定调 (宽松/紧缩)
@@ -581,6 +583,9 @@ def _apply_analysis_task_policy(
     )
     current_plan = list(plan or [])
     current_symbol = str(symbol or "").strip()
+
+    if policy.task_type == TASK_TYPE_LINK_ARTICLE_STOCK_MAPPING:
+        return list(policy.recommended_plan), "" if policy.clear_symbol else current_symbol
 
     if policy.task_type in {TASK_TYPE_STOCK_SELECTION, TASK_TYPE_OPTION_STRATEGY_NEEDS_SUBJECT}:
         return list(policy.recommended_plan), ""
@@ -1825,6 +1830,529 @@ def _is_recent_company_news_query(query: str) -> bool:
     return any(term in text for term in _RECENT_COMPANY_NEWS_TERMS)
 
 
+def _is_link_article_stock_mapping_task(query: str) -> bool:
+    return classify_analysis_task_type(query).task_type == TASK_TYPE_LINK_ARTICLE_STOCK_MAPPING
+
+
+def _extract_link_context_from_query(query: str) -> Dict[str, Any]:
+    text = str(query or "")
+    if "【链接参考内容】" not in text:
+        return {}
+    source_match = re.search(r"来源:\s*(.+)", text)
+    title_match = re.search(r"标题:\s*(.+)", text)
+    snippet = ""
+    snippet_match = re.search(r"摘要:\s*(.*?)(?:\n请优先基于以上链接内容回答|$)", text, re.DOTALL)
+    if snippet_match:
+        snippet = snippet_match.group(1).strip()
+    return {
+        "ok": bool(snippet),
+        "url": source_match.group(1).strip() if source_match else "",
+        "title": title_match.group(1).strip() if title_match else "",
+        "snippet": snippet,
+        "snippet_len": len(snippet),
+        "source": "prompt_link_block",
+    }
+
+
+def _get_link_article_context(state: Mapping[str, Any]) -> Dict[str, Any]:
+    link_ctx = state.get("link_context") if isinstance(state.get("link_context"), dict) else {}
+    if link_ctx.get("ok") and str(link_ctx.get("snippet") or "").strip():
+        return dict(link_ctx)
+    return _extract_link_context_from_query(str(state.get("user_query", "") or ""))
+
+
+_ARTICLE_COMPANY_SUFFIXES = (
+    "股份",
+    "集团",
+    "科技",
+    "电气",
+    "实业",
+    "控股",
+    "通信",
+    "药业",
+    "银行",
+    "证券",
+)
+_ARTICLE_COMPANY_PATTERN = re.compile(
+    r"[A-Za-z\u4e00-\u9fff]{2,20}(?:%s)" % "|".join(_ARTICLE_COMPANY_SUFFIXES)
+)
+_ARTICLE_CHAIN_KEYWORDS = (
+    "电子特气",
+    "高纯钨",
+    "钨制品",
+    "半导体材料",
+    "半导体",
+    "芯片",
+    "材料",
+    "设备",
+    "制品",
+    "产品",
+    "化工",
+    "新能源",
+    "光伏",
+    "储能",
+    "电池",
+    "机器人",
+    "通信",
+)
+
+
+def _short_text(value: Any, limit: int = 240) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 1)].rstrip() + "…"
+
+
+def _dedupe_text_items(items: Any, *, limit: int = 6, max_chars: int = 80) -> List[str]:
+    if isinstance(items, str):
+        raw_items = re.split(r"[\n,，、;；|]+", items)
+    elif isinstance(items, (list, tuple, set)):
+        raw_items = list(items)
+    else:
+        raw_items = []
+    out: List[str] = []
+    seen = set()
+    for item in raw_items:
+        value = _short_text(item, max_chars)
+        if not value:
+            continue
+        key = value.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(value)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _extract_article_json_object(text: str) -> Dict[str, Any]:
+    cleaned = str(text or "").strip()
+    cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
+    cleaned = re.sub(r"\s*```$", "", cleaned)
+    candidates = [cleaned]
+    brace_match = re.search(r"\{[\s\S]*\}", cleaned)
+    if brace_match:
+        candidates.append(brace_match.group(0))
+    for candidate in candidates:
+        try:
+            data = json.loads(candidate)
+        except Exception:
+            continue
+        if isinstance(data, dict):
+            return data
+    return {}
+
+
+def _clean_company_candidate(value: str) -> str:
+    text = str(value or "").strip(" ，,。；;：:")
+    for marker in ("提到", "包括", "例如", "比如", "关注", "涉及"):
+        if marker in text:
+            text = text.rsplit(marker, 1)[-1].strip(" ，,。；;：:")
+    return text
+
+
+def _extract_mentioned_companies(text: str) -> List[str]:
+    matches = [_clean_company_candidate(item) for item in _ARTICLE_COMPANY_PATTERN.findall(str(text or ""))]
+    return _dedupe_text_items(matches, limit=8)
+
+
+def _extract_industry_chain_items(text: str) -> List[str]:
+    source = re.sub(r"\s+", " ", str(text or "")).strip()
+    candidates: List[str] = []
+    for keyword in _ARTICLE_CHAIN_KEYWORDS:
+        if keyword not in source:
+            continue
+        pattern = rf"[\u4e00-\u9fffA-Za-z0-9]{{0,8}}{re.escape(keyword)}[\u4e00-\u9fffA-Za-z0-9]{{0,8}}"
+        matches = re.findall(pattern, source)
+        candidates.extend(matches or [keyword])
+    cleaned = []
+    for item in candidates:
+        value = re.sub(r"^(文章|报道|主线|指向|利好|受益|以及|和|及|的)+", "", item).strip()
+        value = re.sub(r"(企业|公司|板块|方向)$", "", value).strip() or item
+        cleaned.append(value)
+    return _dedupe_text_items(cleaned, limit=8, max_chars=40)
+
+
+def _build_fallback_article_profile(link_ctx: Mapping[str, Any]) -> Dict[str, Any]:
+    title = _short_text(link_ctx.get("title"), 160)
+    snippet = str(link_ctx.get("snippet") or "").strip()
+    first_sentence = re.split(r"[。！？!?]\s*", snippet, maxsplit=1)[0].strip()
+    main_event = _short_text(first_sentence or title or "链接文章摘要不足", 220)
+    merged_text = f"{title}\n{snippet}"
+    chain_items = _extract_industry_chain_items(merged_text)
+    mentioned_companies = _extract_mentioned_companies(merged_text)
+    missing_info = [
+        "候选公司的主营业务占比",
+        "订单/产能/客户验证",
+        "股价是否已提前反应",
+    ]
+    if not snippet:
+        missing_info.insert(0, "完整正文")
+    return {
+        "main_event": main_event,
+        "industry_chain_items": chain_items,
+        "mentioned_companies": mentioned_companies,
+        "key_claims": _dedupe_text_items([first_sentence or title], limit=4, max_chars=160),
+        "missing_info": missing_info,
+        "source": "fallback_parser",
+    }
+
+
+def build_article_event_profile(link_ctx: Mapping[str, Any], llm=None) -> Dict[str, Any]:
+    fallback = _build_fallback_article_profile(link_ctx)
+    snippet = str(link_ctx.get("snippet") or "").strip()
+    if not llm or not snippet:
+        return fallback
+
+    prompt = f"""
+请把用户提供的财经文章摘要结构化为 JSON。只允许使用摘要里的事实，不要补充常识。
+
+【标题】
+{str(link_ctx.get("title") or "").strip()}
+
+【正文摘要】
+{snippet[:3000]}
+
+输出 JSON，字段固定为：
+{{
+  "main_event": "一句话概括文章主线",
+  "industry_chain_items": ["文章直接指向的产业链环节或方向"],
+  "mentioned_companies": ["文章摘要中明确出现的公司名，没有则空数组"],
+  "key_claims": ["价格/供需/政策/订单等关键事实"],
+  "missing_info": ["继续做A股映射前需要核验的信息"]
+}}
+""".strip()
+    try:
+        response = llm.invoke(prompt)
+        data = _extract_article_json_object(str(getattr(response, "content", response) or ""))
+    except Exception:
+        data = {}
+    if not data:
+        return fallback
+
+    return {
+        "main_event": _short_text(data.get("main_event") or fallback.get("main_event"), 220),
+        "industry_chain_items": _dedupe_text_items(
+            data.get("industry_chain_items") or fallback.get("industry_chain_items"),
+            limit=8,
+            max_chars=60,
+        ),
+        "mentioned_companies": _dedupe_text_items(
+            data.get("mentioned_companies") or fallback.get("mentioned_companies"),
+            limit=8,
+            max_chars=40,
+        ),
+        "key_claims": _dedupe_text_items(
+            data.get("key_claims") or fallback.get("key_claims"),
+            limit=6,
+            max_chars=160,
+        ),
+        "missing_info": _dedupe_text_items(
+            data.get("missing_info") or fallback.get("missing_info"),
+            limit=6,
+            max_chars=100,
+        ),
+        "source": "llm_structured" if data else fallback.get("source", "fallback_parser"),
+    }
+
+
+def _candidate_key(candidate: Mapping[str, Any]) -> str:
+    return _short_text(candidate.get("name_or_direction"), 60).lower()
+
+
+def _candidate_is_company_like(value: str) -> bool:
+    return bool(_ARTICLE_COMPANY_PATTERN.fullmatch(str(value or "").strip()))
+
+
+def _build_candidate(
+    name_or_direction: str,
+    *,
+    source_type: str,
+    benefit_logic: str,
+    verification_needed: str,
+    confidence: str,
+) -> Dict[str, Any]:
+    return {
+        "name_or_direction": _short_text(name_or_direction, 60),
+        "source_type": source_type,
+        "benefit_logic": _short_text(benefit_logic, 180),
+        "verification_needed": _short_text(verification_needed, 140),
+        "confidence": confidence,
+    }
+
+
+def map_article_to_a_share_candidates(
+    article_profile: Mapping[str, Any],
+    search_result: str = "",
+) -> List[Dict[str, Any]]:
+    candidates: List[Dict[str, Any]] = []
+    seen = set()
+
+    for company in _dedupe_text_items(article_profile.get("mentioned_companies"), limit=8, max_chars=60):
+        candidate = _build_candidate(
+            company,
+            source_type="文章明确提到",
+            benefit_logic="文章摘要直接出现该公司名；需核验文章事件与公司业务/订单的实际关系。",
+            verification_needed="公告、主营业务、业务占比、事件影响是否已落地",
+            confidence="中",
+        )
+        key = _candidate_key(candidate)
+        if key:
+            candidates.append(candidate)
+            seen.add(key)
+
+    for item in _dedupe_text_items(article_profile.get("industry_chain_items"), limit=8, max_chars=60):
+        candidate = _build_candidate(
+            item,
+            source_type="产业链推导",
+            benefit_logic=f"文章主线指向“{item}”，相关 A 股只能作为产业链受益方向继续核验。",
+            verification_needed="该方向对应上市公司、主营业务占比、订单/产能弹性",
+            confidence="低-中",
+        )
+        key = _candidate_key(candidate)
+        if key and key not in seen:
+            candidates.append(candidate)
+            seen.add(key)
+
+    for company in _extract_mentioned_companies(search_result):
+        if company.lower() in seen:
+            continue
+        candidate = _build_candidate(
+            company,
+            source_type="待核验",
+            benefit_logic="补证搜索结果中出现该公司，尚不能视为文章明确点名。",
+            verification_needed="主营业务是否覆盖文章所述产业链、公告/财报是否有对应披露",
+            confidence="低",
+        )
+        key = _candidate_key(candidate)
+        if key:
+            candidates.append(candidate)
+            seen.add(key)
+
+    if not candidates:
+        candidates.append(
+            _build_candidate(
+                "文章主线相关产业链",
+                source_type="待核验",
+                benefit_logic="文章摘要不足以定位明确公司，先保留方向性研究线索。",
+                verification_needed="补充完整正文、产业链环节和对应上市公司",
+                confidence="低",
+            )
+        )
+    return candidates[:10]
+
+
+def _search_tool_invoke(search_tool: Any, query: str) -> str:
+    if not search_tool:
+        return ""
+    if hasattr(search_tool, "invoke"):
+        return str(search_tool.invoke({"query": query}) or "").strip()
+    return str(search_tool(query) or "").strip()
+
+
+def verify_a_share_candidates(
+    candidates: List[Mapping[str, Any]],
+    *,
+    article_profile: Mapping[str, Any] | None = None,
+    search_tool: Any = None,
+    max_checks: int = 3,
+) -> List[Dict[str, Any]]:
+    verified: List[Dict[str, Any]] = []
+    profile = article_profile or {}
+    main_event = _short_text(profile.get("main_event"), 80)
+    for index, raw_candidate in enumerate(candidates or []):
+        candidate = dict(raw_candidate)
+        name = _short_text(candidate.get("name_or_direction"), 60)
+        source_type = str(candidate.get("source_type") or "").strip()
+        candidate["verification_summary"] = "尚未执行补证检索；只能作为研究线索。"
+        candidate["verification_evidence"] = ""
+
+        should_check = index < max(0, int(max_checks or 0)) and bool(search_tool)
+        if should_check:
+            query = f"{name} 主营业务 公告 财报 {main_event}".strip()
+            try:
+                evidence = _search_tool_invoke(search_tool, query)
+            except Exception as exc:
+                evidence = f"补证搜索暂不可用: {exc}"
+            evidence = _short_text(evidence, 700)
+            candidate["verification_evidence"] = evidence
+            if evidence.startswith("补证搜索暂不可用"):
+                candidate["verification_summary"] = evidence
+            elif evidence:
+                candidate["verification_summary"] = "已做轻量补证，仍需核验主营占比、公告原文和事件落地程度。"
+                if source_type == "文章明确提到":
+                    candidate["confidence"] = "中-高"
+                elif _candidate_is_company_like(name):
+                    candidate["confidence"] = "中"
+            elif source_type == "产业链推导":
+                candidate["verification_summary"] = "方向性线索，暂未检索到可直接落到公司的证据。"
+
+        verified.append(candidate)
+    return verified
+
+
+def _build_article_mapping_search_query(
+    article_profile: Mapping[str, Any],
+    link_ctx: Mapping[str, Any],
+) -> str:
+    chain = " ".join(_dedupe_text_items(article_profile.get("industry_chain_items"), limit=4, max_chars=30))
+    main_event = _short_text(article_profile.get("main_event"), 80)
+    title = _short_text(link_ctx.get("title"), 80)
+    base = " ".join(item for item in [title, main_event, chain] if item).strip()
+    return f"{base[:120]} A股 受益 公司 主营业务".strip()
+
+
+def _format_article_bullets(items: Any, *, empty: str = "暂无明确可用信息") -> List[str]:
+    values = _dedupe_text_items(items, limit=6, max_chars=100)
+    if not values:
+        return [f"- {empty}"]
+    return [f"- {item}" for item in values]
+
+
+def _format_candidate_table(candidates: List[Mapping[str, Any]]) -> List[str]:
+    lines = [
+        "| 公司/方向 | 怎么看 | 可信度 | 下一步核验 |",
+        "| --- | --- | --- | --- |",
+    ]
+    for candidate in candidates[:8]:
+        lines.append(
+            "| {name} | {source}：{logic} | {confidence} | {verify} |".format(
+                name=_short_text(candidate.get("name_or_direction"), 40),
+                source=_short_text(candidate.get("source_type"), 20),
+                logic=_short_text(candidate.get("benefit_logic"), 70),
+                confidence=_short_text(candidate.get("confidence"), 16),
+                verify=_short_text(candidate.get("verification_needed"), 55),
+            )
+        )
+    return lines
+
+
+def _format_verification_lines(candidates: List[Mapping[str, Any]]) -> List[str]:
+    lines: List[str] = []
+    for candidate in candidates[:5]:
+        name = _short_text(candidate.get("name_or_direction"), 40)
+        source_type = str(candidate.get("source_type") or "").strip()
+        summary = _short_text(candidate.get("verification_summary"), 96)
+        evidence = _short_text(candidate.get("verification_evidence"), 120)
+        if source_type == "产业链推导":
+            prefix = "偏方向线索"
+        elif source_type == "文章明确提到":
+            prefix = "文章点到"
+        else:
+            prefix = "先放观察池"
+        if evidence:
+            lines.append(f"- {name}：{prefix}，{summary}")
+        else:
+            lines.append(f"- {name}：{prefix}，{summary or '还缺补证材料'}")
+    return lines or ["- 暂时没有形成可核验的公司线索。"]
+
+
+def _build_article_mapping_report(
+    query: str,
+    link_ctx: Mapping[str, Any],
+    article_profile: Mapping[str, Any],
+    candidates: List[Mapping[str, Any]],
+    *,
+    search_result: str = "",
+) -> str:
+    title = _short_text(link_ctx.get("title") or "未提取到标题", 120)
+    url = _short_text(link_ctx.get("url"), 160)
+    main_event = _short_text(article_profile.get("main_event") or title, 220)
+    lines = [
+        "【情报与舆情】",
+        f"一句话先说：这篇文章真正的看点是“{main_event}”。A股这边先别急着当名单买，比较适合沿着产业链找线索、再逐家公司核验。",
+        "",
+        "### 这篇文章在说什么",
+        f"- 来源：{url or '用户提供链接'}",
+        f"- 标题：{title}",
+        f"- 主线：{main_event}",
+        "",
+        "### 先抓住几个关键点",
+        *_format_article_bullets(article_profile.get("key_claims"), empty="文章摘要没有给出更多可核验事实"),
+        "",
+        "### A股可以顺着这些方向看",
+        *_format_article_bullets(article_profile.get("industry_chain_items"), empty="文章摘要不足以提取明确产业链方向"),
+        "",
+        "### 候选公司/方向映射",
+        *_format_candidate_table(candidates),
+        "",
+        "### 核验线索",
+        *_format_verification_lines(candidates),
+    ]
+    missing = _dedupe_text_items(article_profile.get("missing_info"), limit=5, max_chars=100)
+    if missing:
+        lines.extend(["", "### 还差哪些信息"])
+        lines.extend(f"- {item}" for item in missing)
+    if search_result:
+        lines.extend(["", "### 补证搜索怎么用", "- 我只把搜索结果当作辅助线索，不直接照搬长段原文；公司能不能落地，还要看主营占比和公告。"])
+    return "\n".join(lines).strip()
+
+
+def _build_link_article_mapping_fallback(query: str, link_ctx: Mapping[str, Any], search_result: str = "") -> str:
+    title = str(link_ctx.get("title") or "未提取到标题").strip()
+    url = str(link_ctx.get("url") or "").strip()
+    snippet = str(link_ctx.get("snippet") or "").strip()
+    mainline = snippet.split("\n", 1)[0][:180] if snippet else title
+    lines = [
+        "【情报与舆情】",
+        f"一句话先说：这题要先看文章主线，别直接套普通选股模板。{mainline}",
+        "",
+        "### 这篇文章在说什么",
+        f"- 来源：{url or '用户提供链接'}",
+        f"- 标题：{title}",
+        f"- 摘要：{snippet[:500] if snippet else '链接摘要不足，需要用户补充正文后才能精确映射。'}",
+        "",
+        "### A股怎么顺着看",
+        "- 先看文章直接指向的产业链方向，再找可能相关的 A 股公司。",
+        "- 如果文章没明确点名公司，公司层面只能写成“产业链推导/待核验”。",
+    ]
+    if search_result:
+        lines.extend(["", "### 补证线索", f"- {_short_text(search_result, 180)}"])
+    return "\n".join(lines).strip()
+
+
+def _answer_link_article_stock_mapping(state: Mapping[str, Any], llm) -> Dict[str, Any]:
+    query = str(state.get("user_query", "") or "").strip()
+    link_ctx = _get_link_article_context(state)
+    snippet = str(link_ctx.get("snippet") or "").strip()
+    if not snippet:
+        return {
+            "messages": [
+                HumanMessage(content=_build_link_article_mapping_fallback(query, link_ctx))
+            ]
+        }
+
+    article_profile = build_article_event_profile(link_ctx, llm)
+
+    search_result = ""
+    search_query = _build_article_mapping_search_query(article_profile, link_ctx)
+    if search_query:
+        try:
+            search_result = str(search_web.invoke({"query": search_query}) or "").strip()
+        except Exception as exc:
+            search_result = f"补证搜索暂不可用: {exc}"
+
+    candidates = map_article_to_a_share_candidates(article_profile, search_result)
+    verified_candidates = verify_a_share_candidates(
+        candidates,
+        article_profile=article_profile,
+        search_tool=search_web,
+        max_checks=2,
+    )
+    content = _build_article_mapping_report(
+        query,
+        link_ctx,
+        article_profile,
+        verified_candidates,
+        search_result=search_result,
+    )
+    return {
+        "messages": [HumanMessage(content=content)]
+    }
+
+
 def _extract_recent_company_subject(query: str, *, symbol: str = "", symbol_name: str = "") -> str:
     for candidate in (symbol_name, symbol):
         text = str(candidate or "").strip()
@@ -2033,6 +2561,7 @@ def _state_context_payload(state: Mapping[str, Any], *, recent_context_override:
         "intent_domain": str(state.get("intent_domain", "") or ""),
         "quick_answer_target": str(state.get("quick_answer_target", "") or ""),
         "quick_answer_direction": str(state.get("quick_answer_direction", "") or ""),
+        "link_context": state.get("link_context") if isinstance(state.get("link_context"), dict) else {},
     }
     context_layers = state.get("context_layers")
     if isinstance(context_layers, list):
@@ -3476,6 +4005,9 @@ def _researcher_node_impl(state: AgentState,llm=None):
     symbol_name = state.get("symbol_name", "")
     query = state["user_query"]
     current_date = datetime.now().strftime("%Y年%m月%d日 %A")
+    if _is_link_article_stock_mapping_task(query):
+        return _answer_link_article_stock_mapping(state, llm)
+
     if _is_recent_company_news_query(query):
         subject = _extract_recent_company_subject(query, symbol=symbol, symbol_name=symbol_name)
         if subject:
@@ -4230,6 +4762,9 @@ def screener_node(state: AgentState, llm):
             f"\n{followup_route_context}\n"
             "【追问承接要求】当前请求是短期承接，不要反问上下文中已经明确的对象或条件。\n"
         )
+
+    if _is_link_article_stock_mapping_task(query):
+        return _answer_link_article_stock_mapping(state, llm)
 
     if _is_us_stock_selection_query(query):
         try:
