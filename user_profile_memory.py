@@ -4,6 +4,15 @@ from typing import Any, Callable, Dict, List
 
 from sqlalchemy import text
 
+from agent_memory_registry import (
+    MEMORY_STATUS_SUPERSEDED,
+    MEMORY_TYPE_SEMANTIC,
+    SOURCE_PROFILE_MEMORY,
+    build_memory_namespace,
+    register_profile_memory,
+    update_agent_memories_status,
+)
+
 
 PROFILE_MEMORY_ACTIVE = "active"
 PROFILE_MEMORY_SUPERSEDED = "superseded"
@@ -97,6 +106,28 @@ def _is_guest_user(user_id: str) -> bool:
     return str(user_id or "").strip().lower() in GUEST_USER_IDS
 
 
+def _register_profile_memory_best_effort(
+    engine,
+    *,
+    user_id: str,
+    memory_key: str,
+    memory_value: str,
+    confidence: float,
+    source_text: str = "",
+) -> None:
+    try:
+        register_profile_memory(
+            engine,
+            user_id=user_id,
+            memory_key=memory_key,
+            memory_value=memory_value,
+            confidence=confidence,
+            source_text=source_text,
+        )
+    except Exception as exc:
+        print(f"[profile-memory] agent memory register failed user={user_id} key={memory_key} err={exc}")
+
+
 def ensure_profile_memory_table(engine) -> bool:
     if engine is None:
         return False
@@ -188,10 +219,72 @@ def get_active_profile_memories(engine, user_id: str) -> List[Dict[str, Any]]:
         for row in rows:
             item = dict(row)
             latest.setdefault(str(item.get("memory_key") or ""), item)
-        return [v for k, v in latest.items() if k]
+        memories = [v for k, v in latest.items() if k]
+        if _repair_misclassified_trading_hobby_memories(engine, user_id=uid, memories=memories):
+            return get_active_profile_memories(engine, uid)
+        return memories
     except Exception as exc:
         print(f"[profile-memory] read active failed user={uid} err={exc}")
         return []
+
+
+def _repair_misclassified_trading_hobby_memories(engine, *, user_id: str, memories: List[Dict[str, Any]]) -> bool:
+    repaired = False
+    for item in memories:
+        if str(item.get("memory_key") or "") != KEY_HOBBIES:
+            continue
+        value = str(item.get("memory_value") or "").strip()
+        stable_value = _normalize_trading_strategy_preference_text(value)
+        if not stable_value:
+            continue
+        memory_id = item.get("id")
+        if not memory_id:
+            continue
+        try:
+            confidence = max(float(item.get("confidence") or 0.9), 0.9)
+        except Exception:
+            confidence = 0.9
+        upsert_profile_memory(
+            engine,
+            user_id=user_id,
+            memory_key=KEY_STABLE_PREFERENCE,
+            memory_value=stable_value,
+            confidence=confidence,
+            source_text=str(item.get("source_text") or value),
+        )
+        try:
+            with engine.begin() as conn:
+                result = conn.execute(
+                    text(
+                        """
+                        UPDATE user_profile_memory
+                        SET status=:status, updated_at=:updated_at
+                        WHERE id=:id AND user_id=:user_id AND memory_key=:memory_key AND status=:active
+                        """
+                    ),
+                    {
+                        "id": memory_id,
+                        "user_id": user_id,
+                        "memory_key": KEY_HOBBIES,
+                        "active": PROFILE_MEMORY_ACTIVE,
+                        "status": PROFILE_MEMORY_SUPERSEDED,
+                        "updated_at": _now_iso(),
+                    },
+                )
+            if int(result.rowcount or 0) > 0:
+                update_agent_memories_status(
+                    engine,
+                    user_id=user_id,
+                    namespace=build_memory_namespace(user_id, kind="profile"),
+                    memory_type=MEMORY_TYPE_SEMANTIC,
+                    memory_key=KEY_HOBBIES,
+                    source_type=SOURCE_PROFILE_MEMORY,
+                    status=MEMORY_STATUS_SUPERSEDED,
+                )
+                repaired = True
+        except Exception as exc:
+            print(f"[profile-memory] repair misclassified hobby failed user={user_id} err={exc}")
+    return repaired
 
 
 def upsert_profile_memory(
@@ -252,6 +345,14 @@ def upsert_profile_memory(
                     "updated_at": now,
                 },
             )
+        _register_profile_memory_best_effort(
+            engine,
+            user_id=uid,
+            memory_key=key,
+            memory_value=value,
+            confidence=max(0.0, min(float(confidence or 0.9), 1.0)),
+            source_text=source_text,
+        )
         return True
     except Exception as exc:
         print(f"[profile-memory] upsert failed user={uid} key={key} err={exc}")
@@ -361,6 +462,77 @@ def _extract_products_value(prompt_text: str) -> str:
     return "、".join(products[:4])
 
 
+def _is_trading_strategy_preference_text(value: str) -> bool:
+    raw = str(value or "")
+    if not raw:
+        return False
+    has_option = "期权" in raw or "option" in raw.lower()
+    strategy_terms = (
+        "策略",
+        "买方",
+        "卖方",
+        "买期权",
+        "卖期权",
+        "买入期权",
+        "裸卖",
+        "价差",
+        "跨式",
+        "宽跨",
+        "认购",
+        "认沽",
+    )
+    return has_option and any(term in raw for term in strategy_terms)
+
+
+def _normalize_trading_strategy_preference_text(value: str) -> str:
+    raw = str(value or "")
+    if "期权" not in raw and "option" not in raw.lower():
+        return ""
+    buy_side_terms = (
+        "买期权",
+        "买入期权",
+        "买方策略",
+        "期权买方",
+        "做买方",
+        "做买期权",
+        "做期权买方",
+        "买认购",
+        "买认沽",
+    )
+    if any(term in raw for term in buy_side_terms):
+        return "期权买方策略"
+
+    sell_side_terms = ("卖方策略", "期权卖方", "裸卖", "卖期权", "卖认购", "卖认沽")
+    if any(term in raw for term in ("不喜欢", "避免", "不想做", "别让我做")) and any(
+        term in raw for term in sell_side_terms
+    ):
+        return "偏期权买方策略，避免裸卖/卖方策略"
+
+    return ""
+
+
+def _extract_trading_strategy_preference_value(prompt_text: str) -> str:
+    raw = str(prompt_text or "")
+    if "期权" not in raw and "option" not in raw.lower():
+        return ""
+    preference_terms = (
+        "喜欢",
+        "偏好",
+        "主要做",
+        "常做",
+        "平时做",
+        "习惯做",
+        "更愿意",
+        "更喜欢",
+        "记住",
+        "长期做",
+    )
+    if not any(term in raw for term in preference_terms):
+        return ""
+
+    return _normalize_trading_strategy_preference_text(raw)
+
+
 def _extract_answer_style_value(prompt_text: str) -> str:
     raw = str(prompt_text or "")
     if any(k in raw for k in ("别给我讲太基础", "不要太基础", "少讲基础", "不用科普")):
@@ -422,6 +594,8 @@ def _extract_hobbies_value(prompt_text: str) -> str:
             value = _clean_profile_fragment(match.group(1))
             if value.startswith(("的", "什么", "哪")):
                 continue
+            if _is_trading_strategy_preference_text(value):
+                continue
             return value
     return ""
 
@@ -452,7 +626,7 @@ def _extract_dislikes_value(prompt_text: str) -> str:
         match = re.search(pattern, raw)
         if match:
             value = _clean_profile_fragment(match.group(1))
-            if value and "提示风险" not in value:
+            if value and "提示风险" not in value and not _is_trading_strategy_preference_text(value):
                 return value
     return ""
 
@@ -503,6 +677,8 @@ def _extract_stable_fact_signals(prompt_text: str) -> Dict[str, str]:
         raw,
         ("稳定偏好是", "我的稳定偏好是", "记住我的偏好", "以后我偏好", "我长期偏好"),
     )
+    if not stable_preference:
+        stable_preference = _extract_trading_strategy_preference_value(raw)
     if stable_preference:
         signals[KEY_STABLE_PREFERENCE] = stable_preference
 
@@ -611,7 +787,7 @@ def extract_profile_signals(prompt_text: str) -> Dict[str, str]:
         signals[KEY_AGE] = age_value
     if gender_value:
         signals[KEY_GENDER] = gender_value
-    if hobbies_value:
+    if hobbies_value and not _is_trading_strategy_preference_text(hobbies_value):
         signals[KEY_HOBBIES] = hobbies_value
     if fears_value:
         signals[KEY_FEARS] = fears_value
@@ -784,6 +960,14 @@ def _is_profile_query(prompt_text: str) -> bool:
             "你记得我的目标吗",
             "我的投资目标是什么",
             "我的目标是什么",
+            "你记得我的交易偏好吗",
+            "你记得我的期权交易偏好吗",
+            "我的交易偏好是什么",
+            "我的期权交易偏好是什么",
+            "我的策略偏好是什么",
+            "我的期权策略偏好是什么",
+            "我喜欢做什么策略",
+            "我偏好什么策略",
             "你记住了我什么",
             "你记得我什么",
             "你记住我的什么",
@@ -818,6 +1002,11 @@ def _is_memory_challenge(prompt_text: str) -> bool:
             "我没有做过",
             "别这么说",
             "不要这么说",
+            "删掉",
+            "删除",
+            "清掉",
+            "别再提",
+            "不要再提",
         )
     )
 
@@ -892,6 +1081,10 @@ def _build_update_confirmation(updates: Dict[str, str]) -> str:
         value = str(updates.get(KEY_HOBBIES) or "").strip()
         if value:
             return f"好，我记住了。以后聊天时我会留意你的爱好：{value}。"
+    if set(updates.keys()) == {KEY_STABLE_PREFERENCE}:
+        value = str(updates.get(KEY_STABLE_PREFERENCE) or "").strip()
+        if value:
+            return f"好，我记住了。以后涉及策略选择和风险收益结构时，我会把这个交易偏好作为参考：{value}。"
     if set(updates.keys()) == {KEY_FEARS}:
         value = str(updates.get(KEY_FEARS) or "").strip()
         if value:
@@ -947,6 +1140,12 @@ def _build_profile_query_answer(prompt_text: str, memories: List[Dict[str, Any]]
         if value:
             return f"你当前记录的目标/用途是：{value}。我会用它来约束收益目标、风险承受和时间周期。"
         return "目前我还没有记录到你的投资目标。你可以说“投资目标是稳健增值”或“这笔钱半年后要用”。"
+
+    if any(k in raw for k in ("交易偏好", "期权交易偏好", "策略偏好", "期权策略偏好", "喜欢做什么策略", "偏好什么策略")):
+        value = active.get(KEY_STABLE_PREFERENCE)
+        if value:
+            return f"你当前记录的交易偏好是：{value}。我会用它来辅助策略结构选择、风险收益判断和执行条件约束。"
+        return "目前我还没有记录到明确的交易偏好。你可以说“记住我偏好期权买方策略”。"
 
     if "风险偏好" in raw:
         value = active.get(KEY_RISK_PREFERENCE)
@@ -1017,6 +1216,20 @@ def _build_portfolio_status_answer(snapshot: Dict[str, Any] | None) -> str:
     )
 
 
+def _matches_memory_delete_request(*, key: str, value: str, label: str, prompt_text: str) -> bool:
+    raw = str(prompt_text or "")
+    if (value and value in raw) or (label and label in raw):
+        return True
+    if key == KEY_STABLE_PREFERENCE:
+        if any(k in raw for k in ("交易偏好", "策略偏好", "期权交易偏好", "期权策略偏好")):
+            return True
+        raw_preference = _extract_trading_strategy_preference_value(raw) or _normalize_trading_strategy_preference_text(raw)
+        value_preference = _normalize_trading_strategy_preference_text(value)
+        if raw_preference and value_preference and raw_preference == value_preference:
+            return True
+    return False
+
+
 def _delete_matching_active_memories(engine, *, user_id: str, prompt_text: str, memories: List[Dict[str, Any]]) -> int:
     raw = str(prompt_text or "")
     if not any(keyword in raw for keyword in ("删掉", "删除", "清掉", "别再提", "不要再提")):
@@ -1027,11 +1240,16 @@ def _delete_matching_active_memories(engine, *, user_id: str, prompt_text: str, 
         key = str(item.get("memory_key") or "")
         value = str(item.get("memory_value") or "").strip()
         label = PROFILE_MEMORY_LABELS.get(key, key)
-        if memory_id and ((value and value in raw) or (label and label in raw)):
+        if memory_id and _matches_memory_delete_request(key=key, value=value, label=label, prompt_text=raw):
             matched_ids.append(memory_id)
     if not matched_ids:
         return 0
     try:
+        matched_keys = {
+            str(item.get("memory_key") or "")
+            for item in memories
+            if item.get("id") in matched_ids and str(item.get("memory_key") or "")
+        }
         with engine.begin() as conn:
             for memory_id in matched_ids:
                 conn.execute(
@@ -1050,6 +1268,16 @@ def _delete_matching_active_memories(engine, *, user_id: str, prompt_text: str, 
                         "updated_at": _now_iso(),
                     },
                 )
+        for key in matched_keys:
+            update_agent_memories_status(
+                engine,
+                user_id=user_id,
+                namespace=build_memory_namespace(user_id, kind="profile"),
+                memory_type=MEMORY_TYPE_SEMANTIC,
+                memory_key=key,
+                source_type=SOURCE_PROFILE_MEMORY,
+                status=MEMORY_STATUS_SUPERSEDED,
+            )
         return len(matched_ids)
     except Exception as exc:
         print(f"[profile-memory] delete matching failed user={user_id} err={exc}")

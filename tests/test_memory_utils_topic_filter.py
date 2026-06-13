@@ -2,8 +2,10 @@ import unittest
 from unittest.mock import patch
 
 from langchain_core.documents import Document
+from sqlalchemy import create_engine
 
 import memory_utils
+import agent_memory_registry as registry
 
 
 class _FakeSearchStore:
@@ -98,6 +100,7 @@ class TestMemoryUtilsTopicFilter(unittest.TestCase):
 
     def test_save_interaction_backwards_compatible_and_infers_topic(self):
         fake_store = _FakeWriteStore()
+        engine = create_engine("sqlite:///:memory:", future=True)
         with patch.object(memory_utils, "get_vector_store", return_value=fake_store):
             memory_utils.save_interaction(
                 user_id="u1",
@@ -118,6 +121,30 @@ class TestMemoryUtilsTopicFilter(unittest.TestCase):
         self.assertEqual(first_meta.get("topic"), "stock_portfolio")
         self.assertEqual(second_meta.get("topic"), "option")
         self.assertEqual(second_meta.get("source"), "mobile")
+
+    def test_save_interaction_registers_agent_memory_with_source_id(self):
+        fake_store = _FakeWriteStore()
+        engine = create_engine("sqlite:///:memory:", future=True)
+        with patch.object(memory_utils, "get_vector_store", return_value=fake_store):
+            memory_utils.save_interaction(
+                user_id="u1",
+                user_input="option adjustment",
+                ai_response="handle near-month leg first",
+                topic="option",
+                source="mobile",
+                registry_engine=engine,
+            )
+
+        self.assertEqual(len(fake_store.docs), 1)
+        self.assertTrue(fake_store.docs[0].metadata.get("memory_source_id"))
+        rows = registry.list_agent_memories(
+            engine,
+            user_id="u1",
+            memory_type=registry.MEMORY_TYPE_CONVERSATION,
+            status="",
+        )
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["source_type"], registry.SOURCE_CHROMA_CHAT_HISTORY)
 
     def test_retrieve_recent_conversation_memory_filters_by_user_and_time(self):
         docs = [

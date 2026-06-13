@@ -2,41 +2,28 @@ import os
 import re
 import warnings
 from typing import Any, Optional
-from langchain_community.embeddings import DashScopeEmbeddings
 from langchain_core.documents import Document
 from datetime import datetime
-from chromadb.config import Settings
-import chromadb
+from agent_memory_registry import (
+    SOURCE_CHROMA_CHAT_HISTORY,
+    build_chroma_memory_source_id,
+    is_agent_memory_active,
+    record_agent_memory_use,
+    register_conversation_memory,
+)
 
-try:
-    from langchain_chroma import Chroma  # type: ignore
-    _CHROMA_BACKEND = "langchain_chroma"
-except ImportError:
-    try:
-        from langchain_core._api.deprecation import LangChainDeprecationWarning  # type: ignore
-    except Exception:
-        LangChainDeprecationWarning = Warning  # type: ignore
-
-    # Fallback for environments that haven't installed langchain-chroma yet.
-    # Suppress import-time deprecation noise while keeping runtime behavior.
-    with warnings.catch_warnings():
-        warnings.filterwarnings(
-            "ignore",
-            category=LangChainDeprecationWarning,
-            message=r".*langchain_community\.vectorstores\.Chroma.*",
-        )
-        from langchain_community.vectorstores import Chroma  # type: ignore
-
-    _CHROMA_BACKEND = "langchain_community"
+Settings = None  # type: ignore
+chromadb = None  # type: ignore
+Chroma = None  # type: ignore
+_CHROMA_BACKEND = "lazy"
+_CHROMADB_IMPORT_ERROR = None
+DashScopeEmbeddings = None  # type: ignore
+embeddings = None
+_EMBEDDINGS_IMPORT_ERROR = None
 
 # 1. 初始化 Embedding 模型
 if not os.getenv("DASHSCOPE_API_KEY"):
     print("⚠️ 警告: 未检测到 DASHSCOPE_API_KEY，记忆功能将无法使用")
-
-embeddings = DashScopeEmbeddings(
-    model="text-embedding-v3",
-    dashscope_api_key=os.getenv("DASHSCOPE_API_KEY")
-)
 
 PERSIST_DIRECTORY = "./chroma_memory_db"
 TOPIC_OPTION = "option"
@@ -51,6 +38,67 @@ STOCK_PORTFOLIO_TOPIC_KEYWORDS = (
     "持仓体检", "自动持仓体检", "我的持仓", "我的股票", "股票持仓", "持仓分析", "仓位", "调仓",
     "加仓", "减仓", "股票组合", "股票账户", "前3大持仓", "行业分布",
 )
+
+
+def _get_embeddings():
+    global DashScopeEmbeddings, embeddings, _EMBEDDINGS_IMPORT_ERROR
+    if embeddings is not None:
+        return embeddings
+    try:
+        from langchain_community.embeddings import DashScopeEmbeddings as _DashScopeEmbeddings
+
+        DashScopeEmbeddings = _DashScopeEmbeddings  # type: ignore
+        embeddings = DashScopeEmbeddings(
+            model="text-embedding-v3",
+            dashscope_api_key=os.getenv("DASHSCOPE_API_KEY"),
+        )
+        return embeddings
+    except Exception as exc:
+        _EMBEDDINGS_IMPORT_ERROR = exc
+        raise RuntimeError(f"Embedding dependencies unavailable: {exc}") from exc
+
+
+def _load_chroma_backend():
+    global Settings, chromadb, Chroma, _CHROMA_BACKEND, _CHROMADB_IMPORT_ERROR
+    if Chroma is not None and Settings is not None and chromadb is not None:
+        return True
+    try:
+        from chromadb.config import Settings as _Settings
+        import chromadb as _chromadb
+
+        Settings = _Settings  # type: ignore
+        chromadb = _chromadb  # type: ignore
+    except Exception as exc:
+        _CHROMADB_IMPORT_ERROR = exc
+        return False
+
+    try:
+        from langchain_chroma import Chroma as _Chroma  # type: ignore
+
+        Chroma = _Chroma  # type: ignore
+        _CHROMA_BACKEND = "langchain_chroma"
+        return True
+    except Exception as chroma_import_exc:
+        try:
+            from langchain_core._api.deprecation import LangChainDeprecationWarning  # type: ignore
+        except Exception:
+            LangChainDeprecationWarning = Warning  # type: ignore
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                category=LangChainDeprecationWarning,
+                message=r".*langchain_community\.vectorstores\.Chroma.*",
+            )
+            try:
+                from langchain_community.vectorstores import Chroma as _LegacyChroma  # type: ignore
+
+                Chroma = _LegacyChroma  # type: ignore
+                _CHROMA_BACKEND = "langchain_community"
+                return True
+            except Exception as legacy_chroma_import_exc:
+                _CHROMA_BACKEND = "unavailable"
+                _CHROMADB_IMPORT_ERROR = legacy_chroma_import_exc or chroma_import_exc
+                return False
 
 
 def _needs_manual_persist() -> bool:
@@ -70,6 +118,8 @@ def _needs_manual_persist() -> bool:
 def get_vector_store():
     """获取或创建向量数据库实例"""
     # 修复逻辑：显式定义 Settings 对象，防止版本兼容性问题
+    if not _load_chroma_backend():
+        raise RuntimeError(f"Chroma dependencies unavailable: {_CHROMADB_IMPORT_ERROR}")
     settings = Settings(
         anonymized_telemetry=False,
         is_persistent=True  # <--- [新增] 明确告诉它我要持久化
@@ -77,7 +127,7 @@ def get_vector_store():
 
     return Chroma(
         collection_name="user_chat_history",
-        embedding_function=embeddings,
+        embedding_function=_get_embeddings(),
         persist_directory=PERSIST_DIRECTORY,
         client_settings=settings,
         # 强制指定 Cosine 距离
@@ -154,6 +204,84 @@ def _build_conversation_memory_where(user_id: str) -> dict:
     return {"user_id": str(user_id)}
 
 
+def _get_default_agent_memory_engine():
+    try:
+        import data_engine as de
+
+        return getattr(de, "engine", None)
+    except Exception:
+        return None
+
+
+def _agent_memory_allows_source(source_id: str, registry_engine=None) -> bool:
+    source = str(source_id or "").strip()
+    if not source:
+        return True
+    engine = registry_engine if registry_engine is not None else _get_default_agent_memory_engine()
+    if engine is None:
+        return True
+    try:
+        return is_agent_memory_active(
+            engine,
+            source_type=SOURCE_CHROMA_CHAT_HISTORY,
+            source_id=source,
+        )
+    except Exception as exc:
+        print(f"[memory-registry] active check failed source_id={source} err={exc}")
+        return True
+
+
+def _record_conversation_memory_use(source_id: str, registry_engine=None) -> None:
+    source = str(source_id or "").strip()
+    if not source:
+        return
+    engine = registry_engine if registry_engine is not None else _get_default_agent_memory_engine()
+    if engine is None:
+        return
+    try:
+        record_agent_memory_use(
+            engine,
+            source_type=SOURCE_CHROMA_CHAT_HISTORY,
+            source_id=source,
+        )
+    except Exception as exc:
+        print(f"[memory-registry] use record failed source_id={source} err={exc}")
+
+
+def _register_conversation_memory_best_effort(
+    registry_engine,
+    *,
+    user_id: str,
+    topic: str,
+    source: str,
+    source_id: str,
+    user_input: str,
+    ai_response: str,
+    timestamp: str,
+) -> None:
+    engine = registry_engine if registry_engine is not None else _get_default_agent_memory_engine()
+    if engine is None:
+        return
+    try:
+        register_conversation_memory(
+            engine,
+            user_id=user_id,
+            topic=topic,
+            source=source,
+            source_id=source_id,
+            user_input=user_input,
+            ai_response=ai_response,
+            timestamp=timestamp,
+            vector_ref={
+                "collection": "user_chat_history",
+                "persist_directory": PERSIST_DIRECTORY,
+                "source_id": source_id,
+            },
+        )
+    except Exception as exc:
+        print(f"[memory-registry] conversation register failed user={user_id} err={exc}")
+
+
 def _memory_timestamp_in_window(timestamp: str, since: str = "", until: str = "") -> bool:
     ts = _parse_memory_timestamp(timestamp)
     if since:
@@ -173,6 +301,7 @@ def retrieve_recent_conversation_memory(
     limit: int = 6,
     since: str = "",
     until: str = "",
+    registry_engine=None,
 ) -> str:
     """按用户与时间窗口读取最近对话记录，用于“昨天聊了什么/上次说过什么”这类问题。"""
     if not user_id:
@@ -193,6 +322,9 @@ def retrieve_recent_conversation_memory(
             timestamp = str(meta.get("timestamp") or "")
             if not _memory_timestamp_in_window(timestamp, since=since, until=until):
                 continue
+            source_id = str(meta.get("memory_source_id") or "")
+            if not _agent_memory_allows_source(source_id, registry_engine=registry_engine):
+                continue
             question, answer = _parse_memory_qa(doc)
             rows.append(
                 {
@@ -200,6 +332,7 @@ def retrieve_recent_conversation_memory(
                     "ts": _parse_memory_timestamp(timestamp) or datetime.min,
                     "question": question,
                     "answer": answer,
+                    "source_id": source_id,
                 }
             )
 
@@ -212,6 +345,7 @@ def retrieve_recent_conversation_memory(
         for item in selected:
             answer = item["answer"][:260]
             question = item["question"][:180]
+            _record_conversation_memory_use(str(item.get("source_id") or ""), registry_engine=registry_engine)
             lines.append(f"- [{item['timestamp'] or '时间未知'}] 用户问: {question}\n  AI回答片段: {answer}")
         return "\n".join(lines)
     except Exception as e:
@@ -219,7 +353,14 @@ def retrieve_recent_conversation_memory(
         return ""
 
 
-def save_interaction(user_id: str, user_input: str, ai_response: str, topic: str = "", source: str = ""):
+def save_interaction(
+    user_id: str,
+    user_input: str,
+    ai_response: str,
+    topic: str = "",
+    source: str = "",
+    registry_engine=None,
+):
     """
     [写入记忆] 带有显式持久化和错误检查
     """
@@ -233,6 +374,14 @@ def save_interaction(user_id: str, user_input: str, ai_response: str, topic: str
         timestamp = datetime.now().strftime('%Y-%m-%d %H:%M')
         content = f"[{timestamp}] 用户问: {user_input}\nAI回答: {ai_response}"
         topic_norm = _normalize_topic(topic, fallback_text=f"{user_input}\n{ai_response}")
+        memory_source_id = build_chroma_memory_source_id(
+            user_id=str(user_id),
+            timestamp=timestamp,
+            topic=topic_norm,
+            source=str(source or ""),
+            user_input=str(user_input or ""),
+            ai_response=str(ai_response or ""),
+        )
 
         doc = Document(
             page_content=content,
@@ -241,6 +390,7 @@ def save_interaction(user_id: str, user_input: str, ai_response: str, topic: str
                 "timestamp": timestamp,
                 "topic": topic_norm,
                 "source": str(source or ""),
+                "memory_source_id": memory_source_id,
             }
         )
 
@@ -253,6 +403,17 @@ def save_interaction(user_id: str, user_input: str, ai_response: str, topic: str
                 vector_store.persist()
             except AttributeError:
                 pass
+
+        _register_conversation_memory_best_effort(
+            registry_engine,
+            user_id=str(user_id),
+            topic=topic_norm,
+            source=str(source or ""),
+            source_id=memory_source_id,
+            user_input=str(user_input or ""),
+            ai_response=str(ai_response or ""),
+            timestamp=timestamp,
+        )
 
         print("✅ [记忆系统] 写入成功！")
 
@@ -268,6 +429,7 @@ def retrieve_relevant_memory(
     score_threshold: float = 0.5,
     query_topic: str = "",
     strict_topic: bool = False,
+    registry_engine=None,
 ) -> str:
     """
     [读取记忆]
@@ -312,7 +474,13 @@ def retrieve_relevant_memory(
                     print(f"  ❌ 主题不符 (doc_topic={doc_topic})")
                     continue
 
+            source_id = str((doc.metadata or {}).get("memory_source_id") or "")
+            if not _agent_memory_allows_source(source_id, registry_engine=registry_engine):
+                print(f"  鉂?璁板繂宸插仠鐢?(source_id={source_id})")
+                continue
+
             valid_memories.append(doc.page_content)
+            _record_conversation_memory_use(source_id, registry_engine=registry_engine)
             print(f"  ✅ 命中 (Dist: {score:.3f}, topic={doc_topic}): {doc.page_content[:30]}...")
             if len(valid_memories) >= max(int(k or 3), 1):
                 break

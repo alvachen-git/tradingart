@@ -4,6 +4,7 @@ from sqlalchemy import create_engine
 from sqlalchemy import text
 
 import chat_feedback_service as feedback_service
+import agent_memory_registry as registry
 
 
 class TestChatFeedbackService(unittest.TestCase):
@@ -64,6 +65,40 @@ class TestChatFeedbackService(unittest.TestCase):
 
         self.assertEqual(invalid["code"], "invalid_reason_code")
         self.assertTrue(valid["ok"])
+
+    def test_submit_feedback_registers_agent_memory_event(self):
+        feedback_service.save_chat_answer_event(
+            self.engine,
+            task_id="task-reg",
+            user_id="u1",
+            trace_id="trace_reg",
+            answer_id="answer_reg",
+            prompt_text="review my holdings",
+            response_text="answer",
+            intent_domain="stock_portfolio",
+            feedback_allowed=True,
+        )
+
+        result = feedback_service.submit_chat_feedback(
+            self.engine,
+            answer_id="answer_reg",
+            trace_id="trace_reg",
+            user_id="u1",
+            feedback_type="down",
+            reason_code="too_generic",
+            feedback_text="Please be more specific",
+        )
+
+        self.assertTrue(result["ok"])
+        rows = registry.list_agent_memories(
+            self.engine,
+            user_id="u1",
+            memory_type=registry.MEMORY_TYPE_EPISODIC,
+            source_type=registry.SOURCE_CHAT_FEEDBACK_EVENT,
+            status="",
+        )
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["domain"], "stock_portfolio")
 
     def test_submit_feedback_rejects_wrong_user(self):
         feedback_service.save_chat_answer_event(
@@ -306,6 +341,14 @@ class TestChatFeedbackService(unittest.TestCase):
         self.assertEqual(sample["sample_status"], "new")
         self.assertEqual(sample["optimization_type"], "prompt")
         self.assertEqual(sample["latest_feedback_text"], "still generic")
+        rows = registry.list_agent_memories(
+            self.engine,
+            memory_type=registry.MEMORY_TYPE_PROCEDURAL,
+            source_type=registry.SOURCE_CHAT_FEEDBACK_SAMPLE,
+            status="",
+        )
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["memory_key"], sample["sample_key"])
 
     def test_update_feedback_sample_persists_status_and_reviewer(self):
         create_result = feedback_service.upsert_chat_feedback_sample(

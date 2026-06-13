@@ -3,6 +3,7 @@ import unittest
 from sqlalchemy import create_engine, text
 
 import user_profile_memory as upm
+import agent_memory_registry as registry
 
 
 class TestUserProfileMemory(unittest.TestCase):
@@ -382,6 +383,84 @@ class TestUserProfileMemory(unittest.TestCase):
         self.assertIn("性别：男性", out["profile_context"])
         self.assertIn("爱好：打网球", out["profile_context"])
 
+    def test_option_buy_side_strategy_preference_is_not_stored_as_hobby(self):
+        out = upm.build_profile_memory_context(
+            self.engine,
+            user_id="u1",
+            prompt_text="记住我，我喜欢做买期权的策略",
+        )
+
+        self.assertTrue(out["should_short_circuit"])
+        self.assertEqual(out["memory_action"], "updated")
+        self.assertEqual(self._active_value(upm.KEY_STABLE_PREFERENCE), "期权买方策略")
+        self.assertEqual(self._active_value(upm.KEY_HOBBIES), "")
+        self.assertIn("【稳定事实】", out["profile_context"])
+        self.assertIn("稳定偏好：期权买方策略", out["profile_context"])
+        self.assertNotIn("爱好：", out["profile_context"])
+        self.assertIn("交易偏好", out["confirmation"])
+        self.assertNotIn("爱好", out["confirmation"])
+
+    def test_misclassified_option_strategy_hobby_repairs_to_stable_preference(self):
+        upm.upsert_profile_memory(
+            self.engine,
+            user_id="u1",
+            memory_key=upm.KEY_HOBBIES,
+            memory_value="做买期权的策略",
+            source_text="旧版本误分类",
+        )
+
+        memories = upm.get_active_profile_memories(self.engine, "u1")
+        by_key = {item["memory_key"]: item["memory_value"] for item in memories}
+
+        self.assertEqual(by_key.get(upm.KEY_STABLE_PREFERENCE), "期权买方策略")
+        self.assertNotIn(upm.KEY_HOBBIES, by_key)
+        with self.engine.begin() as conn:
+            superseded_count = conn.execute(
+                text(
+                    "SELECT COUNT(*) FROM user_profile_memory "
+                    "WHERE user_id='u1' AND memory_key='hobbies' AND status='superseded'"
+                )
+            ).scalar()
+        self.assertEqual(superseded_count, 1)
+
+    def test_query_trading_preference_returns_stable_preference(self):
+        upm.upsert_profile_memory(
+            self.engine,
+            user_id="u1",
+            memory_key=upm.KEY_STABLE_PREFERENCE,
+            memory_value="期权买方策略",
+        )
+
+        out = upm.build_profile_memory_context(
+            self.engine,
+            user_id="u1",
+            prompt_text="你记得我的交易偏好吗？",
+        )
+
+        self.assertTrue(out["should_short_circuit"])
+        self.assertEqual(out["memory_action"], "query")
+        self.assertIn("交易偏好", out["confirmation"])
+        self.assertIn("期权买方策略", out["confirmation"])
+
+    def test_delete_trading_preference_by_natural_strategy_phrase(self):
+        upm.upsert_profile_memory(
+            self.engine,
+            user_id="u1",
+            memory_key=upm.KEY_STABLE_PREFERENCE,
+            memory_value="期权买方策略",
+        )
+
+        out = upm.build_profile_memory_context(
+            self.engine,
+            user_id="u1",
+            prompt_text="删除我喜欢做买期权的这条记忆",
+        )
+
+        self.assertTrue(out["should_short_circuit"])
+        self.assertEqual(out["memory_action"], "challenge")
+        self.assertEqual(self._active_value(upm.KEY_STABLE_PREFERENCE), "")
+        self.assertIn("停用", out["confirmation"])
+
     def test_inferred_personal_profile_uses_lower_confidence(self):
         out = upm.build_profile_memory_context(
             self.engine,
@@ -537,6 +616,26 @@ class TestUserProfileMemory(unittest.TestCase):
 
         self.assertEqual(out["memory_action"], "guest_skip")
         self.assertEqual(upm.get_active_profile_memories(self.engine, "访客"), [])
+
+    def test_profile_upsert_registers_agent_memory(self):
+        upm.upsert_profile_memory(
+            self.engine,
+            user_id="u1",
+            memory_key=upm.KEY_RISK_PREFERENCE,
+            memory_value="profile-risk",
+            source_text="profile source",
+        )
+
+        rows = registry.list_agent_memories(
+            self.engine,
+            user_id="u1",
+            namespace="user:u1:profile",
+            memory_type=registry.MEMORY_TYPE_SEMANTIC,
+        )
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["memory_key"], upm.KEY_RISK_PREFERENCE)
+        self.assertEqual(rows[0]["source_type"], registry.SOURCE_PROFILE_MEMORY)
 
 
 if __name__ == "__main__":

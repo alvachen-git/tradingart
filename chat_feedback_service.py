@@ -4,6 +4,11 @@ import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
+from agent_memory_registry import (
+    register_feedback_event_memory,
+    register_feedback_sample_memory,
+)
+
 
 CHAT_FEEDBACK_ALLOWED_TYPES = {"up", "down"}
 CHAT_FEEDBACK_REASON_CODES = {
@@ -30,6 +35,33 @@ _CHAT_FEEDBACK_SCHEMA_LOCK = threading.Lock()
 _CHAT_FEEDBACK_SCHEMA_READY = False
 _CHAT_FEEDBACK_SCHEMA_ENGINE_ID = ""
 _CHAT_FEEDBACK_SCHEMA_VERSION = "v2_samples"
+
+
+def _register_feedback_event_best_effort(engine, **kwargs) -> None:
+    try:
+        register_feedback_event_memory(engine, **kwargs)
+    except Exception as exc:
+        print(f"[chat-feedback] agent feedback event register failed err={exc}")
+
+
+def _register_feedback_sample_best_effort(engine, sample: Dict[str, Any]) -> None:
+    if not sample:
+        return
+    try:
+        register_feedback_sample_memory(
+            engine,
+            sample_key=str(sample.get("sample_key") or ""),
+            prompt_text=str(sample.get("prompt_text") or ""),
+            reason_code=str(sample.get("reason_code") or ""),
+            intent_domain=str(sample.get("intent_domain") or "general"),
+            occurrence_count=int(sample.get("occurrence_count") or 1),
+            latest_feedback_text=str(sample.get("latest_feedback_text") or ""),
+            sample_status=str(sample.get("sample_status") or "new"),
+            optimization_type=str(sample.get("optimization_type") or ""),
+            review_notes=str(sample.get("review_notes") or ""),
+        )
+    except Exception as exc:
+        print(f"[chat-feedback] agent feedback sample register failed err={exc}")
 
 
 def generate_chat_trace_id() -> str:
@@ -409,6 +441,18 @@ def save_chat_feedback_event(
                     "created_at": datetime.now().isoformat(),
                 },
             )
+        _register_feedback_event_best_effort(
+            engine,
+            answer_id=answer_id,
+            trace_id=trace_id,
+            user_id=str(user_id or ""),
+            prompt_text=str(prompt_text or ""),
+            response_text=str(response_text or ""),
+            intent_domain=str(intent_domain or "general"),
+            feedback_type=str(feedback_type or ""),
+            reason_code=str(reason_code or ""),
+            feedback_text=str(feedback_text or ""),
+        )
         return True
     except Exception as exc:
         print(f"[chat-feedback] save feedback failed answer_id={answer_id} err={exc}")
@@ -782,10 +826,12 @@ def upsert_chat_feedback_sample(
                         "updated_at": now_iso,
                     },
                 )
+                sample = get_chat_feedback_sample(engine, sample_key=normalized_key)
+                _register_feedback_sample_best_effort(engine, sample)
                 return {
                     "ok": True,
                     "code": "updated",
-                    "sample": get_chat_feedback_sample(engine, sample_key=normalized_key),
+                    "sample": sample,
                 }
 
             conn.execute(
@@ -827,10 +873,12 @@ def upsert_chat_feedback_sample(
                     "updated_at": now_iso,
                 },
             )
+        sample = get_chat_feedback_sample(engine, sample_key=normalized_key)
+        _register_feedback_sample_best_effort(engine, sample)
         return {
             "ok": True,
             "code": "created",
-            "sample": get_chat_feedback_sample(engine, sample_key=normalized_key),
+            "sample": sample,
         }
     except Exception as exc:
         print(f"[chat-feedback] upsert sample failed sample_key={normalized_key} err={exc}")
@@ -897,7 +945,9 @@ def update_chat_feedback_sample(
                     "updated_at": now_iso,
                 },
             )
-        return {"ok": True, "code": "ok", "sample": get_chat_feedback_sample(engine, sample_key=normalized_key)}
+        sample = get_chat_feedback_sample(engine, sample_key=normalized_key)
+        _register_feedback_sample_best_effort(engine, sample)
+        return {"ok": True, "code": "ok", "sample": sample}
     except Exception as exc:
         print(f"[chat-feedback] update sample failed sample_key={normalized_key} err={exc}")
         return {"ok": False, "code": "save_failed"}
