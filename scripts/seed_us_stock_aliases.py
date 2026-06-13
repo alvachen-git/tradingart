@@ -101,7 +101,7 @@ US_ALIAS_MAP: Dict[str, List[str]] = {
     # Stablecoin infra
     "COIN": ["Coinbase"],
     "HOOD": ["罗宾汉", "Robinhood"],
-    "SQ": ["Block", "Square"],
+    "XYZ": ["Block", "Square"],
     "MSTR": ["微策略", "Strategy"],
     # Oil
     "XOM": ["埃克森美孚"],

@@ -135,7 +135,7 @@ SECTOR_SYMBOLS = {
     ],
     # 稳定币/支付与交易基础设施（不含高波动矿股）
     "stablecoin_infra": [
-        "COIN", "HOOD", "PYPL", "SQ", "MSTR",
+        "COIN", "HOOD", "PYPL", "XYZ", "MSTR",
     ],
     # 石油与油服炼化
     "oil_energy": [
