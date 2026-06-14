@@ -1648,6 +1648,483 @@ def get_comprehensive_market_data():
 #   核心功能：AI 专用 IV 查询工具（商品 + ETF 期权）
 # ==========================================
 
+def _normalize_iv_scan_date(value) -> str:
+    digits = re.sub(r"\D", "", str(value or ""))
+    return digits[:8] if len(digits) >= 8 else ""
+
+
+def _normalize_iv_scan_scope(value) -> str:
+    raw = str(value or "").strip().lower()
+    if raw in {"commodity", "commodities", "future", "futures", "商品", "期货"}:
+        return "commodity"
+    if raw in {"etf", "fund", "基金"}:
+        return "etf"
+    return "all"
+
+
+def _normalize_iv_scan_direction(value) -> str:
+    raw = str(value or "").strip().lower()
+    if raw in {"decrease", "down", "decline", "fall", "drop", "asc", "small_to_large"}:
+        return "decrease"
+    if any(token in raw for token in ("降", "跌", "回落", "由小到大", "小到大")):
+        return "decrease"
+    return "increase"
+
+
+def _normalize_iv_scan_sort_by(value) -> str:
+    raw = str(value or "").strip().lower()
+    if raw in {"relative_change", "relative", "pct_change", "percent_change", "ratio"}:
+        return "relative_change"
+    if any(token in raw for token in ("相对", "百分比", "比例")):
+        return "relative_change"
+    return "point_change"
+
+
+def _clamp_iv_scan_limit(value) -> int:
+    try:
+        limit = int(value)
+    except Exception:
+        limit = 5
+    return max(1, min(10, limit))
+
+
+def _resolve_commodity_scan_code(symbol: str) -> str:
+    raw = str(symbol or "").strip()
+    if not raw:
+        return ""
+
+    common_aliases = {
+        "沪锡": "SN", "锡": "SN",
+        "沪银": "AG", "白银": "AG", "银": "AG",
+        "沪金": "AU", "黄金": "AU", "金": "AU",
+        "沪铜": "CU", "铜": "CU",
+        "沪铝": "AL", "铝": "AL",
+        "沪锌": "ZN", "锌": "ZN",
+        "沪镍": "NI", "镍": "NI",
+        "碳酸锂": "LC", "工业硅": "SI", "多晶硅": "PS",
+        "豆粕": "M", "棕榈油": "P", "铁矿石": "I", "原油": "SC",
+    }
+    if raw in common_aliases:
+        return common_aliases[raw]
+
+    clean = re.sub(r"[^A-Za-z]", "", raw).upper()
+    if clean in PRODUCT_MAP:
+        return clean
+
+    if raw in CN_TO_CODE:
+        return str(CN_TO_CODE.get(raw) or "").upper()
+
+    for prefix in ("沪", "郑", "大", "广", "上期", "郑商", "大商", "广期", "中金"):
+        if raw.startswith(prefix):
+            stripped = raw[len(prefix):]
+            if stripped in CN_TO_CODE:
+                return str(CN_TO_CODE.get(stripped) or "").upper()
+
+    for code, name in PRODUCT_MAP.items():
+        if name and str(name) in raw:
+            return str(code or "").upper()
+    return ""
+
+
+def _resolve_etf_scan_code(symbol: str) -> tuple[str, str]:
+    raw = str(symbol or "").strip()
+    if not raw:
+        return "", ""
+
+    upper = raw.upper()
+    matches = []
+    for name, code in ETF_MAP.items():
+        name_upper = str(name or "").upper()
+        if name_upper and name_upper in upper:
+            matches.append((len(name_upper), str(code or "").upper(), str(name or "")))
+            continue
+        short_name = name_upper.replace("ETF", "")
+        if short_name and len(short_name) >= 2 and short_name in upper:
+            matches.append((len(short_name), str(code or "").upper(), str(name or "")))
+
+    if matches:
+        _, code, name = sorted(matches, key=lambda item: item[0], reverse=True)[0]
+        return code, name
+
+    match_code = re.search(r"(510\d{3}|159\d{3}|588\d{3})(?:\.(SH|SZ))?", upper)
+    if match_code:
+        raw_code = match_code.group(1)
+        suffix = match_code.group(2)
+        code = f"{raw_code}.{suffix}" if suffix else (f"{raw_code}.SZ" if raw_code.startswith("159") else f"{raw_code}.SH")
+        return code.upper(), f"{raw_code}ETF"
+
+    return "", ""
+
+
+def _etf_scan_display_name(etf_code: str) -> str:
+    code = str(etf_code or "").upper()
+    for name, mapped_code in ETF_MAP.items():
+        if str(mapped_code or "").upper() == code:
+            return str(name or code)
+    return code
+
+
+def _extract_iv_scan_dates(df: pd.DataFrame) -> list[str]:
+    if df is None or df.empty:
+        return []
+    date_col = "trade_date" if "trade_date" in df.columns else df.columns[0]
+    dates = (
+        df[date_col]
+        .astype(str)
+        .str.replace("-", "", regex=False)
+        .str.replace("/", "", regex=False)
+        .str.slice(0, 8)
+    )
+    return [d for d in dates.tolist() if re.fullmatch(r"\d{8}", str(d or ""))]
+
+
+def _read_commodity_iv_scan_dates(commodity_code: str = "", end_date: str = "", limit: int = 5) -> list[str]:
+    if engine is None:
+        return []
+    safe_limit = max(1, min(20, int(limit or 5)))
+    conditions = [
+        "iv > 0",
+        "UPPER(ts_code) NOT LIKE '%%TAS%%'",
+        "UPPER(ts_code) REGEXP '[0-9]'",
+    ]
+    params = {}
+    if commodity_code:
+        conditions.append(sql_prefix_condition(commodity_code))
+    if end_date:
+        conditions.append("REPLACE(trade_date, '-', '') <= :end_date")
+        params["end_date"] = end_date
+
+    sql = text(
+        f"""
+        SELECT DISTINCT REPLACE(trade_date, '-', '') AS trade_date
+        FROM commodity_iv_history
+        WHERE {' AND '.join(conditions)}
+        ORDER BY trade_date DESC
+        LIMIT {safe_limit}
+        """
+    )
+    try:
+        df = pd.read_sql(sql, engine, params=params)
+    except Exception:
+        return []
+    return _extract_iv_scan_dates(df)
+
+
+def _read_etf_iv_scan_dates(etf_code: str = "", end_date: str = "", limit: int = 5) -> list[str]:
+    if engine is None:
+        return []
+    safe_limit = max(1, min(20, int(limit or 5)))
+    conditions = ["iv > 0"]
+    params = {}
+    if etf_code:
+        conditions.append("UPPER(etf_code) = :etf_code")
+        params["etf_code"] = etf_code.upper()
+    if end_date:
+        conditions.append("REPLACE(trade_date, '-', '') <= :end_date")
+        params["end_date"] = end_date
+
+    sql = text(
+        f"""
+        SELECT DISTINCT REPLACE(trade_date, '-', '') AS trade_date
+        FROM etf_iv_history
+        WHERE {' AND '.join(conditions)}
+        ORDER BY trade_date DESC
+        LIMIT {safe_limit}
+        """
+    )
+    try:
+        df = pd.read_sql(sql, engine, params=params)
+    except Exception:
+        return []
+    return _extract_iv_scan_dates(df)
+
+
+def _resolve_iv_scan_dates(fetch_dates, start_date: str, end_date: str) -> tuple[str, str]:
+    start = _normalize_iv_scan_date(start_date)
+    end = _normalize_iv_scan_date(end_date)
+    if not end:
+        latest_dates = fetch_dates("", 2)
+        if latest_dates:
+            end = latest_dates[0]
+            if not start and len(latest_dates) > 1:
+                start = latest_dates[1]
+    if end and not start:
+        previous_dates = fetch_dates(end, 2)
+        if len(previous_dates) > 1:
+            start = previous_dates[1]
+    return start, end
+
+
+def _commodity_iv_scan_records(start_date: str, end_date: str, commodity_code: str = "") -> tuple[list[dict], list[str]]:
+    notes: list[str] = []
+    start, end = _resolve_iv_scan_dates(
+        lambda before, limit: _read_commodity_iv_scan_dates(commodity_code, before, limit),
+        start_date,
+        end_date,
+    )
+    if not start or not end:
+        latest = _read_commodity_iv_scan_dates(commodity_code, "", 5)
+        latest_text = ", ".join(latest[:5]) if latest else "无"
+        return [], [f"商品IV缺少可比日期；最近可用日期：{latest_text}"]
+
+    conditions = [
+        "iv > 0",
+        "UPPER(ts_code) NOT LIKE '%%TAS%%'",
+        "UPPER(ts_code) REGEXP '[0-9]'",
+        "REPLACE(trade_date, '-', '') IN (:start_date, :end_date)",
+    ]
+    params = {"start_date": start, "end_date": end}
+    if commodity_code:
+        conditions.append(sql_prefix_condition(commodity_code))
+
+    sql = text(
+        f"""
+        SELECT ts_code, REPLACE(trade_date, '-', '') AS trade_date, iv
+        FROM commodity_iv_history
+        WHERE {' AND '.join(conditions)}
+        """
+    )
+    try:
+        df = pd.read_sql(sql, engine, params=params)
+    except Exception as exc:
+        return [], [f"商品IV查询失败：{exc}"]
+
+    if df is None or df.empty:
+        latest = _read_commodity_iv_scan_dates(commodity_code, "", 5)
+        latest_text = ", ".join(latest[:5]) if latest else "无"
+        return [], [f"商品IV在 {start} / {end} 无数据；最近可用日期：{latest_text}"]
+
+    out = df.copy()
+    out["contract_code"] = out["ts_code"].astype(str).str.upper().str.strip()
+    out["trade_date"] = out["trade_date"].astype(str).str.replace("-", "", regex=False).str.slice(0, 8)
+    out["iv"] = pd.to_numeric(out["iv"], errors="coerce")
+    out = out.dropna(subset=["contract_code", "trade_date", "iv"])
+    out = out[out["iv"] > 0]
+    out = out[out["contract_code"].str.contains(r"\d", regex=True, na=False)]
+    out = out[~out["contract_code"].str.contains("TAS", case=False, na=False)]
+    out["product_code"] = out["contract_code"].str.extract(r"^([A-Z]+)", expand=False).fillna("")
+    if commodity_code:
+        out = out[out["product_code"] == commodity_code.upper()]
+    out = out.sort_values(["contract_code", "trade_date"]).drop_duplicates(["contract_code", "trade_date"], keep="last")
+
+    start_df = out[out["trade_date"] == start][["contract_code", "product_code", "iv"]].rename(columns={"iv": "start_iv"})
+    end_df = out[out["trade_date"] == end][["contract_code", "product_code", "iv"]].rename(columns={"iv": "end_iv"})
+    merged = start_df.merge(end_df, on=["contract_code", "product_code"], how="inner")
+    if merged.empty:
+        latest = _read_commodity_iv_scan_dates(commodity_code, "", 5)
+        latest_text = ", ".join(latest[:5]) if latest else "无"
+        return [], [f"商品IV在 {start} / {end} 缺少同一合约可比数据；最近可用日期：{latest_text}"]
+
+    records: list[dict] = []
+    for _, row in merged.iterrows():
+        start_iv = float(row["start_iv"])
+        end_iv = float(row["end_iv"])
+        point_change = end_iv - start_iv
+        relative_change = point_change / start_iv * 100.0 if start_iv > 0 else None
+        product_code = str(row["product_code"] or "").upper()
+        records.append(
+            {
+                "asset_type": "商品",
+                "asset_name": PRODUCT_MAP.get(product_code, product_code),
+                "asset_code": str(row["contract_code"] or "").upper(),
+                "start_date": start,
+                "end_date": end,
+                "start_iv": start_iv,
+                "end_iv": end_iv,
+                "point_change": point_change,
+                "relative_change": relative_change,
+            }
+        )
+    return records, notes
+
+
+def _etf_iv_scan_records(start_date: str, end_date: str, etf_code: str = "") -> tuple[list[dict], list[str]]:
+    notes: list[str] = []
+    start, end = _resolve_iv_scan_dates(
+        lambda before, limit: _read_etf_iv_scan_dates(etf_code, before, limit),
+        start_date,
+        end_date,
+    )
+    if not start or not end:
+        latest = _read_etf_iv_scan_dates(etf_code, "", 5)
+        latest_text = ", ".join(latest[:5]) if latest else "无"
+        return [], [f"ETF IV缺少可比日期；最近可用日期：{latest_text}"]
+
+    conditions = ["iv > 0", "REPLACE(trade_date, '-', '') IN (:start_date, :end_date)"]
+    params = {"start_date": start, "end_date": end}
+    if etf_code:
+        conditions.append("UPPER(etf_code) = :etf_code")
+        params["etf_code"] = etf_code.upper()
+
+    sql = text(
+        f"""
+        SELECT etf_code, REPLACE(trade_date, '-', '') AS trade_date, iv
+        FROM etf_iv_history
+        WHERE {' AND '.join(conditions)}
+        """
+    )
+    try:
+        df = pd.read_sql(sql, engine, params=params)
+    except Exception as exc:
+        return [], [f"ETF IV查询失败：{exc}"]
+
+    if df is None or df.empty:
+        latest = _read_etf_iv_scan_dates(etf_code, "", 5)
+        latest_text = ", ".join(latest[:5]) if latest else "无"
+        return [], [f"ETF IV在 {start} / {end} 无数据；最近可用日期：{latest_text}"]
+
+    out = df.copy()
+    out["etf_code"] = out["etf_code"].astype(str).str.upper().str.strip()
+    out["trade_date"] = out["trade_date"].astype(str).str.replace("-", "", regex=False).str.slice(0, 8)
+    out["iv"] = pd.to_numeric(out["iv"], errors="coerce")
+    out = out.dropna(subset=["etf_code", "trade_date", "iv"])
+    out = out[out["iv"] > 0]
+    if etf_code:
+        out = out[out["etf_code"] == etf_code.upper()]
+    out = out.sort_values(["etf_code", "trade_date"]).drop_duplicates(["etf_code", "trade_date"], keep="last")
+
+    start_df = out[out["trade_date"] == start][["etf_code", "iv"]].rename(columns={"iv": "start_iv"})
+    end_df = out[out["trade_date"] == end][["etf_code", "iv"]].rename(columns={"iv": "end_iv"})
+    merged = start_df.merge(end_df, on=["etf_code"], how="inner")
+    if merged.empty:
+        latest = _read_etf_iv_scan_dates(etf_code, "", 5)
+        latest_text = ", ".join(latest[:5]) if latest else "无"
+        return [], [f"ETF IV在 {start} / {end} 缺少同一标的可比数据；最近可用日期：{latest_text}"]
+
+    records: list[dict] = []
+    for _, row in merged.iterrows():
+        start_iv = float(row["start_iv"])
+        end_iv = float(row["end_iv"])
+        point_change = end_iv - start_iv
+        relative_change = point_change / start_iv * 100.0 if start_iv > 0 else None
+        code = str(row["etf_code"] or "").upper()
+        records.append(
+            {
+                "asset_type": "ETF",
+                "asset_name": _etf_scan_display_name(code),
+                "asset_code": code,
+                "start_date": start,
+                "end_date": end,
+                "start_iv": start_iv,
+                "end_iv": end_iv,
+                "point_change": point_change,
+                "relative_change": relative_change,
+            }
+        )
+    return records, notes
+
+
+def _format_signed_number(value, digits: int = 2, suffix: str = "") -> str:
+    if value is None or (isinstance(value, float) and (math.isnan(value) or math.isinf(value))):
+        return "NA"
+    return f"{float(value):+.{digits}f}{suffix}"
+
+
+def _format_percent_value(value, digits: int = 2) -> str:
+    if value is None or (isinstance(value, float) and (math.isnan(value) or math.isinf(value))):
+        return "NA"
+    return f"{float(value):.{digits}f}%"
+
+
+def _format_iv_scan_report(records: list[dict], notes: list[str], direction: str, sort_by: str, limit: int) -> str:
+    metric_key = "relative_change" if sort_by == "relative_change" else "point_change"
+    reverse = direction != "decrease"
+
+    def metric_value(row: dict) -> float:
+        value = row.get(metric_key)
+        if value is None or (isinstance(value, float) and math.isnan(value)):
+            return -math.inf if reverse else math.inf
+        return float(value)
+
+    ranked = sorted(records, key=metric_value, reverse=reverse)[:limit]
+    if not ranked:
+        note_text = "\n".join(f"- {note}" for note in notes if note)
+        return (
+            "⚠️ 未找到可比 IV 数据。\n"
+            f"{note_text}\n"
+            "请检查日期是否为交易日、该标的是否已有 IV 历史，或换用最近可用日期。"
+        ).strip()
+
+    direction_text = "增幅最大" if direction != "decrease" else "降幅最大"
+    sort_text = "相对变化%" if sort_by == "relative_change" else "IV变化pct"
+    lines = [
+        f"### IV变化扫描：{direction_text} Top {len(ranked)}（按{sort_text}排序）",
+        "",
+        "| 排名 | 资产类型 | 品种/标的 | 合约/代码 | 起始日 | 起始IV | 结束日 | 结束IV | IV变化pct | 相对变化% |",
+        "|---:|---|---|---|---:|---:|---:|---:|---:|---:|",
+    ]
+    for idx, row in enumerate(ranked, start=1):
+        lines.append(
+            "| {rank} | {asset_type} | {asset_name} | {asset_code} | {start_date} | {start_iv} | {end_date} | {end_iv} | {point_change} | {relative_change} |".format(
+                rank=idx,
+                asset_type=row.get("asset_type", ""),
+                asset_name=row.get("asset_name", ""),
+                asset_code=row.get("asset_code", ""),
+                start_date=row.get("start_date", ""),
+                start_iv=_format_percent_value(row.get("start_iv")),
+                end_date=row.get("end_date", ""),
+                end_iv=_format_percent_value(row.get("end_iv")),
+                point_change=_format_signed_number(row.get("point_change")),
+                relative_change=_format_signed_number(row.get("relative_change"), suffix="%"),
+            )
+        )
+    if notes:
+        lines.extend(["", "数据提示："])
+        lines.extend(f"- {note}" for note in notes if note)
+    return "\n".join(lines)
+
+
+@tool
+def scan_iv_change_ranking(
+    start_date: str = "",
+    end_date: str = "",
+    asset_scope: str = "all",
+    symbol: str = "",
+    direction: str = "increase",
+    sort_by: str = "point_change",
+    limit: int = 5,
+):
+    """
+    扫描商品期权和 ETF 期权的 ATM/近 ATM IV 变化排行。
+
+    适用问题：IV增幅/降幅排行、IV扫描、指定日期区间的ATM IV变化排序、
+    哪些合约升波最多/降波最多。单标的最新IV或IV Rank请使用 get_commodity_iv_info。
+    """
+    if engine is None:
+        return "❌ 数据库未连接"
+
+    scope = _normalize_iv_scan_scope(asset_scope)
+    scan_direction = _normalize_iv_scan_direction(direction)
+    scan_sort_by = _normalize_iv_scan_sort_by(sort_by)
+    safe_limit = _clamp_iv_scan_limit(limit)
+    start = _normalize_iv_scan_date(start_date)
+    end = _normalize_iv_scan_date(end_date)
+    raw_symbol = str(symbol or "").strip()
+
+    commodity_code = _resolve_commodity_scan_code(raw_symbol)
+    etf_code, _ = _resolve_etf_scan_code(raw_symbol)
+
+    include_commodity = scope in {"all", "commodity"} and (not raw_symbol or bool(commodity_code))
+    include_etf = scope in {"all", "etf"} and (not raw_symbol or bool(etf_code))
+    if raw_symbol and not include_commodity and not include_etf:
+        return f"⚠️ 无法识别标的【{raw_symbol}】，请使用商品代码/名称（如 SN、沪锡）或 ETF 代码/名称。"
+
+    all_records: list[dict] = []
+    all_notes: list[str] = []
+
+    if include_commodity:
+        records, notes = _commodity_iv_scan_records(start, end, commodity_code)
+        all_records.extend(records)
+        all_notes.extend(notes)
+
+    if include_etf:
+        records, notes = _etf_iv_scan_records(start, end, etf_code)
+        all_records.extend(records)
+        all_notes.extend(notes)
+
+    return _format_iv_scan_report(all_records, all_notes, scan_direction, scan_sort_by, safe_limit)
+
+
 @tool
 def get_commodity_iv_info(query: str):
     """

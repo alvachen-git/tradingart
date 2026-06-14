@@ -163,6 +163,20 @@ MARKET_DATA_INTENT_KEYWORDS = (
     "几天", "多久", "多少点", "多少钱", "是什么水平", "分位", "rank", "报价", "数值",
 )
 
+IV_SCAN_SUBJECT_KEYWORDS = (
+    "波动率", "隐含波动率", "升波", "降波",
+)
+
+IV_SCAN_INTENT_KEYWORDS = (
+    "列出", "排行", "排名", "扫描", "筛选", "增幅", "降幅", "升波最多", "降波最多", "回落最多",
+    "由大到小", "由小到大", "最大", "最多", "top",
+)
+
+OPTION_DATA_SUBJECT_KEYWORDS = OPTION_DATA_SUBJECT_KEYWORDS + IV_SCAN_SUBJECT_KEYWORDS
+MARKET_DATA_SUBJECT_KEYWORDS = MARKET_DATA_SUBJECT_KEYWORDS + IV_SCAN_SUBJECT_KEYWORDS
+OPTION_DATA_INTENT_KEYWORDS = OPTION_DATA_INTENT_KEYWORDS + IV_SCAN_INTENT_KEYWORDS
+MARKET_DATA_INTENT_KEYWORDS = MARKET_DATA_INTENT_KEYWORDS + IV_SCAN_INTENT_KEYWORDS
+
 MARKET_DATA_EXCLUDED_KEYWORDS = OPTION_DATA_EXCLUDED_KEYWORDS + (
     "解释", "什么是", "什么意思", "原理", "为什么", "原因", "意味着", "举例", "护城河", "竞争对手",
     "隐忧", "值不值得", "该怎么做",

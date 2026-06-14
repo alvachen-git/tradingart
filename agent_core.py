@@ -52,6 +52,7 @@ from data_engine import (
     _build_futures_broker_position_signal,
     check_option_expiry_status,
     get_commodity_iv_info,
+    scan_iv_change_ranking,
     get_futures_broker_indicator_profile,
     get_futures_broker_group_position_moves,
     get_futures_broker_position_signal,
@@ -2424,6 +2425,7 @@ def build_generalist_tools():
     return [
         interpret_market_news_tool,
         analyze_kline_pattern, search_investment_knowledge, get_market_snapshot, get_commodity_iv_info,
+        scan_iv_change_ranking,
         search_broker_holdings_on_date, tool_analyze_position_change,
         tool_query_specific_option, get_historical_price, get_volume_oi, get_futures_oi_ranking,
         get_option_oi_ranking, get_option_volume_abnormal, get_option_oi_abnormal,
@@ -2449,6 +2451,7 @@ def build_monitor_tools():
         get_futures_inventory_receipt_profile,  # 库存/仓单
         get_futures_delivery_tospot_profile,  # 交割/期转现
         get_commodity_iv_info,  # IV/波动率/Rank
+        scan_iv_change_ranking,  # IV增幅/降幅排名/扫描
         search_broker_holdings_on_date,  # 期货商持仓排名
         tool_analyze_position_change,  # 持仓变动分析
         get_option_volume_abnormal,
@@ -2473,6 +2476,7 @@ def build_monitor_tools():
 def build_strategist_tools():
     return [
         get_commodity_iv_info,  # IV排名/波动率
+        scan_iv_change_ranking,  # IV增幅/降幅排名/扫描
         check_option_expiry_status,  # 到期日状态
         tool_query_specific_option,  # 查询特定期权合约
         get_option_volume_abnormal,  # 期权成交异动
@@ -3066,7 +3070,8 @@ def generalist_node(state: AgentState, llm):
         12.3 只问某期货商加多/加空是否利多利空，且没有给具体品种 -> get_futures_broker_indicator_profile
         13.查成交量和持仓量 -> get_volume_oi
         14.查期货持仓量排名 -> get_futures_oi_ranking
-        15.查期权波动率-> get_commodity_iv_info
+        15.查单个标的最新IV/IV Rank/近期趋势 -> get_commodity_iv_info
+        15.1 查IV增幅/降幅排行、IV扫描、指定日期区间ATM IV变化排序 -> scan_iv_change_ranking
         16.查期权合约价格-> tool_query_specific_option
         17.查ETF期权有哪些合约-> get_etf_option_strikes
         18.查宏观指标 -> get_macro_indicator
@@ -3440,7 +3445,8 @@ def monitor_node(state: AgentState, llm):
     - 数据库最新交易日：{latest_trade_date}
 
     【你的工具箱 - 根据问题类型选择正确的工具】
-    - 查波动率/IV -> get_commodity_iv_info
+    - 查单个标的最新IV/IV Rank/近期趋势 -> get_commodity_iv_info
+    - 查IV增幅/降幅排行、IV扫描、指定日期区间ATM IV变化排序 -> scan_iv_change_ranking
     - 查股票行业资金 -> tool_get_retail_money_flow
     - 查某期货资金流动 -> get_futures_fund_flow
     - 查全部期货资金沉淀排名 -> get_futures_fund_ranking
@@ -3474,6 +3480,8 @@ def monitor_node(state: AgentState, llm):
     2. **只陈述数据事实**，不要进行复杂的行情预测或给交易建议。
     3. 如果用户没有指定日期，**必须使用 {latest_trade_date}** 作为查询日期！
     4. 如果工具返回了 Markdown 表格，请原样输出。
+    4.1 用户问 IV增幅/降幅/排行/扫描/哪些合约升波最多或降波最多/指定日期区间ATM IV变化排序时，必须调用 `scan_iv_change_ranking`。
+    4.2 用户说“由大到小/增幅最大/升波最多”时，`direction="increase"`；用户说“由小到大/降幅最大/回落最多/降波最多”时，`direction="decrease"`。
     5. 商品都有期权，禁止说商品没有场内期权。
     6. 用户要“某天价格”优先用 `get_historical_price`；用户要“区间统计”优先用 `get_price_statistics`。
     7. 用户要“最近N天/最近N个交易日/列表/逐日明细/走势数据表”时，优先用 `get_recent_price_series`，不要只返回 `get_market_snapshot`。
@@ -3792,6 +3800,7 @@ def strategist_node(state: AgentState, llm):
         - 普通知识解释、概念类比、宽泛讨论，不要为了预检索而查工具。
         - 只要进入“适合我怎么做 / 推荐策略 / 买卖哪个合约 / 仓位风险 / 具体执行”的回答，必须按需检查三件事：标的现价、IV Rank、距离到期日。
         - 用 `get_market_snapshot` 获取现价，用 `get_commodity_iv_info` 看IV/IV Rank，用 `check_option_expiry_status` 看到期日；工具失败时改为条件式建议，不编造数据。
+        - 如果用户问 IV增幅/降幅排行、IV扫描、哪些合约升波最多/降波最多，必须用 `scan_iv_change_ranking`，不要用单标的 IV 查询替代。
 
         **第二步：设计策略**
         - **期权策略**：根据技术面趋势+IV+距离到期日+客户风险偏好来选择策略，可以查知识库辅助`search_investment_knowledge`。

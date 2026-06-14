@@ -374,6 +374,14 @@ class TestChatRouting(unittest.TestCase):
         self.assertFalse(is_market_data_query("如果黄金跌破支撑，后面怎么看"))
         self.assertFalse(is_market_data_query("解释一下IV"))
 
+    def test_detect_iv_scanner_market_data_query(self):
+        self.assertTrue(is_market_data_query("列出2026年6月11日到2026年6月12日 ATM IV增幅由大到小的合约"))
+        self.assertTrue(is_market_data_query("IV 降幅最大的前5个合约"))
+        self.assertEqual(
+            classify_chat_mode("列出2026年6月11日到2026年6月12日 ATM IV增幅由大到小的合约"),
+            CHAT_MODE_ANALYSIS,
+        )
+
 
     def test_execute_suggested_stock_screening_followup_routes_to_analysis(self):
         recent_context = (
