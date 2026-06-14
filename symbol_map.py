@@ -2457,6 +2457,26 @@ def get_us_ticker_set():
     return tickers
 
 
+def _normalize_hk_stock_code_input(query: str) -> str:
+    value = str(query or "").strip().upper()
+    if not value:
+        return ""
+
+    compact = re.sub(r"\s+", "", value)
+    match = re.fullmatch(r"(?:HK|HKG)(\d{1,5})", compact)
+    if not match:
+        match = re.fullmatch(r"(\d{1,5})(?:\.(?:HK|HKG)|HK|HKG)", compact)
+    if not match:
+        match = re.fullmatch(r"港股(\d{1,5})|(\d{1,5})港股", compact)
+    if not match:
+        return ""
+
+    digits = next((group for group in match.groups() if group), "")
+    if not digits:
+        return ""
+    return f"{digits.zfill(5)}.HK"
+
+
 def resolve_symbol(query):
     """
     核心解析函数：智能识别 主力连续 vs 具体合约 vs 指数 vs 股票
@@ -2475,6 +2495,10 @@ def resolve_symbol(query):
     # --- 0.1 直接输入美股代码 ---
     if re.fullmatch(r"[A-Z][A-Z0-9]{0,9}\.US", query):
         return query, 'stock'
+
+    hk_code = _normalize_hk_stock_code_input(query)
+    if hk_code:
+        return hk_code, 'stock'
 
     # --- 0.2 美股别名与 ticker（高优先级，避免与期货别名冲突） ---
     us_alias_map = get_us_stock_alias_map()

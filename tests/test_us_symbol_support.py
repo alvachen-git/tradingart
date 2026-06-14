@@ -27,6 +27,14 @@ def test_resolve_us_explicit_code(monkeypatch):
     assert symbol_map.resolve_symbol("AAPL.US") == ("AAPL.US", "stock")
 
 
+def test_resolve_hk_prefixed_and_unpadded_codes(monkeypatch):
+    monkeypatch.setattr(symbol_map, "get_all_market_map", lambda: {})
+    assert symbol_map.resolve_symbol("HK2513") == ("02513.HK", "stock")
+    assert symbol_map.resolve_symbol("HKG2513") == ("02513.HK", "stock")
+    assert symbol_map.resolve_symbol("2513.HK") == ("02513.HK", "stock")
+    assert symbol_map.resolve_symbol("2513港股") == ("02513.HK", "stock")
+
+
 def test_resolve_invalid_symbol(monkeypatch):
     monkeypatch.setattr(symbol_map, "get_all_market_map", lambda: {})
     assert symbol_map.resolve_symbol("NOT_A_REAL_SYMBOL_123") == (None, None)
