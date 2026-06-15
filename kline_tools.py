@@ -31,6 +31,9 @@ engine = get_db_engine()
 ensure_unified_stock_view(engine)
 STOCK_DAILY_SOURCE = get_stock_price_source(engine)
 
+_A_SHARE_SYMBOL_RE = re.compile(r"^\d{6}\.(?:SH|SZ)$", re.IGNORECASE)
+_KLINE_COLUMNS = ["trade_date", "open_price", "high_price", "low_price", "close_price"]
+
 
 # 🔥 [新增] 插入这个函数，用于把 "SH" 翻译回 "烧碱"
 def _get_chinese_name(code_str):
@@ -136,6 +139,50 @@ def _extract_symbol_candidates(raw_query: str):
         ordered.append(norm)
     return ordered
 
+
+def _compact_trade_date(value: str) -> str:
+    return str(value or "").replace("-", "").replace("/", "").strip()[:8]
+
+
+def _is_a_share_symbol(symbol: str) -> bool:
+    return bool(_A_SHARE_SYMBOL_RE.match(str(symbol or "").strip().upper()))
+
+
+def _stock_date_condition(clean_date: str) -> str:
+    if clean_date:
+        return "AND trade_date <= :clean_date"
+    return ""
+
+
+def _read_stock_rows(table_name: str, symbol: str, clean_date: str) -> pd.DataFrame:
+    params = {"symbol": symbol}
+    if clean_date:
+        params["clean_date"] = clean_date
+    sql = text(
+        f"""
+        SELECT trade_date, open_price, high_price, low_price, close_price
+        FROM {table_name}
+        WHERE ts_code = :symbol
+        {_stock_date_condition(clean_date)}
+        ORDER BY trade_date DESC LIMIT 60
+        """
+    )
+    return pd.read_sql(sql, engine, params=params)
+
+
+def _read_stock_kline_rows(symbol: str, clean_date: str) -> tuple[pd.DataFrame, str]:
+    if _is_a_share_symbol(symbol):
+        try:
+            qfq_df = _read_stock_rows("stock_price_qfq", symbol, clean_date)
+            if not qfq_df.empty:
+                return qfq_df, "stock_price_qfq(前复权)"
+        except Exception:
+            qfq_df = pd.DataFrame(columns=_KLINE_COLUMNS)
+        return qfq_df, "stock_price_qfq(前复权缺失；拒绝未复权均线)"
+
+    return _read_stock_rows(STOCK_DAILY_SOURCE, symbol, clean_date), f"{STOCK_DAILY_SOURCE}(日线)"
+
+
 # --- 2. 核心工具定义 ---
 
 @tool
@@ -172,23 +219,23 @@ def analyze_kline_pattern(query: str, trade_date: str = None):
     # 【修改点 2】构建日期过滤条件
     # 逻辑：如果指定了 12月10日，我们要查 <= 12月10日 的最近60条记录
     # 这样第1条就是12月10日，后面是9日、8日... 用于计算均线
+    clean_date = ""
     date_condition = ""
     if trade_date:
         # 清洗日期格式 2025-12-10 -> 20251210
-        clean_date = trade_date.replace("-", "").replace("/", "")
+        clean_date = _compact_trade_date(trade_date)
         date_condition = f"AND trade_date <= '{clean_date}'"
 
     try:
         # 2. 获取数据
+        price_source_label = ""
         if asset_type == 'stock':
-            sql = f"""
-                SELECT trade_date, open_price, high_price, low_price, close_price 
-                FROM {STOCK_DAILY_SOURCE}
-                WHERE ts_code='{symbol}' 
-                {date_condition} 
-                ORDER BY trade_date DESC LIMIT 60
-            """
-            df = pd.read_sql(sql, engine)
+            df, price_source_label = _read_stock_kline_rows(symbol, clean_date)
+            if df.empty and _is_a_share_symbol(symbol) and "前复权缺失" in price_source_label:
+                return (
+                    f"{symbol} 前复权日线数据缺失，无法可靠计算均线；"
+                    "已拒绝使用未复权 stock_price，避免除权断点污染。"
+                )
             # 🔥🔥🔥 [新增核心修复]：兜底查询
             # 如果在股票表没查到，且代码看起来像指数 (399开头是深市指数, 000开头可能是沪市指数)，尝试去指数表查
             if df.empty:
@@ -207,6 +254,7 @@ def analyze_kline_pattern(query: str, trade_date: str = None):
                 if not df_index.empty:
                     df = df_index
                     asset_type = 'index'  # 修正类型，防止后面逻辑出错
+                    price_source_label = "index_price"
 
         elif asset_type == 'future':
             # 🔥【核心修复】判断是否指定了具体合约月份
@@ -251,6 +299,7 @@ def analyze_kline_pattern(query: str, trade_date: str = None):
                         ORDER BY trade_date DESC LIMIT 60
                     """
             df = pd.read_sql(sql, engine)
+            price_source_label = "futures_price"
 
         # 🔥【新增】指数查询逻辑
         elif asset_type == 'index':
@@ -262,6 +311,7 @@ def analyze_kline_pattern(query: str, trade_date: str = None):
                 ORDER BY trade_date DESC LIMIT 60
             """
             df = pd.read_sql(sql, engine)
+            price_source_label = "index_price"
 
         if df.empty:
             target_date_msg = f" ({trade_date})" if trade_date else ""
@@ -279,7 +329,7 @@ def analyze_kline_pattern(query: str, trade_date: str = None):
         df['MA30'] = df['close_price'].rolling(window=30).mean()
         df['MA60'] = df['close_price'].rolling(window=60).mean()
 
-        if len(df) < 2: return "数据不足，无法分析趋势。"
+        if len(df) < 6: return "数据不足，无法分析趋势。"
 
         # 提取今日和昨日数据
         curr = df.iloc[-1]
@@ -813,6 +863,7 @@ def analyze_kline_pattern(query: str, trade_date: str = None):
 - 多日趋势：{multi_day_trend}
 
 **六、价格数据**
+- 数据源：{price_source_label or '未知'}
 - 今日收盘：{close} (涨跌 {chg_pct * 100:+.2f}%)
 - MA5: {curr['MA5']:.2f} | MA10: {curr['MA10']:.2f} | MA20: {curr['MA20']:.2f}
         """

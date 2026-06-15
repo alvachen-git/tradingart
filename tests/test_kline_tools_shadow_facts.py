@@ -83,6 +83,45 @@ def _make_df(last_bar, base_close=10.0, drift=0.02):
     return pd.DataFrame(rows)
 
 
+def _make_qfq_ex_rights_df():
+    rows = []
+    for i in range(50):
+        close = 50.0 + i * 0.18
+        rows.append(
+            {
+                "trade_date": f"202603{i + 1:02d}",
+                "open_price": close - 0.1,
+                "high_price": close + 0.5,
+                "low_price": close - 0.5,
+                "close_price": close,
+            }
+        )
+
+    tail = [
+        ("20260601", 64.6828),
+        ("20260602", 69.9845),
+        ("20260603", 71.4454),
+        ("20260604", 78.8493),
+        ("20260605", 74.4169),
+        ("20260608", 75.0369),
+        ("20260609", 81.0227),
+        ("20260610", 76.9609),
+        ("20260611", 77.5),
+        ("20260612", 80.36),
+    ]
+    for trade_date, close in tail:
+        rows.append(
+            {
+                "trade_date": trade_date,
+                "open_price": close - 0.5,
+                "high_price": close + 1.0,
+                "low_price": close - 1.0,
+                "close_price": close,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
 @unittest.skipIf(kline_tools is None, f"kline_tools import failed: {_IMPORT_ERROR}")
 class TestKlineToolsShadowFacts(unittest.TestCase):
     def _invoke_with_df(self, df):
@@ -163,6 +202,57 @@ class TestKlineToolsShadowFacts(unittest.TestCase):
 
         self.assertIn("**二、今日K线事实**", out)
         self.assertIn("实体占全日振幅 0.0%", out)
+
+    def test_a_share_uses_qfq_for_moving_average_across_ex_rights_gap(self):
+        qfq_df = _make_qfq_ex_rights_df()
+        raw_df = qfq_df.copy()
+        raw_df.loc[raw_df["trade_date"] == "20260608", "close_price"] = 105.30
+        raw_df.loc[raw_df["trade_date"] == "20260609", "close_price"] = 113.70
+        raw_df.loc[raw_df["trade_date"] == "20260610", "close_price"] = 108.00
+
+        def fake_read_sql(sql, *_args, **_kwargs):
+            sql_text = str(sql)
+            if "stock_price_qfq" in sql_text:
+                return qfq_df.copy()
+            return raw_df.copy()
+
+        with patch.object(kline_tools, "engine", object()), patch.object(
+            kline_tools, "STOCK_DAILY_SOURCE", "stock_price"
+        ), patch.object(
+            kline_tools.symbol_map, "resolve_symbol", return_value=("688257.SH", "stock")
+        ), patch.object(
+            kline_tools.pd, "read_sql", side_effect=fake_read_sql
+        ):
+            out = kline_tools.analyze_kline_pattern.invoke({"query": "新锐股份技术面分析"})
+
+        self.assertIn("数据源：stock_price_qfq(前复权)", out)
+        self.assertIn("MA5: 78.18", out)
+        self.assertNotIn("MA5: 96.97", out)
+
+    def test_a_share_missing_qfq_fails_closed_instead_of_raw_ma(self):
+        raw_df = _make_qfq_ex_rights_df()
+        raw_df.loc[raw_df["trade_date"] == "20260608", "close_price"] = 105.30
+        raw_df.loc[raw_df["trade_date"] == "20260609", "close_price"] = 113.70
+        raw_df.loc[raw_df["trade_date"] == "20260610", "close_price"] = 108.00
+
+        def fake_read_sql(sql, *_args, **_kwargs):
+            sql_text = str(sql)
+            if "stock_price_qfq" in sql_text:
+                return pd.DataFrame(columns=["trade_date", "open_price", "high_price", "low_price", "close_price"])
+            return raw_df.copy()
+
+        with patch.object(kline_tools, "engine", object()), patch.object(
+            kline_tools, "STOCK_DAILY_SOURCE", "stock_price"
+        ), patch.object(
+            kline_tools.symbol_map, "resolve_symbol", return_value=("688257.SH", "stock")
+        ), patch.object(
+            kline_tools.pd, "read_sql", side_effect=fake_read_sql
+        ):
+            out = kline_tools.analyze_kline_pattern.invoke({"query": "新锐股份技术面分析"})
+
+        self.assertIn("前复权日线数据缺失", out)
+        self.assertIn("已拒绝使用未复权 stock_price", out)
+        self.assertNotIn("MA5:", out)
 
 
 if __name__ == "__main__":
