@@ -70,6 +70,11 @@ COMMODITY_IV_INVALID_TOKENS = ["无数据", "N/A", "未知", "None", "--"]
 MAX_REWRITE_ROUNDS = 2
 
 
+def _current_trade_date_key() -> str:
+    """报告运行日对应的 YYYYMMDD，传给K线工具避免重跑历史日报时漂移到最新K线。"""
+    return datetime.now().strftime("%Y%m%d")
+
+
 def _extract_first_percent(value_text: str):
     """从文本中提取第一个百分比数值（如 42.5% -> 42.5）。"""
     if not value_text:
@@ -193,13 +198,103 @@ def _fetch_programmatic_commodity_iv_snapshot():
     return snapshot_map, snapshot_text
 
 
-def validate_commodity_cards(html: str, expected_iv_map: dict = None):
+def _clean_inline_html_text(text_value: str) -> str:
+    """清理卡片字段中的HTML标签与多余空白，便于确定性校验。"""
+    if not text_value:
+        return ""
+    cleaned = re.sub(r"<[^>]+>", "", str(text_value))
+    cleaned = cleaned.replace("&nbsp;", " ")
+    return re.sub(r"\s+", " ", cleaned).strip()
+
+
+def _normalize_kline_shape_label(shape: str) -> str:
+    """统一形态标签写法，去掉装饰括号和“形态”等尾缀。"""
+    label = _clean_inline_html_text(shape)
+    label = label.strip("【】[]（）() ")
+    label = re.sub(r"[，,。；;：:].*$", "", label).strip()
+    label = re.sub(r"(形态|信号)$", "", label).strip()
+    return label
+
+
+def _extract_section_after_heading(report_text: str, heading_keyword: str) -> str:
+    """从 analyze_kline_pattern 的多段文本里提取指定标题后的第一段正文。"""
+    if not report_text:
+        return ""
+    pattern = re.compile(
+        rf"{re.escape(heading_keyword)}(?:\*\*)?\s*\n(?P<body>.*?)(?:\n\s*\*\*|$)",
+        re.S,
+    )
+    m = pattern.search(report_text)
+    if not m:
+        return ""
+    return m.group("body").strip()
+
+
+def _extract_kline_shape_from_report(report_text: str) -> str:
     """
-    校验商品卡片的隐含波动率字段是否合理：
+    将 K 线工具输出压缩成商品卡片可展示的确定性形态标签。
+    优先使用“今日形态信号”，普通K线则保留为“普通震荡K线”，避免LLM自行改写。
+    """
+    section = _extract_section_after_heading(report_text, "今日形态信号")
+    first_line = ""
+    for raw_line in section.splitlines():
+        line = _clean_inline_html_text(raw_line).lstrip("-• ").strip()
+        if line:
+            first_line = line
+            break
+
+    if not first_line:
+        return "暂无明确形态"
+    if "普通震荡K线" in first_line:
+        return "普通震荡K线"
+    if "无明显形态" in first_line:
+        return "无明显形态"
+
+    m = re.search(r"【([^】]+)】", first_line)
+    if m:
+        return _normalize_kline_shape_label(m.group(1))
+    return _normalize_kline_shape_label(first_line) or "暂无明确形态"
+
+
+def _fetch_programmatic_commodity_kline_snapshot(trade_date: str = None):
+    """
+    程序端调用K线工具抓取商品形态真值，供晚报商品卡片强制使用。
+    返回:
+      - snapshot_map: {商品: {shape, trade_date}}
+      - snapshot_text: 可直接注入到 prompt 的说明文本
+    """
+    snapshot_map = {}
+    lines = []
+    report_trade_date = trade_date or _current_trade_date_key()
+
+    for commodity in COMMODITY_CARD_LIST:
+        try:
+            report = analyze_kline_pattern.invoke({
+                "query": commodity,
+                "trade_date": report_trade_date,
+            })
+            shape = _extract_kline_shape_from_report(str(report))
+            snapshot_map[commodity] = {
+                "shape": shape,
+                "trade_date": report_trade_date,
+            }
+            lines.append(f"- {commodity}: 形态={shape} [K线日期 <= {report_trade_date}]")
+        except Exception as e:
+            print(f"⚠️ [K线形态快照] {commodity} 查询异常: {e}")
+            lines.append(f"- {commodity}: 暂无可用K线形态（本次不做形态对齐）")
+
+    snapshot_text = "\n".join(lines)
+    return snapshot_map, snapshot_text
+
+
+def validate_commodity_cards(html: str, expected_iv_map: dict = None, expected_kline_map: dict = None):
+    """
+    校验商品卡片字段是否合理：
     1) 必须包含“隐含波动率/隐波/IV”字段；
     2) 必须给出高/中/低等级描述；
     3) 若给出百分比，必须在 0%~300% 区间。
     4) 若提供 expected_iv_map，百分比需与程序注入真值一致（容忍±0.3%）。
+    5) 若提供 expected_kline_map，形态字段需与程序注入真值一致。
     """
     anomalies = []
     if not html:
@@ -238,11 +333,29 @@ def validate_commodity_cards(html: str, expected_iv_map: dict = None):
                     f"{commodity} IV与真值不一致: 页面={iv_percent:.2f}%, 真值={expected_iv:.2f}%"
                 )
 
+        expected_kline = (expected_kline_map or {}).get(commodity)
+        if expected_kline:
+            shape_pattern = re.compile(
+                rf"{re.escape(commodity)}(.{{0,500}}?)形态[：:]\s*(?P<shape_text>[^<\n]+)",
+                re.S | re.I
+            )
+            shape_match = shape_pattern.search(html)
+            if not shape_match:
+                anomalies.append(f"{commodity} 缺少“形态”字段")
+                continue
+
+            actual_shape = _normalize_kline_shape_label(shape_match.group("shape_text"))
+            expected_shape = _normalize_kline_shape_label(expected_kline.get("shape", ""))
+            if expected_shape and actual_shape != expected_shape:
+                anomalies.append(
+                    f"{commodity} 形态与真值不一致: 页面={actual_shape}, 真值={expected_shape}"
+                )
+
     return len(anomalies) == 0, anomalies
 
 
 def _rewrite_report_after_validation(raw_material: str, html: str, anomalies: list, round_idx: int,
-                                     iv_snapshot_text: str = "") -> str:
+                                     iv_snapshot_text: str = "", kline_snapshot_text: str = "") -> str:
     """当商品卡片校验失败时，提醒 LLM 定向重写整份 HTML。"""
     anomaly_text = "\n".join([f"- {x}" for x in anomalies])
     rewrite_prompt = f"""
@@ -256,12 +369,16 @@ def _rewrite_report_after_validation(raw_material: str, html: str, anomalies: li
 2. 商品期货全景必须保留10个商品卡片，且每个卡片都含“隐含波动率：X”字段。
 3. 隐含波动率字段必须体现“高/中/低”等级（可写成“偏高/偏低/中等/极高/极低”）。
 4. 必须写具体百分比，格式示例：“隐含波动率：42.5%（偏高）”。
-5. 不要再写“支撑：... | 压力：...”这一行。
-6. 趋势判断（看多/看空/震荡）仍由你根据素材自主判断。
-7. 其他板块风格与结构尽量保持原有质量。
+5. 商品卡片“形态：X”必须逐字匹配下方程序注入的K线形态真值。
+6. 不要再写“支撑：... | 压力：...”这一行。
+7. 趋势判断（看多/看空/震荡）仍由你根据素材自主判断。
+8. 其他板块风格与结构尽量保持原有质量。
 
 【程序注入的商品IV真值（最高优先级，必须原样使用）】
 {iv_snapshot_text}
+
+【程序注入的商品K线形态真值（最高优先级，必须原样使用）】
+{kline_snapshot_text}
 
 【记者素材】
 {raw_material}
@@ -336,6 +453,7 @@ def collect_data_via_agent():
     ]
 
     today_str = datetime.now().strftime("%Y年%m月%d日")
+    trade_date_key = _current_trade_date_key()
     holdings_start_date, holdings_end_date = _get_recent_holding_dates()
     system_prompt = f"""
     你是一位**顶级财经记者**，正在为今天的《晚间深度复盘日报》采集素材。
@@ -379,6 +497,9 @@ def collect_data_via_agent():
     9. **棉花**
     10.**PTA**
 
+    ⚠️ 调用 `analyze_kline_pattern` 时必须传入 `trade_date="{trade_date_key}"`，
+    不允许省略日期，避免历史晚报重跑时漂移到最新K线。
+
     对每个品种，记录：
     - 当前趋势（多/空/震荡）
     - K线形态（如大阳线、十字星、吞噬等）
@@ -421,16 +542,17 @@ def collect_data_via_agent():
     reporter_agent = create_react_agent(llm, tools, prompt=system_prompt)
 
     try:
-        trigger_msg = """开始今天的市场扫描任务，请确保：
+        trigger_msg = f"""开始今天的市场扫描任务，请确保：
         1. 覆盖宏观、资金、期权和选股四个维度
         2. ⚠️ 必须完成 10 个商品期货的技术分析（黄金、白银、原油、铜、铁矿石、碳酸锂、豆粕、橡胶、棉花、PTA）
         3. 每个商品都要给出趋势判断和隐含波动率水平（高/中/低）
+        4. 调用 analyze_kline_pattern 时必须传入 trade_date="{trade_date_key}"
         """
 
 
         trigger_msg += f"""
-        4. Use holdings change dates: {holdings_start_date} -> {holdings_end_date}
-        5. In broker holdings, prioritize net position changes (increase/decrease top movers), not absolute net position rank.
+        5. Use holdings change dates: {holdings_start_date} -> {holdings_end_date}
+        6. In broker holdings, prioritize net position changes (increase/decrease top movers), not absolute net position rank.
         """
         result = reporter_agent.invoke(
             {"messages": [HumanMessage(content=trigger_msg)]},
@@ -455,8 +577,11 @@ def draft_report(raw_material):
 
     today = datetime.now().strftime("%Y年%m月%d日")
     weekday = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"][datetime.now().weekday()]
+    trade_date_key = _current_trade_date_key()
     iv_snapshot_map, iv_snapshot_text = _fetch_programmatic_commodity_iv_snapshot()
     print(f"🧮 [程序注入] 商品IV真值已生成: {len(iv_snapshot_map)}/{len(COMMODITY_CARD_LIST)}")
+    kline_snapshot_map, kline_snapshot_text = _fetch_programmatic_commodity_kline_snapshot(trade_date_key)
+    print(f"📈 [程序注入] 商品K线形态真值已生成: {len(kline_snapshot_map)}/{len(COMMODITY_CARD_LIST)}")
 
     prompt = f"""
     你是【爱波塔首席投研】的主编。你的记者刚刚提交了今天的市场调研素材。
@@ -464,6 +589,9 @@ def draft_report(raw_material):
 
     【程序查库得到的商品IV真值（最高优先级，必须原样使用）】
     {iv_snapshot_text}
+
+    【程序查库得到的商品K线形态真值（最高优先级，必须原样使用）】
+    {kline_snapshot_text}
 
     【记者提交的素材】：
     {raw_material}
@@ -709,6 +837,8 @@ def draft_report(raw_material):
 
     ## 9. 内容要求
     - 商品期货全景：必须包含 10 个商品卡片（5行2列）
+    - 商品卡片第一行必须展示“形态：xxx”
+    - 各商品形态，必须逐字匹配【程序查库得到的商品K线形态真值】
     - 商品卡片第二行必须展示“隐含波动率：xx.xx%（高/中/低）”
     - 各商品IV百分比与等级，必须逐字匹配【程序查库得到的商品IV真值】
     - 商品卡片不要再出现“支撑/压力”字段
@@ -727,15 +857,22 @@ def draft_report(raw_material):
     html = res.content.replace("```html", "").replace("```", "").strip()
 
     # 发布前商品卡片校验：异常则提醒 LLM 重写
-    is_valid, anomalies = validate_commodity_cards(html, iv_snapshot_map)
+    is_valid, anomalies = validate_commodity_cards(html, iv_snapshot_map, kline_snapshot_map)
     for i in range(1, MAX_REWRITE_ROUNDS + 1):
         if is_valid:
             break
         print(f"⚠️ [发布前校验] 商品卡片异常，触发重写（第{i}轮）")
         for a in anomalies[:8]:
             print(f"   - {a}")
-        html = _rewrite_report_after_validation(raw_material, html, anomalies, i, iv_snapshot_text)
-        is_valid, anomalies = validate_commodity_cards(html, iv_snapshot_map)
+        html = _rewrite_report_after_validation(
+            raw_material,
+            html,
+            anomalies,
+            i,
+            iv_snapshot_text,
+            kline_snapshot_text,
+        )
+        is_valid, anomalies = validate_commodity_cards(html, iv_snapshot_map, kline_snapshot_map)
 
     if not is_valid:
         print("❌ [发布前校验] 商品卡片校验仍未通过，终止发布。")
