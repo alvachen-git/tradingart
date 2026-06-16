@@ -229,6 +229,32 @@ class TestKlineToolsShadowFacts(unittest.TestCase):
         self.assertIn("MA5: 78.18", out)
         self.assertNotIn("MA5: 96.97", out)
 
+    def test_bj_stock_uses_qfq_for_moving_average(self):
+        qfq_df = _make_qfq_ex_rights_df()
+        raw_df = qfq_df.copy()
+        raw_df.loc[raw_df["trade_date"] == "20260608", "close_price"] = 105.30
+        raw_df.loc[raw_df["trade_date"] == "20260609", "close_price"] = 113.70
+        raw_df.loc[raw_df["trade_date"] == "20260610", "close_price"] = 108.00
+
+        def fake_read_sql(sql, *_args, **_kwargs):
+            sql_text = str(sql)
+            if "stock_price_qfq" in sql_text:
+                return qfq_df.copy()
+            return raw_df.copy()
+
+        with patch.object(kline_tools, "engine", object()), patch.object(
+            kline_tools, "STOCK_DAILY_SOURCE", "stock_price"
+        ), patch.object(
+            kline_tools.symbol_map, "resolve_symbol", return_value=("920001.BJ", "stock")
+        ), patch.object(
+            kline_tools.pd, "read_sql", side_effect=fake_read_sql
+        ):
+            out = kline_tools.analyze_kline_pattern.invoke({"query": "920001.BJ技术面分析"})
+
+        self.assertIn("数据源：stock_price_qfq(前复权)", out)
+        self.assertIn("MA5: 78.18", out)
+        self.assertNotIn("MA5: 96.97", out)
+
     def test_a_share_missing_qfq_fails_closed_instead_of_raw_ma(self):
         raw_df = _make_qfq_ex_rights_df()
         raw_df.loc[raw_df["trade_date"] == "20260608", "close_price"] = 105.30

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import os
 import re
 import time
@@ -11,7 +12,7 @@ from typing import Any, Dict, List, Optional, Sequence
 import pandas as pd
 import tushare as ts
 from dotenv import load_dotenv
-from sqlalchemy import create_engine, text, types
+from sqlalchemy import bindparam, create_engine, text, types
 
 
 TARGET_COLS = [
@@ -30,6 +31,29 @@ TARGET_COLS = [
     "source",
     "updated_at",
 ]
+
+ETF_PREFIXES = (
+    "159",
+    "510",
+    "511",
+    "512",
+    "513",
+    "515",
+    "516",
+    "517",
+    "518",
+    "519",
+    "520",
+    "521",
+    "522",
+    "560",
+    "561",
+    "562",
+    "563",
+    "588",
+    "589",
+)
+PROXY_ENV_KEYS = ("ALL_PROXY", "HTTP_PROXY", "HTTPS_PROXY", "all_proxy", "http_proxy", "https_proxy")
 
 
 @dataclass
@@ -71,11 +95,89 @@ def normalize_symbol(symbol: str) -> str:
     return f"{code}.BJ"
 
 
+def is_etf_symbol(symbol: str) -> bool:
+    code = normalize_symbol(symbol).split(".")[0]
+    return bool(re.match(r"^\d{6}$", code)) and code.startswith(ETF_PREFIXES)
+
+
 def is_a_share_symbol(symbol: str) -> bool:
     code = normalize_symbol(symbol).split(".")[0]
-    return bool(re.match(r"^\d{6}$", code)) and not code.startswith(
-        ("510", "511", "512", "513", "515", "516", "518", "588", "159")
-    )
+    return bool(re.match(r"^\d{6}$", code)) and not is_etf_symbol(symbol)
+
+
+def qfq_asset_type(symbol: str) -> str:
+    if is_etf_symbol(symbol):
+        return "etf"
+    if is_a_share_symbol(symbol):
+        return "stock"
+    return "other"
+
+
+def _asset_scope_allows(symbol: str, asset_scope: str) -> bool:
+    scope = str(asset_scope or "all").strip().lower()
+    if scope == "all":
+        return True
+    asset_type = qfq_asset_type(symbol)
+    if scope == "stock_etf":
+        return asset_type in {"stock", "etf"}
+    return asset_type == scope
+
+
+def _apply_resume_and_limit(symbols: Sequence[str], resume_after: str = "", max_symbols: int = 0) -> List[str]:
+    out = list(symbols)
+    marker = normalize_symbol(resume_after)
+    if marker:
+        out = [symbol for symbol in out if symbol > marker]
+    limit = int(max_symbols or 0)
+    if limit > 0:
+        out = out[:limit]
+    return out
+
+
+def _chunked(items: Sequence[str], size: int = 800):
+    for idx in range(0, len(items), size):
+        yield list(items[idx: idx + size])
+
+
+@contextmanager
+def _without_proxy_env():
+    saved = {key: os.environ.get(key) for key in PROXY_ENV_KEYS}
+    original_request = None
+    try:
+        for key in PROXY_ENV_KEYS:
+            os.environ.pop(key, None)
+        try:
+            import requests
+
+            original_request = requests.sessions.Session.request
+
+            def request_without_proxy(session, method, url, **kwargs):
+                old_trust_env = getattr(session, "trust_env", True)
+                session.trust_env = False
+                kwargs["proxies"] = {}
+                try:
+                    return original_request(session, method, url, **kwargs)
+                finally:
+                    session.trust_env = old_trust_env
+
+            requests.sessions.Session.request = request_without_proxy
+        except Exception:
+            original_request = None
+        yield
+    finally:
+        if original_request is not None:
+            try:
+                import requests
+
+                requests.sessions.Session.request = original_request
+            except Exception:
+                pass
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
 
 
 def get_engine():
@@ -226,6 +328,68 @@ def _read_symbols_for_range(
     return sorted({normalize_symbol(r[0]) for r in rows if r and normalize_symbol(r[0])})
 
 
+def _read_range_stats(engine, table_name: str, symbols: Sequence[str], start_date: str, end_date: str) -> Dict[str, Dict[str, Any]]:
+    out: Dict[str, Dict[str, Any]] = {}
+    if not symbols:
+        return out
+    sql = (
+        text(
+            f"""
+            SELECT ts_code,
+                   MIN(trade_date) AS min_date,
+                   MAX(trade_date) AS max_date,
+                   COUNT(*) AS row_count
+            FROM {table_name}
+            WHERE ts_code IN :symbols
+              AND trade_date >= :start_date
+              AND trade_date <= :end_date
+              AND close_price IS NOT NULL
+              AND close_price > 0
+            GROUP BY ts_code
+            """
+        )
+        .bindparams(bindparam("symbols", expanding=True))
+    )
+    with engine.connect() as conn:
+        for chunk in _chunked(list(symbols)):
+            rows = conn.execute(
+                sql,
+                {"symbols": chunk, "start_date": start_date, "end_date": end_date},
+            ).mappings().all()
+            for row in rows:
+                symbol = normalize_symbol(row["ts_code"])
+                out[symbol] = {
+                    "min_date": str(row["min_date"] or ""),
+                    "max_date": str(row["max_date"] or ""),
+                    "row_count": int(row["row_count"] or 0),
+                }
+    return out
+
+
+def filter_symbols_by_qfq_gap(engine, symbols: Sequence[str], start_date: str, end_date: str) -> List[str]:
+    unique = sorted({normalize_symbol(symbol) for symbol in symbols if normalize_symbol(symbol)})
+    if not unique:
+        return []
+    raw_stats = _read_range_stats(engine, "stock_price", unique, start_date, end_date)
+    qfq_stats = _read_range_stats(engine, "stock_price_qfq", unique, start_date, end_date)
+    selected: List[str] = []
+    for symbol in unique:
+        raw = raw_stats.get(symbol)
+        if not raw:
+            continue
+        qfq = qfq_stats.get(symbol)
+        if not qfq:
+            selected.append(symbol)
+            continue
+        if (
+            qfq["min_date"] > raw["min_date"]
+            or qfq["max_date"] < raw["max_date"]
+            or qfq["row_count"] < raw["row_count"]
+        ):
+            selected.append(symbol)
+    return selected
+
+
 def _latest_screener_date(engine, trade_date: str) -> str:
     sql = text(
         """
@@ -278,8 +442,7 @@ def _read_v3_daily_candidate_symbols(engine, trade_date: str, limit: int = 800) 
     return sorted({normalize_symbol(r[0]) for r in rows if r and normalize_symbol(r[0])})
 
 
-def _fetch_adj_factor_tushare(pro, ts_code: str, start_date: str, end_date: str) -> pd.DataFrame:
-    df = pro.adj_factor(ts_code=ts_code, start_date=start_date, end_date=end_date)
+def _standardize_factor_df(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         return pd.DataFrame(columns=["trade_date", "ts_code", "adj_factor"])
     out = df[["trade_date", "ts_code", "adj_factor"]].copy()
@@ -289,14 +452,44 @@ def _fetch_adj_factor_tushare(pro, ts_code: str, start_date: str, end_date: str)
     return out.dropna(subset=["adj_factor"])
 
 
-def _build_qfq_from_raw_and_factor(raw: pd.DataFrame, factors: pd.DataFrame, end_date: str) -> pd.DataFrame:
+def _fetch_adj_factor_tushare(pro, ts_code: str, start_date: str, end_date: str) -> pd.DataFrame:
+    return _standardize_factor_df(pro.adj_factor(ts_code=ts_code, start_date=start_date, end_date=end_date))
+
+
+def _fetch_fund_adj_factor_tushare(pro, ts_code: str, start_date: str, end_date: str) -> pd.DataFrame:
+    return _standardize_factor_df(pro.fund_adj(ts_code=ts_code, start_date=start_date, end_date=end_date))
+
+
+def _build_qfq_from_raw_and_factor(
+    raw: pd.DataFrame,
+    factors: pd.DataFrame,
+    end_date: str,
+    source: str = "tushare_adj_factor",
+    fill_factor_gaps: bool = False,
+    max_factor_gap_days: int = 7,
+) -> pd.DataFrame:
     if raw.empty or factors.empty:
         return pd.DataFrame(columns=TARGET_COLS)
     work = raw.copy()
     work["trade_date"] = work["trade_date"].astype(str).str.replace(r"[^0-9]", "", regex=True).str[:8]
     for col in ["open_price", "high_price", "low_price", "close_price", "pct_chg", "vol", "amount"]:
         work[col] = pd.to_numeric(work[col], errors="coerce")
-    merged = work.merge(factors[["trade_date", "adj_factor"]], on="trade_date", how="inner")
+    clean_factors = factors[["trade_date", "adj_factor"]].copy()
+    if fill_factor_gaps:
+        factor_dates = clean_factors.dropna(subset=["adj_factor"]).drop_duplicates("trade_date", keep="last")
+        raw_dates = pd.DataFrame({"trade_date": sorted(work["trade_date"].dropna().unique())})
+        aligned = raw_dates.merge(factor_dates, on="trade_date", how="left").sort_values("trade_date")
+        aligned["factor_trade_date"] = aligned["trade_date"].where(aligned["adj_factor"].notna())
+        aligned["adj_factor"] = aligned["adj_factor"].ffill()
+        aligned["factor_trade_date"] = aligned["factor_trade_date"].ffill()
+        gap_days = (
+            pd.to_datetime(aligned["trade_date"], format="%Y%m%d", errors="coerce")
+            - pd.to_datetime(aligned["factor_trade_date"], format="%Y%m%d", errors="coerce")
+        ).dt.days
+        aligned = aligned[(aligned["adj_factor"].notna()) & (gap_days <= int(max_factor_gap_days))]
+        clean_factors = aligned[["trade_date", "adj_factor"]].copy()
+
+    merged = work.merge(clean_factors, on="trade_date", how="inner")
     merged = merged.dropna(subset=["adj_factor", "close_price"]).sort_values("trade_date")
     if merged.empty:
         return pd.DataFrame(columns=TARGET_COLS)
@@ -316,7 +509,7 @@ def _build_qfq_from_raw_and_factor(raw: pd.DataFrame, factors: pd.DataFrame, end
     merged["pct_chg"] = merged["close_price"].pct_change().fillna(pd.to_numeric(merged["pct_chg"], errors="coerce") / 100.0) * 100.0
     merged["pct_chg"] = pd.to_numeric(merged["pct_chg"], errors="coerce").fillna(0.0).round(4)
     merged["anchor_trade_date"] = anchor_trade_date
-    merged["source"] = "tushare_adj_factor"
+    merged["source"] = source
     merged["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     for col in TARGET_COLS:
         if col not in merged.columns:
@@ -331,7 +524,24 @@ def _fetch_akshare_qfq(ts_code: str, start_date: str, end_date: str, name: str =
         raise RuntimeError(f"AkShare import failed: {exc}") from exc
 
     symbol = normalize_symbol(ts_code).split(".")[0]
-    raw = ak.stock_zh_a_hist(symbol=symbol, period="daily", start_date=start_date, end_date=end_date, adjust="qfq")
+    with _without_proxy_env():
+        raw = ak.stock_zh_a_hist(symbol=symbol, period="daily", start_date=start_date, end_date=end_date, adjust="qfq")
+    return _standardize_akshare_qfq(raw, ts_code, end_date, name=name, source="akshare_qfq")
+
+
+def _fetch_akshare_etf_qfq(ts_code: str, start_date: str, end_date: str, name: str = "") -> pd.DataFrame:
+    try:
+        import akshare as ak
+    except Exception as exc:
+        raise RuntimeError(f"AkShare import failed: {exc}") from exc
+
+    symbol = normalize_symbol(ts_code).split(".")[0]
+    with _without_proxy_env():
+        raw = ak.fund_etf_hist_em(symbol=symbol, period="daily", start_date=start_date, end_date=end_date, adjust="qfq")
+    return _standardize_akshare_qfq(raw, ts_code, end_date, name=name, source="akshare_etf_qfq")
+
+
+def _standardize_akshare_qfq(raw: pd.DataFrame, ts_code: str, end_date: str, name: str = "", source: str = "akshare_qfq") -> pd.DataFrame:
     if raw is None or raw.empty:
         return pd.DataFrame(columns=TARGET_COLS)
     out = raw.rename(
@@ -355,7 +565,7 @@ def _fetch_akshare_qfq(ts_code: str, start_date: str, end_date: str, name: str =
         out[col] = pd.to_numeric(out.get(col), errors="coerce")
     out["adj_factor"] = None
     out["anchor_trade_date"] = end_date
-    out["source"] = "akshare_qfq"
+    out["source"] = source
     out["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     out = out.dropna(subset=["close_price"])
     for col in TARGET_COLS:
@@ -431,6 +641,28 @@ def update_symbol_qfq(engine, pro, ts_code: str, start_date: str, end_date: str,
                 result.error = ""
             except Exception as exc:
                 result.error = f"{result.error}; AkShare qfq 失败: {exc}" if result.error else f"AkShare qfq 失败: {exc}"
+    elif is_etf_symbol(ts_code):
+        try:
+            factors = _fetch_fund_adj_factor_tushare(pro, ts_code, start_date, end_date)
+            df = _build_qfq_from_raw_and_factor(
+                raw,
+                factors,
+                end_date,
+                source="tushare_fund_adj",
+                fill_factor_gaps=True,
+                max_factor_gap_days=7,
+            )
+            result.source = "tushare_fund_adj"
+        except Exception as exc:
+            df = pd.DataFrame(columns=TARGET_COLS)
+            result.error = f"Tushare fund_adj 失败: {exc}"
+        if df.empty:
+            try:
+                df = _fetch_akshare_etf_qfq(ts_code, start_date, end_date, name=name)
+                result.source = "akshare_etf_qfq"
+                result.error = ""
+            except Exception as exc:
+                result.error = f"{result.error}; AkShare ETF qfq 失败: {exc}" if result.error else f"AkShare ETF qfq 失败: {exc}"
     else:
         df = raw.copy()
         df["adj_factor"] = None
@@ -471,6 +703,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="组合代码范围：all 包含自选池；trades_positions 只含历史交易和持仓",
     )
     parser.add_argument("--all-stock-price-symbols", action="store_true", help="按 stock_price 区间内全部代码补齐")
+    parser.add_argument(
+        "--asset-scope",
+        choices=["all", "stock", "etf", "stock_etf"],
+        default="all",
+        help="补数标的类型：stock=普通A股，etf=ETF，stock_etf=两者，all=保持旧行为",
+    )
+    parser.add_argument("--only-missing-or-stale", action="store_true", help="只补 stock_price_qfq 缺失、日期落后或行数不足的代码")
+    parser.add_argument("--resume-after", default="", help="按排序代码从该代码之后继续，便于分批恢复")
+    parser.add_argument("--max-symbols", type=int, default=0, help="本次最多处理多少个代码，0 表示不限")
     parser.add_argument("--v3-daily-candidates", action="store_true", help="加入3号当日资金候选池预备代码")
     parser.add_argument("--candidate-date", default="", help="3号候选池日期，默认 end-date")
     parser.add_argument("--candidate-limit", type=int, default=800, help="3号资金候选池预备代码数量上限")
@@ -521,7 +762,17 @@ def resolve_symbols(engine, args: argparse.Namespace) -> List[str]:
     if getattr(args, "v3_daily_candidates", False):
         candidate_date = clean_date(getattr(args, "candidate_date", "") or args.end_date, "candidate-date")
         symbols.extend(_read_v3_daily_candidate_symbols(engine, candidate_date, limit=int(getattr(args, "candidate_limit", 800) or 800)))
-    unique = sorted({s for s in symbols if s})
+    asset_scope = getattr(args, "asset_scope", "all") or "all"
+    unique = sorted({s for s in symbols if s and _asset_scope_allows(s, asset_scope)})
+    if getattr(args, "only_missing_or_stale", False):
+        before = len(unique)
+        unique = filter_symbols_by_qfq_gap(engine, unique, args.start_date, args.end_date)
+        print(f"缺口过滤: before={before} after={len(unique)}")
+    unique = _apply_resume_and_limit(
+        unique,
+        resume_after=getattr(args, "resume_after", "") or "",
+        max_symbols=int(getattr(args, "max_symbols", 0) or 0),
+    )
     if not unique:
         raise RuntimeError("没有可补的代码，请传 --symbols、--portfolio-id 或 --all-stock-price-symbols")
     return unique
@@ -537,6 +788,10 @@ def run_update(
     candidate_date: str = "",
     candidate_limit: int = 800,
     portfolio_symbol_scope: str = "all",
+    asset_scope: str = "all",
+    only_missing_or_stale: bool = False,
+    resume_after: str = "",
+    max_symbols: int = 0,
     dry_run: bool = False,
     sleep_sec: float = 0.2,
 ) -> List[UpdateResult]:
@@ -558,6 +813,10 @@ def run_update(
     args.portfolio_id = portfolio_id
     args.portfolio_symbol_scope = portfolio_symbol_scope
     args.all_stock_price_symbols = all_stock_price_symbols
+    args.asset_scope = asset_scope
+    args.only_missing_or_stale = bool(only_missing_or_stale)
+    args.resume_after = resume_after
+    args.max_symbols = int(max_symbols or 0)
     args.v3_daily_candidates = bool(v3_daily_candidates)
     args.candidate_date = candidate_date or end_date
     args.candidate_limit = int(candidate_limit or 800)
@@ -565,7 +824,8 @@ def run_update(
 
     print(
         f"前复权补数: {start_date} -> {end_date} | symbols={len(target_symbols)} "
-        f"| portfolio_id={portfolio_id or '-'} | v3_daily_candidates={bool(v3_daily_candidates)} "
+        f"| portfolio_id={portfolio_id or '-'} | asset_scope={asset_scope} "
+        f"| only_missing_or_stale={bool(only_missing_or_stale)} | v3_daily_candidates={bool(v3_daily_candidates)} "
         f"| dry_run={dry_run}"
     )
     results: List[UpdateResult] = []
@@ -574,7 +834,7 @@ def run_update(
         results.append(result)
         status = "OK" if result.ok else "ERR"
         print(f"[{idx}/{len(target_symbols)}] {symbol} {status} rows={result.rows} source={result.source or '-'} error={result.error}")
-        if sleep_sec > 0 and not dry_run:
+        if sleep_sec > 0:
             time.sleep(float(sleep_sec))
     ok_count = sum(1 for r in results if r.ok)
     print(f"完成: ok={ok_count} error={len(results) - ok_count}")
@@ -594,6 +854,10 @@ def main() -> int:
         candidate_date=args.candidate_date or end_date,
         candidate_limit=int(args.candidate_limit),
         portfolio_symbol_scope=args.portfolio_symbol_scope,
+        asset_scope=args.asset_scope,
+        only_missing_or_stale=bool(args.only_missing_or_stale),
+        resume_after=args.resume_after,
+        max_symbols=int(args.max_symbols or 0),
         dry_run=args.dry_run,
         sleep_sec=args.sleep_sec,
     )

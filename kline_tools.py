@@ -31,7 +31,7 @@ engine = get_db_engine()
 ensure_unified_stock_view(engine)
 STOCK_DAILY_SOURCE = get_stock_price_source(engine)
 
-_A_SHARE_SYMBOL_RE = re.compile(r"^\d{6}\.(?:SH|SZ)$", re.IGNORECASE)
+_A_SHARE_SYMBOL_RE = re.compile(r"^\d{6}\.(?:SH|SZ|BJ)$", re.IGNORECASE)
 _KLINE_COLUMNS = ["trade_date", "open_price", "high_price", "low_price", "close_price"]
 
 
