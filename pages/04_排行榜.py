@@ -3,6 +3,12 @@ import pandas as pd
 import data_engine as de
 from st_aggrid import AgGrid, GridOptionsBuilder, JsCode, ColumnsAutoSizeMode
 import time
+from market_monitor_grid import (
+    AG_GRID_LOCALE_ZH_CN,
+    GRID_NUMBER_COMPARATOR,
+    GRID_NUMBER_FILTER_PARAMS,
+    make_grid_number_filter_value_getter,
+)
 from ui_components import inject_sidebar_toggle_style
 
 # ============================================================
@@ -538,7 +544,7 @@ if not df_monitor.empty:
             # 基础配置
             gb.configure_default_column(
                 resizable=True,
-                filterable=True,
+                filter=True,
                 sortable=True,
                 cellStyle={
                     'display': 'flex',
@@ -553,6 +559,7 @@ if not df_monitor.empty:
             gb.configure_column("合约",
                                 pinned='left',
                                 width=220,
+                                filter=False,
                                 cellStyle={
                                     'fontWeight': '600',
                                     'color': '#f1f5f9',
@@ -652,13 +659,20 @@ if not df_monitor.empty:
             gb.configure_column("IV Rank",
                                 width=120,
                                 cellRenderer=iv_rank_renderer,
-                                comparator=iv_rank_comparator
+                                comparator=iv_rank_comparator,
+                                filter="agNumberColumnFilter",
+                                filterParams=GRID_NUMBER_FILTER_PARAMS,
+                                filterValueGetter=make_grid_number_filter_value_getter("IV Rank")
                                 )
 
             # 当前IV
             gb.configure_column("当前IV",
                                 width=100,
                                 valueFormatter="x ? Number(x).toFixed(2) + '%' : '-'",
+                                comparator=GRID_NUMBER_COMPARATOR,
+                                filter="agNumberColumnFilter",
+                                filterParams=GRID_NUMBER_FILTER_PARAMS,
+                                filterValueGetter=make_grid_number_filter_value_getter("当前IV"),
                                 cellStyle={
                                     'color': '#e2e8f0',
                                     'fontWeight': '600',
@@ -694,6 +708,10 @@ if not df_monitor.empty:
                     gb.configure_column(col,
                                         cellStyle=change_style_js,
                                         valueFormatter=number_formatter,
+                                        comparator=GRID_NUMBER_COMPARATOR,
+                                        filter="agNumberColumnFilter",
+                                        filterParams=GRID_NUMBER_FILTER_PARAMS,
+                                        filterValueGetter=make_grid_number_filter_value_getter(col),
                                         width=110
                                         )
 
@@ -702,10 +720,15 @@ if not df_monitor.empty:
                     gb.configure_column(col,
                                         cellStyle=change_style_js,
                                         valueFormatter=hold_formatter,
+                                        comparator=GRID_NUMBER_COMPARATOR,
+                                        filter="agNumberColumnFilter",
+                                        filterParams=GRID_NUMBER_FILTER_PARAMS,
+                                        filterValueGetter=make_grid_number_filter_value_getter(col),
                                         width=120
                                         )
 
             gridOptions = gb.build()
+            gridOptions["localeText"] = AG_GRID_LOCALE_ZH_CN
 
             # 渲染表格
             AgGrid(
@@ -716,8 +739,9 @@ if not df_monitor.empty:
                 columns_auto_size_mode=ColumnsAutoSizeMode.FIT_ALL_COLUMNS_TO_VIEW,
                 allow_unsafe_jscode=True,
                 enable_enterprise_modules=False,
-                reload_data=False,
-                update_mode='MODEL_CHANGED',
+                key=f"market_monitor_grid_{category}",
+                update_mode="NO_UPDATE",
+                update_on=[],
                 custom_css={
                     ".ag-root-wrapper": {
                         "background-color": "#0f172a !important",
@@ -731,8 +755,73 @@ if not df_monitor.empty:
                         "font-size": "12px",
                         "font-weight": "600"
                     },
+                    ".ag-header-cell": {
+                        "border-right": "1px solid rgba(148, 163, 184, 0.22) !important",
+                        "box-shadow": "inset -1px 0 0 rgba(15, 23, 42, 0.55)",
+                        "padding-left": "12px !important",
+                        "padding-right": "8px !important",
+                        "text-align": "left !important"
+                    },
+                    ".ag-header-cell-comp-wrapper": {
+                        "justify-content": "flex-start !important",
+                        "align-items": "center !important",
+                        "width": "100% !important",
+                        "min-width": "0"
+                    },
+                    ".ag-cell-label-container": {
+                        "justify-content": "flex-start !important",
+                        "align-items": "center !important",
+                        "text-align": "left !important",
+                        "width": "100% !important"
+                    },
+                    ".ag-right-aligned-header .ag-cell-label-container": {
+                        "flex-direction": "row !important",
+                        "justify-content": "flex-start !important",
+                        "text-align": "left !important"
+                    },
+                    ".ag-header-cell-label": {
+                        "flex": "1 1 auto !important",
+                        "width": "100% !important",
+                        "justify-content": "flex-start !important",
+                        "text-align": "left !important",
+                        "gap": "6px",
+                        "min-width": "0"
+                    },
                     ".ag-header-cell-text": {
-                        "color": "#94a3b8 !important"
+                        "color": "#94a3b8 !important",
+                        "text-align": "left !important",
+                        "overflow": "hidden",
+                        "text-overflow": "ellipsis",
+                        "white-space": "nowrap"
+                    },
+                    ".ag-header-icon": {
+                        "margin-left": "2px !important",
+                        "opacity": "0.9"
+                    },
+                    ".ag-header-cell-menu-button, .ag-header-cell-filter-button": {
+                        "margin-left": "6px !important",
+                        "margin-right": "0 !important"
+                    },
+                    ".ag-right-aligned-header .ag-header-cell-label": {
+                        "flex-direction": "row !important",
+                        "justify-content": "flex-start !important"
+                    },
+                    ".ag-header-cell-filtered": {
+                        "background": "rgba(239, 68, 68, 0.12) !important"
+                    },
+                    ".ag-header-cell-filtered .ag-header-cell-text": {
+                        "color": "#f8fafc !important",
+                        "font-weight": "700 !important"
+                    },
+                    ".ag-header-cell-filtered .ag-header-cell-text::after": {
+                        "content": "' 筛选中'",
+                        "margin-left": "6px",
+                        "padding": "1px 5px",
+                        "border-radius": "4px",
+                        "background": "rgba(239, 68, 68, 0.2)",
+                        "color": "#fca5a5",
+                        "font-size": "10px",
+                        "font-weight": "700"
                     },
                     ".ag-row": {
                         "background-color": "#0f172a !important",
@@ -750,7 +839,7 @@ if not df_monitor.empty:
                     },
                     ".ag-cell": {
                         "background-color": "transparent !important",
-                        "border-right": "none !important"
+                        "border-right": "1px solid rgba(148, 163, 184, 0.08) !important"
                     },
                     ".ag-body-viewport": {
                         "background-color": "#0f172a !important"
