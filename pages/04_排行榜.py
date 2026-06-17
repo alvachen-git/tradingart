@@ -555,6 +555,38 @@ st.markdown("""
         background-color: rgba(30, 41, 59, 0.5) !important;
         border-radius: 10px;
     }
+    .data-help-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 8px 14px;
+        margin-top: 4px;
+    }
+    .data-help-grid > div {
+        display: flex;
+        gap: 8px;
+        align-items: baseline;
+        color: #cbd5e1;
+        font-size: 12px;
+        line-height: 1.45;
+    }
+    .data-help-grid b,
+    .data-help-advice b {
+        color: #f8fafc;
+        font-size: 12px;
+        white-space: nowrap;
+    }
+    .data-help-grid span,
+    .data-help-advice span {
+        color: #94a3b8;
+    }
+    .data-help-advice {
+        margin-top: 12px;
+        padding-top: 10px;
+        border-top: 1px solid rgba(71, 85, 105, 0.35);
+        color: #94a3b8;
+        font-size: 12px;
+        line-height: 1.55;
+    }
 
     /* === Metric卡片 === */
     [data-testid="stMetric"] {
@@ -744,7 +776,7 @@ inject_sidebar_toggle_style(mode="high_contrast")
 # 页面标题区域
 # ============================================================
 
-col_title, col_info_top, col_refresh = st.columns([4.2, 1.2, 1.2], gap="large")
+col_title, col_info_top, col_refresh = st.columns([3.0, 2.6, 1.2], gap="large")
 
 
 def _format_latest_date(date_text):
@@ -761,6 +793,15 @@ def get_latest_date_from_market_data(df):
     if latest_values.empty:
         return ""
     return latest_values.iloc[0]
+
+
+@st.cache_data(ttl=300)
+def load_latest_data_date_fallback():
+    """Fallback for old cached monitor data that was created before _数据日期 existed."""
+    try:
+        return de.get_latest_data_date()
+    except Exception:
+        return ""
 
 
 with col_title:
@@ -792,17 +833,17 @@ with col_title:
 with col_info_top:
     with st.expander("数据说明", expanded=False):
         st.markdown("""
-**指标解释**
-- **IV**：Implied volatility（隐含波动率）
-- **IV Rank**：当前隐含波动率在最近一年中的百分位排名
-- **散户变动**：散户集中期货商净持仓变化，偏反向观察
-- **机构变动**：机构集中期货商净持仓变化，偏顺向观察
-
-**扫描建议**
-- IV Rank > 80：波动率偏贵，关注卖方机会
-- IV Rank < 20：波动率偏便宜，关注买方机会
-- 机构流入 + 散户流出：作为资金共振线索继续核对
-        """)
+<div class="data-help-grid">
+  <div><b>IV</b><span>隐含波动率</span></div>
+  <div><b>IV Rank</b><span>近一年百分位排名</span></div>
+  <div><b>散户变动</b><span>散户集中席位净持仓变化，偏反向观察</span></div>
+  <div><b>机构变动</b><span>机构集中席位净持仓变化，偏顺向观察</span></div>
+</div>
+<div class="data-help-advice">
+  <b>扫描建议</b>
+  <span>IV Rank &gt; 80 关注卖方机会；IV Rank &lt; 20 关注买方机会；机构流入 + 散户流出作为资金共振线索继续核对。</span>
+</div>
+        """, unsafe_allow_html=True)
 
 refresh_requested = False
 with col_refresh:
@@ -836,6 +877,7 @@ def load_data():
 if refresh_requested:
     # 仅清理本页 load_data 缓存，避免全局缓存被清空后引发整站重算。
     load_data.clear()
+    load_latest_data_date_fallback.clear()
     if hasattr(de, "clear_comprehensive_market_data_snapshot"):
         de.clear_comprehensive_market_data_snapshot()
 
@@ -848,7 +890,10 @@ if refresh_requested:
 else:
     df_monitor = load_data()
 load_time = time.time() - start_time
-latest_date_display = _format_latest_date(get_latest_date_from_market_data(df_monitor))
+latest_date_value = get_latest_date_from_market_data(df_monitor)
+if not latest_date_value:
+    latest_date_value = load_latest_data_date_fallback()
+latest_date_display = _format_latest_date(latest_date_value)
 latest_date_placeholder.markdown(
     f"""
     <div style="margin-top:6px; text-align:right; font-size:12px; color:#94a3b8;">
