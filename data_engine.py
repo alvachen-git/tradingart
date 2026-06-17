@@ -1177,6 +1177,21 @@ def get_product_code(raw_code):
     return "".join(re.findall("[A-Z]", base))
 
 
+def _get_product_from_join_key(join_key):
+    product = get_product_code(join_key)
+    mapping = {'IO': 'IF', 'HO': 'IH', 'MO': 'IM'}
+    return mapping.get(product, product)
+
+
+def _get_iv_history_product_code(ts_code, join_key=""):
+    product = _get_product_from_join_key(join_key)
+    if product:
+        return product
+    base_product = get_product_code(ts_code)
+    mapping = {'IO': 'IF', 'HO': 'IH', 'MO': 'IM'}
+    return mapping.get(base_product, base_product)
+
+
 # --- 【新增】判断合约是否快到期 (用于过滤不准确的IV) ---
 def check_expiry_validity(row, current_date_str):
     """
@@ -1380,22 +1395,28 @@ def get_comprehensive_market_data():
         """)
         df_iv_all = read_sql_timed(sql_iv_all, params={"date_1y": date_1y})
         if not df_iv_all.empty:
-            df_iv_all['iv'] = pd.to_numeric(df_iv_all['iv'], errors='coerce').fillna(0.0)
+            df_iv_all['iv'] = pd.to_numeric(df_iv_all['iv'], errors='coerce')
             df_iv_all['trade_date_key'] = pd.to_datetime(df_iv_all['trade_date']).dt.strftime('%Y%m%d')
         else:
             df_iv_all['trade_date_key'] = ""
         df_iv_all['join_key'] = df_iv_all['ts_code'].apply(get_join_key)
-        df_iv_all = df_iv_all[df_iv_all['join_key'] != ""]
+        df_iv_all['product'] = df_iv_all.apply(
+            lambda row: _get_iv_history_product_code(row.get('ts_code'), row.get('join_key')),
+            axis=1,
+        )
+        df_iv_all = df_iv_all[df_iv_all['product'] != ""].copy()
+        df_iv_contract = df_iv_all[df_iv_all['join_key'] != ""].copy()
+        df_iv_product = df_iv_all[df_iv_all['join_key'] == ""].copy()
 
         # 分离最新7天和全年数据
-        df_iv_recent = df_iv_all[df_iv_all['trade_date_key'] >= date_7d].copy()
+        df_iv_recent = df_iv_contract[df_iv_contract['trade_date_key'] >= date_7d].copy()
         df_iv_latest = df_iv_recent.sort_values('trade_date_key').groupby('join_key').tail(1)[['join_key', 'iv']]
 
         # === 第4步：智能选择合约（保持不变）===
         df_cand = df_now.merge(df_iv_latest, on='join_key', how='left')
         df_cand['product'] = df_cand['join_key'].apply(lambda x: re.match(r"([a-zA-Z]+)", x).group(1))
-        df_cand['iv'] = df_cand['iv'].fillna(0)
-        df_cand['has_iv'] = df_cand['iv'] > 0.0001
+        df_cand['iv'] = pd.to_numeric(df_cand['iv'], errors='coerce')
+        df_cand['has_iv'] = df_cand['iv'].fillna(0) > 0.0001
 
         def get_m_num(k):
             m = re.search(r'\d+$', k)
@@ -1416,7 +1437,14 @@ def get_comprehensive_market_data():
 
         # B. 选月份最近的 (m_num Min)
         # m_num 是之前代码里计算出来的数字月份，越小代表越近月
-        top_near = df_valid.sort_values('m_num', ascending=True).groupby('product').head(1)
+        near_candidates = df_valid.copy()
+        near_candidates['iv_missing_rank'] = np.where(near_candidates['has_iv'], 0, 1)
+        top_near = (
+            near_candidates
+            .sort_values(['iv_missing_rank', 'm_num'], ascending=[True, True])
+            .groupby('product')
+            .head(1)
+        )
 
         # 3. 合并并去重
         # 如果主力合约刚好也是近月合约，drop_duplicates 会自动把它们变成一条
@@ -1426,37 +1454,62 @@ def get_comprehensive_market_data():
         keys = df_selected['join_key'].unique().tolist()
         if keys:
             # 复用已加载的一年IV数据，避免重复全量扫描
-            df_h = df_iv_all[df_iv_all['join_key'].isin(keys)][['join_key', 'iv']].copy()
+            products = df_selected['product'].dropna().unique().tolist()
+            df_h = df_iv_contract[df_iv_contract['join_key'].isin(keys)][['join_key', 'iv']].copy()
 
             # --- 【核心修改】 过滤掉 IV 为 0 的异常值 ---
             # 只有大于 0.0001 的 IV 才参与统计
             # 这样 Min 值就是“历史最低的有效IV”，而不是 0
             df_h_valid = df_h[df_h['iv'] > 0.0001]
+            df_product_valid = df_iv_product[
+                (df_iv_product['product'].isin(products)) & (df_iv_product['iv'] > 0.0001)
+            ].copy()
 
             if not df_h_valid.empty:
-                stats = df_h_valid.groupby('join_key')['iv'].agg(['min', 'max']).reset_index()
+                stats = (
+                    df_h_valid
+                    .groupby('join_key')['iv']
+                    .agg(['min', 'max'])
+                    .reset_index()
+                    .rename(columns={'min': 'contract_min', 'max': 'contract_max'})
+                )
                 df_final = df_selected.merge(stats, on='join_key', how='left')
             else:
                 # 如果全是 0，给个空列防止报错
                 df_final = df_selected.copy()
-                df_final['min'] = 0
-                df_final['max'] = 0
+                df_final['contract_min'] = np.nan
+                df_final['contract_max'] = np.nan
+
+            if not df_product_valid.empty:
+                product_stats = (
+                    df_product_valid
+                    .groupby('product')['iv']
+                    .agg(['min', 'max'])
+                    .reset_index()
+                    .rename(columns={'min': 'product_min', 'max': 'product_max'})
+                )
+                df_final = df_final.merge(product_stats, on='product', how='left')
+            else:
+                df_final['product_min'] = np.nan
+                df_final['product_max'] = np.nan
 
             # 计算 Rank
-            df_final['iv_range'] = df_final['max'] - df_final['min']
+            df_final['rank_min'] = df_final['product_min'].combine_first(df_final['contract_min'])
+            df_final['rank_max'] = df_final['product_max'].combine_first(df_final['contract_max'])
+            df_final['iv_range'] = df_final['rank_max'] - df_final['rank_min']
             # 分母极小时保护
             df_final['iv_rank'] = np.where(
-                df_final['iv_range'] > 0.0001,
-                (df_final['iv'] - df_final['min']) / df_final['iv_range'] * 100,
-                0
+                (df_final['iv'].fillna(0) > 0.0001) & (df_final['iv_range'] > 0.0001),
+                (df_final['iv'] - df_final['rank_min']) / df_final['iv_range'] * 100,
+                np.nan
             )
-            df_final['iv_rank'] = df_final['iv_rank'].replace([np.inf, -np.inf], 0).fillna(0)
+            df_final['iv_rank'] = df_final['iv_rank'].replace([np.inf, -np.inf], np.nan)
         else:
             df_final = df_selected
-            df_final['iv_rank'] = 0
+            df_final['iv_rank'] = np.nan
 
         # === 第6步：历史IV数据（按合约自身最近日历回退）===
-        df_hiv = df_iv_all.groupby(['join_key', 'trade_date_key'])['iv'].mean().reset_index()
+        df_hiv = df_iv_contract.groupby(['join_key', 'trade_date_key'])['iv'].mean().reset_index()
         iv_trade_dates = (
             df_hiv[['join_key', 'trade_date_key']]
             .drop_duplicates()
@@ -1561,10 +1614,19 @@ def get_comprehensive_market_data():
         df_final['5日涨跌%'] = ((df_final['close_price'] - df_final['close_price_5d']) /
                                 df_final['close_price_5d'] * 100).fillna(0)
 
-        for c in ['iv', 'iv_prev', 'iv_5d']:
-            df_final[c] = df_final[c].fillna(0)
-        df_final['当日IV变动'] = np.where(df_final['iv_prev'] > 0.0001, df_final['iv'] - df_final['iv_prev'], 0)
-        df_final['5日IV变动'] = np.where(df_final['iv_5d'] > 0.0001, df_final['iv'] - df_final['iv_5d'], 0)
+        df_final['iv'] = pd.to_numeric(df_final['iv'], errors='coerce')
+        for c in ['iv_prev', 'iv_5d']:
+            df_final[c] = pd.to_numeric(df_final[c], errors='coerce').fillna(0)
+        df_final['当日IV变动'] = np.where(
+            (df_final['iv'].fillna(0) > 0.0001) & (df_final['iv_prev'] > 0.0001),
+            df_final['iv'] - df_final['iv_prev'],
+            0,
+        )
+        df_final['5日IV变动'] = np.where(
+            (df_final['iv'].fillna(0) > 0.0001) & (df_final['iv_5d'] > 0.0001),
+            df_final['iv'] - df_final['iv_5d'],
+            0,
+        )
 
         for c in ['dumb_chg_1d', 'dumb_chg_5d', 'smart_chg_1d', 'smart_chg_5d']:
             if c not in df_final.columns: df_final[c] = 0
@@ -1587,14 +1649,18 @@ def get_comprehensive_market_data():
         curr_yymm = int(pd.to_datetime(today).strftime('%y%m'))
 
         def fmt_rank(row):
-            if row['iv'] < 0.0001:
+            iv_val = pd.to_numeric(row.get('iv'), errors='coerce')
+            if pd.isna(iv_val) or iv_val < 0.0001:
                 m = re.search(r'\d{3,4}$', row['join_key'])
                 if m:
                     m_str = m.group(0)
                     if len(m_str) == 3: m_str = "2" + m_str
                     if int(m_str) <= curr_yymm + 1: return "快到期"
-                return 0
-            return int(round(row['iv_rank'], 0))
+                return "N/A"
+            rank_val = pd.to_numeric(row.get('iv_rank'), errors='coerce')
+            if pd.isna(rank_val):
+                return "N/A"
+            return int(round(rank_val, 0))
 
         df_final['iv_rank_display'] = df_final.apply(fmt_rank, axis=1)
 

@@ -35,10 +35,22 @@ class ComprehensiveMarketDataSnapshotTests(unittest.TestCase):
                 [
                     {"ts_code": "MA2609", "close_price": 200.0, "oi": 1200.0, "trade_date": "2026-04-28"},
                     {"ts_code": "MA2606", "close_price": 198.0, "oi": 900.0, "trade_date": "2026-04-28"},
+                    {"ts_code": "RB2608", "close_price": 300.0, "oi": 100.0, "trade_date": "2026-04-28"},
+                    {"ts_code": "RB2609", "close_price": 302.0, "oi": 200.0, "trade_date": "2026-04-28"},
+                    {"ts_code": "RB2610", "close_price": 304.0, "oi": 1000.0, "trade_date": "2026-04-28"},
+                    {"ts_code": "HC2609", "close_price": 310.0, "oi": 500.0, "trade_date": "2026-04-28"},
                     {"ts_code": "MA2609", "close_price": 190.0, "oi": 1100.0, "trade_date": "2026-04-27"},
                     {"ts_code": "MA2606", "close_price": 188.0, "oi": 880.0, "trade_date": "2026-04-27"},
+                    {"ts_code": "RB2608", "close_price": 298.0, "oi": 90.0, "trade_date": "2026-04-27"},
+                    {"ts_code": "RB2609", "close_price": 299.0, "oi": 190.0, "trade_date": "2026-04-27"},
+                    {"ts_code": "RB2610", "close_price": 301.0, "oi": 950.0, "trade_date": "2026-04-27"},
+                    {"ts_code": "HC2609", "close_price": 308.0, "oi": 480.0, "trade_date": "2026-04-27"},
                     {"ts_code": "MA2609", "close_price": 180.0, "oi": 1000.0, "trade_date": "2026-04-21"},
                     {"ts_code": "MA2606", "close_price": 178.0, "oi": 860.0, "trade_date": "2026-04-21"},
+                    {"ts_code": "RB2608", "close_price": 296.0, "oi": 80.0, "trade_date": "2026-04-21"},
+                    {"ts_code": "RB2609", "close_price": 297.0, "oi": 180.0, "trade_date": "2026-04-21"},
+                    {"ts_code": "RB2610", "close_price": 300.0, "oi": 900.0, "trade_date": "2026-04-21"},
+                    {"ts_code": "HC2609", "close_price": 306.0, "oi": 460.0, "trade_date": "2026-04-21"},
                     {"ts_code": "TA2609", "close_price": 100.0, "oi": 1500.0, "trade_date": "2026-04-27"},
                     {"ts_code": "TA2606", "close_price": 98.0, "oi": 1000.0, "trade_date": "2026-04-27"},
                     {"ts_code": "TA2609", "close_price": 95.0, "oi": 1400.0, "trade_date": "2026-04-24"},
@@ -49,12 +61,18 @@ class ComprehensiveMarketDataSnapshotTests(unittest.TestCase):
         if "FROM commodity_iv_history" in sql_text:
             return pd.DataFrame(
                 [
-                    {"ts_code": "MA2609", "iv": 35.0, "trade_date": "2026-04-28"},
+                    {"ts_code": "MA", "iv": 20.0, "trade_date": "2026-04-21"},
+                    {"ts_code": "MA", "iv": 40.0, "trade_date": "2026-04-27"},
+                    {"ts_code": "MA2609", "iv": 25.0, "trade_date": "2026-04-28"},
                     {"ts_code": "MA2609", "iv": 30.0, "trade_date": "2026-04-27"},
-                    {"ts_code": "MA2609", "iv": 25.0, "trade_date": "2026-04-21"},
+                    {"ts_code": "MA2609", "iv": 35.0, "trade_date": "2026-04-21"},
                     {"ts_code": "MA2606", "iv": 31.0, "trade_date": "2026-04-28"},
                     {"ts_code": "MA2606", "iv": 27.0, "trade_date": "2026-04-27"},
                     {"ts_code": "MA2606", "iv": 24.0, "trade_date": "2026-04-21"},
+                    {"ts_code": "RB2609", "iv": 12.0, "trade_date": "2026-04-28"},
+                    {"ts_code": "RB2609", "iv": 11.0, "trade_date": "2026-04-27"},
+                    {"ts_code": "RB2610", "iv": 13.0, "trade_date": "2026-04-28"},
+                    {"ts_code": "RB2610", "iv": 12.5, "trade_date": "2026-04-27"},
                     {"ts_code": "TA2609", "iv": 22.0, "trade_date": "2026-04-27"},
                     {"ts_code": "TA2609", "iv": 20.0, "trade_date": "2026-04-24"},
                     {"ts_code": "TA2606", "iv": 18.0, "trade_date": "2026-04-27"},
@@ -80,6 +98,38 @@ class ComprehensiveMarketDataSnapshotTests(unittest.TestCase):
         ta_main = ta_rows[ta_rows["合约"] == "TA2609 (PTA)"]
         self.assertFalse(ta_main.empty)
         self.assertAlmostEqual(float(ta_main.iloc[0]["涨跌%(日)"]), round((100.0 - 95.0) / 95.0 * 100, 2))
+
+    def test_iv_rank_prefers_product_continuous_history(self):
+        with patch.object(data_engine, "engine", object()), \
+             patch.object(data_engine, "check_expiry_validity", return_value=True), \
+             patch.object(data_engine.pd, "read_sql", side_effect=self._fake_read_sql):
+            df = data_engine.get_comprehensive_market_data()
+
+        ma_main = df[df["合约"] == "MA2609 (甲醇)"]
+        self.assertFalse(ma_main.empty)
+        self.assertEqual(ma_main.iloc[0]["IV Rank"], 25)
+
+    def test_near_contract_prefers_available_iv_over_blank_near_month(self):
+        with patch.object(data_engine, "engine", object()), \
+             patch.object(data_engine, "check_expiry_validity", return_value=True), \
+             patch.object(data_engine.pd, "read_sql", side_effect=self._fake_read_sql):
+            df = data_engine.get_comprehensive_market_data()
+
+        labels = set(df["合约"].astype(str).tolist())
+        self.assertIn("RB2610 (螺纹钢)", labels)
+        self.assertIn("RB2609 (螺纹钢)", labels)
+        self.assertNotIn("RB2608 (螺纹钢)", labels)
+
+    def test_missing_iv_outputs_na_rank_instead_of_zero(self):
+        with patch.object(data_engine, "engine", object()), \
+             patch.object(data_engine, "check_expiry_validity", return_value=True), \
+             patch.object(data_engine.pd, "read_sql", side_effect=self._fake_read_sql):
+            df = data_engine.get_comprehensive_market_data()
+
+        hc = df[df["合约"] == "HC2609 (热卷)"]
+        self.assertFalse(hc.empty)
+        self.assertTrue(pd.isna(hc.iloc[0]["当前IV"]))
+        self.assertEqual(hc.iloc[0]["IV Rank"], "N/A")
 
 
 if __name__ == "__main__":
