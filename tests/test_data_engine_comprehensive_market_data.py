@@ -1,4 +1,6 @@
 import unittest
+import tempfile
+from pathlib import Path
 from unittest.mock import patch
 
 import pandas as pd
@@ -8,10 +10,24 @@ import data_engine
 
 class ComprehensiveMarketDataSnapshotTests(unittest.TestCase):
     def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self._disk_cache_patch = patch.object(
+            data_engine,
+            "_MARKET_DISK_SNAPSHOT_PATH",
+            Path(self._tmpdir.name) / "market_snapshot.json",
+        )
+        self._disk_cache_patch.start()
         data_engine.clear_comprehensive_market_data_snapshot()
 
     def tearDown(self):
         data_engine.clear_comprehensive_market_data_snapshot()
+        self._disk_cache_patch.stop()
+        self._tmpdir.cleanup()
+
+    def _clear_memory_snapshot_only(self):
+        with data_engine._MARKET_SNAPSHOT_LOCK:
+            data_engine._MARKET_SNAPSHOT_LAST_DF = None
+            data_engine._MARKET_SNAPSHOT_LAST_AT = 0.0
 
     def _fake_read_sql(self, sql, engine, params=None):
         sql_text = str(sql)
@@ -130,6 +146,45 @@ class ComprehensiveMarketDataSnapshotTests(unittest.TestCase):
         self.assertFalse(hc.empty)
         self.assertTrue(pd.isna(hc.iloc[0]["当前IV"]))
         self.assertEqual(hc.iloc[0]["IV Rank"], "N/A")
+
+    def test_result_carries_latest_data_date_for_ui_header(self):
+        with patch.object(data_engine, "engine", object()), \
+             patch.object(data_engine, "check_expiry_validity", return_value=True), \
+             patch.object(data_engine.pd, "read_sql", side_effect=self._fake_read_sql):
+            df = data_engine.get_comprehensive_market_data()
+
+        self.assertIn("_数据日期", df.columns)
+        self.assertEqual(set(df["_数据日期"].dropna().astype(str)), {"20260428"})
+
+    def test_disk_snapshot_serves_after_process_memory_is_empty(self):
+        with patch.object(data_engine, "engine", object()), \
+             patch.object(data_engine, "check_expiry_validity", return_value=True), \
+             patch.object(data_engine.pd, "read_sql", side_effect=self._fake_read_sql):
+            first_df = data_engine.get_comprehensive_market_data()
+
+        self.assertFalse(first_df.empty)
+        self.assertTrue(data_engine._MARKET_DISK_SNAPSHOT_PATH.exists())
+
+        self._clear_memory_snapshot_only()
+        with patch.object(data_engine, "engine", object()), \
+             patch.object(data_engine.pd, "read_sql", side_effect=AssertionError("disk hit should not query SQL")):
+            second_df = data_engine.get_comprehensive_market_data()
+
+        self.assertEqual(len(second_df), len(first_df))
+        self.assertEqual(set(second_df["_数据日期"].dropna().astype(str)), {"20260428"})
+
+    def test_clear_market_snapshot_removes_disk_snapshot(self):
+        with patch.object(data_engine, "engine", object()), \
+             patch.object(data_engine, "check_expiry_validity", return_value=True), \
+             patch.object(data_engine.pd, "read_sql", side_effect=self._fake_read_sql):
+            df = data_engine.get_comprehensive_market_data()
+
+        self.assertFalse(df.empty)
+        self.assertTrue(data_engine._MARKET_DISK_SNAPSHOT_PATH.exists())
+
+        data_engine.clear_comprehensive_market_data_snapshot()
+
+        self.assertFalse(data_engine._MARKET_DISK_SNAPSHOT_PATH.exists())
 
 
 if __name__ == "__main__":

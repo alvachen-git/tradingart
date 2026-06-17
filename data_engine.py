@@ -1111,6 +1111,14 @@ _MARKET_SNAPSHOT_LAST_AT = 0.0
 _MARKET_SNAPSHOT_TTL_SEC = 300
 _MARKET_SNAPSHOT_STALE_MAX_SEC = 1800
 _MARKET_SNAPSHOT_WAIT_SEC = 0.8
+_MARKET_SNAPSHOT_SCHEMA_VERSION = 2
+_MARKET_DISK_SNAPSHOT_PATH = Path(
+    os.getenv("TRADINGART_MARKET_SNAPSHOT_CACHE", "/tmp/tradingart_comprehensive_market_data_snapshot.json")
+)
+try:
+    _MARKET_DISK_SNAPSHOT_TTL_SEC = int(os.getenv("TRADINGART_MARKET_SNAPSHOT_TTL_SEC", "1800"))
+except ValueError:
+    _MARKET_DISK_SNAPSHOT_TTL_SEC = 1800
 
 
 def _snapshot_copy(max_age_sec):
@@ -1124,8 +1132,8 @@ def _snapshot_copy(max_age_sec):
     return _MARKET_SNAPSHOT_LAST_DF.copy(deep=True)
 
 
-def _snapshot_store(df):
-    """Store the latest successful snapshot for anti-stampede fallback."""
+def _snapshot_store_memory(df):
+    """Store the latest successful snapshot in memory for anti-stampede fallback."""
     global _MARKET_SNAPSHOT_LAST_DF, _MARKET_SNAPSHOT_LAST_AT
     if df is None or df.empty:
         return
@@ -1133,12 +1141,73 @@ def _snapshot_store(df):
     _MARKET_SNAPSHOT_LAST_AT = time.time()
 
 
+def _disk_snapshot_copy(max_age_sec):
+    """Return a defensive copy of the persisted snapshot when it is fresh enough."""
+    path = _MARKET_DISK_SNAPSHOT_PATH
+    try:
+        if max_age_sec <= 0 or not path.exists():
+            return None
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            return None
+        if payload.get("schema_version") != _MARKET_SNAPSHOT_SCHEMA_VERSION:
+            return None
+        created_at = float(payload.get("created_at") or 0.0)
+        if time.time() - created_at > max_age_sec:
+            return None
+        records = payload.get("records")
+        columns = payload.get("columns")
+        if not isinstance(records, list) or not isinstance(columns, list):
+            return None
+        df = pd.DataFrame(records, columns=columns)
+        if df.empty:
+            return None
+        return df.copy(deep=True)
+    except Exception as exc:
+        _PERF_LOGGER.warning("market disk snapshot read failed: %s", exc)
+        return None
+
+
+def _disk_snapshot_store(df):
+    """Persist the latest successful snapshot so Streamlit restarts can load fast."""
+    path = _MARKET_DISK_SNAPSHOT_PATH
+    try:
+        if df is None or df.empty:
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+        payload = {
+            "schema_version": _MARKET_SNAPSHOT_SCHEMA_VERSION,
+            "created_at": time.time(),
+            "columns": list(df.columns),
+            "records": df.where(pd.notnull(df), None).to_dict(orient="records"),
+        }
+        tmp_path.write_text(json.dumps(payload, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+        os.replace(tmp_path, path)
+    except Exception as exc:
+        _PERF_LOGGER.warning("market disk snapshot write failed: %s", exc)
+
+
+def _disk_snapshot_clear():
+    try:
+        _MARKET_DISK_SNAPSHOT_PATH.unlink(missing_ok=True)
+    except Exception as exc:
+        _PERF_LOGGER.warning("market disk snapshot clear failed: %s", exc)
+
+
+def _snapshot_store(df):
+    """Store the latest successful snapshot in memory and on disk."""
+    _snapshot_store_memory(df)
+    _disk_snapshot_store(df)
+
+
 def clear_comprehensive_market_data_snapshot():
-    """Clear in-process market snapshot cache used by get_comprehensive_market_data."""
+    """Clear market snapshot cache used by get_comprehensive_market_data."""
     global _MARKET_SNAPSHOT_LAST_DF, _MARKET_SNAPSHOT_LAST_AT
     with _MARKET_SNAPSHOT_LOCK:
         _MARKET_SNAPSHOT_LAST_DF = None
         _MARKET_SNAPSHOT_LAST_AT = 0.0
+        _disk_snapshot_clear()
 
 
 def _log_market_perf(*, cache_hit: int, sql_ms: float, compute_ms: float, rows: int, total_ms: float, note: str):
@@ -1286,6 +1355,20 @@ def get_comprehensive_market_data():
         )
         return hot_snapshot
 
+    disk_snapshot = _disk_snapshot_copy(_MARKET_DISK_SNAPSHOT_TTL_SEC)
+    if disk_snapshot is not None:
+        _snapshot_store_memory(disk_snapshot)
+        total_ms = (time.perf_counter() - total_t0) * 1000
+        _log_market_perf(
+            cache_hit=1,
+            sql_ms=0.0,
+            compute_ms=total_ms,
+            rows=len(disk_snapshot),
+            total_ms=total_ms,
+            note="disk_snapshot_hit",
+        )
+        return disk_snapshot
+
     try:
         lock_acquired = _MARKET_SNAPSHOT_LOCK.acquire(timeout=_MARKET_SNAPSHOT_WAIT_SEC)
         if not lock_acquired:
@@ -1301,6 +1384,19 @@ def get_comprehensive_market_data():
                     note="stale_fallback_timeout",
                 )
                 return stale_snapshot
+            stale_disk_snapshot = _disk_snapshot_copy(_MARKET_SNAPSHOT_STALE_MAX_SEC)
+            if stale_disk_snapshot is not None:
+                _snapshot_store_memory(stale_disk_snapshot)
+                total_ms = (time.perf_counter() - total_t0) * 1000
+                _log_market_perf(
+                    cache_hit=1,
+                    sql_ms=0.0,
+                    compute_ms=total_ms,
+                    rows=len(stale_disk_snapshot),
+                    total_ms=total_ms,
+                    note="disk_stale_fallback_timeout",
+                )
+                return stale_disk_snapshot
             _MARKET_SNAPSHOT_LOCK.acquire()
             lock_acquired = True
 
@@ -1316,6 +1412,20 @@ def get_comprehensive_market_data():
                 note="snapshot_hit",
             )
             return hot_snapshot
+
+        disk_snapshot = _disk_snapshot_copy(_MARKET_DISK_SNAPSHOT_TTL_SEC)
+        if disk_snapshot is not None:
+            _snapshot_store_memory(disk_snapshot)
+            total_ms = (time.perf_counter() - total_t0) * 1000
+            _log_market_perf(
+                cache_hit=1,
+                sql_ms=0.0,
+                compute_ms=total_ms,
+                rows=len(disk_snapshot),
+                total_ms=total_ms,
+                note="disk_snapshot_hit_locked",
+            )
+            return disk_snapshot
 
         # === 第1步：获取日期（保持不变）===
         dates_df = read_sql_timed(
@@ -1670,6 +1780,7 @@ def get_comprehensive_market_data():
         res.columns = ['合约', '当前IV', 'IV Rank', 'IV变动(日)', 'IV变动(5日)', '涨跌%(日)', '涨跌%(5日)',
                        '散户变动(日)', '散户变动(5日)', '机构变动(日)', '机构变动(5日)']
         res = res.round(2)
+        res['_数据日期'] = today
         _snapshot_store(res)
 
         total_ms = (time.perf_counter() - total_t0) * 1000
@@ -1700,6 +1811,19 @@ def get_comprehensive_market_data():
                 note="error_stale_fallback",
             )
             return stale_snapshot
+        stale_disk_snapshot = _disk_snapshot_copy(_MARKET_SNAPSHOT_STALE_MAX_SEC)
+        if stale_disk_snapshot is not None:
+            _snapshot_store_memory(stale_disk_snapshot)
+            total_ms = (time.perf_counter() - total_t0) * 1000
+            _log_market_perf(
+                cache_hit=1,
+                sql_ms=sql_ms,
+                compute_ms=max(total_ms - sql_ms, 0.0),
+                rows=len(stale_disk_snapshot),
+                total_ms=total_ms,
+                note="error_disk_stale_fallback",
+            )
+            return stale_disk_snapshot
         return pd.DataFrame()
     finally:
         if lock_acquired:

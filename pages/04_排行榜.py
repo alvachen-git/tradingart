@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import data_engine as de
+import html
 from st_aggrid import AgGrid, GridOptionsBuilder, JsCode, ColumnsAutoSizeMode
 import time
 from market_monitor_grid import (
@@ -209,6 +210,245 @@ def get_product_category(contract_name):
     return PRODUCT_CATEGORY.get(code, "其他")
 
 
+def to_float(value):
+    """把表格中的百分比、千分位数字、N/A 安全转换成浮点数。"""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        cleaned = value.replace(",", "").replace("%", "").strip()
+        if cleaned in {"", "-", "N/A", "nan", "None", "快到期"}:
+            return None
+    else:
+        cleaned = value
+    try:
+        number = float(cleaned)
+    except (TypeError, ValueError):
+        return None
+    if pd.isna(number):
+        return None
+    return number
+
+
+def count_by_rule(df, column, rule):
+    if column not in df.columns:
+        return 0
+    return int(df[column].apply(lambda value: (to_float(value) is not None) and rule(to_float(value))).sum())
+
+
+SCAN_FILTERS = [
+    {"key": "全部", "label": "全部扫描", "hint": "当前结果"},
+    {"key": "高IV", "label": "高IV Rank", "hint": ">= 80"},
+    {"key": "低IV", "label": "低IV Rank", "hint": "<= 20"},
+    {"key": "IV升幅", "label": "IV日升幅", "hint": ">= 0.30"},
+    {"key": "价格异动", "label": "价格异动", "hint": "|日涨跌| >= 1%"},
+    {"key": "机构流入", "label": "机构流入", "hint": "日变动 >= 1,000"},
+    {"key": "散户流出", "label": "散户流出", "hint": "日变动 <= -1,000"},
+    {"key": "缺IV", "label": "缺IV数据", "hint": "无有效IV"},
+]
+
+
+def build_scan_metrics(df):
+    missing_iv = 0
+    if {"当前IV", "IV Rank"}.issubset(df.columns):
+        missing_iv = int(
+            df.apply(
+                lambda row: to_float(row.get("当前IV")) is None or to_float(row.get("IV Rank")) is None,
+                axis=1,
+            ).sum()
+        )
+
+    return {
+        "全部": len(df),
+        "高IV": count_by_rule(df, "IV Rank", lambda value: value >= 80),
+        "低IV": count_by_rule(df, "IV Rank", lambda value: value <= 20),
+        "IV升幅": count_by_rule(df, "IV变动(日)", lambda value: value >= 0.30),
+        "价格异动": count_by_rule(df, "涨跌%(日)", lambda value: abs(value) >= 1),
+        "机构流入": count_by_rule(df, "机构变动(日)", lambda value: value >= 1000),
+        "散户流出": count_by_rule(df, "散户变动(日)", lambda value: value <= -1000),
+        "缺IV": missing_iv,
+    }
+
+
+def apply_text_search(df, search_term):
+    if not search_term:
+        return df
+    mask = df['合约'].str.contains(search_term, case=False, na=False) | df['品种'].str.contains(search_term, case=False, na=False)
+    return df[mask]
+
+
+def build_scan_tags(row):
+    tags = []
+    iv_rank = to_float(row.get("IV Rank"))
+    current_iv = to_float(row.get("当前IV"))
+    iv_change = to_float(row.get("IV变动(日)"))
+    price_change = to_float(row.get("涨跌%(日)"))
+    inst_change = to_float(row.get("机构变动(日)"))
+    retail_change = to_float(row.get("散户变动(日)"))
+
+    if str(row.get("IV Rank", "")).strip() == "快到期":
+        tags.append("快到期")
+    elif current_iv is None or iv_rank is None:
+        tags.append("缺IV")
+    elif iv_rank >= 80:
+        tags.append("高波")
+    elif iv_rank <= 20:
+        tags.append("低波")
+
+    if iv_change is not None and iv_change >= 0.30:
+        tags.append("IV升")
+    if price_change is not None and abs(price_change) >= 1:
+        tags.append("价异动")
+    if inst_change is not None and inst_change >= 1000:
+        tags.append("机构流入")
+    if retail_change is not None and retail_change <= -1000:
+        tags.append("散户流出")
+
+    return tags[:3] or ["观察"]
+
+
+def add_scan_signal_column(df):
+    df_with_signal = df.copy()
+    if "扫描信号" in df_with_signal.columns:
+        return df_with_signal
+    insert_at = 1 if "合约" in df_with_signal.columns else 0
+    signals = df_with_signal.apply(lambda row: "|".join(build_scan_tags(row)), axis=1)
+    df_with_signal.insert(insert_at, "扫描信号", signals)
+    return df_with_signal
+
+
+def format_percent(value):
+    number = to_float(value)
+    return "-" if number is None else f"{number:.2f}%"
+
+
+def format_signed_number(value, decimals=2, thousands=False):
+    number = to_float(value)
+    if number is None:
+        return "-"
+    sign = "+" if number > 0 else ""
+    if thousands:
+        return f"{sign}{int(number):,}"
+    return f"{sign}{number:.{decimals}f}"
+
+
+def format_grid_iv_rank(value):
+    if str(value).strip() == "快到期":
+        return "快到期"
+    number = to_float(value)
+    if number is None:
+        return "N/A"
+    return f"{number:.0f}"
+
+
+def tone_class(value):
+    number = to_float(value)
+    if number is None or number == 0:
+        return "flat"
+    return "up" if number > 0 else "down"
+
+
+def apply_grid_column_groups(grid_options):
+    column_defs = grid_options.get("columnDefs", [])
+    by_field = {
+        column.get("field"): column
+        for column in column_defs
+        if column.get("field")
+    }
+    used_fields = set()
+
+    def children(fields):
+        grouped_children = []
+        for field in fields:
+            if field in by_field:
+                grouped_children.append(by_field[field])
+                used_fields.add(field)
+        return grouped_children
+
+    groups = []
+    for group_name, fields in [
+        ("合约", ["合约", "扫描信号"]),
+        ("波动率", ["当前IV", "IV Rank", "IV变动(日)", "IV变动(5日)"]),
+        ("价格", ["涨跌%(日)", "涨跌%(5日)"]),
+        ("持仓资金", ["散户变动(日)", "散户变动(5日)", "机构变动(日)", "机构变动(5日)"]),
+    ]:
+        grouped_children = children(fields)
+        if grouped_children:
+            groups.append({
+                "headerName": group_name,
+                "marryChildren": True,
+                "children": grouped_children,
+            })
+
+    leftovers = [column for column in column_defs if column.get("field") not in used_fields]
+    grid_options["columnDefs"] = groups + leftovers
+    grid_options["groupHeaderHeight"] = 34
+    grid_options["headerHeight"] = 36
+    return grid_options
+
+
+def focus_metric_html(label, value, tone="flat"):
+    return (
+        f'<div class="focus-kpi">'
+        f'<div class="focus-kpi-label">{html.escape(label)}</div>'
+        f'<div class="focus-kpi-value {tone}">{html.escape(str(value))}</div>'
+        f'</div>'
+    )
+
+
+def render_focus_panel(row):
+    contract = html.escape(str(row.get("合约", "-")))
+    product = html.escape(str(row.get("品种", "-")))
+    category = html.escape(str(row.get("分类", "-")))
+    tags = "".join(
+        f"<span class='focus-tag'>{html.escape(tag)}</span>"
+        for tag in build_scan_tags(row)
+    )
+    iv_rank_value = to_float(row.get("IV Rank"))
+    iv_rank_display = "-" if iv_rank_value is None else f"{iv_rank_value:.0f}"
+
+    overview_metrics = [
+        focus_metric_html("当前IV", format_percent(row.get("当前IV"))),
+        focus_metric_html("IV Rank", iv_rank_display),
+        focus_metric_html("IV变动(日)", format_signed_number(row.get("IV变动(日)")), tone_class(row.get("IV变动(日)"))),
+        focus_metric_html("IV变动(5日)", format_signed_number(row.get("IV变动(5日)")), tone_class(row.get("IV变动(5日)"))),
+    ]
+    price_metrics = [
+        focus_metric_html("涨跌%(日)", format_signed_number(row.get("涨跌%(日)")), tone_class(row.get("涨跌%(日)"))),
+        focus_metric_html("涨跌%(5日)", format_signed_number(row.get("涨跌%(5日)")), tone_class(row.get("涨跌%(5日)"))),
+    ]
+    holding_metrics = [
+        focus_metric_html("散户(日)", format_signed_number(row.get("散户变动(日)"), decimals=0, thousands=True), tone_class(row.get("散户变动(日)"))),
+        focus_metric_html("散户(5日)", format_signed_number(row.get("散户变动(5日)"), decimals=0, thousands=True), tone_class(row.get("散户变动(5日)"))),
+        focus_metric_html("机构(日)", format_signed_number(row.get("机构变动(日)"), decimals=0, thousands=True), tone_class(row.get("机构变动(日)"))),
+        focus_metric_html("机构(5日)", format_signed_number(row.get("机构变动(5日)"), decimals=0, thousands=True), tone_class(row.get("机构变动(5日)"))),
+    ]
+
+    panel_html = (
+        f'<div class="focus-panel">'
+        f'<div class="focus-contract">{contract}</div>'
+        f'<div class="focus-meta">{product} · {category}</div>'
+        f'<div class="focus-tags">{tags}</div>'
+        f'<div class="focus-block">'
+        f'<div class="focus-block-title">波动率概览</div>'
+        f'<div class="focus-grid">{"".join(overview_metrics)}</div>'
+        f'</div>'
+        f'<div class="focus-block">'
+        f'<div class="focus-block-title">价格表现</div>'
+        f'<div class="focus-grid">{"".join(price_metrics)}</div>'
+        f'</div>'
+        f'<div class="focus-block">'
+        f'<div class="focus-block-title">持仓资金</div>'
+        f'<div class="focus-grid">{"".join(holding_metrics)}</div>'
+        f'</div>'
+        f'<div class="focus-block">'
+        f'<div class="focus-block-title">扫描备注</div>'
+        f'<div class="focus-note">右侧面板用于快速核对单一合约，表格仍保留完整排序和筛选能力。</div>'
+        f'</div>'
+        f'</div>'
+    )
+    st.markdown(panel_html, unsafe_allow_html=True)
+
+
 # ============================================================
 # 全局CSS样式
 # ============================================================
@@ -331,6 +571,166 @@ st.markdown("""
         font-weight: 700 !important;
     }
 
+    /* === 扫描工作台 === */
+    .scan-toolbar {
+        margin-top: 18px;
+        padding: 14px 16px;
+        background: rgba(15, 23, 42, 0.72);
+        border: 1px solid rgba(71, 85, 105, 0.36);
+        border-radius: 14px;
+    }
+    .scan-title {
+        color: #e2e8f0;
+        font-size: 14px;
+        font-weight: 700;
+        margin-bottom: 4px;
+    }
+    .scan-subtitle {
+        color: #94a3b8;
+        font-size: 12px;
+        line-height: 1.5;
+    }
+    .scan-card {
+        min-height: 86px;
+        padding: 14px 16px;
+        background: linear-gradient(180deg, rgba(30, 41, 59, 0.86), rgba(15, 23, 42, 0.92));
+        border: 1px solid rgba(71, 85, 105, 0.45);
+        border-radius: 12px;
+        box-shadow: 0 14px 30px rgba(2, 6, 23, 0.26);
+    }
+    .scan-card-label {
+        color: #cbd5e1;
+        font-size: 13px;
+        font-weight: 700;
+        margin-bottom: 8px;
+    }
+    .scan-card-rule {
+        color: #64748b;
+        font-size: 11px;
+        margin-top: 5px;
+    }
+    .scan-card-value {
+        color: #f8fafc;
+        font-size: 24px;
+        line-height: 1;
+        font-weight: 800;
+        letter-spacing: 0;
+        font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    }
+    .scan-card-high { border-color: rgba(248, 113, 113, 0.32); }
+    .scan-card-low { border-color: rgba(74, 222, 128, 0.32); }
+    .scan-card-focus { border-color: rgba(59, 130, 246, 0.36); }
+    .st-key-category_filter [data-testid="stWidgetLabel"] {
+        display: none;
+    }
+    .st-key-category_filter [data-baseweb="select"] > div {
+        min-height: 86px;
+        padding: 14px 16px;
+        background: linear-gradient(180deg, rgba(30, 41, 59, 0.9), rgba(15, 23, 42, 0.96)) !important;
+        border: 1px solid rgba(71, 85, 105, 0.4) !important;
+        border-radius: 12px !important;
+        box-shadow: 0 14px 30px rgba(2, 6, 23, 0.26);
+        color: #f8fafc !important;
+    }
+    .st-key-category_filter [data-baseweb="select"] > div div,
+    .st-key-category_filter [data-baseweb="select"] > div span {
+        color: #f8fafc !important;
+        font-size: 15px !important;
+        font-weight: 800 !important;
+        letter-spacing: 0;
+        opacity: 1 !important;
+    }
+    .st-key-category_filter [data-baseweb="select"] svg {
+        color: #94a3b8 !important;
+        fill: #94a3b8 !important;
+    }
+    .scan-table-gap {
+        height: 22px;
+    }
+    .focus-panel {
+        background: rgba(15, 23, 42, 0.78);
+        border: 1px solid rgba(71, 85, 105, 0.42);
+        border-radius: 14px;
+        padding: 14px;
+        min-height: 600px;
+    }
+    .focus-contract {
+        color: #f8fafc;
+        font-size: 18px;
+        font-weight: 800;
+        margin-bottom: 2px;
+    }
+    .focus-meta {
+        color: #94a3b8;
+        font-size: 12px;
+        margin-bottom: 12px;
+    }
+    .focus-tags {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+        margin-bottom: 14px;
+    }
+    .focus-tag {
+        padding: 4px 8px;
+        border-radius: 999px;
+        background: rgba(59, 130, 246, 0.16);
+        border: 1px solid rgba(96, 165, 250, 0.24);
+        color: #bfdbfe;
+        font-size: 11px;
+        font-weight: 700;
+    }
+    .focus-block {
+        border-top: 1px solid rgba(71, 85, 105, 0.32);
+        padding-top: 12px;
+        margin-top: 12px;
+    }
+    .focus-block-title {
+        color: #cbd5e1;
+        font-size: 12px;
+        font-weight: 700;
+        margin-bottom: 10px;
+    }
+    .focus-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 8px;
+    }
+    .focus-kpi {
+        background: rgba(30, 41, 59, 0.58);
+        border: 1px solid rgba(71, 85, 105, 0.24);
+        border-radius: 10px;
+        padding: 9px 10px;
+    }
+    .focus-kpi-label {
+        color: #94a3b8;
+        font-size: 11px;
+        margin-bottom: 5px;
+    }
+    .focus-kpi-value {
+        color: #e2e8f0;
+        font-size: 15px;
+        font-weight: 800;
+        letter-spacing: 0;
+    }
+    .focus-kpi-value.up { color: #f87171; }
+    .focus-kpi-value.down { color: #4ade80; }
+    .focus-kpi-value.flat { color: #94a3b8; }
+    .focus-note {
+        color: #94a3b8;
+        font-size: 12px;
+        line-height: 1.6;
+        margin-top: 10px;
+    }
+    .empty-hint {
+        padding: 24px;
+        border: 1px dashed rgba(148, 163, 184, 0.32);
+        border-radius: 12px;
+        color: #94a3b8;
+        text-align: center;
+        background: rgba(15, 23, 42, 0.46);
+    }
+
     /* === 分隔线 === */
     hr {
         border-color: rgba(71, 85, 105, 0.3) !important;
@@ -344,7 +744,7 @@ inject_sidebar_toggle_style(mode="high_contrast")
 # 页面标题区域
 # ============================================================
 
-col_title, col_refresh = st.columns([5, 1])
+col_title, col_info_top, col_refresh = st.columns([4.2, 1.2, 1.2], gap="large")
 
 
 def _format_latest_date(date_text):
@@ -352,6 +752,15 @@ def _format_latest_date(date_text):
     if len(raw) == 8 and raw.isdigit():
         return f"{raw[:4]}-{raw[4:6]}-{raw[6:]}"
     return raw or "未知"
+
+
+def get_latest_date_from_market_data(df):
+    if df is None or df.empty or '_数据日期' not in df.columns:
+        return ""
+    latest_values = df['_数据日期'].dropna().astype(str)
+    if latest_values.empty:
+        return ""
+    return latest_values.iloc[0]
 
 
 with col_title:
@@ -380,15 +789,29 @@ with col_title:
     </div>
     """, unsafe_allow_html=True)
 
+with col_info_top:
+    with st.expander("数据说明", expanded=False):
+        st.markdown("""
+**指标解释**
+- **IV**：Implied volatility（隐含波动率）
+- **IV Rank**：当前隐含波动率在最近一年中的百分位排名
+- **散户变动**：散户集中期货商净持仓变化，偏反向观察
+- **机构变动**：机构集中期货商净持仓变化，偏顺向观察
+
+**扫描建议**
+- IV Rank > 80：波动率偏贵，关注卖方机会
+- IV Rank < 20：波动率偏便宜，关注买方机会
+- 机构流入 + 散户流出：作为资金共振线索继续核对
+        """)
+
 refresh_requested = False
 with col_refresh:
-    latest_date_raw = de.get_latest_data_date() if hasattr(de, "get_latest_data_date") else ""
-    latest_date_display = _format_latest_date(latest_date_raw)
     refresh_requested = st.button("🔄 刷新数据", key="refresh_btn", use_container_width=True)
-    st.markdown(
+    latest_date_placeholder = st.empty()
+    latest_date_placeholder.markdown(
         f"""
         <div style="margin-top:6px; text-align:right; font-size:12px; color:#94a3b8;">
-            最新数据日期：<span style="color:#e2e8f0; font-weight:600;">{latest_date_display}</span>
+            最新数据日期：<span style="color:#e2e8f0; font-weight:600;">读取中</span>
         </div>
         """,
         unsafe_allow_html=True,
@@ -413,8 +836,8 @@ def load_data():
 if refresh_requested:
     # 仅清理本页 load_data 缓存，避免全局缓存被清空后引发整站重算。
     load_data.clear()
-    if hasattr(de, "get_latest_data_date") and hasattr(de.get_latest_data_date, "clear"):
-        de.get_latest_data_date.clear()
+    if hasattr(de, "clear_comprehensive_market_data_snapshot"):
+        de.clear_comprehensive_market_data_snapshot()
 
 
 # 数据加载：保留缓存，移除固定 sleep，避免命中缓存时仍然“看起来很慢”
@@ -425,6 +848,15 @@ if refresh_requested:
 else:
     df_monitor = load_data()
 load_time = time.time() - start_time
+latest_date_display = _format_latest_date(get_latest_date_from_market_data(df_monitor))
+latest_date_placeholder.markdown(
+    f"""
+    <div style="margin-top:6px; text-align:right; font-size:12px; color:#94a3b8;">
+        最新数据日期：<span style="color:#e2e8f0; font-weight:600;">{latest_date_display}</span>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 
 # ============================================================
 # 主内容区域
@@ -432,111 +864,92 @@ load_time = time.time() - start_time
 
 if not df_monitor.empty:
 
-    # === 统计卡片 ===
-    st.markdown("<div style='height: 16px'></div>", unsafe_allow_html=True)
+    st.markdown("<div style='height: 14px'></div>", unsafe_allow_html=True)
 
-    # 计算统计数据
-    total_count = len(df_monitor)
-    high_iv_count = len(df_monitor[df_monitor['IV Rank'].apply(lambda x: isinstance(x, (int, float)) and x > 80)])
-    low_iv_count = len(df_monitor[df_monitor['IV Rank'].apply(lambda x: isinstance(x, (int, float)) and x < 20)])
+    scan_metrics = build_scan_metrics(df_monitor)
+    scan_card_styles = {
+        "高IV": "scan-card-high",
+        "低IV": "scan-card-low",
+        "缺IV": "scan-card-focus",
+    }
+    search_term = ""
+    df_searched = apply_text_search(df_monitor, search_term).copy()
 
-    # 计算机构净流入（需要根据你的实际列名调整）
-    inst_col = '机构变动(日)' if '机构变动(日)' in df_monitor.columns else None
-    net_inflow = int(df_monitor[inst_col].sum()) if inst_col and inst_col in df_monitor.columns else 0
-
-
-    # 统计卡片HTML
-    def create_stat_card(icon, label, value, suffix, color, glow_color):
-        value_display = f"+{value:,}" if isinstance(value, int) and value > 0 else f"{value:,}" if isinstance(value,
-                                                                                                              int) else value
-        return f"""
-        <div style="
-            background: linear-gradient(135deg, rgba(30, 41, 59, 0.8), rgba(15, 23, 42, 0.9));
-            border-radius: 16px;
-            padding: 20px 24px;
-            border: 1px solid rgba(71, 85, 105, 0.3);
-            box-shadow: 0 8px 32px {glow_color};
-            position: relative;
-            overflow: hidden;
-        ">
-            <div style="
-                position: absolute;
-                top: -20px; right: -20px;
-                font-size: 80px;
-                opacity: 0.06;
-            ">{icon}</div>
-            <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 8px;">
-                <span style="font-size: 22px;">{icon}</span>
-                <span style="font-size: 13px; color: #94a3b8; font-weight: 500;">{label}</span>
-            </div>
-            <div style="
-                font-size: 32px;
-                font-weight: 700;
-                color: {color};
-                text-shadow: 0 0 20px {glow_color};
-                font-family: 'JetBrains Mono', monospace;
-            ">
-                {value_display}
-                <span style="font-size: 14px; color: #64748b; margin-left: 4px;">{suffix}</span>
-            </div>
-        </div>
-        """
-
-
-    st.markdown("<div style='height: 24px'></div>", unsafe_allow_html=True)
-
-    # === 数据说明 + 搜索框 ===
-    col_info, col_space, col_search = st.columns([2, 2, 1])
-
-    with col_info:
-        with st.expander("📖 数据说明", expanded=False):
-            st.markdown("""
-    **指标解释：**
-    - **IV = Implied volatility（隐含波动率）
-    - **IV Rank**：目前隐含波动率在最近一年中的百分位排名
-    - **散户变动**：（反向指标）某些散户多的期货商净持仓变化
-    - **机构变动**：（正向指标）某些机构强的期货商净持仓变化
-
-    **使用建议：**
-    - <span style="color: #ef4444;">IV Rank > 80</span> ：适合卖方策略（波动率偏贵）
-    - <span style="color: #22c55e;">IV Rank < 20</span> ：适合买方策略（波动率便宜）
-    - 机构流入↑ + 散户流出↓ = 潜在做多信号
-    - 机构流出↓ + 散户流入↑ = 潜在做空信号
-
-    **数据更新：** 每天盘后更新，缓存30分钟
-            """, unsafe_allow_html=True)
-
-    with col_search:
-        search_term = st.text_input(
-            "🔍 搜索",
-            placeholder="搜索合约...",
-            key="search_input",
-            label_visibility="collapsed"
+    category_counts = {}
+    for category_name in CATEGORIES:
+        if category_name == "全部":
+            category_counts[category_name] = len(df_searched)
+        else:
+            category_counts[category_name] = len(df_searched[df_searched['分类'] == category_name])
+    category_label_lookup = {
+        category: (
+            f"全部扫描 · {category_counts.get(category, 0):,}"
+            if category == "全部"
+            else f"{category} · {category_counts.get(category, 0):,}"
         )
+        for category in CATEGORIES
+    }
 
-    # === 分类Tab ===
-    tabs = st.tabs(CATEGORIES)
+    scan_cols = st.columns(len(SCAN_FILTERS), gap="small")
+    with scan_cols[0]:
+        selected_category = st.selectbox(
+            "扫描范围",
+            options=CATEGORIES,
+            index=0,
+            format_func=lambda category: category_label_lookup.get(category, category),
+            key="category_filter",
+            label_visibility="collapsed",
+        )
+    for scan_col, item in zip(scan_cols[1:], SCAN_FILTERS[1:]):
+        css_class = scan_card_styles.get(item["key"], "scan-card")
+        if css_class != "scan-card":
+            css_class = f"scan-card {css_class}"
+        value = scan_metrics.get(item["key"], 0)
+        with scan_col:
+            st.markdown(
+                f"""
+                <div class="{css_class}">
+                    <div class="scan-card-label">{html.escape(item["label"])}</div>
+                    <div class="scan-card-value">{value:,}</div>
+                    <div class="scan-card-rule">{html.escape(item["hint"])}</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
 
-    for i, category in enumerate(CATEGORIES):
-        with tabs[i]:
+    st.markdown("<div class='scan-table-gap'></div>", unsafe_allow_html=True)
+
+    df_scanned = df_searched.copy()
+
+    # === 分类内容 ===
+    category_container = st.container()
+
+    for category in [selected_category]:
+        with category_container:
             # 筛选数据
             if category == "全部":
-                df_filtered = df_monitor.copy()
+                df_filtered = df_scanned.copy()
             else:
-                df_filtered = df_monitor[df_monitor['分类'] == category].copy()
+                df_filtered = df_scanned[df_scanned['分类'] == category].copy()
 
             if df_filtered.empty:
-                st.info(f"📭 暂无 {category} 品种数据")
+                st.markdown(
+                    f"<div class='empty-hint'>暂无符合「{html.escape(category_label_lookup.get(category, category))}」的合约</div>",
+                    unsafe_allow_html=True,
+                )
                 continue
 
-            # 应用搜索筛选
-            if search_term:
-                mask = df_filtered['合约'].str.contains(search_term, case=False, na=False)
-                df_filtered = df_filtered[mask]
+            df_filtered = add_scan_signal_column(df_filtered)
 
-            # 移除品种和分类列（不在表格中显示）
-            display_columns = [col for col in df_filtered.columns if col not in ['品种', '分类']]
+            # 移除品种和分类列（右侧聚焦面板使用，不在表格中重复显示）
+            display_columns = [col for col in df_filtered.columns if col not in ['品种', '分类', '_数据日期']]
+            if "合约" in display_columns and "扫描信号" in display_columns:
+                display_columns = ["合约", "扫描信号"] + [
+                    col for col in display_columns if col not in ["合约", "扫描信号"]
+                ]
             df_display = df_filtered[display_columns].copy()
+            if "IV Rank" in df_display.columns:
+                df_display["IV Rank"] = df_display["IV Rank"].apply(format_grid_iv_rank)
 
             # === AgGrid配置 ===
             gb = GridOptionsBuilder.from_dataframe(df_display)
@@ -565,6 +978,59 @@ if not df_monitor.empty:
                                     'color': '#f1f5f9',
                                     'justifyContent': 'flex-start',
                                     'paddingLeft': '12px'
+                                }
+                                )
+
+            signal_renderer = JsCode("""
+            class SignalRenderer {
+                init(params) {
+                    const raw = params.value || '观察';
+                    const colorMap = {
+                        '高波': ['rgba(220, 38, 38, 0.25)', '#fecaca', 'rgba(248, 113, 113, 0.28)'],
+                        '低波': ['rgba(22, 163, 74, 0.24)', '#bbf7d0', 'rgba(74, 222, 128, 0.28)'],
+                        '缺IV': ['rgba(100, 116, 139, 0.26)', '#cbd5e1', 'rgba(148, 163, 184, 0.24)'],
+                        '快到期': ['rgba(217, 119, 6, 0.22)', '#fde68a', 'rgba(251, 191, 36, 0.28)'],
+                        'IV升': ['rgba(37, 99, 235, 0.24)', '#bfdbfe', 'rgba(96, 165, 250, 0.28)'],
+                        '价异动': ['rgba(126, 34, 206, 0.22)', '#ddd6fe', 'rgba(168, 85, 247, 0.28)'],
+                        '机构流入': ['rgba(15, 118, 110, 0.24)', '#99f6e4', 'rgba(45, 212, 191, 0.28)'],
+                        '散户流出': ['rgba(30, 64, 175, 0.24)', '#bfdbfe', 'rgba(96, 165, 250, 0.28)'],
+                        '观察': ['rgba(51, 65, 85, 0.26)', '#cbd5e1', 'rgba(148, 163, 184, 0.2)'],
+                    };
+                    const tags = String(raw).split('|').filter(Boolean);
+                    this.eGui = document.createElement('div');
+                    this.eGui.style.display = 'flex';
+                    this.eGui.style.gap = '4px';
+                    this.eGui.style.alignItems = 'center';
+                    this.eGui.style.overflow = 'hidden';
+                    this.eGui.style.width = '100%';
+                    this.eGui.innerHTML = tags.map(tag => {
+                        const colors = colorMap[tag] || colorMap['观察'];
+                        return `<span style="
+                            padding: 2px 6px;
+                            border-radius: 999px;
+                            background: ${colors[0]};
+                            border: 1px solid ${colors[2]};
+                            color: ${colors[1]};
+                            font-size: 11px;
+                            font-weight: 700;
+                            white-space: nowrap;
+                        ">${tag}</span>`;
+                    }).join('');
+                }
+                getGui() { return this.eGui; }
+            }
+            """)
+
+            gb.configure_column("扫描信号",
+                                pinned='left',
+                                width=150,
+                                filter=False,
+                                sortable=False,
+                                cellRenderer=signal_renderer,
+                                cellStyle={
+                                    'justifyContent': 'flex-start',
+                                    'paddingLeft': '8px',
+                                    'paddingRight': '8px'
                                 }
                                 )
 
@@ -598,11 +1064,33 @@ if not df_monitor.empty:
                     this.eGui.style.justifyContent = 'center';
 
                     if (val === '快到期') {
-                        this.eGui.innerHTML = '<span style="color: #fbbf24; font-weight: 600; font-size: 12px;">⚠️ 快到期</span>';
+                        this.eGui.innerHTML = '<span style="color: #fbbf24; font-weight: 700; font-size: 12px;">快到期</span>';
                         return;
                     }
 
-                    const numVal = parseFloat(val) || 0;
+                    if (val === null || val === undefined || val === '' || val === 'N/A') {
+                        this.eGui.innerHTML = `
+                            <div style="
+                                width: 100%; height: 22px;
+                                background: rgba(100, 116, 139, 0.24);
+                                border: 1px solid rgba(148, 163, 184, 0.22);
+                                border-radius: 4px;
+                                display: flex;
+                                align-items: center;
+                                justify-content: center;
+                                color: #cbd5e1;
+                                font-size: 12px;
+                                font-weight: 700;
+                            ">N/A</div>
+                        `;
+                        return;
+                    }
+
+                    const numVal = parseFloat(val);
+                    if (Number.isNaN(numVal)) {
+                        this.eGui.innerHTML = '<span style="color: #94a3b8; font-weight: 700; font-size: 12px;">N/A</span>';
+                        return;
+                    }
                     let barColor, textColor;
 
                     if (numVal > 80) {
@@ -627,7 +1115,7 @@ if not df_monitor.empty:
                         <div style="
                             position: absolute;
                             left: 0; top: 2px;
-                            width: ${numVal}%; height: 22px;
+                            width: ${Math.max(0, Math.min(100, numVal))}%; height: 22px;
                             background: ${barColor};
                             border-radius: 4px;
                             opacity: 0.85;
@@ -650,7 +1138,8 @@ if not df_monitor.empty:
             function(valueA, valueB) {
                 const getVal = (v) => {
                     if (v === '快到期') return -100;
-                    return parseFloat(v) || -100;
+                    const parsed = parseFloat(v);
+                    return Number.isNaN(parsed) ? -100 : parsed;
                 };
                 return getVal(valueA) - getVal(valueB);
             }
@@ -668,7 +1157,15 @@ if not df_monitor.empty:
             # 当前IV
             gb.configure_column("当前IV",
                                 width=100,
-                                valueFormatter="x ? Number(x).toFixed(2) + '%' : '-'",
+                                valueFormatter=JsCode("""
+                                function(params) {
+                                    const raw = params.value;
+                                    if (raw === null || raw === undefined || raw === '' || raw === '-' || raw === 'N/A') return '-';
+                                    const val = Number(String(raw).replace('%', '').replace(',', ''));
+                                    if (!Number.isFinite(val) || val <= 0) return '-';
+                                    return val.toFixed(2) + '%';
+                                }
+                                """),
                                 comparator=GRID_NUMBER_COMPARATOR,
                                 filter="agNumberColumnFilter",
                                 filterParams=GRID_NUMBER_FILTER_PARAMS,
@@ -729,20 +1226,24 @@ if not df_monitor.empty:
 
             gridOptions = gb.build()
             gridOptions["localeText"] = AG_GRID_LOCALE_ZH_CN
+            gridOptions = apply_grid_column_groups(gridOptions)
 
-            # 渲染表格
-            AgGrid(
-                df_display,
-                gridOptions=gridOptions,
-                height=600,
-                width='100%',
-                columns_auto_size_mode=ColumnsAutoSizeMode.FIT_ALL_COLUMNS_TO_VIEW,
-                allow_unsafe_jscode=True,
-                enable_enterprise_modules=False,
-                key=f"market_monitor_grid_{category}",
-                update_mode="NO_UPDATE",
-                update_on=[],
-                custom_css={
+            grid_col, focus_col = st.columns([4.7, 1.25], gap="small")
+
+            with grid_col:
+                # 渲染表格
+                AgGrid(
+                    df_display,
+                    gridOptions=gridOptions,
+                    height=600,
+                    width='100%',
+                    columns_auto_size_mode=ColumnsAutoSizeMode.FIT_ALL_COLUMNS_TO_VIEW,
+                    allow_unsafe_jscode=True,
+                    enable_enterprise_modules=False,
+                    key=f"market_monitor_grid_{category}",
+                    update_mode="NO_UPDATE",
+                    update_on=[],
+                    custom_css={
                     ".ag-root-wrapper": {
                         "background-color": "#0f172a !important",
                         "border": "1px solid rgba(71, 85, 105, 0.3) !important",
@@ -754,6 +1255,17 @@ if not df_monitor.empty:
                         "border-bottom": "1px solid rgba(71, 85, 105, 0.4) !important",
                         "font-size": "12px",
                         "font-weight": "600"
+                    },
+                    ".ag-header-group-cell": {
+                        "background-color": "#172235 !important",
+                        "border-right": "1px solid rgba(148, 163, 184, 0.24) !important",
+                        "color": "#cbd5e1 !important",
+                        "font-size": "12px",
+                        "font-weight": "800",
+                        "padding-left": "12px !important"
+                    },
+                    ".ag-header-group-cell-label": {
+                        "justify-content": "flex-start !important"
                     },
                     ".ag-header-cell": {
                         "border-right": "1px solid rgba(148, 163, 184, 0.22) !important",
@@ -856,8 +1368,19 @@ if not df_monitor.empty:
                     "::-webkit-scrollbar-thumb:hover": {
                         "background": "#64748b"
                     }
-                }
-            )
+                    }
+                )
+
+            with focus_col:
+                focus_contracts = df_filtered["合约"].astype(str).tolist()
+                selected_contract = st.selectbox(
+                    "聚焦合约",
+                    focus_contracts,
+                    key=f"focus_contract_{category}",
+                    label_visibility="collapsed",
+                )
+                focus_row = df_filtered[df_filtered["合约"].astype(str) == selected_contract].iloc[0]
+                render_focus_panel(focus_row)
 
 
     # 底部图例
