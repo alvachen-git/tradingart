@@ -186,6 +186,50 @@ class ComprehensiveMarketDataSnapshotTests(unittest.TestCase):
 
         self.assertFalse(data_engine._MARKET_DISK_SNAPSHOT_PATH.exists())
 
+    def test_market_monitor_iv_trend_prefers_exact_contract(self):
+        with patch.object(data_engine, "engine", object()), \
+             patch.object(data_engine.pd, "read_sql", side_effect=self._fake_read_sql):
+            trend = data_engine.get_market_monitor_iv_trend("MA2609 (甲醇)", points=5)
+
+        self.assertFalse(trend.empty)
+        self.assertEqual(set(trend["source"]), {"contract"})
+        self.assertEqual(trend["trade_date"].tolist(), ["20260421", "20260427", "20260428"])
+        self.assertEqual(trend["iv"].tolist(), [35.0, 30.0, 25.0])
+
+    def test_market_monitor_iv_trend_falls_back_to_product_history(self):
+        with patch.object(data_engine, "engine", object()), \
+             patch.object(data_engine.pd, "read_sql", side_effect=self._fake_read_sql):
+            trend = data_engine.get_market_monitor_iv_trend("MA2610 (甲醇)", points=5)
+
+        self.assertFalse(trend.empty)
+        self.assertEqual(set(trend["source"]), {"product"})
+        self.assertEqual(trend["trade_date"].tolist(), ["20260421", "20260427"])
+        self.assertEqual(trend["iv"].tolist(), [20.0, 40.0])
+
+    def test_market_monitor_iv_trend_falls_back_to_suffixed_contract_code(self):
+        def fake_read_sql(sql, engine, params=None):
+            sql_text = str(sql)
+            if "UPPER(ts_code) IN" in sql_text:
+                return pd.DataFrame(columns=["ts_code", "iv", "trade_date"])
+            if "FROM commodity_iv_history" in sql_text:
+                return pd.DataFrame(
+                    [
+                        {"ts_code": "CU2609.SHFE", "iv": 18.0, "trade_date": "2026-04-24"},
+                        {"ts_code": "CU2609.SHFE", "iv": 20.0, "trade_date": "2026-04-27"},
+                        {"ts_code": "CU2609.SHFE", "iv": 21.0, "trade_date": "2026-04-28"},
+                    ]
+                )
+            raise AssertionError(f"Unexpected SQL in test: {sql_text}")
+
+        with patch.object(data_engine, "engine", object()), \
+             patch.object(data_engine.pd, "read_sql", side_effect=fake_read_sql):
+            trend = data_engine.get_market_monitor_iv_trend("CU2609 (沪铜)", points=5)
+
+        self.assertFalse(trend.empty)
+        self.assertEqual(set(trend["source"]), {"contract"})
+        self.assertEqual(trend["trade_date"].tolist(), ["20260424", "20260427", "20260428"])
+        self.assertEqual(trend["iv"].tolist(), [18.0, 20.0, 21.0])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1261,6 +1261,188 @@ def _get_iv_history_product_code(ts_code, join_key=""):
     return mapping.get(base_product, base_product)
 
 
+def _extract_market_monitor_contract_code(contract_label):
+    """Extract contract code from labels like 'MA2609 (甲醇)'."""
+    if isinstance(contract_label, (bytes, bytearray)):
+        contract_label = contract_label.decode("utf-8", errors="ignore")
+    if not isinstance(contract_label, str):
+        return ""
+    raw = contract_label.strip().upper()
+    match = re.search(r"([A-Z]+)\d{3,4}", raw)
+    if match:
+        return match.group(0)
+    return get_join_key(raw)
+
+
+def get_market_monitor_iv_trend(contract_label, points=5):
+    """
+    Return recent IV history for the leaderboard focus panel.
+
+    Exact contract IV is preferred; if it is sparse, product continuous IV is used
+    as a lightweight fallback so the panel can still show a useful trend.
+    """
+    empty = pd.DataFrame(columns=["trade_date", "iv", "source"])
+    if engine is None:
+        return empty
+
+    safe_points = max(2, min(10, int(points or 5)))
+    raw_contract_code = _extract_market_monitor_contract_code(contract_label)
+    join_key = get_join_key(raw_contract_code) or raw_contract_code
+
+    contract_candidates = []
+    for code in (raw_contract_code, join_key):
+        code = str(code or "").upper().strip()
+        if code and code not in contract_candidates:
+            contract_candidates.append(code)
+
+    # Financial option IV may be stored with IO/HO/MO while monitor rows use IF/IH/IM.
+    join_match = re.fullmatch(r"([A-Z]+)(\d{3,4})", str(join_key or "").upper())
+    inverse_fin_map = {"IF": "IO", "IH": "HO", "IM": "MO"}
+    if join_match:
+        alt_prefix = inverse_fin_map.get(join_match.group(1))
+        if alt_prefix:
+            alt_code = f"{alt_prefix}{join_match.group(2)}"
+            if alt_code not in contract_candidates:
+                contract_candidates.append(alt_code)
+
+    product_code = _get_iv_history_product_code(raw_contract_code, join_key)
+    product_candidates = []
+    if product_code:
+        product_candidates.append(product_code)
+
+    candidate_codes = contract_candidates + [code for code in product_candidates if code not in contract_candidates]
+    if not candidate_codes:
+        return empty
+
+    limit_rows = safe_points * max(6, len(candidate_codes) * 3)
+
+    def read_exact_rows():
+        params = {f"code_{idx}": code for idx, code in enumerate(candidate_codes)}
+        placeholders = ", ".join(f":{name}" for name in params)
+        sql = text(
+            f"""
+            SELECT ts_code, iv, trade_date
+            FROM commodity_iv_history
+            WHERE iv > 0
+              AND UPPER(ts_code) IN ({placeholders})
+            ORDER BY REPLACE(trade_date, '-', '') DESC
+            LIMIT {limit_rows}
+            """
+        )
+        return pd.read_sql(sql, engine, params=params)
+
+    def read_product_prefix_rows():
+        if not product_code:
+            return pd.DataFrame()
+        sql = text(
+            f"""
+            SELECT ts_code, iv, trade_date
+            FROM commodity_iv_history
+            WHERE iv > 0
+              AND UPPER(ts_code) NOT LIKE '%%TAS%%'
+              AND {sql_prefix_condition(product_code)}
+            ORDER BY REPLACE(trade_date, '-', '') DESC
+            LIMIT {limit_rows}
+            """
+        )
+        return pd.read_sql(sql, engine)
+
+    try:
+        df = read_exact_rows()
+    except Exception as exc:
+        _PERF_LOGGER.warning("market monitor iv trend exact query failed: %s", exc)
+        df = pd.DataFrame()
+
+    if df is None or df.empty:
+        out = pd.DataFrame(columns=["ts_code", "iv", "trade_date"])
+    else:
+        out = df.copy()
+    out["code_upper"] = out["ts_code"].astype(str).str.upper().str.strip()
+    out["join_key"] = out["ts_code"].apply(get_join_key)
+    out["product"] = out.apply(
+        lambda row: _get_iv_history_product_code(row.get("ts_code"), row.get("join_key")),
+        axis=1,
+    )
+    out = out[
+        out["code_upper"].isin(candidate_codes)
+        | out["join_key"].isin(contract_candidates)
+        | out["product"].isin(product_candidates)
+    ]
+    out["iv"] = pd.to_numeric(out["iv"], errors="coerce")
+    out["trade_date_key"] = (
+        out["trade_date"]
+        .astype(str)
+        .str.replace("-", "", regex=False)
+        .str.replace("/", "", regex=False)
+        .str.slice(0, 8)
+    )
+    out = out.dropna(subset=["iv"])
+    out = out[out["trade_date_key"].str.fullmatch(r"\d{8}", na=False)]
+
+    if len(out) < 2 and product_code:
+        try:
+            fallback_df = read_product_prefix_rows()
+        except Exception as exc:
+            _PERF_LOGGER.warning("market monitor iv trend prefix query failed: %s", exc)
+            fallback_df = pd.DataFrame()
+        if fallback_df is not None and not fallback_df.empty:
+            fallback = fallback_df.copy()
+            fallback["code_upper"] = fallback["ts_code"].astype(str).str.upper().str.strip()
+            fallback["join_key"] = fallback["ts_code"].apply(get_join_key)
+            fallback["product"] = fallback.apply(
+                lambda row: _get_iv_history_product_code(row.get("ts_code"), row.get("join_key")),
+                axis=1,
+            )
+            fallback["iv"] = pd.to_numeric(fallback["iv"], errors="coerce")
+            fallback["trade_date_key"] = (
+                fallback["trade_date"]
+                .astype(str)
+                .str.replace("-", "", regex=False)
+                .str.replace("/", "", regex=False)
+                .str.slice(0, 8)
+            )
+            fallback = fallback.dropna(subset=["iv"])
+            fallback = fallback[fallback["trade_date_key"].str.fullmatch(r"\d{8}", na=False)]
+            fallback = fallback[
+                fallback["join_key"].isin(contract_candidates)
+                | fallback["product"].isin(product_candidates)
+            ]
+            out = pd.concat([out, fallback], ignore_index=True)
+            out = out.drop_duplicates(subset=["code_upper", "join_key", "trade_date_key", "iv"], keep="last")
+
+    if out.empty:
+        return empty
+
+    contract_rows = out[out["code_upper"].isin(contract_candidates)].copy()
+    if contract_rows.empty:
+        contract_rows = out[out["join_key"].isin(contract_candidates)].copy()
+    product_rows = out[out["code_upper"].isin(product_candidates)].copy()
+    if product_rows.empty:
+        product_rows = out[out["product"].isin(product_candidates)].copy()
+    if len(contract_rows) >= 2:
+        selected = contract_rows
+        source = "contract"
+    elif len(product_rows) >= 2:
+        selected = product_rows
+        source = "product"
+    elif not contract_rows.empty:
+        selected = contract_rows
+        source = "contract"
+    else:
+        selected = out
+        source = "mixed"
+
+    selected = (
+        selected.sort_values(["trade_date_key", "code_upper"])
+        .drop_duplicates(subset=["trade_date_key"], keep="last")
+        .tail(safe_points)
+        .copy()
+    )
+    selected["trade_date"] = selected["trade_date_key"]
+    selected["source"] = source
+    return selected[["trade_date", "iv", "source"]].reset_index(drop=True)
+
+
 # --- 【新增】判断合约是否快到期 (用于过滤不准确的IV) ---
 def check_expiry_validity(row, current_date_str):
     """

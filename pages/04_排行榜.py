@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import data_engine as de
 import html
+import re
 from st_aggrid import AgGrid, GridOptionsBuilder, JsCode, ColumnsAutoSizeMode
 import time
 from market_monitor_grid import (
@@ -137,6 +138,88 @@ PRODUCT_NAMES = {
     "588080": "科创板ETF",
 }
 
+PRODUCT_DESCRIPTIONS = {
+    "IO": "沪深300指数期权，反映大盘蓝筹波动率预期。",
+    "MO": "中证1000指数期权，偏中小盘风格波动率观察。",
+    "HO": "上证50指数期权，跟踪大盘权重股风险偏好。",
+    "IF": "沪深300股指期货，代表核心宽基指数风险敞口。",
+    "IH": "上证50股指期货，偏金融和大盘权重风格。",
+    "IM": "中证1000股指期货，偏小盘成长与量化资金敏感。",
+    "IC": "中证500股指期货，偏中盘风格风险敞口。",
+    "C": "玉米是饲料和深加工原料，关注库存、进口和养殖需求。",
+    "CS": "淀粉由玉米加工而来，反映深加工利润和下游消费。",
+    "A": "豆一代表国产大豆，关注国产供应和压榨需求。",
+    "B": "豆二代表进口大豆，受美豆、巴西豆和到港节奏影响。",
+    "M": "豆粕是大豆压榨后的饲料原料，常用于观察养殖饲料成本。",
+    "Y": "豆油是植物油品种，受大豆压榨、油脂消费和外盘影响。",
+    "P": "棕榈油是主要植物油，受马印产量、库存和进口利润影响。",
+    "OI": "菜油是植物油品种，关注菜籽供应和油脂替代需求。",
+    "RM": "菜粕是水产和畜禽饲料原料，受菜籽压榨和养殖需求影响。",
+    "SR": "白糖是软商品，关注压榨季、进口和消费旺季。",
+    "CF": "棉花是纺织原料，受种植、库存和下游订单影响。",
+    "AP": "苹果是生鲜农产品，关注产区天气、入库和消费。",
+    "CJ": "红枣是特色农产品，受产区供给和季节性消费影响。",
+    "PK": "花生是油料和食品原料，关注产量、油厂收购和消费。",
+    "JD": "鸡蛋反映养殖补栏和消费季节性。",
+    "LH": "生猪连接养殖利润和猪肉消费，是农产品周期核心品种。",
+    "RB": "螺纹钢是建筑用钢材，反映地产和基建施工需求。",
+    "HC": "热卷是制造业板材用钢，关注汽车、家电和机械需求。",
+    "I": "铁矿石是钢铁原料，受钢厂生产、港口库存和海外发运影响。",
+    "J": "焦炭是钢铁冶炼燃料，关注钢厂利润和焦化产能。",
+    "JM": "焦煤是焦炭上游原料，受煤矿供应和进口煤影响。",
+    "SM": "锰硅是钢铁合金原料，受钢厂需求和电力成本影响。",
+    "SF": "硅铁是合金和金属镁原料，关注电价、产区开工和钢需。",
+    "SS": "不锈钢反映镍、铬成本和制造业需求。",
+    "WR": "线材是建筑和工业用钢，关注终端施工需求。",
+    "FG": "玻璃用于地产和光伏，关注库存、产线和终端需求。",
+    "SA": "纯碱是玻璃和化工原料，受光伏玻璃和浮法玻璃需求影响。",
+    "SP": "纸浆是造纸原料，关注进口供应和成品纸需求。",
+    "L": "塑料是聚乙烯品种，受原油、煤化工成本和包装需求影响。",
+    "PP": "聚丙烯用于塑编、注塑和膜料，关注化工开工和下游订单。",
+    "V": "PVC是建材和塑料原料，受地产需求和电石成本影响。",
+    "EB": "苯乙烯用于塑料和橡胶制品，受纯苯、乙烯和下游利润影响。",
+    "EG": "乙二醇是聚酯原料，关注煤化工、油化工供应和聚酯需求。",
+    "PF": "短纤是纺织原料，连接聚酯成本和纱线需求。",
+    "TA": "PTA是聚酯产业链原料，上接PX和原油，下接纺织消费。",
+    "MA": "甲醇是煤化工基础品种，关注煤价、烯烃需求和港口库存。",
+    "UR": "尿素是氮肥品种，受农业需求、煤价和出口节奏影响。",
+    "RU": "橡胶用于轮胎和工业制品，关注产区天气和汽车需求。",
+    "NR": "20号胶偏轮胎原料，受东南亚供应和轮胎开工影响。",
+    "BR": "丁苯橡胶是合成橡胶，关注丁二烯成本和轮胎需求。",
+    "FU": "燃油与船燃和工业燃料相关，受原油、炼厂和航运需求影响。",
+    "LU": "低硫燃油是船用燃料，关注原油、裂解价差和航运需求。",
+    "BU": "沥青用于道路建设，受原油成本和基建施工影响。",
+    "SC": "原油是能源定价核心品种，受供需、库存和地缘风险影响。",
+    "PG": "LPG是液化石油气，关注进口到港、化工需求和民用消费。",
+    "PX": "PX是PTA上游原料，受芳烃利润和聚酯需求影响。",
+    "BZ": "纯苯是化工基础原料，影响苯乙烯、己内酰胺等链条。",
+    "PL": "丙烯是化工原料，连接聚丙烯和下游化工需求。",
+    "PR": "瓶片用于饮料包装和聚酯出口，受聚酯利润和消费旺季影响。",
+    "CU": "铜是宏观敏感有色金属，反映电力、地产和制造业需求。",
+    "AL": "铝受电解产能、电力成本和加工需求影响。",
+    "ZN": "锌用于镀锌和基建制造，关注矿端供应和消费。",
+    "PB": "铅主要用于蓄电池，关注再生铅供应和电池需求。",
+    "NI": "镍连接不锈钢和新能源电池，受印尼供应影响较大。",
+    "SN": "锡用于焊料和电子，关注半导体周期和矿端供应。",
+    "BC": "国际铜对接境外铜价，便于观察内外盘价差。",
+    "AO": "氧化铝是电解铝原料，关注矿石、冶炼和电解铝利润。",
+    "AU": "黄金是贵金属避险资产，受利率、美元和风险偏好影响。",
+    "AG": "白银兼具贵金属和工业属性，波动通常高于黄金。",
+    "PT": "铂金用于汽车催化和工业，受贵金属替代和供给影响。",
+    "PD": "钯金用于汽车催化，关注汽车产销和贵金属替代。",
+    "SI": "工业硅用于有机硅、多晶硅和铝合金，关注新能源链条需求。",
+    "LC": "碳酸锂是电池材料核心品种，受新能源车和库存周期影响。",
+    "PS": "多晶硅是光伏上游材料，关注硅料供给和组件需求。",
+    "510050": "50ETF期权跟踪上证50，观察大盘权重波动率。",
+    "510300": "沪深300ETF期权，适合观察宽基指数波动率。",
+    "510500": "中证500ETF期权，反映中盘风格波动率。",
+    "159901": "深100ETF期权，跟踪深市核心资产波动率。",
+    "159915": "创业板ETF期权，反映成长风格风险偏好。",
+    "159919": "深市300ETF期权，观察沪深300相关波动率。",
+    "588000": "科创50ETF期权，反映科创板成长资产波动率。",
+    "588080": "科创板ETF期权，关注科技成长风格波动率。",
+}
+
 # 品种分类映射（合约代码前缀 -> 分类）
 PRODUCT_CATEGORY = {
     # 股指
@@ -177,6 +260,7 @@ PRODUCT_CATEGORY = {
 
 # 分类列表（按显示顺序）
 CATEGORIES = ["全部", "股指", "农产", "工业", "化工", "有色", "贵金属", "新能源"]
+FOCUS_IV_TREND_CACHE_VERSION = "v2"
 
 
 # ============================================================
@@ -208,6 +292,26 @@ def get_product_category(contract_name):
     """获取品种分类"""
     code = extract_product_code(contract_name)
     return PRODUCT_CATEGORY.get(code, "其他")
+
+
+def get_product_description(contract_name):
+    """获取右侧详情面板的简短品种说明。"""
+    code = extract_product_code(contract_name)
+    category = get_product_category(contract_name)
+    return PRODUCT_DESCRIPTIONS.get(
+        code,
+        f"该品种属于{category}板块，适合结合波动率、价格和资金变化做快速扫描。",
+    )
+
+
+def contract_alpha_sort_key(contract_name):
+    """按合约代码字母和月份排序，供右侧聚焦下拉使用。"""
+    raw = str(contract_name or "").strip().upper()
+    code_part = raw.split(" ", 1)[0]
+    match = re.match(r"^([A-Z]+)(\d{3,4})", code_part)
+    if match:
+        return (match.group(1), int(match.group(2)), code_part)
+    return (code_part, 0, raw)
 
 
 def to_float(value):
@@ -395,10 +499,110 @@ def focus_metric_html(label, value, tone="flat"):
     )
 
 
-def render_focus_panel(row):
-    contract = html.escape(str(row.get("合约", "-")))
-    product = html.escape(str(row.get("品种", "-")))
-    category = html.escape(str(row.get("分类", "-")))
+def _format_trend_date(date_value):
+    raw = str(date_value or "").replace("-", "").replace("/", "").strip()
+    if len(raw) == 8 and raw.isdigit():
+        return f"{raw[4:6]}-{raw[6:]}"
+    return raw or "-"
+
+
+def _format_trend_value(value):
+    number = to_float(value)
+    if number is None:
+        return "-"
+    return f"{number:.2f}%"
+
+
+def render_iv_trend_html(iv_history):
+    if iv_history is None or len(iv_history) < 2:
+        return '<div class="iv-trend-empty">暂无近5日IV趋势</div>'
+
+    if isinstance(iv_history, pd.DataFrame):
+        records = iv_history.to_dict(orient="records")
+    else:
+        records = list(iv_history)
+
+    points_data = []
+    for record in records:
+        value = to_float(record.get("iv") if isinstance(record, dict) else None)
+        if value is None:
+            continue
+        date_label = _format_trend_date(record.get("trade_date", "") if isinstance(record, dict) else "")
+        source = str(record.get("source", "") if isinstance(record, dict) else "")
+        points_data.append({"date": date_label, "iv": value, "source": source})
+
+    if len(points_data) < 2:
+        return '<div class="iv-trend-empty">暂无近5日IV趋势</div>'
+
+    values = [item["iv"] for item in points_data]
+    min_v = min(values)
+    max_v = max(values)
+    if abs(max_v - min_v) < 0.01:
+        min_v -= 1
+        max_v += 1
+
+    width, height = 320, 154
+    pad_left, pad_right, pad_top, pad_bottom = 40, 18, 20, 30
+    plot_w = width - pad_left - pad_right
+    plot_h = height - pad_top - pad_bottom
+    span = max_v - min_v
+
+    svg_points = []
+    circles = []
+    for idx, item in enumerate(points_data):
+        x = pad_left + (plot_w * idx / max(1, len(points_data) - 1))
+        y = pad_top + ((max_v - item["iv"]) / span * plot_h)
+        svg_points.append(f"{x:.1f},{y:.1f}")
+        circles.append(
+            f'<circle cx="{x:.1f}" cy="{y:.1f}" r="3.5" fill="#60a5fa" '
+            f'stroke="#dbeafe" stroke-width="1.4" />'
+        )
+
+    grid_values = [max_v, (max_v + min_v) / 2, min_v]
+    grid_lines = []
+    for value in grid_values:
+        y = pad_top + ((max_v - value) / span * plot_h)
+        grid_lines.append(
+            f'<line x1="{pad_left}" y1="{y:.1f}" x2="{width - pad_right}" y2="{y:.1f}" '
+            f'stroke="rgba(148,163,184,0.18)" stroke-width="1" />'
+            f'<text x="{pad_left - 8}" y="{y + 4:.1f}" text-anchor="end" '
+            f'fill="#94a3b8" font-size="10">{value:.0f}%</text>'
+        )
+
+    latest = points_data[-1]
+    first = points_data[0]
+    source = latest.get("source", "")
+    source_label = "合约IV" if source == "contract" else "连续品种IV" if source == "product" else "IV历史"
+    latest_x, latest_y = [float(part) for part in svg_points[-1].split(",")]
+    latest_label_x = latest_x - 8 if latest_x > width - 78 else latest_x + 8
+    latest_anchor = "end" if latest_x > width - 78 else "start"
+    area_points = f"{pad_left},{height - pad_bottom} {' '.join(svg_points)} {width - pad_right},{height - pad_bottom}"
+
+    svg_html = (
+        f'<svg class="iv-trend-svg" viewBox="0 0 {width} {height}" role="img" '
+        f'aria-label="近5日IV趋势">'
+        f'<polygon points="{area_points}" fill="rgba(59,130,246,0.12)" />'
+        f'{"".join(grid_lines)}'
+        f'<polyline points="{" ".join(svg_points)}" fill="none" '
+        f'stroke="#3b82f6" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" />'
+        f'{"".join(circles)}'
+        f'<text x="{pad_left}" y="{height - 8}" text-anchor="middle" fill="#94a3b8" font-size="11">{html.escape(first["date"])}</text>'
+        f'<text x="{width - pad_right}" y="{height - 8}" text-anchor="middle" fill="#94a3b8" font-size="11">{html.escape(latest["date"])}</text>'
+        f'<text x="{latest_label_x:.1f}" y="{latest_y - 7:.1f}" text-anchor="{latest_anchor}" '
+        f'fill="#e2e8f0" font-size="12" font-weight="700">{latest["iv"]:.2f}%</text>'
+        f'</svg>'
+    )
+    return (
+        f'<div class="iv-trend-head">'
+        f'<span>{html.escape(source_label)}</span>'
+        f'<strong>{html.escape(_format_trend_value(latest["iv"]))}</strong>'
+        f'</div>'
+        f'{svg_html}'
+    )
+
+
+def render_focus_panel(row, iv_history=None):
+    description = html.escape(get_product_description(str(row.get("合约", ""))))
     tags = "".join(
         f"<span class='focus-tag'>{html.escape(tag)}</span>"
         for tag in build_scan_tags(row)
@@ -422,15 +626,20 @@ def render_focus_panel(row):
         focus_metric_html("机构(日)", format_signed_number(row.get("机构变动(日)"), decimals=0, thousands=True), tone_class(row.get("机构变动(日)"))),
         focus_metric_html("机构(5日)", format_signed_number(row.get("机构变动(5日)"), decimals=0, thousands=True), tone_class(row.get("机构变动(5日)"))),
     ]
+    iv_trend_html = render_iv_trend_html(iv_history)
 
     panel_html = (
         f'<div class="focus-panel">'
-        f'<div class="focus-contract">{contract}</div>'
-        f'<div class="focus-meta">{product} · {category}</div>'
+        f'<div class="focus-intro-label">品种说明</div>'
+        f'<div class="focus-intro-text">{description}</div>'
         f'<div class="focus-tags">{tags}</div>'
         f'<div class="focus-block">'
         f'<div class="focus-block-title">波动率概览</div>'
         f'<div class="focus-grid">{"".join(overview_metrics)}</div>'
+        f'</div>'
+        f'<div class="focus-block">'
+        f'<div class="focus-block-title">IV趋势（近5日）</div>'
+        f'{iv_trend_html}'
         f'</div>'
         f'<div class="focus-block">'
         f'<div class="focus-block-title">价格表现</div>'
@@ -686,15 +895,16 @@ st.markdown("""
         padding: 14px;
         min-height: 600px;
     }
-    .focus-contract {
-        color: #f8fafc;
-        font-size: 18px;
-        font-weight: 800;
-        margin-bottom: 2px;
-    }
-    .focus-meta {
+    .focus-intro-label {
         color: #94a3b8;
-        font-size: 12px;
+        font-size: 11px;
+        font-weight: 700;
+        margin-bottom: 6px;
+    }
+    .focus-intro-text {
+        color: #e2e8f0;
+        font-size: 13px;
+        line-height: 1.55;
         margin-bottom: 12px;
     }
     .focus-tags {
@@ -748,6 +958,38 @@ st.markdown("""
     .focus-kpi-value.up { color: #f87171; }
     .focus-kpi-value.down { color: #4ade80; }
     .focus-kpi-value.flat { color: #94a3b8; }
+    .iv-trend-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        color: #94a3b8;
+        font-size: 11px;
+        margin-bottom: 4px;
+    }
+    .iv-trend-head strong {
+        color: #e2e8f0;
+        font-size: 13px;
+        letter-spacing: 0;
+    }
+    .iv-trend-svg {
+        display: block;
+        width: 100%;
+        height: 154px;
+        background: rgba(15, 23, 42, 0.34);
+        border: 1px solid rgba(71, 85, 105, 0.22);
+        border-radius: 10px;
+    }
+    .iv-trend-empty {
+        height: 126px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: #64748b;
+        border: 1px dashed rgba(148, 163, 184, 0.24);
+        border-radius: 10px;
+        background: rgba(15, 23, 42, 0.28);
+        font-size: 12px;
+    }
     .focus-note {
         color: #94a3b8;
         font-size: 12px;
@@ -874,9 +1116,19 @@ def load_data():
     return df
 
 
+@st.cache_data(ttl=1800)
+def load_focus_iv_trend(contract_name, data_date="", cache_version=FOCUS_IV_TREND_CACHE_VERSION):
+    """加载右侧详情面板近5日 IV 趋势。"""
+    try:
+        return de.get_market_monitor_iv_trend(contract_name, points=5)
+    except Exception:
+        return pd.DataFrame(columns=["trade_date", "iv", "source"])
+
+
 if refresh_requested:
     # 仅清理本页 load_data 缓存，避免全局缓存被清空后引发整站重算。
     load_data.clear()
+    load_focus_iv_trend.clear()
     load_latest_data_date_fallback.clear()
     if hasattr(de, "clear_comprehensive_market_data_snapshot"):
         de.clear_comprehensive_market_data_snapshot()
@@ -1417,7 +1669,10 @@ if not df_monitor.empty:
                 )
 
             with focus_col:
-                focus_contracts = df_filtered["合约"].astype(str).tolist()
+                focus_contracts = sorted(
+                    df_filtered["合约"].astype(str).tolist(),
+                    key=contract_alpha_sort_key,
+                )
                 selected_contract = st.selectbox(
                     "聚焦合约",
                     focus_contracts,
@@ -1425,7 +1680,12 @@ if not df_monitor.empty:
                     label_visibility="collapsed",
                 )
                 focus_row = df_filtered[df_filtered["合约"].astype(str) == selected_contract].iloc[0]
-                render_focus_panel(focus_row)
+                focus_iv_trend = load_focus_iv_trend(
+                    selected_contract,
+                    latest_date_display,
+                    FOCUS_IV_TREND_CACHE_VERSION,
+                )
+                render_focus_panel(focus_row, focus_iv_trend)
 
 
     # 底部图例
