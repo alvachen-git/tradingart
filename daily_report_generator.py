@@ -256,11 +256,104 @@ def _extract_kline_shape_from_report(report_text: str) -> str:
     return _normalize_kline_shape_label(first_line) or "暂无明确形态"
 
 
+def _normalize_commodity_direction_label(direction: str) -> str:
+    """将商品趋势标签统一为 看多/看空/震荡。"""
+    text_value = _clean_inline_html_text(direction)
+    if not text_value:
+        return ""
+    if "看多" in text_value or "偏多" in text_value:
+        return "看多"
+    if "看空" in text_value or "偏空" in text_value:
+        return "看空"
+    if "震荡" in text_value or "中性" in text_value or "观望" in text_value:
+        return "震荡"
+    return text_value.strip()
+
+
+def _extract_commodity_direction_label(card_segment: str) -> str:
+    """从单个商品卡片片段中提取展示给用户的趋势标签。"""
+    text_value = _clean_inline_html_text(card_segment)
+    m = re.search(r"(看多|偏多|看空|偏空|震荡|中性|观望)", text_value)
+    if not m:
+        return ""
+    return _normalize_commodity_direction_label(m.group(1))
+
+
+def _derive_kline_direction_from_report(report_text: str, shape: str = "") -> str:
+    """
+    从 K 线工具报告确定性派生商品趋势标签，避免 LLM 把偏空技术面标成看多。
+    输出只允许：看多 / 看空 / 震荡。
+    """
+    report = _clean_inline_html_text(report_text)
+    shape_label = _normalize_kline_shape_label(shape)
+    source_text = f"{shape_label} {report}"
+
+    bullish_score = 0
+    bearish_score = 0
+
+    bullish_shape_tokens = [
+        "假跌破", "多头吞噬", "上升三法", "大阳线", "多头反击",
+        "晨星", "锤子线", "突破", "放量突破", "红三兵", "V型反转",
+    ]
+    bearish_shape_tokens = [
+        "假突破", "空头吞噬", "下降三法", "大阴线", "空头反击",
+        "夜星", "吊人线", "射击之星", "破位", "放量下跌", "三只乌鸦", "倒V",
+    ]
+
+    for token in bullish_shape_tokens:
+        if token in shape_label:
+            bullish_score += 3
+            break
+    for token in bearish_shape_tokens:
+        if token in shape_label:
+            bearish_score += 3
+            break
+
+    bullish_trend_weights = {
+        "近5日强势上涨": 3,
+        "多头主导": 3,
+        "均线多头排列": 2,
+        "站上5日线": 1,
+        "站稳20日线": 1,
+        "中多": 1,
+        "震荡偏多": 1,
+        "小幅上涨": 1,
+    }
+    bearish_trend_weights = {
+        "近5日持续下跌": 3,
+        "空头主导": 3,
+        "均线空头排列": 2,
+        "跌破5日线": 1,
+        "跌破20日线": 1,
+        "中空": 1,
+        "震荡偏空": 1,
+        "小幅下跌": 1,
+    }
+
+    for token, weight in bullish_trend_weights.items():
+        if token in source_text:
+            bullish_score += weight
+    for token, weight in bearish_trend_weights.items():
+        if token in source_text:
+            bearish_score += weight
+
+    if "站上5日线" in source_text and "站稳20日线" in source_text:
+        bullish_score += 1
+    if "跌破5日线" in source_text and "跌破20日线" in source_text:
+        bearish_score += 1
+
+    if bullish_score - bearish_score >= 2:
+        return "看多"
+    if bearish_score - bullish_score >= 2:
+        return "看空"
+    return "震荡"
+
+
 def _fetch_programmatic_commodity_kline_snapshot(trade_date: str = None):
     """
     程序端调用K线工具抓取商品形态真值，供晚报商品卡片强制使用。
     返回:
-      - snapshot_map: {商品: {shape, trade_date}}
+      - snapshot_map: {商品: {shape, direction, trade_date}}
       - snapshot_text: 可直接注入到 prompt 的说明文本
     """
     snapshot_map = {}
@@ -273,15 +366,18 @@ def _fetch_programmatic_commodity_kline_snapshot(trade_date: str = None):
                 "query": commodity,
                 "trade_date": report_trade_date,
             })
-            shape = _extract_kline_shape_from_report(str(report))
+            report_text = str(report)
+            shape = _extract_kline_shape_from_report(report_text)
+            direction = _derive_kline_direction_from_report(report_text, shape)
             snapshot_map[commodity] = {
                 "shape": shape,
+                "direction": direction,
                 "trade_date": report_trade_date,
             }
-            lines.append(f"- {commodity}: 形态={shape} [K线日期 <= {report_trade_date}]")
+            lines.append(f"- {commodity}: 形态={shape}; 趋势={direction} [K线日期 <= {report_trade_date}]")
         except Exception as e:
             print(f"⚠️ [K线形态快照] {commodity} 查询异常: {e}")
-            lines.append(f"- {commodity}: 暂无可用K线形态（本次不做形态对齐）")
+            lines.append(f"- {commodity}: 暂无可用K线形态与趋势（本次不做形态/趋势对齐）")
 
     snapshot_text = "\n".join(lines)
     return snapshot_map, snapshot_text
@@ -295,6 +391,7 @@ def validate_commodity_cards(html: str, expected_iv_map: dict = None, expected_k
     3) 若给出百分比，必须在 0%~300% 区间。
     4) 若提供 expected_iv_map，百分比需与程序注入真值一致（容忍±0.3%）。
     5) 若提供 expected_kline_map，形态字段需与程序注入真值一致。
+    6) 若 expected_kline_map 提供 direction，趋势标签需与程序注入真值一致。
     """
     anomalies = []
     if not html:
@@ -335,6 +432,24 @@ def validate_commodity_cards(html: str, expected_iv_map: dict = None, expected_k
 
         expected_kline = (expected_kline_map or {}).get(commodity)
         if expected_kline:
+            expected_direction = _normalize_commodity_direction_label(expected_kline.get("direction", ""))
+            if expected_direction:
+                direction_pattern = re.compile(
+                    rf"{re.escape(commodity)}(?P<direction_segment>.{{0,400}}?)形态[：:]",
+                    re.S | re.I
+                )
+                direction_match = direction_pattern.search(html)
+                if not direction_match:
+                    anomalies.append(f"{commodity} 缺少趋势标签或“形态”字段")
+                    continue
+                actual_direction = _extract_commodity_direction_label(direction_match.group("direction_segment"))
+                if not actual_direction:
+                    anomalies.append(f"{commodity} 缺少趋势标签")
+                elif actual_direction != expected_direction:
+                    anomalies.append(
+                        f"{commodity} 趋势标签与真值不一致: 页面={actual_direction}, 真值={expected_direction}"
+                    )
+
             shape_pattern = re.compile(
                 rf"{re.escape(commodity)}(.{{0,500}}?)形态[：:]\s*(?P<shape_text>[^<\n]+)",
                 re.S | re.I
@@ -369,15 +484,15 @@ def _rewrite_report_after_validation(raw_material: str, html: str, anomalies: li
 2. 商品期货全景必须保留10个商品卡片，且每个卡片都含“隐含波动率：X”字段。
 3. 隐含波动率字段必须体现“高/中/低”等级（可写成“偏高/偏低/中等/极高/极低”）。
 4. 必须写具体百分比，格式示例：“隐含波动率：42.5%（偏高）”。
-5. 商品卡片“形态：X”必须逐字匹配下方程序注入的K线形态真值。
+5. 商品卡片“形态：X”和趋势标签必须逐字匹配下方程序注入的K线形态/趋势真值。
 6. 不要再写“支撑：... | 压力：...”这一行。
-7. 趋势判断（看多/看空/震荡）仍由你根据素材自主判断。
+7. 趋势标签只允许“看多/看空/震荡”，不得自行改写或根据宏观素材覆盖程序真值。
 8. 其他板块风格与结构尽量保持原有质量。
 
 【程序注入的商品IV真值（最高优先级，必须原样使用）】
 {iv_snapshot_text}
 
-【程序注入的商品K线形态真值（最高优先级，必须原样使用）】
+【程序注入的商品K线形态/趋势真值（最高优先级，必须原样使用）】
 {kline_snapshot_text}
 
 【记者素材】
@@ -590,7 +705,7 @@ def draft_report(raw_material):
     【程序查库得到的商品IV真值（最高优先级，必须原样使用）】
     {iv_snapshot_text}
 
-    【程序查库得到的商品K线形态真值（最高优先级，必须原样使用）】
+    【程序查库得到的商品K线形态/趋势真值（最高优先级，必须原样使用）】
     {kline_snapshot_text}
 
     【记者提交的素材】：
@@ -829,16 +944,15 @@ def draft_report(raw_material):
     | 正文内容 | 13-14px | #e2e8f0 (亮白) |
     | 次要文字 | 12-13px | #94a3b8 (灰色) |
 
-    ## 8. ⚠️ 商品期货趋势判断规则
-    根据素材判断：
-    - "多头趋势"、"突破"、"站上均线"、"金叉" → 标签"看多"，背景 #dc2626
-    - "空头趋势"、"破位"、"跌破支撑"、"死叉" → 标签"看空"，背景 #16a34a
-    - "震荡"、"盘整"、"观望" → 标签"震荡"，背景 #d97706
+    ## 8. ⚠️ 商品期货趋势标签规则
+    - 商品卡片趋势标签必须逐字匹配【程序查库得到的商品K线形态/趋势真值】中的“趋势=看多/看空/震荡”。
+    - 不得根据宏观新闻、期货商持仓或主观短评覆盖商品K线趋势真值。
+    - 看多背景 #dc2626；看空背景 #16a34a；震荡背景 #d97706。
 
     ## 9. 内容要求
     - 商品期货全景：必须包含 10 个商品卡片（5行2列）
     - 商品卡片第一行必须展示“形态：xxx”
-    - 各商品形态，必须逐字匹配【程序查库得到的商品K线形态真值】
+    - 各商品形态与趋势标签，必须逐字匹配【程序查库得到的商品K线形态/趋势真值】
     - 商品卡片第二行必须展示“隐含波动率：xx.xx%（高/中/低）”
     - 各商品IV百分比与等级，必须逐字匹配【程序查库得到的商品IV真值】
     - 商品卡片不要再出现“支撑/压力”字段

@@ -90,6 +90,53 @@ class DailyReportCommodityGuardrailTest(unittest.TestCase):
 
         self.assertTrue(is_valid, anomalies)
 
+    def test_kline_direction_derives_bearish_from_trend_structure(self):
+        report = """
+**一、今日形态信号**
+【十字星】(多空对峙)
+
+**五、趋势研判**
+- 均线位置：跌破5日线(短弱)，跌破20日线(中空)，均线空头排列，震荡横盘格局
+- 多日趋势：↔️ 近5日横盘震荡，方向待选
+"""
+
+        self.assertEqual(drg._derive_kline_direction_from_report(report, "十字星"), "看空")
+
+    def test_commodity_card_validation_rejects_wrong_direction(self):
+        html = """
+        <div>🪙 黄金</div><span>看多</span>
+        <p>形态：十字星<br>隐含波动率：23.61%（偏低）</p>
+        """
+        expected_iv = {
+            "黄金": {"iv": 23.61},
+        }
+        expected_kline = {
+            "黄金": {"shape": "十字星", "direction": "看空"},
+        }
+
+        with patch.object(drg, "COMMODITY_CARD_LIST", ["黄金"]):
+            is_valid, anomalies = drg.validate_commodity_cards(html, expected_iv, expected_kline)
+
+        self.assertFalse(is_valid)
+        self.assertTrue(any("黄金 趋势标签与真值不一致" in item for item in anomalies))
+
+    def test_commodity_card_validation_accepts_programmatic_direction(self):
+        html = """
+        <div>🪙 黄金</div><span>看空</span>
+        <p>形态：十字星<br>隐含波动率：23.61%（偏低）</p>
+        """
+        expected_iv = {
+            "黄金": {"iv": 23.61},
+        }
+        expected_kline = {
+            "黄金": {"shape": "十字星", "direction": "看空"},
+        }
+
+        with patch.object(drg, "COMMODITY_CARD_LIST", ["黄金"]):
+            is_valid, anomalies = drg.validate_commodity_cards(html, expected_iv, expected_kline)
+
+        self.assertTrue(is_valid, anomalies)
+
     def test_kline_snapshot_passes_report_trade_date_to_tool(self):
         fake_tool = FakeKlineTool()
 
@@ -98,8 +145,11 @@ class DailyReportCommodityGuardrailTest(unittest.TestCase):
                 snapshot, snapshot_text = drg._fetch_programmatic_commodity_kline_snapshot("20260612")
 
         self.assertEqual(snapshot["碳酸锂"]["shape"], "普通震荡K线")
+        self.assertEqual(snapshot["碳酸锂"]["direction"], "震荡")
         self.assertEqual(snapshot["原油"]["shape"], "极致压缩破位")
+        self.assertEqual(snapshot["原油"]["direction"], "看空")
         self.assertIn("形态=普通震荡K线", snapshot_text)
+        self.assertIn("趋势=看空", snapshot_text)
         self.assertEqual(
             fake_tool.calls,
             [
