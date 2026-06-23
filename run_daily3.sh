@@ -64,8 +64,8 @@ run_step 8 10 "更新股票成交量排名数据" "update_stock_money_scan.py"
 # 3. 更新【波动率数据】
 run_step 9 10 "股票期权IV计算" "calc_iv_oneday.py"
 
-# 4. 选股3号：只补前复权价格；日结由 run_ai_simulation_weekday_2030.sh 执行
-run_step 10 10 "更新选股3号前复权价格" "update_stock_price_qfq.py" "--date" "latest" "--lookback-days" "420" "--portfolio-id" "official_cn_a_etf_v3" "--v3-daily-candidates" "--sleep-sec" "0.05"
+# 4. 选股3号 + 常用宽基ETF：只补前复权价格；日结由 run_ai_simulation_weekday_2030.sh 执行
+run_step 10 10 "更新选股3号和核心ETF前复权价格" "update_stock_price_qfq.py" "--date" "latest" "--lookback-days" "420" "--symbols" "510050.SH,510300.SH,510500.SH,159915.SZ,588000.SH" "--portfolio-id" "official_cn_a_etf_v3" "--v3-daily-candidates" "--sleep-sec" "0.05"
 
 
 # 7. 结束

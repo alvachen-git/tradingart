@@ -280,6 +280,48 @@ class TestKlineToolsShadowFacts(unittest.TestCase):
         self.assertIn("已拒绝使用未复权 stock_price", out)
         self.assertNotIn("MA5:", out)
 
+    def test_a_share_stale_qfq_fails_closed_instead_of_using_old_latest_bar(self):
+        qfq_df = _make_qfq_ex_rights_df()
+        raw_df = pd.concat(
+            [
+                qfq_df.copy(),
+                pd.DataFrame(
+                    [
+                        {
+                            "trade_date": "20260615",
+                            "open_price": 82.00,
+                            "high_price": 83.00,
+                            "low_price": 81.00,
+                            "close_price": 82.50,
+                        }
+                    ]
+                ),
+            ],
+            ignore_index=True,
+        )
+
+        def fake_read_sql(sql, *_args, **_kwargs):
+            sql_text = str(sql)
+            if "stock_price_qfq" in sql_text:
+                return qfq_df.copy()
+            return raw_df.copy()
+
+        with patch.object(kline_tools, "engine", object()), patch.object(
+            kline_tools, "STOCK_DAILY_SOURCE", "stock_price"
+        ), patch.object(
+            kline_tools.symbol_map, "resolve_symbol", return_value=("510300.SH", "stock")
+        ), patch.object(
+            kline_tools.pd, "read_sql", side_effect=fake_read_sql
+        ):
+            out = kline_tools.analyze_kline_pattern.invoke({"query": "300ETF技术面分析"})
+
+        self.assertIn("前复权滞后", out)
+        self.assertIn("最新20260612", out)
+        self.assertIn("stock_price最新20260615", out)
+        self.assertIn("已拒绝使用未复权或滞后的前复权数据", out)
+        self.assertNotIn("今日收盘", out)
+        self.assertNotIn("MA5:", out)
+
 
 if __name__ == "__main__":
     unittest.main()

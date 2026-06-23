@@ -170,11 +170,36 @@ def _read_stock_rows(table_name: str, symbol: str, clean_date: str) -> pd.DataFr
     return pd.read_sql(sql, engine, params=params)
 
 
+def _latest_trade_date_from_df(df: pd.DataFrame) -> str:
+    if df is None or df.empty or "trade_date" not in df.columns:
+        return ""
+    dates = []
+    for value in df["trade_date"].tolist():
+        cleaned = _compact_trade_date(value)
+        if len(cleaned) == 8:
+            dates.append(cleaned)
+    return max(dates) if dates else ""
+
+
 def _read_stock_kline_rows(symbol: str, clean_date: str) -> tuple[pd.DataFrame, str]:
     if _is_a_share_symbol(symbol):
         try:
             qfq_df = _read_stock_rows("stock_price_qfq", symbol, clean_date)
             if not qfq_df.empty:
+                raw_latest = ""
+                try:
+                    raw_df = _read_stock_rows(STOCK_DAILY_SOURCE, symbol, clean_date)
+                    raw_latest = _latest_trade_date_from_df(raw_df)
+                except Exception:
+                    raw_latest = ""
+                qfq_latest = _latest_trade_date_from_df(qfq_df)
+                if raw_latest and qfq_latest and qfq_latest < raw_latest:
+                    empty = pd.DataFrame(columns=_KLINE_COLUMNS)
+                    return (
+                        empty,
+                        f"stock_price_qfq(前复权滞后：最新{qfq_latest}；"
+                        f"{STOCK_DAILY_SOURCE}最新{raw_latest}；已拒绝旧数据)"
+                    )
                 return qfq_df, "stock_price_qfq(前复权)"
         except Exception:
             qfq_df = pd.DataFrame(columns=_KLINE_COLUMNS)
@@ -231,10 +256,14 @@ def analyze_kline_pattern(query: str, trade_date: str = None):
         price_source_label = ""
         if asset_type == 'stock':
             df, price_source_label = _read_stock_kline_rows(symbol, clean_date)
-            if df.empty and _is_a_share_symbol(symbol) and "前复权缺失" in price_source_label:
+            if df.empty and _is_a_share_symbol(symbol) and (
+                "前复权缺失" in price_source_label or "前复权滞后" in price_source_label
+            ):
+                issue = "前复权日线数据滞后" if "前复权滞后" in price_source_label else "前复权日线数据缺失"
                 return (
-                    f"{symbol} 前复权日线数据缺失，无法可靠计算均线；"
-                    "已拒绝使用未复权 stock_price，避免除权断点污染。"
+                    f"{symbol} {issue}：{price_source_label}，无法可靠计算最新K线与均线；"
+                    "已拒绝使用未复权 stock_price；已拒绝使用未复权或滞后的前复权数据，"
+                    "避免把历史行情当作今日。"
                 )
             # 🔥🔥🔥 [新增核心修复]：兜底查询
             # 如果在股票表没查到，且代码看起来像指数 (399开头是深市指数, 000开头可能是沪市指数)，尝试去指数表查
