@@ -273,6 +273,75 @@ class TestStockPriceQfq(unittest.TestCase):
         self.assertEqual(out, ["300502.SZ"])
         self.assertFalse(mock_read.call_args.kwargs["include_watchlist"])
 
+    @patch("update_stock_price_qfq.filter_symbols_by_qfq_gap", return_value=[])
+    @patch("update_stock_price_qfq._read_symbols_for_range", return_value=["600519.SH"])
+    def test_resolve_symbols_allows_empty_after_gap_filter(self, _mock_read, mock_filter):
+        class Args:
+            symbols = ""
+            portfolio_id = ""
+            start_date = "20260501"
+            end_date = "20260602"
+            portfolio_symbol_scope = "all"
+            all_stock_price_symbols = True
+            asset_scope = "stock"
+            only_missing_or_stale = True
+            resume_after = ""
+            max_symbols = 0
+            v3_daily_candidates = False
+            candidate_date = ""
+            candidate_limit = 3
+
+        out = qfq.resolve_symbols(object(), Args())
+
+        self.assertEqual(out, [])
+        mock_filter.assert_called_once()
+
+    def test_resolve_symbols_still_requires_a_symbol_source(self):
+        class Args:
+            symbols = ""
+            portfolio_id = ""
+            start_date = "20260501"
+            end_date = "20260602"
+            portfolio_symbol_scope = "all"
+            all_stock_price_symbols = False
+            asset_scope = "stock"
+            only_missing_or_stale = True
+            resume_after = ""
+            max_symbols = 0
+            v3_daily_candidates = False
+            candidate_date = ""
+            candidate_limit = 3
+
+        with self.assertRaises(RuntimeError):
+            qfq.resolve_symbols(object(), Args())
+
+    @patch("update_stock_price_qfq.update_symbol_qfq")
+    @patch("update_stock_price_qfq.filter_symbols_by_qfq_gap", return_value=[])
+    @patch("update_stock_price_qfq._read_symbols_for_range", return_value=["600519.SH"])
+    @patch("update_stock_price_qfq.get_pro", return_value=object())
+    @patch("update_stock_price_qfq.ensure_stock_price_qfq_table")
+    @patch("update_stock_price_qfq.get_engine", return_value=object())
+    def test_run_update_no_gap_is_successful_noop(
+        self,
+        _mock_engine,
+        _mock_ensure_table,
+        _mock_pro,
+        _mock_read,
+        _mock_filter,
+        mock_update_symbol,
+    ):
+        results = qfq.run_update(
+            start_date="20260501",
+            end_date="20260602",
+            all_stock_price_symbols=True,
+            asset_scope="stock_etf",
+            only_missing_or_stale=True,
+            sleep_sec=0,
+        )
+
+        self.assertEqual(results, [])
+        mock_update_symbol.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

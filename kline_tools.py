@@ -183,27 +183,38 @@ def _latest_trade_date_from_df(df: pd.DataFrame) -> str:
 
 def _read_stock_kline_rows(symbol: str, clean_date: str) -> tuple[pd.DataFrame, str]:
     if _is_a_share_symbol(symbol):
+        raw_df = pd.DataFrame(columns=_KLINE_COLUMNS)
+        raw_latest = ""
+        try:
+            raw_df = _read_stock_rows(STOCK_DAILY_SOURCE, symbol, clean_date)
+            raw_latest = _latest_trade_date_from_df(raw_df)
+        except Exception:
+            raw_df = pd.DataFrame(columns=_KLINE_COLUMNS)
+            raw_latest = ""
+
         try:
             qfq_df = _read_stock_rows("stock_price_qfq", symbol, clean_date)
             if not qfq_df.empty:
-                raw_latest = ""
-                try:
-                    raw_df = _read_stock_rows(STOCK_DAILY_SOURCE, symbol, clean_date)
-                    raw_latest = _latest_trade_date_from_df(raw_df)
-                except Exception:
-                    raw_latest = ""
                 qfq_latest = _latest_trade_date_from_df(qfq_df)
                 if raw_latest and qfq_latest and qfq_latest < raw_latest:
-                    empty = pd.DataFrame(columns=_KLINE_COLUMNS)
+                    if not raw_df.empty:
+                        return (
+                            raw_df,
+                            f"{STOCK_DAILY_SOURCE}(未复权备用；"
+                            f"stock_price_qfq前复权滞后：最新{qfq_latest}；"
+                            f"{STOCK_DAILY_SOURCE}最新{raw_latest})"
+                        )
                     return (
-                        empty,
+                        pd.DataFrame(columns=_KLINE_COLUMNS),
                         f"stock_price_qfq(前复权滞后：最新{qfq_latest}；"
-                        f"{STOCK_DAILY_SOURCE}最新{raw_latest}；已拒绝旧数据)"
+                        f"{STOCK_DAILY_SOURCE}最新{raw_latest}；未复权备用数据缺失)"
                     )
                 return qfq_df, "stock_price_qfq(前复权)"
         except Exception:
             qfq_df = pd.DataFrame(columns=_KLINE_COLUMNS)
-        return qfq_df, "stock_price_qfq(前复权缺失；拒绝未复权均线)"
+        if not raw_df.empty:
+            return raw_df, f"{STOCK_DAILY_SOURCE}(未复权备用；stock_price_qfq前复权缺失)"
+        return qfq_df, "stock_price_qfq(前复权缺失；未复权备用数据缺失)"
 
     return _read_stock_rows(STOCK_DAILY_SOURCE, symbol, clean_date), f"{STOCK_DAILY_SOURCE}(日线)"
 
@@ -262,8 +273,7 @@ def analyze_kline_pattern(query: str, trade_date: str = None):
                 issue = "前复权日线数据滞后" if "前复权滞后" in price_source_label else "前复权日线数据缺失"
                 return (
                     f"{symbol} {issue}：{price_source_label}，无法可靠计算最新K线与均线；"
-                    "已拒绝使用未复权 stock_price；已拒绝使用未复权或滞后的前复权数据，"
-                    "避免把历史行情当作今日。"
+                    "未复权备用数据也缺失，无法生成备用技术分析。"
                 )
             # 🔥🔥🔥 [新增核心修复]：兜底查询
             # 如果在股票表没查到，且代码看起来像指数 (399开头是深市指数, 000开头可能是沪市指数)，尝试去指数表查
@@ -855,6 +865,13 @@ def analyze_kline_pattern(query: str, trade_date: str = None):
                 multi_day_trend = "📊 近5日小幅下跌，震荡偏空"
 
         # --- 6. 输出报告 (增强版) ---
+        source_warning = ""
+        if "未复权备用" in str(price_source_label or ""):
+            source_warning = (
+                "\n> ⚠️ 数据提醒：前复权数据未同步，本次改用未复权日线做备用分析；"
+                "若近期发生分红、送转或拆合股，均线和形态可能受除权断点影响，请优先补齐前复权后复核。\n"
+            )
+
         month_part = ""
         # 🔥 [修正] 把 symbol_code 改为 symbol
         match = re.search(r'\d+', symbol)
@@ -872,6 +889,7 @@ def analyze_kline_pattern(query: str, trade_date: str = None):
         # 🔥 [修改结束]
         report = f"""
 📊 **{display_name} ({symbol}) 技术面诊断**
+{source_warning}
 
 **一、今日形态信号**
 {' 🔥 '.join(patterns) if patterns else '普通震荡K线，无明显形态。'}

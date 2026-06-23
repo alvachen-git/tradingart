@@ -255,7 +255,7 @@ class TestKlineToolsShadowFacts(unittest.TestCase):
         self.assertIn("MA5: 78.18", out)
         self.assertNotIn("MA5: 96.97", out)
 
-    def test_a_share_missing_qfq_fails_closed_instead_of_raw_ma(self):
+    def test_a_share_missing_qfq_uses_raw_fallback_with_warning(self):
         raw_df = _make_qfq_ex_rights_df()
         raw_df.loc[raw_df["trade_date"] == "20260608", "close_price"] = 105.30
         raw_df.loc[raw_df["trade_date"] == "20260609", "close_price"] = 113.70
@@ -276,11 +276,11 @@ class TestKlineToolsShadowFacts(unittest.TestCase):
         ):
             out = kline_tools.analyze_kline_pattern.invoke({"query": "新锐股份技术面分析"})
 
-        self.assertIn("前复权日线数据缺失", out)
-        self.assertIn("已拒绝使用未复权 stock_price", out)
-        self.assertNotIn("MA5:", out)
+        self.assertIn("前复权数据未同步", out)
+        self.assertIn("数据源：stock_price(未复权备用；stock_price_qfq前复权缺失)", out)
+        self.assertIn("MA5:", out)
 
-    def test_a_share_stale_qfq_fails_closed_instead_of_using_old_latest_bar(self):
+    def test_a_share_stale_qfq_uses_raw_fallback_instead_of_old_latest_bar(self):
         qfq_df = _make_qfq_ex_rights_df()
         raw_df = pd.concat(
             [
@@ -315,12 +315,13 @@ class TestKlineToolsShadowFacts(unittest.TestCase):
         ):
             out = kline_tools.analyze_kline_pattern.invoke({"query": "300ETF技术面分析"})
 
-        self.assertIn("前复权滞后", out)
+        self.assertIn("前复权数据未同步", out)
+        self.assertIn("stock_price_qfq前复权滞后", out)
         self.assertIn("最新20260612", out)
         self.assertIn("stock_price最新20260615", out)
-        self.assertIn("已拒绝使用未复权或滞后的前复权数据", out)
-        self.assertNotIn("今日收盘", out)
-        self.assertNotIn("MA5:", out)
+        self.assertIn("数据源：stock_price(未复权备用；", out)
+        self.assertIn("今日收盘", out)
+        self.assertIn("MA5:", out)
 
 
 if __name__ == "__main__":

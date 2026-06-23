@@ -746,6 +746,9 @@ def resolve_cli_dates(args: argparse.Namespace) -> tuple[str, str]:
 
 def resolve_symbols(engine, args: argparse.Namespace) -> List[str]:
     symbols = parse_symbols(args.symbols)
+    has_symbol_source = bool(symbols) or bool(args.portfolio_id) or bool(args.all_stock_price_symbols) or bool(
+        getattr(args, "v3_daily_candidates", False)
+    )
     if args.portfolio_id:
         include_watchlist = str(getattr(args, "portfolio_symbol_scope", "all") or "all") == "all"
         symbols.extend(
@@ -774,6 +777,9 @@ def resolve_symbols(engine, args: argparse.Namespace) -> List[str]:
         max_symbols=int(getattr(args, "max_symbols", 0) or 0),
     )
     if not unique:
+        if has_symbol_source and getattr(args, "only_missing_or_stale", False):
+            print("没有可补的前复权缺口：stock_price_qfq 已覆盖本次目标范围。")
+            return []
         raise RuntimeError("没有可补的代码，请传 --symbols、--portfolio-id 或 --all-stock-price-symbols")
     return unique
 
