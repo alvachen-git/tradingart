@@ -1,4 +1,5 @@
 import json
+import math
 
 from st_aggrid import JsCode
 
@@ -104,3 +105,38 @@ def make_grid_number_filter_value_getter(field):
         }}
         """
     )
+
+
+def _to_optional_float(value):
+    if value is None:
+        return None
+    if isinstance(value, str):
+        cleaned = value.replace(",", "").replace("%", "").strip()
+        if cleaned in {"", "-", "N/A", "nan", "None", "快到期"}:
+            return None
+    else:
+        cleaned = value
+    try:
+        number = float(cleaned)
+    except (TypeError, ValueError):
+        return None
+    if math.isnan(number):
+        return None
+    return number
+
+
+def format_contract_expiry_suffix(days_left):
+    number = _to_optional_float(days_left)
+    if number is None:
+        return ""
+    days = int(number)
+    if days < 0:
+        return "已到期"
+    prefix = "⚠ " if days < 3 else ""
+    return f"{prefix}D-{days}"
+
+
+def format_contract_for_grid(row):
+    contract_name = str(row.get("合约") or "")
+    suffix = format_contract_expiry_suffix(row.get("到期剩余天数"))
+    return f"{contract_name} {suffix}" if suffix else contract_name

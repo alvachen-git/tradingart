@@ -9,6 +9,7 @@ from market_monitor_grid import (
     AG_GRID_LOCALE_ZH_CN,
     GRID_NUMBER_COMPARATOR,
     GRID_NUMBER_FILTER_PARAMS,
+    format_contract_expiry_suffix,
     make_grid_number_filter_value_getter,
 )
 from ui_components import inject_sidebar_toggle_style
@@ -49,6 +50,11 @@ PRODUCT_NAMES = {
     "IH": "上证50股指",
     "IM": "中证1000股指",
     "IC": "中证500股指",
+    "TS": "2年国债",
+    "TF": "5年国债",
+    "T": "10年国债",
+    "TL": "30年国债",
+    "EC": "集运欧线",
 
     # 农产品
     "C": "玉米",
@@ -146,6 +152,11 @@ PRODUCT_DESCRIPTIONS = {
     "IH": "上证50股指期货，偏金融和大盘权重风格。",
     "IM": "中证1000股指期货，偏小盘成长与量化资金敏感。",
     "IC": "中证500股指期货，偏中盘风格风险敞口。",
+    "TS": "2年期国债期货，偏短端利率品种，关注资金面、央行操作和短债收益率。",
+    "TF": "5年期国债期货，反映中短端利率预期，常用于观察债市久期和套保需求。",
+    "T": "10年期国债期货，债市核心长端利率品种，关注宏观增长、通胀和货币政策预期。",
+    "TL": "30年期国债期货，超长端利率品种，对久期交易、保险配置和长期利率预期更敏感。",
+    "EC": "集运指数（欧线）期货，跟踪中国出口至欧洲航线集装箱运价，受外贸需求、舱位供给和航线扰动影响。",
     "C": "玉米是饲料和深加工原料，关注库存、进口和养殖需求。",
     "CS": "淀粉由玉米加工而来，反映深加工利润和下游消费。",
     "A": "豆一代表国产大豆，关注国产供应和压榨需求。",
@@ -225,6 +236,8 @@ PRODUCT_CATEGORY = {
     # 股指
     "IO": "股指", "MO": "股指", "HO": "股指",
     "IF": "股指", "IH": "股指", "IM": "股指","IC": "股指",
+    "TS": "国债", "TF": "国债", "T": "国债", "TL": "国债",
+    "EC": "航运",
     "510050": "股指", "510300": "股指", "510500": "股指",
     "159901": "股指", "159915": "股指", "159919": "股指",
     "588000": "股指", "588080": "股指",
@@ -259,8 +272,15 @@ PRODUCT_CATEGORY = {
 }
 
 # 分类列表（按显示顺序）
-CATEGORIES = ["全部", "股指", "农产", "工业", "化工", "有色", "贵金属", "新能源"]
+CATEGORIES = ["全部", "股指", "国债", "农产", "工业", "化工", "有色", "贵金属", "新能源", "航运"]
 FOCUS_IV_TREND_CACHE_VERSION = "v2"
+FOCUS_HOLDING_TREND_CACHE_VERSION = "v1"
+if "rank_focus_open" not in st.session_state:
+    st.session_state.rank_focus_open = False
+rank_sort_param = st.query_params.get("rank_sort", "")
+if isinstance(rank_sort_param, list):
+    rank_sort_param = rank_sort_param[0] if rank_sort_param else ""
+rank_sort_expiry_active = rank_sort_param == "expiry"
 
 
 # ============================================================
@@ -350,6 +370,18 @@ SCAN_FILTERS = [
     {"key": "缺IV", "label": "缺IV数据", "hint": "无有效IV"},
 ]
 
+RAIL_TAG_ABBR = {
+    "高波": "高",
+    "低波": "低",
+    "IV升": "IV+",
+    "价异动": "价",
+    "机构流入": "机+",
+    "散户流出": "散-",
+    "缺IV": "缺",
+    "快到期": "期",
+    "观察": "观",
+}
+
 
 def build_scan_metrics(df):
     missing_iv = 0
@@ -435,6 +467,28 @@ def format_signed_number(value, decimals=2, thousands=False):
     return f"{sign}{number:.{decimals}f}"
 
 
+def format_compact_number(value):
+    number = to_float(value)
+    if number is None:
+        return "-"
+    sign = "+" if number > 0 else ""
+    abs_value = abs(number)
+    if abs_value >= 10000:
+        return f"{sign}{number / 10000:.1f}万"
+    if abs_value >= 1000:
+        return f"{sign}{number / 1000:.0f}k"
+    return f"{sign}{number:.0f}"
+
+
+def format_rail_iv_rank(value):
+    if str(value).strip() == "快到期":
+        return "期"
+    number = to_float(value)
+    if number is None:
+        return "N/A"
+    return f"{number:.0f}"
+
+
 def format_grid_iv_rank(value):
     if str(value).strip() == "快到期":
         return "快到期"
@@ -470,7 +524,7 @@ def apply_grid_column_groups(grid_options):
 
     groups = []
     for group_name, fields in [
-        ("合约", ["合约", "扫描信号"]),
+        ("合约", ["合约", "到期", "扫描信号"]),
         ("波动率", ["当前IV", "IV Rank", "IV变动(日)", "IV变动(5日)"]),
         ("价格", ["涨跌%(日)", "涨跌%(5日)"]),
         ("持仓资金", ["散户变动(日)", "散户变动(5日)", "机构变动(日)", "机构变动(5日)"]),
@@ -485,8 +539,8 @@ def apply_grid_column_groups(grid_options):
 
     leftovers = [column for column in column_defs if column.get("field") not in used_fields]
     grid_options["columnDefs"] = groups + leftovers
-    grid_options["groupHeaderHeight"] = 34
-    grid_options["headerHeight"] = 36
+    grid_options["groupHeaderHeight"] = 32
+    grid_options["headerHeight"] = 34
     return grid_options
 
 
@@ -511,6 +565,26 @@ def _format_trend_value(value):
     if number is None:
         return "-"
     return f"{number:.2f}%"
+
+
+def _format_position_axis(value):
+    number = to_float(value)
+    if number is None:
+        return "-"
+    abs_value = abs(number)
+    if abs_value >= 10000:
+        return f"{number / 10000:.1f}万"
+    if abs_value >= 1000:
+        return f"{number / 1000:.0f}k"
+    return f"{number:.0f}"
+
+
+def _format_position_value(value):
+    number = to_float(value)
+    if number is None:
+        return "-"
+    prefix = "+" if number > 0 else ""
+    return f"{prefix}{number:,.0f}"
 
 
 def render_iv_trend_html(iv_history):
@@ -601,7 +675,99 @@ def render_iv_trend_html(iv_history):
     )
 
 
-def render_focus_panel(row, iv_history=None):
+def render_holding_trend_html(holding_history):
+    if holding_history is None or len(holding_history) < 2:
+        return '<div class="iv-trend-empty">暂无近5日持仓趋势</div>'
+
+    if isinstance(holding_history, pd.DataFrame):
+        records = holding_history.to_dict(orient="records")
+    else:
+        records = list(holding_history)
+
+    points_data = []
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        dumb_net = to_float(record.get("dumb_net"))
+        smart_net = to_float(record.get("smart_net"))
+        if dumb_net is None and smart_net is None:
+            continue
+        points_data.append(
+            {
+                "date": _format_trend_date(record.get("trade_date", "")),
+                "dumb_net": dumb_net or 0,
+                "smart_net": smart_net or 0,
+            }
+        )
+
+    if len(points_data) < 2:
+        return '<div class="iv-trend-empty">暂无近5日持仓趋势</div>'
+
+    values = [item["dumb_net"] for item in points_data] + [item["smart_net"] for item in points_data]
+    min_v = min(values)
+    max_v = max(values)
+    if abs(max_v - min_v) < 1:
+        min_v -= 1
+        max_v += 1
+
+    width, height = 320, 164
+    pad_left, pad_right, pad_top, pad_bottom = 48, 18, 22, 34
+    plot_w = width - pad_left - pad_right
+    plot_h = height - pad_top - pad_bottom
+    span = max_v - min_v
+
+    def _line_points(field):
+        points = []
+        circles = []
+        for idx, item in enumerate(points_data):
+            x = pad_left + (plot_w * idx / max(1, len(points_data) - 1))
+            y = pad_top + ((max_v - item[field]) / span * plot_h)
+            points.append(f"{x:.1f},{y:.1f}")
+            circles.append(f'<circle cx="{x:.1f}" cy="{y:.1f}" r="3" />')
+        return points, circles
+
+    dumb_points, dumb_circles = _line_points("dumb_net")
+    smart_points, smart_circles = _line_points("smart_net")
+
+    grid_values = [max_v, (max_v + min_v) / 2, min_v]
+    grid_lines = []
+    for value in grid_values:
+        y = pad_top + ((max_v - value) / span * plot_h)
+        grid_lines.append(
+            f'<line x1="{pad_left}" y1="{y:.1f}" x2="{width - pad_right}" y2="{y:.1f}" '
+            f'stroke="rgba(148,163,184,0.18)" stroke-width="1" />'
+            f'<text x="{pad_left - 8}" y="{y + 4:.1f}" text-anchor="end" '
+            f'fill="#94a3b8" font-size="10">{html.escape(_format_position_axis(value))}</text>'
+        )
+
+    latest = points_data[-1]
+    first = points_data[0]
+
+    svg_html = (
+        f'<svg class="iv-trend-svg holding-trend-svg" viewBox="0 0 {width} {height}" role="img" '
+        f'aria-label="近5日持仓趋势">'
+        f'{"".join(grid_lines)}'
+        f'<polyline points="{" ".join(dumb_points)}" fill="none" '
+        f'stroke="#60a5fa" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" />'
+        f'<g fill="#60a5fa" stroke="#dbeafe" stroke-width="1.2">{"".join(dumb_circles)}</g>'
+        f'<polyline points="{" ".join(smart_points)}" fill="none" '
+        f'stroke="#22c55e" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" />'
+        f'<g fill="#22c55e" stroke="#dcfce7" stroke-width="1.2">{"".join(smart_circles)}</g>'
+        f'<text x="{pad_left}" y="{height - 10}" text-anchor="middle" fill="#94a3b8" font-size="11">{html.escape(first["date"])}</text>'
+        f'<text x="{width - pad_right}" y="{height - 10}" text-anchor="middle" fill="#94a3b8" font-size="11">{html.escape(latest["date"])}</text>'
+        f'</svg>'
+    )
+
+    return (
+        f'<div class="holding-trend-head">'
+        f'<span><i class="dumb-line"></i>散户 <strong>{html.escape(_format_position_value(latest["dumb_net"]))}</strong></span>'
+        f'<span><i class="smart-line"></i>机构 <strong>{html.escape(_format_position_value(latest["smart_net"]))}</strong></span>'
+        f'</div>'
+        f'{svg_html}'
+    )
+
+
+def render_focus_panel(row, iv_history=None, holding_history=None):
     description = html.escape(get_product_description(str(row.get("合约", ""))))
     tags = "".join(
         f"<span class='focus-tag'>{html.escape(tag)}</span>"
@@ -627,6 +793,7 @@ def render_focus_panel(row, iv_history=None):
         focus_metric_html("机构(5日)", format_signed_number(row.get("机构变动(5日)"), decimals=0, thousands=True), tone_class(row.get("机构变动(5日)"))),
     ]
     iv_trend_html = render_iv_trend_html(iv_history)
+    holding_trend_html = render_holding_trend_html(holding_history)
 
     panel_html = (
         f'<div class="focus-panel">'
@@ -650,8 +817,8 @@ def render_focus_panel(row, iv_history=None):
         f'<div class="focus-grid">{"".join(holding_metrics)}</div>'
         f'</div>'
         f'<div class="focus-block">'
-        f'<div class="focus-block-title">扫描备注</div>'
-        f'<div class="focus-note">右侧面板用于快速核对单一合约，表格仍保留完整排序和筛选能力。</div>'
+        f'<div class="focus-block-title">持仓趋势（近5日）</div>'
+        f'{holding_trend_html}'
         f'</div>'
         f'</div>'
     )
@@ -666,7 +833,7 @@ st.markdown("""
 <style>
     /* === 基础重置 === */
     .block-container {
-        padding: 1.5rem 2rem !important;
+        padding: 1.15rem 1.65rem 1.25rem !important;
         max-width: 100% !important;
     }
     #MainMenu {visibility: hidden;}
@@ -674,7 +841,8 @@ st.markdown("""
 
     /* === 深色主题 === */
     .stApp {
-        background: linear-gradient(135deg, #0a0f1a 0%, #0d1526 50%, #0a1628 100%);
+        background: radial-gradient(circle at 50% -18%, rgba(37, 99, 235, 0.13), transparent 36%),
+                    linear-gradient(135deg, #08111f 0%, #0b1424 50%, #091526 100%);
         color: #e2e8f0;
     }
 
@@ -711,13 +879,13 @@ st.markdown("""
 
     /* === 按钮 === */
     div.stButton > button {
-        background: linear-gradient(135deg, #1e40af, #3b82f6) !important;
+        background: linear-gradient(135deg, #1d4ed8, #2563eb) !important;
         color: #ffffff !important;
         border: none !important;
-        border-radius: 10px;
-        padding: 10px 24px;
+        border-radius: 9px;
+        padding: 9px 22px;
         font-weight: 600;
-        box-shadow: 0 4px 15px rgba(59, 130, 246, 0.3);
+        box-shadow: 0 8px 18px rgba(37, 99, 235, 0.24);
         transition: all 0.2s ease;
     }
     div.stButton > button:hover {
@@ -813,70 +981,67 @@ st.markdown("""
     }
 
     /* === 扫描工作台 === */
-    .scan-toolbar {
-        margin-top: 18px;
-        padding: 14px 16px;
-        background: rgba(15, 23, 42, 0.72);
-        border: 1px solid rgba(71, 85, 105, 0.36);
-        border-radius: 14px;
-    }
-    .scan-title {
-        color: #e2e8f0;
-        font-size: 14px;
-        font-weight: 700;
-        margin-bottom: 4px;
-    }
+    .scan-toolbar,
+    .scan-title,
     .scan-subtitle {
-        color: #94a3b8;
-        font-size: 12px;
-        line-height: 1.5;
+        display: none;
     }
     .scan-card {
-        min-height: 86px;
-        padding: 14px 16px;
-        background: linear-gradient(180deg, rgba(30, 41, 59, 0.86), rgba(15, 23, 42, 0.92));
-        border: 1px solid rgba(71, 85, 105, 0.45);
-        border-radius: 12px;
-        box-shadow: 0 14px 30px rgba(2, 6, 23, 0.26);
+        min-height: 54px;
+        padding: 10px 14px;
+        background: rgba(15, 27, 47, 0.66);
+        border: 1px solid rgba(71, 85, 105, 0.34);
+        border-radius: 10px;
+        box-shadow: none;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
     }
     .scan-card-label {
         color: #cbd5e1;
         font-size: 13px;
         font-weight: 700;
-        margin-bottom: 8px;
+        white-space: nowrap;
     }
     .scan-card-rule {
         color: #64748b;
-        font-size: 11px;
-        margin-top: 5px;
+        font-size: 10px;
+        white-space: nowrap;
     }
     .scan-card-value {
         color: #f8fafc;
-        font-size: 24px;
+        font-size: 18px;
         line-height: 1;
         font-weight: 800;
         letter-spacing: 0;
         font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
     }
-    .scan-card-high { border-color: rgba(248, 113, 113, 0.32); }
-    .scan-card-low { border-color: rgba(74, 222, 128, 0.32); }
-    .scan-card-focus { border-color: rgba(59, 130, 246, 0.36); }
+    .scan-card-high { border-color: rgba(248, 113, 113, 0.25); }
+    .scan-card-low { border-color: rgba(74, 222, 128, 0.25); }
+    .scan-card-focus { border-color: rgba(96, 165, 250, 0.28); }
+    .scan-card-high .scan-card-label,
+    .scan-card-high .scan-card-value { color: #fca5a5; }
+    .scan-card-low .scan-card-label,
+    .scan-card-low .scan-card-value { color: #86efac; }
+    .scan-card-focus .scan-card-label,
+    .scan-card-focus .scan-card-value { color: #bfdbfe; }
     .st-key-category_filter [data-testid="stWidgetLabel"] {
         display: none;
     }
     .st-key-category_filter [data-baseweb="select"] > div {
-        min-height: 86px;
-        padding: 14px 16px;
-        background: linear-gradient(180deg, rgba(30, 41, 59, 0.9), rgba(15, 23, 42, 0.96)) !important;
-        border: 1px solid rgba(71, 85, 105, 0.4) !important;
-        border-radius: 12px !important;
-        box-shadow: 0 14px 30px rgba(2, 6, 23, 0.26);
+        min-height: 54px;
+        padding: 10px 14px;
+        background: rgba(15, 27, 47, 0.76) !important;
+        border: 1px solid rgba(71, 85, 105, 0.38) !important;
+        border-radius: 10px !important;
+        box-shadow: none;
         color: #f8fafc !important;
     }
     .st-key-category_filter [data-baseweb="select"] > div div,
     .st-key-category_filter [data-baseweb="select"] > div span {
         color: #f8fafc !important;
-        font-size: 15px !important;
+        font-size: 14px !important;
         font-weight: 800 !important;
         letter-spacing: 0;
         opacity: 1 !important;
@@ -886,7 +1051,7 @@ st.markdown("""
         fill: #94a3b8 !important;
     }
     .scan-table-gap {
-        height: 22px;
+        height: 14px;
     }
     .focus-panel {
         background: rgba(15, 23, 42, 0.78);
@@ -894,6 +1059,120 @@ st.markdown("""
         border-radius: 14px;
         padding: 14px;
         min-height: 600px;
+    }
+    .focus-rail-card {
+        min-height: 640px;
+        padding: 16px 8px;
+        background: linear-gradient(180deg, rgba(30, 41, 59, 0.72), rgba(15, 23, 42, 0.86));
+        border: 1px solid rgba(71, 85, 105, 0.34);
+        border-radius: 12px;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 12px;
+        color: #cbd5e1;
+        box-shadow: 0 18px 42px rgba(2, 6, 23, 0.18);
+    }
+    .focus-rail-contract {
+        margin-top: 2px;
+        padding-bottom: 10px;
+        border-bottom: 1px solid rgba(71, 85, 105, 0.24);
+        text-align: center;
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+        width: 100%;
+    }
+    .focus-rail-contract strong {
+        color: #f8fafc;
+        font-size: 12px;
+        font-weight: 800;
+        line-height: 1.2;
+        word-break: break-all;
+    }
+    .focus-rail-contract em {
+        color: #94a3b8;
+        font-style: normal;
+        font-size: 11px;
+        line-height: 1.2;
+    }
+    .focus-rail-metric-list {
+        width: 100%;
+        display: flex;
+        flex-direction: column;
+        gap: 7px;
+    }
+    .focus-rail-metric {
+        min-width: 0;
+        padding: 7px 8px;
+        border-radius: 8px;
+        background: rgba(15, 23, 42, 0.44);
+        border: 1px solid rgba(71, 85, 105, 0.20);
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 6px;
+    }
+    .focus-rail-metric span {
+        flex: 0 0 auto;
+        color: #64748b;
+        font-size: 10px;
+        font-weight: 800;
+        line-height: 1;
+    }
+    .focus-rail-metric strong {
+        min-width: 0;
+        flex: 1 1 auto;
+        color: #e2e8f0;
+        font-size: 12px;
+        line-height: 1;
+        letter-spacing: 0;
+        text-align: right;
+        white-space: nowrap;
+    }
+    .focus-rail-metric strong.up { color: #f87171; }
+    .focus-rail-metric strong.down { color: #4ade80; }
+    .focus-rail-metric strong.flat { color: #94a3b8; }
+    .focus-rail-tags {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+        justify-content: center;
+        width: 100%;
+    }
+    .focus-rail-tags span {
+        min-width: 28px;
+        padding: 3px 6px;
+        border-radius: 999px;
+        color: #bfdbfe;
+        background: rgba(37, 99, 235, 0.16);
+        border: 1px solid rgba(96, 165, 250, 0.22);
+        font-size: 10px;
+        font-weight: 700;
+        line-height: 1.2;
+        text-align: center;
+    }
+    .st-key-rank_focus_open_btn div.stButton > button,
+    .st-key-rank_focus_close_btn div.stButton > button,
+    .st-key-rank_focus_open_btn button,
+    .st-key-rank_focus_close_btn button {
+        background: rgba(15, 27, 47, 0.76) !important;
+        border: 1px solid rgba(71, 85, 105, 0.34) !important;
+        box-shadow: none !important;
+        border-radius: 10px !important;
+        color: #cbd5e1 !important;
+        min-height: 42px;
+        padding: 8px 10px !important;
+        font-size: 13px;
+        font-weight: 800;
+    }
+    .st-key-rank_focus_open_btn div.stButton > button:hover,
+    .st-key-rank_focus_close_btn div.stButton > button:hover,
+    .st-key-rank_focus_open_btn button:hover,
+    .st-key-rank_focus_close_btn button:hover {
+        border-color: rgba(96, 165, 250, 0.45) !important;
+        color: #f8fafc !important;
+        transform: none;
     }
     .focus-intro-label {
         color: #94a3b8;
@@ -989,6 +1268,41 @@ st.markdown("""
         border-radius: 10px;
         background: rgba(15, 23, 42, 0.28);
         font-size: 12px;
+    }
+    .holding-trend-svg {
+        height: 164px;
+    }
+    .holding-trend-head {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 10px;
+        color: #94a3b8;
+        font-size: 11px;
+        margin-bottom: 6px;
+    }
+    .holding-trend-head span {
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        white-space: nowrap;
+    }
+    .holding-trend-head strong {
+        color: #e2e8f0;
+        font-size: 12px;
+        letter-spacing: 0;
+    }
+    .holding-trend-head i {
+        width: 14px;
+        height: 3px;
+        border-radius: 999px;
+        display: inline-block;
+    }
+    .holding-trend-head .dumb-line {
+        background: #60a5fa;
+    }
+    .holding-trend-head .smart-line {
+        background: #22c55e;
     }
     .focus-note {
         color: #94a3b8;
@@ -1125,10 +1439,108 @@ def load_focus_iv_trend(contract_name, data_date="", cache_version=FOCUS_IV_TREN
         return pd.DataFrame(columns=["trade_date", "iv", "source"])
 
 
+@st.cache_data(ttl=1800)
+def load_focus_holding_trend(contract_name, data_date="", cache_version=FOCUS_HOLDING_TREND_CACHE_VERSION):
+    """加载右侧详情面板近5日散户/机构持仓趋势。"""
+    try:
+        return de.get_market_monitor_holding_trend(contract_name, points=5, data_date=data_date)
+    except Exception:
+        return pd.DataFrame(columns=["trade_date", "dumb_net", "smart_net"])
+
+
+@st.fragment
+def render_focus_panel_selector(df_focus, category_key, latest_date_display):
+    """局部刷新右侧详情面板，避免下拉切换时重建整张排行榜。"""
+    focus_contracts = sorted(
+        df_focus["合约"].astype(str).tolist(),
+        key=contract_alpha_sort_key,
+    )
+    if not focus_contracts:
+        return
+
+    selected_contract = st.selectbox(
+        "聚焦合约",
+        focus_contracts,
+        key=f"focus_contract_{category_key}",
+        label_visibility="collapsed",
+    )
+    focus_row = df_focus[df_focus["合约"].astype(str) == selected_contract].iloc[0]
+    focus_iv_trend = load_focus_iv_trend(
+        selected_contract,
+        latest_date_display,
+        FOCUS_IV_TREND_CACHE_VERSION,
+    )
+    focus_holding_trend = load_focus_holding_trend(
+        selected_contract,
+        latest_date_display,
+        FOCUS_HOLDING_TREND_CACHE_VERSION,
+    )
+    render_focus_panel(focus_row, focus_iv_trend, focus_holding_trend)
+
+
+def get_focus_summary_row(df_focus, category_key):
+    """读取当前聚焦合约，供收合态 rail 展示摘要。"""
+    focus_contracts = sorted(
+        df_focus["合约"].astype(str).tolist(),
+        key=contract_alpha_sort_key,
+    )
+    if not focus_contracts:
+        return None, ""
+
+    state_key = f"focus_contract_{category_key}"
+    selected_contract = st.session_state.get(state_key)
+    if selected_contract not in focus_contracts:
+        selected_contract = focus_contracts[0]
+        st.session_state[state_key] = selected_contract
+
+    focus_row = df_focus[df_focus["合约"].astype(str) == selected_contract].iloc[0]
+    return focus_row, selected_contract
+
+
+def render_focus_rail(row):
+    """渲染收合态的轻量合约详情入口。"""
+    contract_name = str(row.get("合约", ""))
+    code_part = contract_name.split(" ", 1)[0]
+    product_name = get_product_name(contract_name)
+    rail_metrics = [
+        ("IV", format_percent(row.get("当前IV")), ""),
+        ("R", format_rail_iv_rank(row.get("IV Rank")), ""),
+        ("Δ", format_signed_number(row.get("IV变动(日)")), tone_class(row.get("IV变动(日)"))),
+        ("机", format_compact_number(row.get("机构变动(日)")), tone_class(row.get("机构变动(日)"))),
+    ]
+    metric_html = "".join(
+        f"""
+        <div class="focus-rail-metric">
+            <span>{html.escape(label)}</span>
+            <strong class="{html.escape(tone)}">{html.escape(value)}</strong>
+        </div>
+        """
+        for label, value, tone in rail_metrics
+    )
+    tags = "".join(
+        f"<span title='{html.escape(tag, quote=True)}'>{html.escape(RAIL_TAG_ABBR.get(tag, tag))}</span>"
+        for tag in build_scan_tags(row)[:3]
+    )
+    st.markdown(
+        f"""
+        <div class="focus-rail-card">
+            <div class="focus-rail-contract">
+                <strong>{html.escape(code_part)}</strong>
+                <em>{html.escape(product_name)}</em>
+            </div>
+            <div class="focus-rail-metric-list">{metric_html}</div>
+            <div class="focus-rail-tags">{tags}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 if refresh_requested:
     # 仅清理本页 load_data 缓存，避免全局缓存被清空后引发整站重算。
     load_data.clear()
     load_focus_iv_trend.clear()
+    load_focus_holding_trend.clear()
     load_latest_data_date_fallback.clear()
     if hasattr(de, "clear_comprehensive_market_data_snapshot"):
         de.clear_comprehensive_market_data_snapshot()
@@ -1164,11 +1576,6 @@ if not df_monitor.empty:
     st.markdown("<div style='height: 14px'></div>", unsafe_allow_html=True)
 
     scan_metrics = build_scan_metrics(df_monitor)
-    scan_card_styles = {
-        "高IV": "scan-card-high",
-        "低IV": "scan-card-low",
-        "缺IV": "scan-card-focus",
-    }
     search_term = ""
     df_searched = apply_text_search(df_monitor, search_term).copy()
 
@@ -1187,7 +1594,21 @@ if not df_monitor.empty:
         for category in CATEGORIES
     }
 
-    scan_cols = st.columns(len(SCAN_FILTERS), gap="small")
+    scan_card_styles = {
+        "高IV": "scan-card-high",
+        "低IV": "scan-card-low",
+        "缺IV": "scan-card-focus",
+    }
+    scan_chip_labels = {
+        "高IV": "高IV",
+        "低IV": "低IV",
+        "IV升幅": "IV日升",
+        "价格异动": "价格异动",
+        "机构流入": "机构流入",
+        "散户流出": "散户流出",
+        "缺IV": "缺IV",
+    }
+    scan_cols = st.columns([1.35, 0.9, 0.9, 1.0, 1.1, 1.15, 1.15, 0.95], gap="small")
     with scan_cols[0]:
         selected_category = st.selectbox(
             "扫描范围",
@@ -1205,10 +1626,12 @@ if not df_monitor.empty:
         with scan_col:
             st.markdown(
                 f"""
-                <div class="{css_class}">
-                    <div class="scan-card-label">{html.escape(item["label"])}</div>
+                    <div class="{css_class}" title="{html.escape(item["hint"])}">
+                    <div>
+                        <div class="scan-card-label">{html.escape(scan_chip_labels.get(item["key"], item["label"]))}</div>
+                        <div class="scan-card-rule">{html.escape(item["hint"])}</div>
+                    </div>
                     <div class="scan-card-value">{value:,}</div>
-                    <div class="scan-card-rule">{html.escape(item["hint"])}</div>
                 </div>
                 """,
                 unsafe_allow_html=True,
@@ -1239,12 +1662,36 @@ if not df_monitor.empty:
             df_filtered = add_scan_signal_column(df_filtered)
 
             # 移除品种和分类列（右侧聚焦面板使用，不在表格中重复显示）
-            display_columns = [col for col in df_filtered.columns if col not in ['品种', '分类', '_数据日期']]
-            if "合约" in display_columns and "扫描信号" in display_columns:
-                display_columns = ["合约", "扫描信号"] + [
-                    col for col in display_columns if col not in ["合约", "扫描信号"]
-                ]
+            display_columns = [col for col in df_filtered.columns if col not in ['品种', '分类', '_数据日期', '期权到期日']]
             df_display = df_filtered[display_columns].copy()
+            if "到期剩余天数" in df_display.columns:
+                df_display["到期"] = df_display["到期剩余天数"].apply(format_contract_expiry_suffix)
+            if "合约" in df_display.columns:
+                leading_columns = ["合约"]
+                if "到期" in df_display.columns:
+                    leading_columns.append("到期")
+                if "扫描信号" in df_display.columns:
+                    leading_columns.append("扫描信号")
+                df_display = df_display[
+                    leading_columns
+                    + [
+                        col for col in df_display.columns
+                        if col not in leading_columns
+                    ]
+                ]
+            if rank_sort_expiry_active and "到期剩余天数" in df_display.columns:
+                df_display["_到期排序"] = df_display["到期剩余天数"].apply(
+                    lambda value: to_float(value) if to_float(value) is not None else 999999
+                )
+                df_display = (
+                    df_display.sort_values(
+                        by=["_到期排序", "合约"],
+                        ascending=[True, True],
+                        kind="mergesort",
+                    )
+                    .drop(columns=["_到期排序"])
+                    .reset_index(drop=True)
+                )
             if "IV Rank" in df_display.columns:
                 df_display["IV Rank"] = df_display["IV Rank"].apply(format_grid_iv_rank)
 
@@ -1260,23 +1707,138 @@ if not df_monitor.empty:
                     'display': 'flex',
                     'alignItems': 'center',
                     'justifyContent': 'flex-end',
-                    'paddingRight': '12px'
+                    'paddingLeft': '10px',
+                    'paddingRight': '14px'
                 },
-                minWidth=90
+                minWidth=96
             )
+
+            contract_renderer = JsCode("""
+            class ContractRenderer {
+                init(params) {
+                    const contractName = params.value || '';
+                    this.eGui = document.createElement('div');
+                    this.eGui.style.display = 'flex';
+                    this.eGui.style.alignItems = 'center';
+                    this.eGui.style.width = '100%';
+                    this.eGui.style.minWidth = '0';
+
+                    const name = document.createElement('span');
+                    name.textContent = contractName;
+                    name.style.minWidth = '0';
+                    name.style.overflow = 'hidden';
+                    name.style.textOverflow = 'ellipsis';
+                    name.style.whiteSpace = 'nowrap';
+                    this.eGui.appendChild(name);
+                }
+                getGui() { return this.eGui; }
+            }
+            """)
+
+            expiry_renderer = JsCode("""
+            class ExpiryRenderer {
+                init(params) {
+                    const label = params.value || '';
+                    const rawDays = params.data ? params.data['到期剩余天数'] : null;
+                    const parsedDays = rawDays !== null && rawDays !== undefined && String(rawDays).trim() !== ''
+                        ? Number(rawDays)
+                        : NaN;
+
+                    this.eGui = document.createElement('div');
+                    this.eGui.style.display = 'flex';
+                    this.eGui.style.alignItems = 'center';
+                    this.eGui.style.justifyContent = 'center';
+                    this.eGui.style.width = '100%';
+
+                    if (!label) {
+                        return;
+                    }
+
+                    const badge = document.createElement('span');
+                    badge.style.display = 'inline-flex';
+                    badge.style.alignItems = 'center';
+                    badge.style.justifyContent = 'center';
+                    badge.style.height = '20px';
+                    badge.style.minWidth = '54px';
+                    badge.style.padding = '0 8px';
+                    badge.style.borderRadius = '999px';
+                    badge.style.fontSize = '11px';
+                    badge.style.fontWeight = '800';
+                    badge.style.lineHeight = '20px';
+                    badge.style.letterSpacing = '0';
+                    badge.textContent = label;
+
+                    if (label === '已到期' || (Number.isFinite(parsedDays) && parsedDays < 0)) {
+                        badge.style.color = '#cbd5e1';
+                        badge.style.background = 'rgba(100, 116, 139, 0.22)';
+                        badge.style.border = '1px solid rgba(148, 163, 184, 0.22)';
+                    } else if (label.includes('⚠') || (Number.isFinite(parsedDays) && parsedDays < 3)) {
+                        badge.style.color = '#fde68a';
+                        badge.style.background = 'rgba(217, 119, 6, 0.22)';
+                        badge.style.border = '1px solid rgba(251, 191, 36, 0.32)';
+                    } else {
+                        badge.style.color = '#bfdbfe';
+                        badge.style.background = 'rgba(37, 99, 235, 0.18)';
+                        badge.style.border = '1px solid rgba(96, 165, 250, 0.24)';
+                    }
+
+                    this.eGui.appendChild(badge);
+                }
+                getGui() { return this.eGui; }
+            }
+            """)
+
+            expiry_comparator = JsCode("""
+            function(valueA, valueB, nodeA, nodeB) {
+                const getVal = (node) => {
+                    const raw = node && node.data ? node.data['到期剩余天数'] : null;
+                    if (raw === null || raw === undefined || String(raw).trim() === '') return 999999;
+                    const parsed = Number(raw);
+                    return Number.isFinite(parsed) ? parsed : 999999;
+                };
+                return getVal(nodeA) - getVal(nodeB);
+            }
+            """)
 
             # 合约列
             gb.configure_column("合约",
                                 pinned='left',
-                                width=220,
+                                width=230,
                                 filter=False,
+                                cellRenderer=contract_renderer,
                                 cellStyle={
                                     'fontWeight': '600',
                                     'color': '#f1f5f9',
                                     'justifyContent': 'flex-start',
-                                    'paddingLeft': '12px'
+                                    'paddingLeft': '14px',
+                                    'paddingRight': '10px'
                                 }
                                 )
+
+            if "到期" in df_display.columns:
+                expiry_column_options = {
+                    "pinned": "left",
+                    "width": 82,
+                    "filter": False,
+                    "sortable": True,
+                    "comparator": expiry_comparator,
+                    "cellRenderer": expiry_renderer,
+                    "cellStyle": {
+                        'justifyContent': 'center',
+                        'paddingLeft': '6px',
+                        'paddingRight': '6px'
+                    },
+                }
+                if rank_sort_expiry_active:
+                    expiry_column_options["sort"] = "asc"
+                gb.configure_column("到期", **expiry_column_options)
+
+            if "到期剩余天数" in df_display.columns:
+                gb.configure_column("到期剩余天数",
+                                    hide=True,
+                                    sortable=True,
+                                    filter=False
+                                    )
 
             signal_renderer = JsCode("""
             class SignalRenderer {
@@ -1320,14 +1882,14 @@ if not df_monitor.empty:
 
             gb.configure_column("扫描信号",
                                 pinned='left',
-                                width=150,
+                                width=156,
                                 filter=False,
                                 sortable=False,
                                 cellRenderer=signal_renderer,
                                 cellStyle={
                                     'justifyContent': 'flex-start',
-                                    'paddingLeft': '8px',
-                                    'paddingRight': '8px'
+                                    'paddingLeft': '10px',
+                                    'paddingRight': '10px'
                                 }
                                 )
 
@@ -1338,7 +1900,8 @@ if not df_monitor.empty:
                 let baseStyle = {
                     'backgroundColor': 'transparent',
                     'textAlign': 'right',
-                    'paddingRight': '12px'
+                    'paddingLeft': '10px',
+                    'paddingRight': '14px'
                 };
                 if (isNaN(val)) return {...baseStyle, 'color': '#64748b'};
                 if (val > 0) return {...baseStyle, 'color': '#f87171', 'fontWeight': '600'};
@@ -1472,7 +2035,8 @@ if not df_monitor.empty:
                                     'fontWeight': '600',
                                     'textAlign': 'right',
                                     'justifyContent': 'flex-end',
-                                    'paddingRight': '12px'
+                                    'paddingLeft': '10px',
+                                    'paddingRight': '14px'
                                 }
                                 )
 
@@ -1524,15 +2088,20 @@ if not df_monitor.empty:
             gridOptions = gb.build()
             gridOptions["localeText"] = AG_GRID_LOCALE_ZH_CN
             gridOptions = apply_grid_column_groups(gridOptions)
+            gridOptions["rowHeight"] = 34
+            visible_row_count = min(len(df_display), 25)
+            grid_height = max(640, min(900, 82 + visible_row_count * 34))
 
-            grid_col, focus_col = st.columns([4.7, 1.25], gap="small")
+            focus_open = bool(st.session_state.get("rank_focus_open", False))
+            grid_ratio = [4.7, 1.25] if focus_open else [14.0, 0.72]
+            grid_col, focus_col = st.columns(grid_ratio, gap="small")
 
             with grid_col:
                 # 渲染表格
                 AgGrid(
                     df_display,
                     gridOptions=gridOptions,
-                    height=600,
+                    height=grid_height,
                     width='100%',
                     columns_auto_size_mode=ColumnsAutoSizeMode.FIT_ALL_COLUMNS_TO_VIEW,
                     allow_unsafe_jscode=True,
@@ -1542,33 +2111,34 @@ if not df_monitor.empty:
                     update_on=[],
                     custom_css={
                     ".ag-root-wrapper": {
-                        "background-color": "#0f172a !important",
-                        "border": "1px solid rgba(71, 85, 105, 0.3) !important",
-                        "border-radius": "12px !important"
+                        "background-color": "#0b1627 !important",
+                        "border": "1px solid rgba(71, 85, 105, 0.30) !important",
+                        "border-radius": "12px !important",
+                        "box-shadow": "0 18px 44px rgba(2, 6, 23, 0.20)"
                     },
                     ".ag-header": {
-                        "background-color": "#1e293b !important",
+                        "background-color": "#172235 !important",
                         "color": "#94a3b8 !important",
-                        "border-bottom": "1px solid rgba(71, 85, 105, 0.4) !important",
+                        "border-bottom": "1px solid rgba(71, 85, 105, 0.32) !important",
                         "font-size": "12px",
-                        "font-weight": "600"
+                        "font-weight": "650"
                     },
                     ".ag-header-group-cell": {
-                        "background-color": "#172235 !important",
-                        "border-right": "1px solid rgba(148, 163, 184, 0.24) !important",
+                        "background-color": "#101b2d !important",
+                        "border-right": "1px solid rgba(148, 163, 184, 0.13) !important",
                         "color": "#cbd5e1 !important",
                         "font-size": "12px",
                         "font-weight": "800",
-                        "padding-left": "12px !important"
+                        "padding-left": "14px !important"
                     },
                     ".ag-header-group-cell-label": {
                         "justify-content": "flex-start !important"
                     },
                     ".ag-header-cell": {
-                        "border-right": "1px solid rgba(148, 163, 184, 0.22) !important",
-                        "box-shadow": "inset -1px 0 0 rgba(15, 23, 42, 0.55)",
-                        "padding-left": "12px !important",
-                        "padding-right": "8px !important",
+                        "border-right": "1px solid rgba(148, 163, 184, 0.11) !important",
+                        "box-shadow": "none",
+                        "padding-left": "14px !important",
+                        "padding-right": "10px !important",
                         "text-align": "left !important"
                     },
                     ".ag-header-cell-comp-wrapper": {
@@ -1595,6 +2165,14 @@ if not df_monitor.empty:
                         "text-align": "left !important",
                         "gap": "6px",
                         "min-width": "0"
+                    },
+                    ".ag-sort-order": {
+                        "display": "none !important"
+                    },
+                    ".ag-sort-indicator-icon.ag-sort-order": {
+                        "display": "none !important",
+                        "width": "0 !important",
+                        "overflow": "hidden !important"
                     },
                     ".ag-header-cell-text": {
                         "color": "#94a3b8 !important",
@@ -1633,25 +2211,27 @@ if not df_monitor.empty:
                         "font-weight": "700"
                     },
                     ".ag-row": {
-                        "background-color": "#0f172a !important",
+                        "background-color": "#0d1728 !important",
                         "color": "#e2e8f0 !important",
-                        "border-bottom": "1px solid rgba(71, 85, 105, 0.2) !important"
+                        "border-bottom": "1px solid rgba(71, 85, 105, 0.16) !important"
                     },
                     ".ag-row-odd": {
-                        "background-color": "#0f172a !important"
+                        "background-color": "#0d1728 !important"
                     },
                     ".ag-row-even": {
-                        "background-color": "#131c2e !important"
+                        "background-color": "#101b2d !important"
                     },
                     ".ag-row-hover": {
-                        "background-color": "#1e293b !important"
+                        "background-color": "#17243a !important"
                     },
                     ".ag-cell": {
                         "background-color": "transparent !important",
-                        "border-right": "1px solid rgba(148, 163, 184, 0.08) !important"
+                        "border-right": "1px solid rgba(148, 163, 184, 0.055) !important",
+                        "font-size": "12.5px",
+                        "letter-spacing": "0"
                     },
                     ".ag-body-viewport": {
-                        "background-color": "#0f172a !important"
+                        "background-color": "#0d1728 !important"
                     },
                     "::-webkit-scrollbar": {
                         "width": "8px",
@@ -1669,23 +2249,17 @@ if not df_monitor.empty:
                 )
 
             with focus_col:
-                focus_contracts = sorted(
-                    df_filtered["合约"].astype(str).tolist(),
-                    key=contract_alpha_sort_key,
-                )
-                selected_contract = st.selectbox(
-                    "聚焦合约",
-                    focus_contracts,
-                    key=f"focus_contract_{category}",
-                    label_visibility="collapsed",
-                )
-                focus_row = df_filtered[df_filtered["合约"].astype(str) == selected_contract].iloc[0]
-                focus_iv_trend = load_focus_iv_trend(
-                    selected_contract,
-                    latest_date_display,
-                    FOCUS_IV_TREND_CACHE_VERSION,
-                )
-                render_focus_panel(focus_row, focus_iv_trend)
+                focus_summary_row, _ = get_focus_summary_row(df_filtered, category)
+                if focus_open:
+                    if st.button("收起详情", key="rank_focus_close_btn", use_container_width=True):
+                        st.session_state.rank_focus_open = False
+                        st.rerun()
+                    render_focus_panel_selector(df_filtered, category, latest_date_display)
+                elif focus_summary_row is not None:
+                    if st.button("详情 ›", key="rank_focus_open_btn", use_container_width=True):
+                        st.session_state.rank_focus_open = True
+                        st.rerun()
+                    render_focus_rail(focus_summary_row)
 
 
     # 底部图例

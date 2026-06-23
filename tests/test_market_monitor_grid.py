@@ -6,6 +6,8 @@ from st_aggrid import GridOptionsBuilder
 from market_monitor_grid import (
     AG_GRID_LOCALE_ZH_CN,
     GRID_NUMBER_FILTER_PARAMS,
+    format_contract_expiry_suffix,
+    format_contract_for_grid,
     make_grid_number_filter_value_getter,
 )
 
@@ -38,6 +40,19 @@ class MarketMonitorGridTest(unittest.TestCase):
         self.assertEqual(column_def["filterParams"]["numAlwaysVisibleConditions"], 1)
         self.assertIn("散户变动(日)", column_def["filterValueGetter"].js_code)
         self.assertIn("replace(/[%+,\\s]/g, '')", column_def["filterValueGetter"].js_code)
+
+    def test_contract_expiry_suffix_ignores_missing_values(self):
+        self.assertEqual(format_contract_expiry_suffix(None), "")
+        self.assertEqual(format_contract_expiry_suffix(float("nan")), "")
+        self.assertEqual(
+            format_contract_for_grid({"合约": "HC2610 (热卷)", "到期剩余天数": None}),
+            "HC2610 (热卷)",
+        )
+
+    def test_contract_expiry_suffix_formats_warning_and_normal_days(self):
+        self.assertEqual(format_contract_expiry_suffix(0), "⚠ D-0")
+        self.assertEqual(format_contract_expiry_suffix(2), "⚠ D-2")
+        self.assertEqual(format_contract_expiry_suffix(3), "D-3")
 
 
 if __name__ == "__main__":

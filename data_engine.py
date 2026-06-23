@@ -1111,7 +1111,7 @@ _MARKET_SNAPSHOT_LAST_AT = 0.0
 _MARKET_SNAPSHOT_TTL_SEC = 300
 _MARKET_SNAPSHOT_STALE_MAX_SEC = 1800
 _MARKET_SNAPSHOT_WAIT_SEC = 0.8
-_MARKET_SNAPSHOT_SCHEMA_VERSION = 2
+_MARKET_SNAPSHOT_SCHEMA_VERSION = 5
 _MARKET_DISK_SNAPSHOT_PATH = Path(
     os.getenv("TRADINGART_MARKET_SNAPSHOT_CACHE", "/tmp/tradingart_comprehensive_market_data_snapshot.json")
 )
@@ -1208,6 +1208,94 @@ def clear_comprehensive_market_data_snapshot():
         _MARKET_SNAPSHOT_LAST_DF = None
         _MARKET_SNAPSHOT_LAST_AT = 0.0
         _disk_snapshot_clear()
+
+
+def _parse_market_monitor_date(value):
+    """Parse compact or dashed dates used by the market monitor."""
+    if value is None or pd.isna(value):
+        return pd.NaT
+    if isinstance(value, pd.Timestamp):
+        return value
+    raw = str(value).strip()
+    if not raw:
+        return pd.NaT
+    compact = raw.replace("-", "").replace("/", "").split(" ")[0]
+    parsed = pd.to_datetime(compact, format="%Y%m%d", errors="coerce")
+    if pd.isna(parsed):
+        parsed = pd.to_datetime(raw, errors="coerce")
+    return parsed
+
+
+_INDEX_OPTION_TO_FUTURE_PRODUCT = {"IO": "IF", "HO": "IH", "MO": "IM"}
+_INDEX_FUTURE_TO_OPTION_PRODUCT = {
+    future_product: option_product
+    for option_product, future_product in _INDEX_OPTION_TO_FUTURE_PRODUCT.items()
+}
+
+
+def _lookup_contract_maturity(join_key, maturity_map):
+    if not join_key or not maturity_map:
+        return None
+    key = str(join_key).upper()
+    maturity_date = maturity_map.get(key)
+    if maturity_date is not None:
+        return maturity_date
+
+    match = re.fullmatch(r"([A-Z]+)(\d{3,4})", key)
+    if not match:
+        return None
+    product, month_code = match.groups()
+    option_product = _INDEX_FUTURE_TO_OPTION_PRODUCT.get(product)
+    if not option_product:
+        return None
+    return maturity_map.get(f"{option_product}{month_code}")
+
+
+def _get_contract_expiry_fields(join_key, data_date, maturity_map):
+    """Return display-safe option expiry date and days-left for one contract."""
+    if not join_key or not maturity_map:
+        return "", np.nan
+    maturity_date = _lookup_contract_maturity(join_key, maturity_map)
+    expiry_dt = _parse_market_monitor_date(maturity_date)
+    data_dt = _parse_market_monitor_date(data_date)
+    if pd.isna(expiry_dt) or pd.isna(data_dt):
+        return "", np.nan
+    days_left = int((expiry_dt.normalize() - data_dt.normalize()).days)
+    return expiry_dt.strftime("%Y-%m-%d"), days_left
+
+
+def _extract_option_maturity_join_key(code):
+    if code is None:
+        return None
+    clean = str(code).upper().split('.')[0].replace('-', '')
+    match = re.match(r'^([A-Z]+?)(\d{3,4})(?:[A-Z]|$)', clean)
+    if not match:
+        return None
+    product, month_code = match.groups()
+    if len(month_code) == 3:
+        month_code = "2" + month_code
+    return f"{product}{month_code}"
+
+
+def _add_index_future_maturity_aliases(expiry_map):
+    """Expose CFFEX option maturities on their matching futures contracts."""
+    for join_key, maturity_date in list(expiry_map.items()):
+        match = re.fullmatch(r"([A-Z]+)(\d{3,4})", str(join_key).upper())
+        if not match:
+            continue
+        option_product, month_code = match.groups()
+        future_product = _INDEX_OPTION_TO_FUTURE_PRODUCT.get(option_product)
+        if not future_product:
+            continue
+        alias_key = f"{future_product}{month_code}"
+        existing = expiry_map.get(alias_key)
+        if existing is None:
+            expiry_map[alias_key] = maturity_date
+            continue
+        existing_dt = _parse_market_monitor_date(existing)
+        alias_dt = _parse_market_monitor_date(maturity_date)
+        if pd.isna(existing_dt) or (not pd.isna(alias_dt) and alias_dt < existing_dt):
+            expiry_map[alias_key] = maturity_date
 
 
 def _log_market_perf(*, cache_hit: int, sql_ms: float, compute_ms: float, rows: int, total_ms: float, note: str):
@@ -1443,20 +1531,116 @@ def get_market_monitor_iv_trend(contract_label, points=5):
     return selected[["trade_date", "iv", "source"]].reset_index(drop=True)
 
 
+def _get_market_monitor_broker_type(broker):
+    for name in BROKERS_DUMB:
+        if name == broker:
+            return "dumb"
+    for name in BROKERS_SMART:
+        if name == broker:
+            return "smart"
+    return "other"
+
+
+def get_market_monitor_holding_trend(contract_label, points=5, data_date=""):
+    """Return recent product-level dumb/smart broker net position trend."""
+    columns = ["trade_date", "dumb_net", "smart_net"]
+    empty = pd.DataFrame(columns=columns)
+    if engine is None:
+        return empty
+
+    raw_contract_code = _extract_market_monitor_contract_code(contract_label)
+    join_key = get_join_key(raw_contract_code) or raw_contract_code
+    product_code = _get_product_from_join_key(join_key) or get_product_code(raw_contract_code)
+    if not product_code:
+        return empty
+
+    safe_points = max(2, min(10, int(points or 5)))
+    data_dt = _parse_market_monitor_date(data_date)
+    if pd.isna(data_dt):
+        data_dt = pd.Timestamp.now().normalize()
+    start_date = (data_dt - pd.Timedelta(days=45)).strftime("%Y%m%d")
+
+    target_brokers = BROKERS_DUMB + BROKERS_SMART
+    broker_params = {"start_date": start_date, "product_code": product_code}
+    broker_keys = []
+    for idx, broker in enumerate(target_brokers):
+        key = f"broker_{idx}"
+        broker_keys.append(f":{key}")
+        broker_params[key] = broker
+
+    try:
+        sql = text(
+            f"""
+            SELECT ts_code, broker, long_vol, short_vol, trade_date
+            FROM futures_holding
+            WHERE trade_date >= :start_date
+              AND broker IN ({",".join(broker_keys)})
+              AND (UPPER(ts_code) = :product_code OR {sql_prefix_condition(product_code)})
+            """
+        )
+        df = pd.read_sql(sql, engine, params=broker_params)
+    except Exception as exc:
+        _PERF_LOGGER.warning("market monitor holding trend query failed: %s", exc)
+        return empty
+
+    if df is None or df.empty:
+        return empty
+
+    df = df.copy()
+    df["long_vol"] = pd.to_numeric(df["long_vol"], errors="coerce").fillna(0.0)
+    df["short_vol"] = pd.to_numeric(df["short_vol"], errors="coerce").fillna(0.0)
+    df["trade_date_parsed"] = df["trade_date"].apply(_parse_market_monitor_date)
+    df = df.dropna(subset=["trade_date_parsed"])
+    df["trade_date_key"] = df["trade_date_parsed"].dt.strftime("%Y%m%d")
+    df["product"] = df["ts_code"].apply(get_product_code)
+    df = df[df["product"] == product_code].copy()
+    if df.empty:
+        return empty
+
+    df["net_vol"] = df["long_vol"] - df["short_vol"]
+    df["type"] = df["broker"].apply(_get_market_monitor_broker_type)
+    df = df[df["type"].isin(["dumb", "smart"])]
+    if df.empty:
+        return empty
+
+    trend = (
+        df.groupby(["trade_date_key", "type"])["net_vol"]
+        .sum()
+        .unstack(fill_value=0.0)
+        .reset_index()
+        .rename(columns={"trade_date_key": "trade_date", "dumb": "dumb_net", "smart": "smart_net"})
+        .sort_values("trade_date")
+    )
+    for col in ["dumb_net", "smart_net"]:
+        if col not in trend.columns:
+            trend[col] = 0.0
+
+    return trend.tail(safe_points)[columns].reset_index(drop=True)
+
+
 # --- 【新增】判断合约是否快到期 (用于过滤不准确的IV) ---
-def check_expiry_validity(row, current_date_str):
+def check_expiry_validity(row, current_date_str, maturity_map=None):
     """
     逻辑：
-    1. 中金所期权 (IF/IH/IM/IO/HO/MO)：
+    1. 优先使用 commodity_option_basic 的真实期权到期日。
+       有真实到期日时，以数据日期计算，D >= 0 保留，D < 0 过滤。
+
+    2. 中金所期权 (IF/IH/IM/IO/HO/MO)：
        【硬规则】只要当前日期到了当月 15 号 (含)，就强制切换到下月合约。
        (例如今天是 12月15日，IF2512 必须下榜，IF2601 上榜)
 
-    2. 商品期权：通常在期货月份的前一个月上旬到期。
+    3. 商品期权：通常在期货月份的前一个月上旬到期。
        保留原有逻辑：(估算到期日 - 当前日期) <= 1天 则过滤。
     """
     try:
+        join_key = str(row.get('join_key', '')).upper()
+        if maturity_map:
+            _, days_left = _get_contract_expiry_fields(join_key, current_date_str, maturity_map)
+            if not pd.isna(days_left):
+                return days_left >= 0
+
         # 1. 解析年份和月份 (RB2505 -> 2025, 5 / IF2512 -> 2025, 12)
-        m = re.search(r'(\d{3,4})$', row['join_key'])
+        m = re.search(r'(\d{3,4})$', join_key)
         if not m: return True  # 解析失败默认保留
 
         ym = m.group(1)
@@ -1717,9 +1901,13 @@ def get_comprehensive_market_data():
             return v + 20000 if v < 1000 else v
 
         df_cand['m_num'] = df_cand['join_key'].apply(get_m_num)
+        maturity_map = get_static_maturity_map()
         # 1. 过滤快到期的合约
         # row 必须包含 'join_key' 和 'product'，并且需要传入当前日期 today
-        df_cand['is_valid'] = df_cand.apply(lambda row: check_expiry_validity(row, today), axis=1)
+        df_cand['is_valid'] = df_cand.apply(
+            lambda row: check_expiry_validity(row, today, maturity_map),
+            axis=1,
+        )
         df_valid = df_cand[df_cand['is_valid']].copy()
 
         # 2. 挑选逻辑：每种商品选 [持仓最大] 和 [月份最近] 两个
@@ -1938,6 +2126,16 @@ def get_comprehensive_market_data():
 
         df_final['合约'] = df_final.apply(fmt_name, axis=1)
 
+        expiry_fields = df_final['join_key'].apply(
+            lambda join_key: _get_contract_expiry_fields(join_key, today, maturity_map)
+        )
+        if not expiry_fields.empty:
+            df_final['期权到期日'] = expiry_fields.apply(lambda item: item[0])
+            df_final['到期剩余天数'] = expiry_fields.apply(lambda item: item[1])
+        else:
+            df_final['期权到期日'] = ""
+            df_final['到期剩余天数'] = np.nan
+
         curr_yymm = int(pd.to_datetime(today).strftime('%y%m'))
 
         def fmt_rank(row):
@@ -1956,10 +2154,10 @@ def get_comprehensive_market_data():
 
         df_final['iv_rank_display'] = df_final.apply(fmt_rank, axis=1)
 
-        cols = ['合约', 'iv', 'iv_rank_display', '当日IV变动', '5日IV变动', '当日涨跌%', '5日涨跌%',
+        cols = ['合约', '期权到期日', '到期剩余天数', 'iv', 'iv_rank_display', '当日IV变动', '5日IV变动', '当日涨跌%', '5日涨跌%',
                 '反指变动(日)', '反指变动(5日)', '正指变动(日)', '正指变动(5日)']
         res = df_final[cols].copy()
-        res.columns = ['合约', '当前IV', 'IV Rank', 'IV变动(日)', 'IV变动(5日)', '涨跌%(日)', '涨跌%(5日)',
+        res.columns = ['合约', '期权到期日', '到期剩余天数', '当前IV', 'IV Rank', 'IV变动(日)', 'IV变动(5日)', '涨跌%(日)', '涨跌%(5日)',
                        '散户变动(日)', '散户变动(5日)', '机构变动(日)', '机构变动(5日)']
         res = res.round(2)
         res['_数据日期'] = today
@@ -3155,28 +3353,18 @@ def get_static_maturity_map():
             print("❌ [Cache] commodity_option_basic 表为空！")
             return {}
 
-        # 3. 【核心修复】强制日期格式转换
+        # 3. 【核心修复】逐条日期格式转换
         # 兼容: 20250520(int), "20250520"(str), "2025-05-20"(str)
-        df['maturity_date'] = pd.to_datetime(df['maturity_date'], format='%Y%m%d', errors='coerce').fillna(
-            pd.to_datetime(df['maturity_date'], errors='coerce'))
+        df['maturity_date'] = df['maturity_date'].apply(_parse_market_monitor_date)
 
         # 4. 过滤无效日期
         df = df.dropna(subset=['maturity_date'])
-        # 【修复】放宽过滤条件，保留近30天内到期的合约
-        cutoff_date = pd.Timestamp.now().normalize() - pd.Timedelta(days=30)
-        df = df[df['maturity_date'] >= cutoff_date]
+        # 不按系统当天过滤：排行榜会以数据日期判断有效性，避免历史回看或补数据时错删真实到期日。
 
         # 5. 智能提取 Key (正则 + 强制大写)
         def _extract_key(code):
             try:
-                import re
-                # 【关键修复】先统一转大写
-                clean = str(code).upper().split('.')[0].replace('-', '')
-
-                match = re.match(r'^([A-Z]+)(\d{3,4})', clean)
-                if match:
-                    return match.group(0)
-                return None
+                return _extract_option_maturity_join_key(code)
             except:
                 return None
 
@@ -3185,6 +3373,7 @@ def get_static_maturity_map():
 
         # 6. 生成字典 (取每个合约最早的到期日)
         expiry_map = df.groupby('join_key')['maturity_date'].min().to_dict()
+        _add_index_future_maturity_aliases(expiry_map)
 
         # 7. 【调试日志】
         print(f"✅ [System] 成功缓存 {len(expiry_map)} 条到期日数据")
