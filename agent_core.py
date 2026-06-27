@@ -53,6 +53,7 @@ from data_engine import (
     check_option_expiry_status,
     get_commodity_iv_info,
     scan_iv_change_ranking,
+    scan_volatility_divergence,
     get_futures_broker_indicator_profile,
     get_futures_broker_group_position_moves,
     get_futures_broker_position_signal,
@@ -82,7 +83,12 @@ from portfolio_tools import (
     analyze_user_trading_style,
     check_portfolio_risks
 )
-from chat_routing import is_market_data_query, is_pure_option_data_query, is_volatility_market_view_query
+from chat_routing import (
+    is_market_data_query,
+    is_pure_option_data_query,
+    is_volatility_divergence_query,
+    is_volatility_market_view_query,
+)
 from simple_chat_runtime import (
     build_simple_runtime_context,
     format_simple_runtime_context,
@@ -418,6 +424,31 @@ def _enforce_volatility_market_view_routing(query: str, plan: List[str]) -> List
     return _dedupe_plan(enforced)
 
 
+def _enforce_volatility_divergence_routing(query: str, plan: List[str]) -> List[str]:
+    """
+    波动率背离是价格/IV数据扫描任务：先由 monitor 用确定性工具计算。
+    只有用户追问原因/消息或策略时，才串联 researcher/strategist。
+    """
+    if not is_volatility_divergence_query(query):
+        return list(plan or [])
+
+    text = str(query or "")
+    wants_research = _contains_any(
+        text,
+        RESEARCH_ROUTE_KEYWORDS + ["为什么", "为何", "原因", "消息", "新闻", "事件", "背后"],
+    )
+    wants_strategy = _contains_any(
+        text,
+        STRATEGY_QUERY_KEYWORDS + ["买购", "买认购", "买沽", "买认沽", "卖购", "卖认购", "卖沽", "卖认沽", "期权策略"],
+    )
+    enforced = ["monitor"]
+    if wants_research:
+        enforced.append("researcher")
+    if wants_strategy:
+        enforced.append("strategist")
+    return _dedupe_plan(enforced)
+
+
 def _enforce_hybrid_background_routing(
     query: str,
     plan: List[str],
@@ -567,6 +598,9 @@ def _apply_analysis_task_policy(
     recent_context: str = "",
 ) -> tuple[List[str], str]:
     # 不采信 planner 生成的 symbol 来判定“是否有标的”，它可能正是模型自行补出的默认对象。
+    if is_volatility_divergence_query(query):
+        return _enforce_volatility_divergence_routing(query, plan), str(symbol or "").strip()
+
     if is_volatility_market_view_query(query):
         return _enforce_volatility_market_view_routing(query, plan), str(symbol or "").strip()
 
@@ -1654,6 +1688,8 @@ def _enforce_option_data_monitor_routing(query: str, plan: List[str]) -> List[st
     明确的数据查询问题只派 monitor，避免误上知识解释或宏观/技术/策略整链路。
     例如：IV/波动率高低、分位、到期日、保证金、乘数、价格、最新价。
     """
+    if is_volatility_divergence_query(query):
+        return plan
     if is_volatility_market_view_query(query):
         return plan
     if not is_market_data_query(query):
@@ -2425,7 +2461,7 @@ def build_generalist_tools():
     return [
         interpret_market_news_tool,
         analyze_kline_pattern, search_investment_knowledge, get_market_snapshot, get_commodity_iv_info,
-        scan_iv_change_ranking,
+        scan_iv_change_ranking, scan_volatility_divergence,
         search_broker_holdings_on_date, tool_analyze_position_change,
         tool_query_specific_option, get_historical_price, get_volume_oi, get_futures_oi_ranking,
         get_option_oi_ranking, get_option_volume_abnormal, get_option_oi_abnormal,
@@ -2452,6 +2488,7 @@ def build_monitor_tools():
         get_futures_delivery_tospot_profile,  # 交割/期转现
         get_commodity_iv_info,  # IV/波动率/Rank
         scan_iv_change_ranking,  # IV增幅/降幅排名/扫描
+        scan_volatility_divergence,  # 价格/IV波动率背离扫描
         search_broker_holdings_on_date,  # 期货商持仓排名
         tool_analyze_position_change,  # 持仓变动分析
         get_option_volume_abnormal,
@@ -2477,6 +2514,7 @@ def build_strategist_tools():
     return [
         get_commodity_iv_info,  # IV排名/波动率
         scan_iv_change_ranking,  # IV增幅/降幅排名/扫描
+        scan_volatility_divergence,  # 价格/IV波动率背离扫描
         check_option_expiry_status,  # 到期日状态
         tool_query_specific_option,  # 查询特定期权合约
         get_option_volume_abnormal,  # 期权成交异动
@@ -2925,6 +2963,7 @@ def supervisor_node(state: AgentState, llm):
     )
     final_plan = _enforce_macro_policy_impact_routing(query, final_plan)
     final_plan = _enforce_option_portfolio_isolation(query, final_plan)
+    final_plan = _enforce_volatility_divergence_routing(query, final_plan)
     final_plan = _enforce_volatility_market_view_routing(query, final_plan)
     final_plan = _enforce_margin_monitor_routing(query, final_plan)
     final_plan = _enforce_option_data_monitor_routing(query, final_plan)
@@ -3072,6 +3111,7 @@ def generalist_node(state: AgentState, llm):
         14.查期货持仓量排名 -> get_futures_oi_ranking
         15.查单个标的最新IV/IV Rank/近期趋势 -> get_commodity_iv_info
         15.1 查IV增幅/降幅排行、IV扫描、指定日期区间ATM IV变化排序 -> scan_iv_change_ranking
+        15.2 查价格与IV是否出现波动率背离 -> scan_volatility_divergence（只在复杂多品种/综合任务中使用；简单背离扫描应由 monitor 处理）
         16.查期权合约价格-> tool_query_specific_option
         17.查ETF期权有哪些合约-> get_etf_option_strikes
         18.查宏观指标 -> get_macro_indicator
@@ -3088,6 +3128,7 @@ def generalist_node(state: AgentState, llm):
         4. 不要编造数据，如果没查到数据就说不知道。
         5. 若处于连续追问模式，第一段必须先承接上一轮关键结论，再回答当前问题。
         6. 东证期货、海通期货、中信期货是正指标期货商；中信建投、东方财富、方正中期是反指标期货商。反指标做多是一种利空，反指标做空是一种利多；只问某期货商加多/加空时，必须先调用 get_futures_broker_indicator_profile；问正/反指标组最近在哪些商品上做多/做空时，必须调用 get_futures_broker_group_position_moves。
+        7. 用户问“波动率背离/IV背离/价格和IV背离”时，必须调用 scan_volatility_divergence；禁止用 scan_iv_change_ranking 替代背离判断。
         """
 
     if wants_chart:
@@ -3447,6 +3488,7 @@ def monitor_node(state: AgentState, llm):
     【你的工具箱 - 根据问题类型选择正确的工具】
     - 查单个标的最新IV/IV Rank/近期趋势 -> get_commodity_iv_info
     - 查IV增幅/降幅排行、IV扫描、指定日期区间ATM IV变化排序 -> scan_iv_change_ranking
+    - 查价格与IV是否出现波动率背离 -> scan_volatility_divergence
     - 查股票行业资金 -> tool_get_retail_money_flow
     - 查某期货资金流动 -> get_futures_fund_flow
     - 查全部期货资金沉淀排名 -> get_futures_fund_ranking
@@ -3482,6 +3524,7 @@ def monitor_node(state: AgentState, llm):
     4. 如果工具返回了 Markdown 表格，请原样输出。
     4.1 用户问 IV增幅/降幅/排行/扫描/哪些合约升波最多或降波最多/指定日期区间ATM IV变化排序时，必须调用 `scan_iv_change_ranking`。
     4.2 用户说“由大到小/增幅最大/升波最多”时，`direction="increase"`；用户说“由小到大/降幅最大/回落最多/降波最多”时，`direction="decrease"`。
+    4.3 用户问“波动率背离/IV背离/隐波背离/价格和IV背离”时，必须调用 `scan_volatility_divergence`；禁止用 `scan_iv_change_ranking` 替代背离判断。
     5. 商品都有期权，禁止说商品没有场内期权。
     6. 用户要“某天价格”优先用 `get_historical_price`；用户要“区间统计”优先用 `get_price_statistics`。
     7. 用户要“最近N天/最近N个交易日/列表/逐日明细/走势数据表”时，优先用 `get_recent_price_series`，不要只返回 `get_market_snapshot`。
@@ -3801,6 +3844,7 @@ def strategist_node(state: AgentState, llm):
         - 只要进入“适合我怎么做 / 推荐策略 / 买卖哪个合约 / 仓位风险 / 具体执行”的回答，必须按需检查三件事：标的现价、IV Rank、距离到期日。
         - 用 `get_market_snapshot` 获取现价，用 `get_commodity_iv_info` 看IV/IV Rank，用 `check_option_expiry_status` 看到期日；工具失败时改为条件式建议，不编造数据。
         - 如果用户问 IV增幅/降幅排行、IV扫描、哪些合约升波最多/降波最多，必须用 `scan_iv_change_ranking`，不要用单标的 IV 查询替代。
+        - 如果用户问波动率背离/IV背离并进一步要求策略，必须使用 monitor 传入的背离结论；需要补查时调用 `scan_volatility_divergence`，禁止用 `scan_iv_change_ranking` 替代背离判断。
 
         **第二步：设计策略**
         - **期权策略**：根据技术面趋势+IV+距离到期日+客户风险偏好来选择策略，可以查知识库辅助`search_investment_knowledge`。

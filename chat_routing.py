@@ -172,6 +172,14 @@ IV_SCAN_INTENT_KEYWORDS = (
     "由大到小", "由小到大", "最大", "最多", "top",
 )
 
+VOLATILITY_DIVERGENCE_SUBJECT_KEYWORDS = (
+    "波动率", "隐含波动率", "隐波", "iv",
+)
+
+VOLATILITY_DIVERGENCE_INTENT_KEYWORDS = (
+    "背离", "不一致", "不同步", "未确认",
+)
+
 OPTION_DATA_SUBJECT_KEYWORDS = OPTION_DATA_SUBJECT_KEYWORDS + IV_SCAN_SUBJECT_KEYWORDS
 MARKET_DATA_SUBJECT_KEYWORDS = MARKET_DATA_SUBJECT_KEYWORDS + IV_SCAN_SUBJECT_KEYWORDS
 OPTION_DATA_INTENT_KEYWORDS = OPTION_DATA_INTENT_KEYWORDS + IV_SCAN_INTENT_KEYWORDS
@@ -468,6 +476,9 @@ def is_market_data_query(prompt_text: str) -> bool:
     if not text:
         return False
 
+    if is_volatility_divergence_query(prompt_text):
+        return True
+
     if is_pure_option_data_query(prompt_text):
         return True
 
@@ -569,6 +580,20 @@ def is_volatility_market_view_query(prompt_text: str) -> bool:
     return has_market_context or has_decision_intent
 
 
+def is_volatility_divergence_query(prompt_text: str) -> bool:
+    text = str(prompt_text or "").strip().lower()
+    if not text:
+        return False
+
+    has_subject = _any_keyword_in_lower(text, VOLATILITY_DIVERGENCE_SUBJECT_KEYWORDS)
+    has_intent = _any_keyword_in_lower(text, VOLATILITY_DIVERGENCE_INTENT_KEYWORDS)
+    if has_subject and has_intent:
+        return True
+
+    compact = text.replace(" ", "")
+    return any(token in compact for token in ("iv背离", "隐波背离", "波动率背离"))
+
+
 def is_volatility_mechanism_knowledge_query(prompt_text: str) -> bool:
     text = str(prompt_text or "").strip().lower()
     if not text:
@@ -633,6 +658,9 @@ def classify_chat_mode(
 
     if is_volatility_mechanism_knowledge_query(text):
         return CHAT_MODE_KNOWLEDGE
+
+    if is_volatility_divergence_query(text):
+        return CHAT_MODE_ANALYSIS
 
     if is_market_data_query(text):
         return CHAT_MODE_ANALYSIS

@@ -7,6 +7,7 @@ from chat_routing import (
     classify_chat_mode,
     is_market_data_query,
     is_pure_option_data_query,
+    is_volatility_divergence_query,
     is_volatility_mechanism_knowledge_query,
     is_volatility_market_view_query,
 )
@@ -381,6 +382,12 @@ class TestChatRouting(unittest.TestCase):
             classify_chat_mode("列出2026年6月11日到2026年6月12日 ATM IV增幅由大到小的合约"),
             CHAT_MODE_ANALYSIS,
         )
+
+    def test_detect_volatility_divergence_query(self):
+        self.assertTrue(is_volatility_divergence_query("有没有什么品种的波动率背离"))
+        self.assertTrue(is_volatility_divergence_query("哪些商品出现价格和IV背离"))
+        self.assertTrue(is_market_data_query("有没有什么品种的波动率背离"))
+        self.assertEqual(classify_chat_mode("有没有什么品种的波动率背离"), CHAT_MODE_ANALYSIS)
 
 
     def test_execute_suggested_stock_screening_followup_routes_to_analysis(self):

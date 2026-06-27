@@ -2644,6 +2644,133 @@ def _format_iv_scan_report(records: list[dict], notes: list[str], direction: str
     return "\n".join(lines)
 
 
+VOL_DIVERGENCE_PRICE_THRESHOLD = 0.5
+VOL_DIVERGENCE_IV_THRESHOLD = 1.0
+VOL_DIVERGENCE_FLAT_PRICE_THRESHOLD = 0.3
+
+
+def _normalize_vol_divergence_window(value) -> str:
+    raw = str(value or "").strip().lower()
+    if raw in {"5d", "5日", "5天", "五日", "近5日", "recent_5d"} or "5" in raw:
+        return "5d"
+    return "1d"
+
+
+def _normalize_vol_divergence_type(value) -> str:
+    raw = str(value or "").strip().lower()
+    if not raw or raw in {"all", "全部", "所有"}:
+        return "all"
+    if raw in {"price_up_iv_down", "up_down", "上涨降波", "价涨iv降", "价涨隐波降"}:
+        return "上涨降波"
+    if raw in {"price_down_iv_up", "down_up", "下跌升波", "价跌iv升", "价跌隐波升"}:
+        return "下跌升波"
+    if raw in {"flat_iv_up", "横盘升波", "价平iv升", "价平隐波升"}:
+        return "横盘升波"
+    if raw in {"price_move_iv_flat", "大波动iv未确认", "大波动IV未确认", "iv未确认", "隐波未确认"}:
+        return "大波动IV未确认"
+    if any(token in raw for token in ("上涨", "价涨", "涨")) and any(token in raw for token in ("降波", "iv降", "隐波降")):
+        return "上涨降波"
+    if any(token in raw for token in ("下跌", "价跌", "跌")) and any(token in raw for token in ("升波", "iv升", "隐波升")):
+        return "下跌升波"
+    if any(token in raw for token in ("横盘", "价平", "震荡")) and any(token in raw for token in ("升波", "iv升", "隐波升")):
+        return "横盘升波"
+    if "未确认" in raw:
+        return "大波动IV未确认"
+    return "all"
+
+
+def _safe_float(value):
+    try:
+        if value is None or pd.isna(value):
+            return None
+        return float(value)
+    except Exception:
+        return None
+
+
+def _format_iv_rank_display(value) -> str:
+    raw = str(value or "").strip()
+    if not raw or raw.lower() in {"nan", "none"}:
+        return "NA"
+    number = _safe_float(value)
+    if number is None:
+        return raw
+    return f"{number:.0f}"
+
+
+def _vol_divergence_interpretation(divergence_type: str) -> str:
+    if divergence_type == "上涨降波":
+        return "价格上涨但IV回落，期权端未追高买波，风险溢价回落。"
+    if divergence_type == "下跌升波":
+        return "价格下跌且IV抬升，避险需求或风险溢价正在升温。"
+    if divergence_type == "横盘升波":
+        return "价格变化不大但IV先升，可能在提前定价事件或不确定性。"
+    if divergence_type == "大波动IV未确认":
+        return "价格已有明显波动但IV跟随不足，期权端暂未明显确认。"
+    return "价格与IV走势出现不同步，需继续核验后续变化。"
+
+
+def _classify_vol_divergence(price_change: float, iv_change: float) -> tuple[str, float] | tuple[None, None]:
+    price_abs = abs(price_change)
+    iv_abs = abs(iv_change)
+    if price_change >= VOL_DIVERGENCE_PRICE_THRESHOLD and iv_change <= -VOL_DIVERGENCE_IV_THRESHOLD:
+        return "上涨降波", price_abs + iv_abs
+    if price_change <= -VOL_DIVERGENCE_PRICE_THRESHOLD and iv_change >= VOL_DIVERGENCE_IV_THRESHOLD:
+        return "下跌升波", price_abs + iv_abs
+    if price_abs <= VOL_DIVERGENCE_FLAT_PRICE_THRESHOLD and iv_change >= VOL_DIVERGENCE_IV_THRESHOLD:
+        return "横盘升波", iv_abs + max(VOL_DIVERGENCE_FLAT_PRICE_THRESHOLD - price_abs, 0)
+    if price_abs >= max(VOL_DIVERGENCE_PRICE_THRESHOLD * 2, 1.0) and iv_abs < VOL_DIVERGENCE_IV_THRESHOLD:
+        return "大波动IV未确认", price_abs + (VOL_DIVERGENCE_IV_THRESHOLD - iv_abs)
+    return None, None
+
+
+def _extract_vol_divergence_contract_product(contract_label: str) -> tuple[str, str, str]:
+    contract_code = _extract_market_monitor_contract_code(contract_label)
+    join_key = get_join_key(contract_code) or contract_code
+    product_code = _get_product_from_join_key(join_key) or get_product_code(contract_code)
+    product_name = PRODUCT_MAP.get(product_code, product_code)
+    return contract_code, product_code, product_name
+
+
+def _format_vol_divergence_report(records: list[dict], *, window: str, data_date: str, symbol: str) -> str:
+    if not records:
+        symbol_text = f"（{symbol}）" if symbol else ""
+        return (
+            f"✅ 未发现符合阈值的波动率背离{symbol_text}。\n"
+            f"- 数据日期：{data_date or '未知'}；窗口：{'近5日' if window == '5d' else '当日'}。\n"
+            f"- 阈值：价格绝对变化≥{VOL_DIVERGENCE_PRICE_THRESHOLD:.1f}%，"
+            f"IV变化≥{VOL_DIVERGENCE_IV_THRESHOLD:.1f}pct；横盘升波价格绝对变化≤{VOL_DIVERGENCE_FLAT_PRICE_THRESHOLD:.1f}%。"
+        )
+
+    window_text = "近5日" if window == "5d" else "当日"
+    lines = [
+        f"### 波动率背离扫描 Top {len(records)}（{window_text}，数据日期 {data_date or '未知'}）",
+        "",
+        "| 排名 | 背离类型 | 品种/合约 | 价格涨跌% | IV变动pct | 当前IV | IV Rank | 解读 |",
+        "|---:|---|---|---:|---:|---:|---:|---|",
+    ]
+    for idx, row in enumerate(records, start=1):
+        lines.append(
+            "| {rank} | {divergence_type} | {label} | {price_change} | {iv_change} | {current_iv} | {iv_rank} | {interpretation} |".format(
+                rank=idx,
+                divergence_type=row.get("divergence_type", ""),
+                label=row.get("label", ""),
+                price_change=_format_signed_number(row.get("price_change"), suffix="%"),
+                iv_change=_format_signed_number(row.get("iv_change")),
+                current_iv=_format_percent_value(row.get("current_iv")),
+                iv_rank=row.get("iv_rank", "NA"),
+                interpretation=row.get("interpretation", ""),
+            )
+        )
+    lines.extend(
+        [
+            "",
+            "注：背离是风险提示，不是交易方向建议；后续要结合事件、成交持仓和价格延续性复核。",
+        ]
+    )
+    return "\n".join(lines)
+
+
 @tool
 def scan_iv_change_ranking(
     start_date: str = "",
@@ -2693,6 +2820,91 @@ def scan_iv_change_ranking(
         all_notes.extend(notes)
 
     return _format_iv_scan_report(all_records, all_notes, scan_direction, scan_sort_by, safe_limit)
+
+
+@tool
+def scan_volatility_divergence(
+    window: str = "1d",
+    symbol: str = "",
+    divergence_type: str = "all",
+    limit: int = 10,
+):
+    """
+    扫描商品期权/期货品种的价格与隐含波动率背离。
+
+    适用问题：有没有波动率背离、哪些品种价格和IV背离、IV背离排行。
+    该工具只做确定性数据扫描，不联网搜索原因，也不输出交易建议。
+    """
+    if engine is None:
+        return "❌ 数据库未连接"
+
+    scan_window = _normalize_vol_divergence_window(window)
+    type_filter = _normalize_vol_divergence_type(divergence_type)
+    raw_symbol = str(symbol or "").strip()
+    commodity_code = _resolve_commodity_scan_code(raw_symbol) if raw_symbol else ""
+    if raw_symbol and not commodity_code:
+        return f"⚠️ 无法识别商品品种【{raw_symbol}】，请使用商品代码/名称（如 SN、沪锡、白银）。"
+
+    try:
+        safe_limit = int(limit)
+    except Exception:
+        safe_limit = 10
+    safe_limit = max(1, min(20, safe_limit))
+
+    df = get_comprehensive_market_data()
+    if df is None or df.empty:
+        return "⚠️ 暂无可用的综合市场监控数据，无法扫描波动率背离。"
+
+    price_col = "涨跌%(5日)" if scan_window == "5d" else "涨跌%(日)"
+    iv_col = "IV变动(5日)" if scan_window == "5d" else "IV变动(日)"
+    required = {"合约", "当前IV", "IV Rank", price_col, iv_col}
+    missing = [col for col in required if col not in df.columns]
+    if missing:
+        return f"⚠️ 综合市场监控数据缺少字段：{', '.join(missing)}，无法扫描波动率背离。"
+
+    data_date = ""
+    if "_数据日期" in df.columns:
+        date_values = [str(v) for v in df["_数据日期"].dropna().tolist() if str(v).strip()]
+        data_date = date_values[0] if date_values else ""
+
+    records: list[dict] = []
+    for _, row in df.iterrows():
+        label = str(row.get("合约") or "").strip()
+        contract_code, product_code, product_name = _extract_vol_divergence_contract_product(label)
+        if commodity_code and product_code != commodity_code.upper():
+            continue
+
+        price_change = _safe_float(row.get(price_col))
+        iv_change = _safe_float(row.get(iv_col))
+        current_iv = _safe_float(row.get("当前IV"))
+        if price_change is None or iv_change is None or current_iv is None:
+            continue
+
+        one_type, score = _classify_vol_divergence(price_change, iv_change)
+        if not one_type:
+            continue
+        if type_filter != "all" and one_type != type_filter:
+            continue
+
+        display_label = label or contract_code or product_name
+        if product_name and contract_code and product_name not in display_label:
+            display_label = f"{contract_code} ({product_name})"
+        records.append(
+            {
+                "divergence_type": one_type,
+                "label": display_label,
+                "product_code": product_code,
+                "price_change": price_change,
+                "iv_change": iv_change,
+                "current_iv": current_iv,
+                "iv_rank": _format_iv_rank_display(row.get("IV Rank")),
+                "interpretation": _vol_divergence_interpretation(one_type),
+                "score": float(score or 0),
+            }
+        )
+
+    records = sorted(records, key=lambda item: item.get("score", 0), reverse=True)[:safe_limit]
+    return _format_vol_divergence_report(records, window=scan_window, data_date=data_date, symbol=raw_symbol)
 
 
 @tool
