@@ -1,6 +1,8 @@
 import unittest
 from unittest.mock import Mock, patch
 
+import pandas as pd
+
 try:
     import agent_core
 except ModuleNotFoundError as exc:
@@ -157,7 +159,93 @@ class TestKnowledgeChatStrategy(unittest.TestCase):
         }
         self.assertEqual(agent_core._select_knowledge_chat_strategy(state), "company_news")
 
-    def test_freshness_listing_query_uses_direct_glm_search_gate(self):
+    def test_freshness_listing_query_uses_quote_lookup_before_glm_search(self):
+        state = {
+            "user_query": "spacex是不是上市了",
+            "focus_mode_hint": "",
+            "focus_topic": "",
+            "recent_context": "",
+            "symbol": "",
+            "freshness_required": True,
+            "freshness_query_target": "SpaceX",
+            "quick_answer_scenario": "freshness",
+        }
+        quote_answer = "【实时核验】\nSpaceX 已能通过公开行情源查到美股股票代码 SPCX 的近期交易数据。"
+
+        with patch.object(agent_core, "_try_listing_quote_status_answer", return_value=quote_answer), \
+             patch.object(agent_core, "_invoke_search_web_direct") as search_direct, \
+             patch.object(agent_core, "create_react_agent") as create_agent:
+            result = agent_core.knowledge_chatter_node(state, llm=Mock())
+
+        self.assertIn("SPCX", result["messages"][0].content)
+        search_direct.assert_not_called()
+        create_agent.assert_not_called()
+
+    def test_listing_quote_candidate_filter_accepts_public_equity(self):
+        raw_candidates = [
+            {
+                "symbol": "CRWV",
+                "quoteType": "EQUITY",
+                "exchange": "NMS",
+                "shortname": "CoreWeave, Inc.",
+                "longname": "CoreWeave, Inc.",
+                "exchDisp": "NASDAQ",
+                "score": 20027,
+            },
+            {
+                "symbol": "CRWV.MX",
+                "quoteType": "EQUITY",
+                "exchange": "MEX",
+                "shortname": "COREWEAVE INC",
+                "score": 20001,
+            },
+        ]
+
+        candidates = agent_core._filter_listing_quote_candidates(raw_candidates, "CoreWeave")
+
+        self.assertEqual(candidates[0]["ticker"], "CRWV")
+        self.assertEqual(candidates[0]["market"], "NASDAQ")
+
+    def test_listing_quote_candidate_filter_rejects_fund_and_tokenized_results(self):
+        raw_candidates = [
+            {
+                "symbol": "OPENAI-USD",
+                "quoteType": "CRYPTOCURRENCY",
+                "shortname": "OpenAI tokenized stock (PreStocks) USD",
+                "longname": "OpenAI tokenized stock (PreStocks) USD",
+                "exchange": "CCC",
+                "score": 20001,
+            },
+            {
+                "symbol": "OPEAZZX",
+                "quoteType": "MUTUALFUND",
+                "longname": "OpenAI - Company Level",
+                "exchange": "NAS",
+                "score": 20001,
+            },
+        ]
+
+        candidates = agent_core._filter_listing_quote_candidates(raw_candidates, "OpenAI")
+
+        self.assertEqual(candidates, [])
+
+    def test_listing_status_quote_lookup_is_generic_not_spacex_only(self):
+        frame = pd.DataFrame({"Close": [97.5]}, index=pd.to_datetime(["2026-06-26"]))
+
+        with patch.object(
+            agent_core,
+            "_search_listing_quote_candidates",
+            return_value=[{"ticker": "CRWV", "name": "CoreWeave, Inc.", "market": "NASDAQ"}],
+        ) as search_candidates, \
+             patch.object(agent_core, "_download_listing_quote_frame", return_value=frame) as download_frame:
+            answer = agent_core._try_listing_quote_status_answer("CoreWeave是不是上市了", {})
+
+        self.assertIn("CRWV", answer)
+        self.assertIn("已上市/已公开交易", answer)
+        search_candidates.assert_called_once()
+        download_frame.assert_called_once()
+
+    def test_freshness_listing_query_uses_direct_glm_search_gate_when_quote_unavailable(self):
         state = {
             "user_query": "今天spacex是不是要上市",
             "focus_mode_hint": "",
@@ -170,7 +258,8 @@ class TestKnowledgeChatStrategy(unittest.TestCase):
         }
         fresh_answer = "SpaceX 已上市交易，股票代码 SPCX，在 Nasdaq 交易，公开报道给出了 IPO 价格和交易日期。"
 
-        with patch.object(agent_core, "_invoke_search_web_direct", return_value=fresh_answer) as search_direct, \
+        with patch.object(agent_core, "_try_listing_quote_status_answer", return_value=""), \
+             patch.object(agent_core, "_invoke_search_web_direct", return_value=fresh_answer) as search_direct, \
              patch.object(agent_core, "is_search_answer_acceptable", return_value=True), \
              patch.object(agent_core, "create_react_agent") as create_agent:
             result = agent_core.knowledge_chatter_node(state, llm=Mock())
@@ -181,7 +270,8 @@ class TestKnowledgeChatStrategy(unittest.TestCase):
         search_query = search_direct.call_args.args[0]
         self.assertIn("SpaceX", search_query)
         self.assertIn("IPO", search_query)
-        self.assertIn("股票代码", search_query)
+        self.assertIn("ticker", search_query)
+        self.assertNotIn("公告", search_query)
         create_agent.assert_not_called()
 
     def test_freshness_listing_query_rejects_stale_answer_without_llm_fallback(self):
@@ -197,7 +287,8 @@ class TestKnowledgeChatStrategy(unittest.TestCase):
         }
         llm = Mock()
 
-        with patch.object(agent_core, "_invoke_search_web_direct", return_value="截至我知识更新时间，SpaceX 仍是私营公司。"), \
+        with patch.object(agent_core, "_try_listing_quote_status_answer", return_value=""), \
+             patch.object(agent_core, "_invoke_search_web_direct", return_value="截至我知识更新时间，SpaceX 仍是私营公司。"), \
              patch.object(agent_core, "is_search_answer_acceptable", return_value=False), \
              patch.object(agent_core, "create_react_agent") as create_agent:
             result = agent_core.knowledge_chatter_node(state, llm=llm)
@@ -206,6 +297,27 @@ class TestKnowledgeChatStrategy(unittest.TestCase):
         self.assertIn("不能凭模型记忆判断是否已上市", content)
         create_agent.assert_not_called()
         llm.invoke.assert_not_called()
+
+    def test_freshness_listing_query_rejects_old_as_of_search_answer(self):
+        state = {
+            "user_query": "spacex是不是上市了",
+            "focus_mode_hint": "",
+            "focus_topic": "",
+            "recent_context": "",
+            "symbol": "",
+            "freshness_required": True,
+            "freshness_query_target": "SpaceX",
+            "quick_answer_scenario": "freshness",
+        }
+        stale_answer = "一句话结论：截至2023年10月，SpaceX尚未确定IPO时间表，也未在Nasdaq或NYSE上市。"
+
+        with patch.object(agent_core, "_try_listing_quote_status_answer", return_value=""), \
+             patch.object(agent_core, "_invoke_search_web_direct", return_value=stale_answer), \
+             patch.object(agent_core, "create_react_agent") as create_agent:
+            result = agent_core.knowledge_chatter_node(state, llm=Mock())
+
+        self.assertIn("不能凭模型记忆判断是否已上市", result["messages"][0].content)
+        create_agent.assert_not_called()
 
     def test_listing_query_without_freshness_state_still_uses_evidence_gate(self):
         state = {
@@ -217,7 +329,8 @@ class TestKnowledgeChatStrategy(unittest.TestCase):
         }
         fresh_answer = "SpaceX 已上市，股票代码 SPCX，Nasdaq 报道显示其股票已经开始交易。"
 
-        with patch.object(agent_core, "_invoke_search_web_direct", return_value=fresh_answer) as search_direct, \
+        with patch.object(agent_core, "_try_listing_quote_status_answer", return_value=""), \
+             patch.object(agent_core, "_invoke_search_web_direct", return_value=fresh_answer) as search_direct, \
              patch.object(agent_core, "is_search_answer_acceptable", return_value=True), \
              patch.object(agent_core, "create_react_agent") as create_agent:
             result = agent_core.knowledge_chatter_node(state, llm=Mock())

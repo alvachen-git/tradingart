@@ -2689,9 +2689,26 @@ _LISTING_EVIDENCE_KEYWORDS = (
     "SPCX", "股票代码", "ticker", "纳斯达克", "NASDAQ", "Nasdaq", "NYSE", "IPO价格", "IPO price",
     "开始交易", "上市交易", "公开交易", "listed", "trading", "shares", "stock", "纳斯达克100",
 )
+_LISTING_QUOTE_ALIASES = {
+    "spacex": {
+        "ticker": "SPCX",
+        "name": "SpaceX",
+        "market": "美股",
+        "exchange": "NASDAQ",
+    },
+}
+_LISTING_QUOTE_ALLOWED_TYPES = {"EQUITY"}
+_LISTING_QUOTE_EXCLUDED_SYMBOL_PARTS = ("=", "-USD", "ZZX")
+_LISTING_QUOTE_EXCLUDED_NAME_HINTS = (
+    "etf", "fund", "mutual fund", "tokenized", "prestock", "prestocks",
+    "derivatives", "company level", "2x", "3x", "short daily",
+)
+_LISTING_QUOTE_PREFERRED_EXCHANGES = {"NMS", "NYQ", "NGM", "NCM", "ASE"}
 _FRESHNESS_STALE_ANSWER_HINTS = (
     "知识更新时间", "训练数据", "截至我", "无法实时", "不能实时", "没有实时联网", "目前没有能力",
-    "仍是私营", "仍然是私营", "还是私营", "保持私有", "没有正式上市",
+    "仍是私营", "仍然是私营", "还是私营", "保持私有", "没有正式上市", "尚未确定IPO",
+    "尚未宣布IPO", "尚未提交任何IPO", "未在Nasdaq", "未在NYSE", "没有近期IPO计划", "暂无IPO计划",
+    "私营公司", "尚未公开宣布IPO", "尚未进行首次公开募股", "尚未上市", "尚未选择在纳斯达克",
 )
 
 
@@ -2745,7 +2762,7 @@ def _build_freshness_deep_search_query(query: str, state: Mapping[str, Any] | No
     today = datetime.now().strftime("%Y-%m-%d")
     if _looks_like_listing_status_query(query):
         subject = target or query
-        return f"{subject} IPO 上市 股票代码 交易所 官方公告 最新 {today}"
+        return f"{subject} IPO stock ticker exchange Nasdaq NYSE listed latest {today}"
     if target:
         return f"{target} 最新 官方公告 新闻 {today} {query}"
     return f"{query} 最新 官方公告 新闻 {today}"
@@ -2755,6 +2772,9 @@ def _freshness_search_answer_has_evidence(query: str, answer: str) -> bool:
     answer_text = str(answer or "").strip()
     if not answer_text:
         return False
+    stale_cutoff = datetime.now().year - 1
+    if any(int(year) < stale_cutoff for year in re.findall(r"截至\s*((?:19|20)\d{2})", answer_text)):
+        return False
     if any(hint in answer_text for hint in _FRESHNESS_STALE_ANSWER_HINTS):
         return False
     if not is_search_answer_acceptable(query, answer_text):
@@ -2762,6 +2782,188 @@ def _freshness_search_answer_has_evidence(query: str, answer: str) -> bool:
     if _looks_like_listing_status_query(query):
         return any(keyword.lower() in answer_text.lower() for keyword in _LISTING_EVIDENCE_KEYWORDS)
     return True
+
+
+def _normalize_listing_quote_key(value: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", str(value or "").lower())
+
+
+def _resolve_listing_quote_alias(query: str, state: Mapping[str, Any] | None = None) -> Dict[str, str]:
+    candidates = [
+        _freshness_query_target_from_state(state, query),
+        str(query or ""),
+    ]
+    for candidate in candidates:
+        key = _normalize_listing_quote_key(candidate)
+        if key in _LISTING_QUOTE_ALIASES:
+            return dict(_LISTING_QUOTE_ALIASES[key])
+        for alias_key, meta in _LISTING_QUOTE_ALIASES.items():
+            if alias_key and alias_key in key:
+                return dict(meta)
+    return {}
+
+
+def _listing_quote_target(query: str, state: Mapping[str, Any] | None = None) -> str:
+    target = _freshness_query_target_from_state(state, query)
+    if target:
+        return target
+    return str(query or "").strip()
+
+
+def _listing_quote_candidate_score(candidate: Mapping[str, Any], target: str) -> float:
+    symbol = str(candidate.get("symbol") or "").strip().upper()
+    quote_type = str(candidate.get("quoteType") or "").strip().upper()
+    if quote_type not in _LISTING_QUOTE_ALLOWED_TYPES or not symbol:
+        return -1.0
+    if any(part in symbol for part in _LISTING_QUOTE_EXCLUDED_SYMBOL_PARTS):
+        return -1.0
+
+    name_text = " ".join(
+        str(candidate.get(key) or "")
+        for key in ("shortname", "longname", "typeDisp", "exchDisp")
+    ).strip()
+    lower_name = name_text.lower()
+    if any(hint in lower_name for hint in _LISTING_QUOTE_EXCLUDED_NAME_HINTS):
+        return -1.0
+
+    target_norm = _normalize_listing_quote_key(target)
+    candidate_norm = _normalize_listing_quote_key(f"{symbol} {name_text}")
+    if len(target_norm) < 4 and target_norm not in candidate_norm:
+        return -1.0
+
+    try:
+        score = float(candidate.get("score") or 0)
+    except Exception:
+        score = 0.0
+    if str(candidate.get("exchange") or "").strip().upper() in _LISTING_QUOTE_PREFERRED_EXCHANGES:
+        score += 5000.0
+    if target_norm and target_norm in candidate_norm:
+        score += 10000.0
+    return score
+
+
+def _filter_listing_quote_candidates(candidates: Any, target: str, *, max_candidates: int = 3) -> List[Dict[str, str]]:
+    scored: List[tuple[float, Dict[str, str]]] = []
+    for raw in candidates or []:
+        if not isinstance(raw, Mapping):
+            continue
+        score = _listing_quote_candidate_score(raw, target)
+        if score < 0:
+            continue
+        item = {
+            "ticker": str(raw.get("symbol") or "").strip().upper(),
+            "name": str(raw.get("longname") or raw.get("shortname") or raw.get("symbol") or "").strip(),
+            "market": str(raw.get("exchDisp") or raw.get("exchange") or "公开市场").strip(),
+            "exchange": str(raw.get("exchange") or "").strip(),
+        }
+        scored.append((score, item))
+    scored.sort(key=lambda pair: pair[0], reverse=True)
+    output: List[Dict[str, str]] = []
+    seen: set[str] = set()
+    for _score, item in scored:
+        ticker = item["ticker"]
+        if ticker in seen:
+            continue
+        seen.add(ticker)
+        output.append(item)
+        if len(output) >= max_candidates:
+            break
+    return output
+
+
+def _search_listing_quote_candidates(target: str, *, timeout_seconds: float) -> List[Dict[str, str]]:
+    if not str(target or "").strip():
+        return []
+    try:
+        import yfinance as yf
+
+        search = yf.Search(
+            str(target).strip(),
+            max_results=8,
+            news_count=0,
+            lists_count=0,
+            timeout=timeout_seconds,
+            raise_errors=False,
+        )
+        return _filter_listing_quote_candidates(getattr(search, "quotes", []) or [], target)
+    except Exception as exc:
+        print(f"[knowledge freshness gate] listing quote search failed for {target}: {exc}")
+        return []
+
+
+def _download_listing_quote_frame(ticker: str, *, timeout_seconds: float) -> Any:
+    import yfinance as yf
+
+    return yf.download(
+        str(ticker or "").strip().upper(),
+        period="10d",
+        interval="1d",
+        auto_adjust=False,
+        progress=False,
+        threads=False,
+        timeout=timeout_seconds,
+    )
+
+
+def _extract_latest_close_from_yfinance_frame(frame: Any) -> tuple[str, float | None]:
+    try:
+        if frame is None or frame.empty:
+            return "", None
+        close_obj = frame["Close"]
+        if hasattr(close_obj, "columns"):
+            close_series = close_obj.iloc[:, 0]
+        else:
+            close_series = close_obj
+        close_series = close_series.dropna()
+        if close_series.empty:
+            return "", None
+        last_date = close_series.index[-1]
+        date_text = last_date.strftime("%Y-%m-%d") if hasattr(last_date, "strftime") else str(last_date)[:10]
+        return date_text, float(close_series.iloc[-1])
+    except Exception:
+        return "", None
+
+
+def _try_listing_quote_status_answer(query: str, state: Mapping[str, Any] | None = None) -> str:
+    if not _looks_like_listing_status_query(query):
+        return ""
+    target = _listing_quote_target(query, state)
+    try:
+        timeout_seconds = float(str(os.getenv("FRESHNESS_LISTING_QUOTE_TIMEOUT_SECONDS", "5")).strip() or 5)
+        candidates = _search_listing_quote_candidates(target, timeout_seconds=timeout_seconds)
+        alias = _resolve_listing_quote_alias(query, state)
+        if alias:
+            alias_item = {
+                "ticker": str(alias.get("ticker") or "").strip().upper(),
+                "name": str(alias.get("name") or alias.get("ticker") or "").strip(),
+                "market": str(alias.get("market") or "公开市场").strip(),
+                "exchange": str(alias.get("exchange") or "").strip(),
+            }
+            if alias_item["ticker"] and all(item.get("ticker") != alias_item["ticker"] for item in candidates):
+                candidates.append(alias_item)
+
+        for candidate in candidates[:3]:
+            ticker = str(candidate.get("ticker") or "").strip().upper()
+            if not ticker:
+                continue
+            frame = _download_listing_quote_frame(ticker, timeout_seconds=timeout_seconds)
+            quote_date, close_price = _extract_latest_close_from_yfinance_frame(frame)
+            if not quote_date:
+                continue
+            name = str(candidate.get("name") or target or ticker).strip()
+            market = str(candidate.get("market") or "公开市场").strip()
+            price_text = f"，最近收盘价约 {close_price:.2f} 美元" if close_price is not None else ""
+            return (
+                f"【实时核验】\n{name} 已能通过公开行情源查到{market}股票代码 {ticker} 的近期交易数据；"
+                f"最近交易日为 {quote_date}{price_text}。"
+                "所以对“是否已经上市/公开交易”这类问题，当前应回答：已上市/已公开交易。"
+                "上市方式、发行价和交易所公告仍建议继续以交易所、SEC 或公司公告核验。\n\n"
+                "仅供研究参考，不构成投资建议。"
+            )
+    except Exception as exc:
+        print(f"[knowledge freshness gate] listing quote lookup failed for {target}: {exc}")
+        return ""
+    return ""
 
 
 def _is_latest_company_fact_query(knowledge_strategy: str, query: str) -> bool:
@@ -2822,6 +3024,10 @@ def _run_freshness_search_with_gate(
     query: str,
     state: Mapping[str, Any] | None = None,
 ) -> str:
+    quote_answer = _try_listing_quote_status_answer(query, state)
+    if quote_answer:
+        return quote_answer
+
     search_query = _build_freshness_deep_search_query(query, state)
     answer = _invoke_search_web_direct(search_query)
     if answer and _freshness_search_answer_has_evidence(query, answer):

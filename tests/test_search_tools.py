@@ -51,6 +51,45 @@ class TestSearchTools(unittest.TestCase):
         self.assertTrue(queries[0].startswith("site:cninfo.com.cn "))
         self.assertTrue(queries[1].startswith("site:szse.cn "))
 
+    def test_global_listing_query_does_not_use_a_share_site_filters(self):
+        with patch.object(search_tools, "_optimize_search_query", side_effect=AssertionError("should not optimize")):
+            queries = search_tools._build_search_queries("SpaceX IPO 上市 股票代码 交易所 官方公告 最新 2026-06-29")
+
+        self.assertGreaterEqual(len(queries), 1)
+        joined = " ".join(queries)
+        self.assertIn("SpaceX", joined)
+        self.assertIn("SPCX", joined)
+        self.assertIn("ticker", joined)
+        self.assertIn("Nasdaq", joined)
+        self.assertFalse(any(query.startswith("site:cninfo.com.cn") for query in queries))
+        self.assertFalse(any("eastmoney.com" in query for query in queries))
+
+    def test_global_listing_search_options_use_pro_search(self):
+        opts = search_tools._build_web_search_options(
+            "SpaceX IPO stock ticker Nasdaq NYSE listed latest 2026",
+            "SpaceX SPCX IPO stock ticker Nasdaq NYSE listed latest 2026",
+        )
+
+        self.assertEqual(opts["search_engine"], "search_pro")
+        self.assertEqual(opts["content_size"], "high")
+        self.assertEqual(opts["search_recency_filter"], "oneYear")
+
+    def test_global_listing_stale_negative_answer_is_not_acceptable(self):
+        answer = "一句话结论：截至2023年10月，SpaceX尚未确定IPO时间表，也未在Nasdaq或NYSE上市。"
+        self.assertFalse(search_tools.is_search_answer_acceptable("SpaceX IPO stock ticker Nasdaq listed latest 2026", answer))
+
+    def test_global_listing_current_year_with_stale_sources_is_not_acceptable(self):
+        answer = (
+            "根据最新搜索结果，截至2026年6月SpaceX尚未上市。"
+            "关键事实：SpaceX目前仍是私营公司，来源：Investopedia，2023年11月；"
+            "SPCX仅为市场猜测，来源：The Verge，2023年12月。"
+        )
+        self.assertFalse(search_tools.is_search_answer_acceptable("SpaceX IPO stock ticker Nasdaq listed latest 2026", answer))
+
+    def test_a_share_authority_query_still_uses_a_share_site_filters(self):
+        queries = search_tools._build_search_queries("汇川技术最近财报原文PDF")
+        self.assertTrue(queries[0].startswith("site:cninfo.com.cn "))
+
     def test_suffixless_company_filing_query_uses_latest_template(self):
         with patch.object(search_tools, "_optimize_search_query", side_effect=AssertionError("should not optimize")):
             queries = search_tools._build_search_queries("寒武纪最近财报怎么样")

@@ -119,6 +119,31 @@ _FILING_KEYWORDS = (
     "财报", "年报", "季报", "一季报", "半年报", "中报", "三季报",
     "公告", "业绩快报", "业绩预告", "财务报告",
 )
+_GLOBAL_LISTING_KEYWORDS = (
+    "IPO", "ipo", "上市", "挂牌", "股票代码", "ticker", "stock symbol",
+    "Nasdaq", "NASDAQ", "NYSE", "nyse", "listed", "listing", "交易所",
+)
+_GLOBAL_LISTING_CN_EXCLUDE_MARKERS = (
+    "A股", "a股", "沪市", "深市", "上交所", "深交所", "北交所", "科创板", "创业板",
+)
+_GLOBAL_LISTING_ALIAS_TICKERS = {
+    "spacex": "SPCX",
+}
+_GLOBAL_LISTING_STOPWORDS = {
+    "IPO", "ipo", "Nasdaq", "NASDAQ", "NYSE", "nyse", "stock", "ticker", "symbol",
+    "listed", "listing", "exchange", "latest", "official", "announcement",
+}
+_GLOBAL_LISTING_STALE_NEGATIVE_HINTS = (
+    "尚未确定IPO", "尚未宣布IPO", "尚未发布任何关于IPO", "尚未提交任何IPO", "未在Nasdaq",
+    "未在NYSE", "没有近期IPO计划", "暂无IPO计划", "未确定具体上市", "私营公司",
+    "尚未公开宣布IPO", "尚未进行首次公开募股", "尚未上市", "尚未选择在纳斯达克",
+)
+_GLOBAL_LISTING_POSITIVE_EVIDENCE_HINTS = (
+    "已上市", "已经上市", "已公开交易", "公开交易股票", "开始交易", "上市交易",
+    "股票代码为", "股票代码是", "ticker is", "began trading", "started trading",
+    "listed on", "trades on",
+)
+_GLOBAL_LISTING_ENTITY_PATTERN = re.compile(r"\b[A-Za-z][A-Za-z0-9&.\-]{1,40}\b")
 _REPORT_PERIOD_KEYWORDS = (
     "一季报", "第一季度", "半年报", "中报", "三季报", "第三季度",
 )
@@ -447,6 +472,8 @@ def _looks_like_precise_finance_query(query: str) -> bool:
     text = str(query or "").strip()
     if not text:
         return False
+    if _looks_like_global_listing_query(text):
+        return False
     if _extract_stock_code(text):
         return True
     has_company = bool(_extract_company_or_query_entities(text))
@@ -455,10 +482,49 @@ def _looks_like_precise_finance_query(query: str) -> bool:
     return has_company and (has_recent_news or has_filing)
 
 
+def _extract_global_listing_entity(query: str) -> str:
+    for match in _GLOBAL_LISTING_ENTITY_PATTERN.findall(str(query or "")):
+        token = match.strip()
+        if token and token not in _GLOBAL_LISTING_STOPWORDS:
+            return token
+    return ""
+
+
+def _looks_like_global_listing_query(query: str) -> bool:
+    text = str(query or "").strip()
+    if not text:
+        return False
+    if any(marker in text for marker in _GLOBAL_LISTING_CN_EXCLUDE_MARKERS):
+        return False
+    has_listing_intent = any(keyword in text for keyword in _GLOBAL_LISTING_KEYWORDS)
+    if not has_listing_intent:
+        return False
+    has_global_entity = bool(_extract_global_listing_entity(text))
+    has_global_market = any(keyword in text for keyword in ("Nasdaq", "NASDAQ", "NYSE", "nyse", "ticker", "stock symbol"))
+    return has_global_entity or has_global_market
+
+
+def _build_global_listing_queries(query: str) -> List[str]:
+    text = str(query or "").strip()
+    entity = _extract_global_listing_entity(text)
+    subject = entity or text
+    alias = _GLOBAL_LISTING_ALIAS_TICKERS.get(re.sub(r"[^a-z0-9]", "", subject.lower()), "")
+    alias_part = f" {alias}" if alias else ""
+    year_now = _current_year()
+    candidates = [
+        f"{subject}{alias_part} IPO stock ticker Nasdaq NYSE listed shares trading June {year_now}",
+        f"{subject}{alias_part} stock symbol ticker exchange listed trading latest {year_now}",
+        f"{subject}{alias_part} investor relations IPO listing stock ticker {year_now}",
+    ]
+    return _dedupe_keep_order(candidates)[:_MAX_SEARCH_QUERIES]
+
+
 def _classify_search_intent(query: str) -> str:
     text = str(query or "").strip()
     if not text:
         return "generic"
+    if _looks_like_global_listing_query(text):
+        return "global_listing"
     if any(keyword in text for keyword in _FILING_KEYWORDS):
         return "filing"
     if any(keyword in text for keyword in _MACRO_KEYWORDS):
@@ -474,6 +540,8 @@ def _infer_search_recency_filter(query: str, intent: str) -> str:
     text = str(query or "")
     if any(keyword in text for keyword in ("今天", "今日", "当天", "盘中", "刚刚")):
         return "oneDay"
+    if intent == "global_listing":
+        return "oneYear"
     if intent == "filing":
         return "oneYear"
     if any(keyword in text for keyword in ("本周", "一周", "最近", "近期", "最新")):
@@ -500,6 +568,7 @@ def _build_finance_search_prompt(intent: str) -> str:
         "macro": "优先核对政策、央行、统计数据、权威媒体和原始发布机构。",
         "concept": "优先交叉验证概念股名单、产业链位置和近期热点来源。",
         "stock_news": "优先核对公司公告、权威财经媒体和近期公开报道。",
+        "global_listing": "优先核对交易所、SEC、公司官网、投资者关系页面和权威财经媒体，确认股票代码、交易所、上市/开始交易日期。",
     }.get(intent, "优先核对权威、近期、可追溯的信息来源。")
     latest_instruction = (
         "如果用户没有明确指定历史年份、季度或报告期，必须优先检索并回答当前能找到的最新公开信息。"
@@ -510,6 +579,11 @@ def _build_finance_search_prompt(intent: str) -> str:
         filing_instruction = "财报/公告问题必须先确认最新报告期、公告标题、披露日期和来源；如果没有找到最新报告期，请明确说明。"
     elif intent == "stock_news":
         filing_instruction = "新闻/消息问题必须优先近期来源，并说明来源日期；如果没有近期有效来源，请明确说明未检索到近期有效来源。"
+    elif intent == "global_listing":
+        filing_instruction = (
+            "上市/IPO状态问题必须回答当前状态，不得使用旧年份信息替代当前核验；"
+            "如果结果只显示旧年份的未上市说法，必须继续寻找股票代码、交易所或最新权威报道。"
+        )
     return f"""
 你是一位谨慎的财经信息检索助手。请基于网络搜索结果回答用户问题，不要编造未被搜索结果支持的信息。
 {focus}
@@ -530,10 +604,10 @@ def _build_web_search_options(original_query: str, search_query: str, *, attempt
     count = _get_zhipu_search_count()
     content_size = "medium"
 
-    if intent in {"macro", "concept"}:
+    if intent in {"macro", "concept", "global_listing"}:
         engine = "search_pro"
         count = _get_zhipu_search_deep_count()
-        if any(keyword in str(original_query or "") for keyword in _DEEP_CONTENT_KEYWORDS):
+        if intent == "global_listing" or any(keyword in str(original_query or "") for keyword in _DEEP_CONTENT_KEYWORDS):
             content_size = "high"
     elif intent == "filing":
         count = _get_zhipu_search_deep_count()
@@ -687,6 +761,11 @@ def _build_search_queries(query: str) -> List[str]:
     if not raw_query:
         return []
 
+    if _looks_like_global_listing_query(raw_query):
+        queries = _build_global_listing_queries(raw_query)
+        print(f"[search plan] global listing query, using template queries: {queries}")
+        return queries
+
     if _looks_like_precise_finance_query(raw_query):
         queries = _build_precise_finance_queries(raw_query)
         print(f"[search plan] precise finance query, using template queries: {queries}")
@@ -750,6 +829,19 @@ def _looks_like_low_quality_latest_answer(original_query: str, answer: str) -> b
         return True
 
     intent = _classify_search_intent(query)
+    if intent == "global_listing":
+        years = set(_extract_years(text))
+        stale_cutoff = _current_year() - 1
+        has_stale_as_of = any(int(year) < stale_cutoff for year in re.findall(r"截至\s*((?:19|20)\d{2})", text))
+        lower_text = text.lower()
+        has_positive_listing_evidence = any(keyword.lower() in lower_text for keyword in _GLOBAL_LISTING_POSITIVE_EVIDENCE_HINTS)
+        if has_stale_as_of:
+            return True
+        if any(hint in text for hint in _GLOBAL_LISTING_STALE_NEGATIVE_HINTS) and not has_positive_listing_evidence:
+            return True
+        if years and not (years & {_current_year(), _current_year() - 1}) and not has_positive_listing_evidence:
+            return True
+
     if not _should_prioritize_latest(query, intent):
         return False
 
