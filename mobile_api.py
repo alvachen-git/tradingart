@@ -4977,6 +4977,208 @@ def _detect_hybrid_quick_scenario(prompt_text: str) -> str:
     return "market_move"
 
 
+_FRESHNESS_TIME_KEYWORDS = (
+    "今天", "今日", "现在", "当前", "此刻", "刚刚", "刚才", "最新", "最近", "近期",
+    "本周", "本月", "今晚", "明天", "昨天",
+)
+_FRESHNESS_FACT_KEYWORDS = (
+    "上市", "IPO", "ipo", "公告", "新闻", "消息", "快讯", "财报", "业绩", "传闻",
+    "政策", "利率", "发布", "披露", "确认", "官宣", "宣布", "批准",
+)
+_FRESHNESS_CONCEPT_PREFIXES = (
+    "什么是", "什么叫", "解释", "科普", "介绍一下", "介绍下", "定义", "概念",
+)
+_FRESHNESS_MARKET_DATA_KEYWORDS = (
+    "最新价", "现价", "报价", "行情", "涨跌", "涨幅", "跌幅", "K线", "k线",
+    "技术面", "选股", "做空", "IV", "iv", "波动率", "期权", "合约",
+)
+_FRESHNESS_QUERY_STOPWORDS = (
+    "今天", "今日", "现在", "当前", "此刻", "刚刚", "刚才", "最新", "最近", "近期",
+    "是不是", "是否", "有没有", "要不要", "会不会", "能不能", "是否会", "是不是要",
+    "上市", "IPO", "ipo", "公告", "新闻", "消息", "快讯", "传闻", "确认", "官宣",
+    "宣布", "发布", "披露", "吗", "呢", "么", "呀", "啊", "请问", "帮我", "查一下",
+)
+
+
+def _mobile_freshness_quick_max_workers() -> int:
+    try:
+        value = int(os.getenv("MOBILE_FRESHNESS_QUICK_MAX_WORKERS", "2") or "2")
+    except Exception:
+        value = 2
+    return min(max(value, 1), 8)
+
+
+_FRESHNESS_QUICK_EXECUTOR = ThreadPoolExecutor(max_workers=_mobile_freshness_quick_max_workers())
+
+
+def _mobile_freshness_as_of() -> str:
+    return datetime.now().isoformat(timespec="seconds")
+
+
+def _mobile_freshness_timeout_seconds() -> float:
+    try:
+        value = float(os.getenv("MOBILE_FRESHNESS_QUICK_TIMEOUT_SECONDS", "1.5") or "1.5")
+    except Exception:
+        value = 1.5
+    return min(max(value, 0.2), 5.0)
+
+
+def _contains_any(text: str, keywords: Tuple[str, ...]) -> bool:
+    return any(keyword in text for keyword in keywords)
+
+
+def _is_freshness_concept_query(prompt_text: str) -> bool:
+    text = str(prompt_text or "").strip()
+    lower_text = text.lower()
+    if not text:
+        return False
+    if any(text.startswith(prefix) or lower_text.startswith(prefix.lower()) for prefix in _FRESHNESS_CONCEPT_PREFIXES):
+        return True
+    return bool(re.search(r"(是什么|是什么意思|怎么理解|概念|定义)$", text))
+
+
+def _is_freshness_market_data_or_trading_query(prompt_text: str) -> bool:
+    text = str(prompt_text or "")
+    lower_text = text.lower()
+    if _contains_any(text, _HYBRID_OPTION_EXCLUDE_KEYWORDS):
+        return True
+    if _contains_any(text, _TECHNICAL_ANALYSIS_KEYWORDS):
+        return True
+    return any(keyword.lower() in lower_text for keyword in _FRESHNESS_MARKET_DATA_KEYWORDS)
+
+
+def _is_freshness_sensitive_query(
+    prompt_text: str,
+    chat_mode: str = "",
+    context_payload: Mapping[str, Any] | None = None,
+) -> bool:
+    text = str(prompt_text or "").strip()
+    if not text:
+        return False
+    if _is_freshness_market_data_or_trading_query(text):
+        return False
+
+    lower_text = text.lower()
+    has_time_word = _contains_any(text, _FRESHNESS_TIME_KEYWORDS)
+    has_fact_word = any(keyword.lower() in lower_text for keyword in _FRESHNESS_FACT_KEYWORDS)
+    asks_listing_or_ipo = "上市" in text or "ipo" in lower_text
+
+    if _is_freshness_concept_query(text) and not has_time_word:
+        return False
+    if asks_listing_or_ipo and not _is_freshness_concept_query(text):
+        return True
+    if has_time_word and has_fact_word:
+        return True
+    if any(phrase in text for phrase in ("最新消息", "最新新闻", "最近公告", "最新公告", "刚刚发布")):
+        return True
+    return False
+
+
+def _extract_freshness_query_target(
+    prompt_text: str,
+    context_payload: Mapping[str, Any] | None = None,
+) -> str:
+    payload = context_payload or {}
+    focus_entity = str(payload.get("focus_entity") or "").strip()
+    if focus_entity:
+        return focus_entity[:32]
+
+    text = str(prompt_text or "").strip()
+    for keyword in sorted(_FRESHNESS_QUERY_STOPWORDS, key=len, reverse=True):
+        text = re.sub(re.escape(keyword), " ", text, flags=re.I)
+    text = re.sub(r"[，。！？、,.!?；;：:\s]+", " ", text).strip()
+    chunks = [chunk.strip(" -_/（）()[]【】") for chunk in text.split(" ") if chunk.strip()]
+    for chunk in chunks:
+        if 2 <= len(chunk) <= 32:
+            return chunk
+    return str(prompt_text or "").strip()[:32]
+
+
+def _build_freshness_lookup_query(prompt_text: str, target: str = "") -> str:
+    today = datetime.now().strftime("%Y-%m-%d")
+    if target:
+        return f"{target} 最新 官方 公告 新闻 IPO 上市 {today}"
+    return f"{prompt_text} 最新 官方 公告 新闻 {today}"
+
+
+def _format_freshness_as_of(as_of: str) -> str:
+    return str(as_of or "").replace("T", " ")[:16]
+
+
+def _freshness_placeholder_answer(status: str, as_of: str) -> str:
+    display_as_of = _format_freshness_as_of(as_of)
+    if status == "not_found":
+        return (
+            f"快速核验：截至{display_as_of}，限时检索还没有拿到明确公开确认。"
+            "这个问题需要实时核验，我先不凭模型记忆下结论；后台正在继续查证公告和新闻源。"
+        )
+    return (
+        f"快速核验：截至{display_as_of}，这个问题需要实时核验。"
+        "我先不凭模型记忆下结论；后台正在继续查证公告和新闻源，稍后补充结果。"
+    )
+
+
+def _is_freshness_lookup_empty(lookup_text: str) -> bool:
+    text = str(lookup_text or "").strip()
+    if not text:
+        return True
+    empty_hints = (
+        "未搜索到", "没有搜索到", "没有找到", "暂无", "未找到", "不可用",
+        "搜索失败", "搜索出错", "无法访问", "未配置", "timeout",
+    )
+    return any(hint in text for hint in empty_hints)
+
+
+def _build_freshness_lookup_answer(
+    prompt_text: str,
+    target: str,
+    lookup_text: str,
+    as_of: str,
+) -> str:
+    display_as_of = _format_freshness_as_of(as_of)
+    snippet = re.sub(r"\s+", " ", str(lookup_text or "")).strip()
+    snippet = snippet[:220]
+    subject = target or "这个问题"
+    return (
+        f"快速核验：截至{display_as_of}，我先查到的公开检索摘要是：{snippet}"
+        f"。这只是对{subject}的限时检索，不作为最终结论；后台会继续核验公告和新闻源后补充。"
+    )
+
+
+def _invoke_freshness_lookup(query: str) -> str:
+    from search_tools import search_web
+
+    if hasattr(search_web, "invoke"):
+        return str(search_web.invoke({"query": query}) or "")
+    return str(search_web(query) or "")
+
+
+def _generate_freshness_quick_answer(
+    prompt_text: str,
+    context_payload: Mapping[str, Any] | None = None,
+) -> Tuple[str, str, int, str, str]:
+    started_at = time.time()
+    as_of = _mobile_freshness_as_of()
+    target = _extract_freshness_query_target(prompt_text, context_payload)
+    query = _build_freshness_lookup_query(prompt_text, target)
+    future = _FRESHNESS_QUICK_EXECUTOR.submit(_invoke_freshness_lookup, query)
+    try:
+        lookup_text = str(future.result(timeout=_mobile_freshness_timeout_seconds()) or "").strip()
+    except TimeoutError:
+        future.cancel()
+        elapsed_ms = int((time.time() - started_at) * 1000)
+        return _freshness_placeholder_answer("timeout", as_of), "fresh_lookup_timeout", elapsed_ms, "timeout", as_of
+    except Exception as exc:
+        print(f"[mobile-chat] freshness quick lookup failed err={exc}", flush=True)
+        elapsed_ms = int((time.time() - started_at) * 1000)
+        return _freshness_placeholder_answer("unavailable", as_of), "fresh_lookup_empty", elapsed_ms, "unavailable", as_of
+
+    elapsed_ms = int((time.time() - started_at) * 1000)
+    if _is_freshness_lookup_empty(lookup_text):
+        return _freshness_placeholder_answer("not_found", as_of), "fresh_lookup_empty", elapsed_ms, "not_found", as_of
+    return _build_freshness_lookup_answer(prompt_text, target, lookup_text, as_of), "fresh_lookup", elapsed_ms, "verified", as_of
+
+
 def _extract_hybrid_quick_bias(prompt_text: str) -> str:
     text = str(prompt_text or "")
     if any(keyword in text for keyword in ("跌破", "跳水", "杀跌", "走弱", "回落", "下跌", "大跌", "暴跌")):
@@ -6325,6 +6527,22 @@ def chat_submit(
             },
         }
 
+    freshness_candidate = _is_freshness_sensitive_query(
+        normalized_prompt,
+        chat_mode=chat_mode,
+        context_payload=context_payload,
+    )
+    if freshness_candidate:
+        context_payload["freshness_required"] = True
+        context_payload["freshness_query_target"] = _extract_freshness_query_target(
+            normalized_prompt,
+            context_payload,
+        )
+        context_payload["freshness_quick_status"] = "pending"
+        if chat_mode == CHAT_MODE_SIMPLE:
+            chat_mode = CHAT_MODE_KNOWLEDGE
+            context_payload["chat_mode"] = chat_mode
+
     has_portfolio = _detect_mobile_has_portfolio(username)
 
     if chat_mode == CHAT_MODE_SIMPLE:
@@ -6408,16 +6626,22 @@ def chat_submit(
             },
         }
 
-    hybrid_candidate = _is_market_move_quick_answer_candidate(
+    market_hybrid_candidate = _is_market_move_quick_answer_candidate(
         normalized_prompt,
         chat_mode,
         context_payload,
     )
-    if hybrid_candidate:
+    freshness_hybrid_candidate = bool(context_payload.get("freshness_required")) and not market_hybrid_candidate
+    hybrid_candidate = market_hybrid_candidate or freshness_hybrid_candidate
+    if market_hybrid_candidate:
         context_payload["delivery_mode"] = "hybrid"
         context_payload["quick_answer_scenario"] = _detect_hybrid_quick_scenario(normalized_prompt)
         context_payload["quick_answer_target"] = _extract_market_move_target(normalized_prompt, context_payload)
         context_payload["quick_answer_direction"] = _extract_market_move_direction(normalized_prompt)
+    elif freshness_hybrid_candidate:
+        context_payload["delivery_mode"] = "hybrid"
+        context_payload["quick_answer_scenario"] = "freshness"
+        context_payload["quick_answer_target"] = str(context_payload.get("freshness_query_target") or "")
 
     try:
         if chat_mode == CHAT_MODE_KNOWLEDGE:
@@ -6458,15 +6682,28 @@ def chat_submit(
     quick_response = ""
     quick_source = ""
     quick_elapsed_ms = 0
-    if hybrid_candidate:
+    quick_freshness_status = ""
+    quick_as_of = ""
+    if market_hybrid_candidate:
         quick_response, quick_source, quick_elapsed_ms = _generate_market_move_quick_answer(
             normalized_prompt,
             context_payload,
         )
+    elif freshness_hybrid_candidate:
+        (
+            quick_response,
+            quick_source,
+            quick_elapsed_ms,
+            quick_freshness_status,
+            quick_as_of,
+        ) = _generate_freshness_quick_answer(normalized_prompt, context_payload)
+        context_payload["freshness_quick_status"] = quick_freshness_status
+    if hybrid_candidate:
         print(
             "[mobile-chat] hybrid_quick "
             f"trace_id={trace_id} task_id={task_id} chat_mode={chat_mode} "
             f"quick_source={quick_source} quick_ms={quick_elapsed_ms} "
+            f"freshness_status={quick_freshness_status or '-'} "
             f"background_status={task_state}",
             flush=True,
         )
@@ -6488,6 +6725,8 @@ def chat_submit(
             "delivery_mode": delivery_mode,
             "quick_answer_source": quick_source,
             "quick_answer_ms": quick_elapsed_ms,
+            "quick_answer_freshness_status": quick_freshness_status,
+            "quick_answer_as_of": quick_as_of,
         },
     )
     _set_mobile_chat_last_task(username, task_id)
@@ -6501,6 +6740,15 @@ def chat_submit(
     else:
         submit_message = "任务已提交，正在整理知识回答..." if chat_mode == CHAT_MODE_KNOWLEDGE else "任务已提交，正在分析..."
     if hybrid_candidate:
+        quick_result = {
+            "status": "success",
+            "response": quick_response,
+            "source": quick_source or "template",
+        }
+        if quick_freshness_status:
+            quick_result["freshness_status"] = quick_freshness_status
+        if quick_as_of:
+            quick_result["as_of"] = quick_as_of
         return {
             "delivery_mode": "hybrid",
             "task_id": task_id,
@@ -6508,11 +6756,7 @@ def chat_submit(
             "chat_mode": chat_mode,
             "trace_id": trace_id,
             "answer_id": answer_id,
-            "quick_result": {
-                "status": "success",
-                "response": quick_response,
-                "source": quick_source or "template",
-            },
+            "quick_result": quick_result,
             "background": {
                 "status": task_state or "pending",
                 "progress": progress_text,

@@ -140,6 +140,157 @@ class TestMobileApiChatMemoryAsync(unittest.TestCase):
         self.assertEqual(state.get("delivery_mode"), "hybrid")
         self.assertEqual(state.get("quick_answer_source"), "template")
 
+    def test_chat_submit_freshness_sensitive_simple_routes_to_knowledge_hybrid(self):
+        fake_redis = _FakeRedis()
+        body = mobile_api.ChatSubmitRequest(prompt="今天spacex是不是要上市", history=[])
+        with patch.object(mobile_api, "_redis", fake_redis), patch.object(
+            mobile_api.de, "get_user_profile", return_value={}
+        ), patch.object(
+            mobile_api, "_build_mobile_context_payload", return_value={"is_followup": False}
+        ), patch.object(
+            mobile_api, "classify_chat_mode", return_value=mobile_api.CHAT_MODE_SIMPLE
+        ), patch.object(
+            mobile_api, "_detect_mobile_has_portfolio", return_value=False
+        ), patch.object(
+            mobile_api.TaskManager, "create_knowledge_task", return_value="task-fresh"
+        ) as mocked_knowledge, patch.object(
+            mobile_api.TaskManager, "create_task"
+        ) as mocked_create, patch.object(
+            mobile_api.TaskManager, "get_task_meta", return_value={"status": "pending", "progress": "正在核验..."}
+        ), patch.object(
+            mobile_api, "_generate_freshness_quick_answer",
+            return_value=("快速核验：截至当前时间，检索到公开摘要。后台继续核验。", "fresh_lookup", 12, "verified", "2026-06-29T15:27:00"),
+        ) as mocked_fresh_quick, patch.object(
+            mobile_api, "build_deepseek_flash_llm"
+        ) as mocked_fast_llm, patch.object(
+            mobile_api, "simple_chatter_reply"
+        ) as mocked_simple:
+            out = mobile_api.chat_submit(body=body, username="u1")
+
+        self.assertEqual(out["delivery_mode"], "hybrid")
+        self.assertEqual(out["chat_mode"], mobile_api.CHAT_MODE_KNOWLEDGE)
+        self.assertEqual(out["quick_result"]["source"], "fresh_lookup")
+        self.assertEqual(out["quick_result"]["freshness_status"], "verified")
+        self.assertEqual(out["quick_result"]["as_of"], "2026-06-29T15:27:00")
+        mocked_knowledge.assert_called_once()
+        mocked_create.assert_not_called()
+        mocked_fresh_quick.assert_called_once()
+        mocked_fast_llm.assert_not_called()
+        mocked_simple.assert_not_called()
+        ctx = mocked_knowledge.call_args.kwargs.get("context_payload") or {}
+        self.assertTrue(ctx.get("freshness_required"))
+        self.assertEqual(ctx.get("delivery_mode"), "hybrid")
+        self.assertEqual(ctx.get("quick_answer_scenario"), "freshness")
+        self.assertIn("spacex", str(ctx.get("freshness_query_target") or "").lower())
+        state = json.loads(fake_redis.get(mobile_api._mobile_chat_state_key("task-fresh")))
+        self.assertEqual(state.get("delivery_mode"), "hybrid")
+        self.assertEqual(state.get("quick_answer_source"), "fresh_lookup")
+        self.assertEqual(state.get("quick_answer_freshness_status"), "verified")
+
+    def test_generate_freshness_quick_answer_success_includes_as_of(self):
+        class _DoneFuture:
+            def result(self, timeout=None):
+                return "公开检索摘要：SpaceX 相关 IPO/上市消息仍需以官方公告为准。"
+
+            def cancel(self):
+                return False
+
+        with patch.object(mobile_api._FRESHNESS_QUICK_EXECUTOR, "submit", return_value=_DoneFuture()) as mocked_submit:
+            text, source, elapsed_ms, status, as_of = mobile_api._generate_freshness_quick_answer(
+                "今天spacex是不是要上市",
+                {},
+            )
+
+        self.assertEqual(source, "fresh_lookup")
+        self.assertEqual(status, "verified")
+        self.assertGreaterEqual(elapsed_ms, 0)
+        self.assertTrue(as_of)
+        self.assertIn("快速核验", text)
+        self.assertIn("后台", text)
+        mocked_submit.assert_called_once()
+
+    def test_generate_freshness_quick_answer_timeout_uses_placeholder(self):
+        class _TimeoutFuture:
+            def result(self, timeout=None):
+                raise TimeoutError()
+
+            def cancel(self):
+                return True
+
+        with patch.object(mobile_api._FRESHNESS_QUICK_EXECUTOR, "submit", return_value=_TimeoutFuture()):
+            text, source, elapsed_ms, status, as_of = mobile_api._generate_freshness_quick_answer(
+                "今天spacex是不是要上市",
+                {},
+            )
+
+        self.assertEqual(source, "fresh_lookup_timeout")
+        self.assertEqual(status, "timeout")
+        self.assertGreaterEqual(elapsed_ms, 0)
+        self.assertTrue(as_of)
+        self.assertIn("不凭模型记忆下结论", text)
+        self.assertIn("后台正在继续查证", text)
+
+    def test_chat_submit_concept_ipo_still_simple_immediate(self):
+        body = mobile_api.ChatSubmitRequest(prompt="什么是IPO", history=[])
+        with patch.object(mobile_api.de, "get_user_profile", return_value={}), patch.object(
+            mobile_api, "_build_mobile_context_payload", return_value={"is_followup": False}
+        ), patch.object(
+            mobile_api, "_detect_mobile_has_portfolio", return_value=False
+        ), patch.object(
+            mobile_api, "classify_chat_mode", return_value=mobile_api.CHAT_MODE_SIMPLE
+        ), patch.object(
+            mobile_api, "build_deepseek_flash_llm", return_value=object()
+        ), patch.object(
+            mobile_api, "simple_chatter_reply", return_value="IPO 是首次公开募股。"
+        ) as mocked_reply, patch.object(
+            mobile_api, "_save_chat_answer_event", return_value=True
+        ), patch.object(
+            mobile_api, "_queue_mobile_chat_memory_persist", return_value="queued"
+        ), patch.object(
+            mobile_api.TaskManager, "create_task"
+        ) as mocked_create, patch.object(
+            mobile_api.TaskManager, "create_knowledge_task"
+        ) as mocked_knowledge, patch.object(
+            mobile_api, "_generate_freshness_quick_answer"
+        ) as mocked_fresh_quick:
+            out = mobile_api.chat_submit(body=body, username="u1")
+
+        self.assertEqual(out["delivery_mode"], "immediate")
+        self.assertEqual(out["chat_mode"], mobile_api.CHAT_MODE_SIMPLE)
+        self.assertEqual(out["result"]["response"], "IPO 是首次公开募股。")
+        mocked_reply.assert_called_once()
+        mocked_create.assert_not_called()
+        mocked_knowledge.assert_not_called()
+        mocked_fresh_quick.assert_not_called()
+
+    def test_chat_submit_market_price_query_not_freshness_lookup(self):
+        fake_redis = _FakeRedis()
+        body = mobile_api.ChatSubmitRequest(prompt="白银最新价多少", history=[])
+        with patch.object(mobile_api, "_redis", fake_redis), patch.object(
+            mobile_api.de, "get_user_profile", return_value={}
+        ), patch.object(
+            mobile_api, "_build_mobile_context_payload", return_value={"is_followup": False}
+        ), patch.object(
+            mobile_api, "classify_chat_mode", return_value=mobile_api.CHAT_MODE_ANALYSIS
+        ), patch.object(
+            mobile_api, "_detect_mobile_has_portfolio", return_value=False
+        ), patch.object(
+            mobile_api.TaskManager, "create_task", return_value="task-market-data"
+        ) as mocked_create, patch.object(
+            mobile_api.TaskManager, "get_task_meta", return_value={"status": "pending", "progress": "正在查询..."}
+        ), patch.object(
+            mobile_api, "_generate_freshness_quick_answer"
+        ) as mocked_fresh_quick, patch.object(
+            mobile_api, "_generate_market_move_quick_answer"
+        ) as mocked_market_quick:
+            out = mobile_api.chat_submit(body=body, username="u1")
+
+        self.assertEqual(out["delivery_mode"], "task")
+        self.assertEqual(out["chat_mode"], mobile_api.CHAT_MODE_ANALYSIS)
+        mocked_create.assert_called_once()
+        mocked_fresh_quick.assert_not_called()
+        mocked_market_quick.assert_not_called()
+
     def test_chat_submit_stock_futures_and_technical_questions_return_hybrid(self):
         for prompt in ("螺纹钢为什么大涨", "汇川技术技术面怎么看"):
             with self.subTest(prompt=prompt):
