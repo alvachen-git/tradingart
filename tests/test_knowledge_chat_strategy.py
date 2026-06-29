@@ -229,6 +229,52 @@ class TestKnowledgeChatStrategy(unittest.TestCase):
 
         self.assertEqual(candidates, [])
 
+    def test_listing_quote_candidate_filter_rejects_leveraged_space_etfs(self):
+        raw_candidates = [
+            {
+                "symbol": "SPCF",
+                "quoteType": "EQUITY",
+                "exchange": "PCX",
+                "shortname": "ProShares Ultra SpaceX",
+                "longname": "Proshares Ultra Spacex",
+                "exchDisp": "NYSEArca",
+                "score": 20004,
+            },
+            {
+                "symbol": "SPCX",
+                "quoteType": "EQUITY",
+                "exchange": "NMS",
+                "shortname": "Space Exploration Technologies ",
+                "longname": "Space Exploration Technologies Corp.",
+                "exchDisp": "NASDAQ",
+                "score": 20697,
+            },
+        ]
+
+        candidates = agent_core._filter_listing_quote_candidates(raw_candidates, "SpaceX")
+
+        self.assertEqual([candidate["ticker"] for candidate in candidates], ["SPCX"])
+
+    def test_listing_status_quote_lookup_prefers_alias_before_search_candidates(self):
+        frame = pd.DataFrame({"Close": [153.23]}, index=pd.to_datetime(["2026-06-26"]))
+
+        with patch.object(
+            agent_core,
+            "_search_listing_quote_candidates",
+            return_value=[{"ticker": "SPCF", "name": "ProShares Ultra SpaceX", "market": "NYSEArca"}],
+        ), patch.object(agent_core, "_download_listing_quote_frame", return_value=frame) as download_frame:
+            answer = agent_core._try_listing_quote_status_answer("spacex已经上市了吗", {})
+
+        self.assertIn("SPCX", answer)
+        self.assertNotIn("SPCF", answer)
+        self.assertEqual(download_frame.call_args.args[0], "SPCX")
+
+    def test_yfinance_session_does_not_inherit_system_proxy(self):
+        session = agent_core._make_yfinance_session()
+
+        if session is not None:
+            self.assertFalse(session.trust_env)
+
     def test_listing_status_quote_lookup_is_generic_not_spacex_only(self):
         frame = pd.DataFrame({"Close": [97.5]}, index=pd.to_datetime(["2026-06-26"]))
 

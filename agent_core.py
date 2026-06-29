@@ -2701,7 +2701,8 @@ _LISTING_QUOTE_ALLOWED_TYPES = {"EQUITY"}
 _LISTING_QUOTE_EXCLUDED_SYMBOL_PARTS = ("=", "-USD", "ZZX")
 _LISTING_QUOTE_EXCLUDED_NAME_HINTS = (
     "etf", "fund", "mutual fund", "tokenized", "prestock", "prestocks",
-    "derivatives", "company level", "2x", "3x", "short daily",
+    "derivatives", "company level", "2x", "3x", "short daily", "short spacex",
+    "proshares", "ultra", "highshares", "graniteshares", "tradr",
 )
 _LISTING_QUOTE_PREFERRED_EXCHANGES = {"NMS", "NYQ", "NGM", "NCM", "ASE"}
 _FRESHNESS_STALE_ANSWER_HINTS = (
@@ -2788,6 +2789,17 @@ def _normalize_listing_quote_key(value: str) -> str:
     return re.sub(r"[^a-z0-9]", "", str(value or "").lower())
 
 
+def _make_yfinance_session() -> Any:
+    try:
+        from curl_cffi import requests as curl_requests
+
+        session = curl_requests.Session(impersonate="chrome")
+        session.trust_env = False
+        return session
+    except Exception:
+        return None
+
+
 def _resolve_listing_quote_alias(query: str, state: Mapping[str, Any] | None = None) -> Dict[str, str]:
     candidates = [
         _freshness_query_target_from_state(state, query),
@@ -2806,8 +2818,13 @@ def _resolve_listing_quote_alias(query: str, state: Mapping[str, Any] | None = N
 def _listing_quote_target(query: str, state: Mapping[str, Any] | None = None) -> str:
     target = _freshness_query_target_from_state(state, query)
     if target:
-        return target
-    return str(query or "").strip()
+        text = target
+    else:
+        text = str(query or "").strip()
+    for keyword in ("已经", "已", "是否", "是不是", "有没有", "上市", "IPO", "ipo", "了吗", "吗", "了"):
+        text = re.sub(re.escape(keyword), " ", text, flags=re.I)
+    text = re.sub(r"[，。！？、,.!?；;：:\s]+", " ", text).strip()
+    return text or target or str(query or "").strip()
 
 
 def _listing_quote_candidate_score(candidate: Mapping[str, Any], target: str) -> float:
@@ -2884,6 +2901,7 @@ def _search_listing_quote_candidates(target: str, *, timeout_seconds: float) -> 
             lists_count=0,
             timeout=timeout_seconds,
             raise_errors=False,
+            session=_make_yfinance_session(),
         )
         return _filter_listing_quote_candidates(getattr(search, "quotes", []) or [], target)
     except Exception as exc:
@@ -2902,6 +2920,7 @@ def _download_listing_quote_frame(ticker: str, *, timeout_seconds: float) -> Any
         progress=False,
         threads=False,
         timeout=timeout_seconds,
+        session=_make_yfinance_session(),
     )
 
 
@@ -2930,7 +2949,7 @@ def _try_listing_quote_status_answer(query: str, state: Mapping[str, Any] | None
     target = _listing_quote_target(query, state)
     try:
         timeout_seconds = float(str(os.getenv("FRESHNESS_LISTING_QUOTE_TIMEOUT_SECONDS", "5")).strip() or 5)
-        candidates = _search_listing_quote_candidates(target, timeout_seconds=timeout_seconds)
+        candidates: List[Dict[str, str]] = []
         alias = _resolve_listing_quote_alias(query, state)
         if alias:
             alias_item = {
@@ -2939,8 +2958,11 @@ def _try_listing_quote_status_answer(query: str, state: Mapping[str, Any] | None
                 "market": str(alias.get("market") or "公开市场").strip(),
                 "exchange": str(alias.get("exchange") or "").strip(),
             }
-            if alias_item["ticker"] and all(item.get("ticker") != alias_item["ticker"] for item in candidates):
+            if alias_item["ticker"]:
                 candidates.append(alias_item)
+        for item in _search_listing_quote_candidates(target, timeout_seconds=timeout_seconds):
+            if all(existing.get("ticker") != item.get("ticker") for existing in candidates):
+                candidates.append(item)
 
         for candidate in candidates[:3]:
             ticker = str(candidate.get("ticker") or "").strip().upper()
