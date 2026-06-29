@@ -854,6 +854,9 @@ def process_ai_query(
             "quick_answer_scenario": str(context_payload.get("quick_answer_scenario", "")),
             "quick_answer_target": str(context_payload.get("quick_answer_target", "")),
             "quick_answer_direction": str(context_payload.get("quick_answer_direction", "")),
+            "freshness_required": bool(context_payload.get("freshness_required", False)),
+            "freshness_quick_status": str(context_payload.get("freshness_quick_status", "")),
+            "freshness_query_target": str(context_payload.get("freshness_query_target", "")),
             "link_context": (
                 context_payload.get("link_context")
                 if isinstance(context_payload.get("link_context"), dict)
@@ -1233,6 +1236,12 @@ def process_knowledge_chat(
             "user_id": str(user_id or ""),
             "knowledge_context": "",
             "intent_domain": str(context_payload.get("intent_domain", "")),
+            "delivery_mode": str(context_payload.get("delivery_mode", "")),
+            "quick_answer_scenario": str(context_payload.get("quick_answer_scenario", "")),
+            "quick_answer_target": str(context_payload.get("quick_answer_target", "")),
+            "freshness_required": bool(context_payload.get("freshness_required", False)),
+            "freshness_quick_status": str(context_payload.get("freshness_quick_status", "")),
+            "freshness_query_target": str(context_payload.get("freshness_query_target", "")),
         }
 
         self.update_state(state="PROCESSING", meta={"progress": "正在检索知识库..."})

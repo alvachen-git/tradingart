@@ -179,6 +179,9 @@ class AgentState(TypedDict):
     quick_answer_scenario: str
     quick_answer_target: str
     quick_answer_direction: str
+    freshness_required: bool
+    freshness_quick_status: str
+    freshness_query_target: str
     link_context: Dict[str, Any]
 
     news_summary: str  # 情报员填入：新闻摘要 (CPI/非农/美联储)
@@ -2544,11 +2547,15 @@ def _select_knowledge_chat_strategy(state: AgentState) -> str:
     user_query = str(state.get("user_query", "") or "").strip().lower()
     recent_context = str(state.get("recent_context", "") or "").strip().lower()
 
+    if _is_freshness_required_state(state):
+        return "company_news"
     if focus_mode_hint == "company_news" or focus_topic == "公司近期动态":
         return "company_news"
     if any(keyword in user_query for keyword in ("最近有什么好消息", "最近有没有好消息", "最近有什么动态", "最近进展", "最近催化")):
         return "company_news"
     if any(keyword in user_query for keyword in ("最近财报", "最新财报", "最近公告", "最新公告", "最近新闻", "最新新闻", "最近消息", "最新消息", "最近业绩", "最新业绩")):
+        return "company_news"
+    if _looks_like_listing_status_query(user_query):
         return "company_news"
     if _looks_like_latest_company_fact_query(user_query):
         return "company_news"
@@ -2603,6 +2610,10 @@ def _state_context_payload(state: Mapping[str, Any], *, recent_context_override:
         "intent_domain": str(state.get("intent_domain", "") or ""),
         "quick_answer_target": str(state.get("quick_answer_target", "") or ""),
         "quick_answer_direction": str(state.get("quick_answer_direction", "") or ""),
+        "quick_answer_scenario": str(state.get("quick_answer_scenario", "") or ""),
+        "freshness_required": bool(state.get("freshness_required", False)),
+        "freshness_quick_status": str(state.get("freshness_quick_status", "") or ""),
+        "freshness_query_target": str(state.get("freshness_query_target", "") or ""),
         "link_context": state.get("link_context") if isinstance(state.get("link_context"), dict) else {},
     }
     context_layers = state.get("context_layers")
@@ -2648,15 +2659,40 @@ def _simple_context_payload(
 _LATEST_COMPANY_FACT_KEYWORDS = (
     "最近",
     "最新",
+    "今天",
+    "今日",
+    "当前",
     "财报",
     "公告",
     "新闻",
     "消息",
     "动态",
     "业绩",
+    "IPO",
+    "ipo",
+    "上市",
+    "挂牌",
+    "交易",
+    "股票代码",
 )
-_LATEST_FACT_TIME_KEYWORDS = ("最近", "最新", "近期", "今年", "本年", "本月", "这个月", "一季度", "第一季度")
-_COMPANY_FACT_TOPIC_KEYWORDS = ("财报", "公告", "新闻", "消息", "动态", "业绩", "年报", "季报", "一季报", "半年报", "中报")
+_LATEST_FACT_TIME_KEYWORDS = (
+    "最近", "最新", "近期", "今天", "今日", "当前", "今年", "本年", "本月", "这个月", "一季度", "第一季度",
+)
+_COMPANY_FACT_TOPIC_KEYWORDS = (
+    "财报", "公告", "新闻", "消息", "动态", "业绩", "年报", "季报", "一季报", "半年报", "中报",
+    "IPO", "ipo", "上市", "挂牌", "交易", "股票代码", "纳斯达克", "NASDAQ", "Nasdaq", "NYSE", "SEC", "S-1", "招股书",
+)
+_LISTING_STATUS_QUERY_KEYWORDS = (
+    "IPO", "ipo", "上市", "挂牌", "交易", "股票代码", "ticker", "纳斯达克", "nasdaq", "NYSE", "nyse", "SEC", "S-1", "招股书",
+)
+_LISTING_EVIDENCE_KEYWORDS = (
+    "SPCX", "股票代码", "ticker", "纳斯达克", "NASDAQ", "Nasdaq", "NYSE", "IPO价格", "IPO price",
+    "开始交易", "上市交易", "公开交易", "listed", "trading", "shares", "stock", "纳斯达克100",
+)
+_FRESHNESS_STALE_ANSWER_HINTS = (
+    "知识更新时间", "训练数据", "截至我", "无法实时", "不能实时", "没有实时联网", "目前没有能力",
+    "仍是私营", "仍然是私营", "还是私营", "保持私有", "没有正式上市",
+)
 
 
 def _looks_like_latest_company_fact_query(query: str) -> bool:
@@ -2667,15 +2703,92 @@ def _looks_like_latest_company_fact_query(query: str) -> bool:
     )
 
 
+def _looks_like_listing_status_query(query: str) -> bool:
+    query_text = str(query or "")
+    if not query_text:
+        return False
+    has_listing_topic = any(keyword in query_text for keyword in _LISTING_STATUS_QUERY_KEYWORDS)
+    has_time_or_question = any(keyword in query_text for keyword in _LATEST_FACT_TIME_KEYWORDS) or any(
+        keyword in query_text for keyword in ("是不是", "是否", "有没有", "要上市", "已上市", "上市了吗")
+    )
+    return has_listing_topic and has_time_or_question
+
+
+def _is_freshness_required_state(state: Mapping[str, Any] | None) -> bool:
+    payload = state or {}
+    if bool(payload.get("freshness_required", False)):
+        return True
+    return str(payload.get("quick_answer_scenario") or "").strip().lower() == "freshness"
+
+
+def _freshness_query_target_from_state(state: Mapping[str, Any] | None, query: str) -> str:
+    payload = state or {}
+    for key in ("freshness_query_target", "quick_answer_target", "focus_entity", "symbol_name", "symbol"):
+        value = str(payload.get(key) or "").strip()
+        if value:
+            return value[:40]
+    text = str(query or "").strip()
+    for keyword in (
+        "今天", "今日", "当前", "最新", "是不是", "是否", "有没有", "要不要", "上市", "IPO", "ipo",
+        "挂牌", "交易", "股票代码", "吗", "呢", "么",
+    ):
+        text = text.replace(keyword, " ")
+    text = re.sub(r"[，。！？、,.!?；;：:\s]+", " ", text).strip()
+    for chunk in [part.strip(" -_/（）()[]【】") for part in text.split(" ") if part.strip()]:
+        if 2 <= len(chunk) <= 40:
+            return chunk
+    return str(query or "").strip()[:40]
+
+
+def _build_freshness_deep_search_query(query: str, state: Mapping[str, Any] | None = None) -> str:
+    target = _freshness_query_target_from_state(state, query)
+    today = datetime.now().strftime("%Y-%m-%d")
+    if _looks_like_listing_status_query(query):
+        subject = target or query
+        return f"{subject} IPO 上市 股票代码 交易所 官方公告 最新 {today}"
+    if target:
+        return f"{target} 最新 官方公告 新闻 {today} {query}"
+    return f"{query} 最新 官方公告 新闻 {today}"
+
+
+def _freshness_search_answer_has_evidence(query: str, answer: str) -> bool:
+    answer_text = str(answer or "").strip()
+    if not answer_text:
+        return False
+    if any(hint in answer_text for hint in _FRESHNESS_STALE_ANSWER_HINTS):
+        return False
+    if not is_search_answer_acceptable(query, answer_text):
+        return False
+    if _looks_like_listing_status_query(query):
+        return any(keyword.lower() in answer_text.lower() for keyword in _LISTING_EVIDENCE_KEYWORDS)
+    return True
+
+
 def _is_latest_company_fact_query(knowledge_strategy: str, query: str) -> bool:
     if knowledge_strategy != "company_news":
         return False
     query_text = str(query or "")
-    return any(keyword in query_text for keyword in _LATEST_COMPANY_FACT_KEYWORDS) or _looks_like_latest_company_fact_query(query_text)
+    return (
+        any(keyword in query_text for keyword in _LATEST_COMPANY_FACT_KEYWORDS)
+        or _looks_like_latest_company_fact_query(query_text)
+        or _looks_like_listing_status_query(query_text)
+    )
 
 
 def _insufficient_latest_company_fact_message() -> str:
     return "我这轮没有检索到足够新的公开资料。你可以指定报告期、公告来源或股票代码，我再帮你精确查。"
+
+
+def _insufficient_freshness_fact_message(query: str) -> str:
+    if _looks_like_listing_status_query(query):
+        return (
+            "我这轮没有检索到足够新的上市/IPO公开证据，不能凭模型记忆判断是否已上市。"
+            "请稍后再试，或补充股票代码、交易所公告/SEC链接，我再精确核验。"
+        )
+    return (
+        "我这轮没有检索到足够新的公开资料，不能凭模型记忆下实时事实结论。"
+        "请稍后再试，或补充公告/新闻链接，我再精确核验。"
+    )
 
 
 def _invoke_search_web_direct(query: str) -> str:
@@ -2693,6 +2806,8 @@ def _invoke_search_web_direct(query: str) -> str:
 def _try_direct_company_fact_search(query: str, knowledge_strategy: str) -> str | None:
     if not _is_latest_company_fact_query(knowledge_strategy, query):
         return None
+    if _looks_like_listing_status_query(query):
+        return _run_freshness_search_with_gate(query, {})
 
     answer = _invoke_search_web_direct(query)
     if answer and is_search_answer_acceptable(query, answer):
@@ -2701,6 +2816,29 @@ def _try_direct_company_fact_search(query: str, knowledge_strategy: str) -> str 
         preview = answer.replace("\n", " ")[:160]
         print(f"[knowledge fast path] rejected stale/low-quality search answer: {preview}")
     return _insufficient_latest_company_fact_message()
+
+
+def _run_freshness_search_with_gate(
+    query: str,
+    state: Mapping[str, Any] | None = None,
+) -> str:
+    search_query = _build_freshness_deep_search_query(query, state)
+    answer = _invoke_search_web_direct(search_query)
+    if answer and _freshness_search_answer_has_evidence(query, answer):
+        return f"【实时核验】\n{answer}"
+    if answer:
+        preview = answer.replace("\n", " ")[:160]
+        print(f"[knowledge freshness gate] rejected stale/low-quality search answer: {preview}")
+    return _insufficient_freshness_fact_message(query)
+
+
+def _try_direct_freshness_fact_search(
+    query: str,
+    state: Mapping[str, Any] | None = None,
+) -> str | None:
+    if not _is_freshness_required_state(state):
+        return None
+    return _run_freshness_search_with_gate(query, state)
 
 
 def simple_chatter_reply(
@@ -4438,6 +4576,13 @@ def knowledge_chatter_node(state: AgentState, llm=None):
         }
 
     # === 🔥 知识问答专用工具集 ===
+    direct_freshness_fact_answer = _try_direct_freshness_fact_search(user_query, state)
+    if direct_freshness_fact_answer:
+        return {
+            "messages": [HumanMessage(content=f"【知识问答】\n{direct_freshness_fact_answer}")],
+            "knowledge_context": ""
+        }
+
     direct_company_fact_answer = _try_direct_company_fact_search(user_query, knowledge_strategy)
     if direct_company_fact_answer:
         return {

@@ -99,13 +99,13 @@ class TestKnowledgeChatStrategy(unittest.TestCase):
         }
         fresh_answer = "最新披露包括2025年年度报告和2026年一季度报告，披露日期明确。"
 
-        with patch.object(agent_core.search_web, "invoke", return_value=fresh_answer) as search_invoke, \
+        with patch.object(agent_core, "_invoke_search_web_direct", return_value=fresh_answer) as search_invoke, \
              patch.object(agent_core, "is_search_answer_acceptable", return_value=True), \
              patch.object(agent_core, "create_react_agent") as create_agent:
             result = agent_core.knowledge_chatter_node(state, llm=Mock())
 
         self.assertIn(fresh_answer, result["messages"][0].content)
-        search_invoke.assert_called_once_with({"query": "汇川技术最近财报怎么样"})
+        search_invoke.assert_called_once_with("汇川技术最近财报怎么样")
         create_agent.assert_not_called()
 
     def test_current_first_quarter_profit_uses_direct_web_fast_path(self):
@@ -118,13 +118,13 @@ class TestKnowledgeChatStrategy(unittest.TestCase):
         }
         fresh_answer = "根据官方报告，2026年第一季度是盈利的，归母净利润为正。"
 
-        with patch.object(agent_core.search_web, "invoke", return_value=fresh_answer) as search_invoke, \
+        with patch.object(agent_core, "_invoke_search_web_direct", return_value=fresh_answer) as search_invoke, \
              patch.object(agent_core, "is_search_answer_acceptable", return_value=True), \
              patch.object(agent_core, "create_react_agent") as create_agent:
             result = agent_core.knowledge_chatter_node(state, llm=Mock())
 
         self.assertIn(fresh_answer, result["messages"][0].content)
-        search_invoke.assert_called_once_with({"query": "汇川技术今年第一季财报是赚钱吗"})
+        search_invoke.assert_called_once_with("汇川技术今年第一季财报是赚钱吗")
         create_agent.assert_not_called()
 
     def test_latest_company_fact_invalid_direct_web_stops_without_llm_fallback(self):
@@ -137,7 +137,7 @@ class TestKnowledgeChatStrategy(unittest.TestCase):
         }
         llm = Mock()
 
-        with patch.object(agent_core.search_web, "invoke", return_value="截至我知识更新时间（2024年中）"), \
+        with patch.object(agent_core, "_invoke_search_web_direct", return_value="截至我知识更新时间（2024年中）"), \
              patch.object(agent_core, "is_search_answer_acceptable", return_value=False), \
              patch.object(agent_core, "create_react_agent") as create_agent:
             result = agent_core.knowledge_chatter_node(state, llm=llm)
@@ -145,6 +145,100 @@ class TestKnowledgeChatStrategy(unittest.TestCase):
         self.assertIn("没有检索到足够新的公开资料", result["messages"][0].content)
         create_agent.assert_not_called()
         llm.invoke.assert_not_called()
+
+    def test_freshness_listing_query_selects_company_news_strategy(self):
+        state = {
+            "user_query": "今天spacex是不是要上市",
+            "focus_mode_hint": "",
+            "focus_topic": "",
+            "recent_context": "",
+            "freshness_required": True,
+            "quick_answer_scenario": "freshness",
+        }
+        self.assertEqual(agent_core._select_knowledge_chat_strategy(state), "company_news")
+
+    def test_freshness_listing_query_uses_direct_glm_search_gate(self):
+        state = {
+            "user_query": "今天spacex是不是要上市",
+            "focus_mode_hint": "",
+            "focus_topic": "",
+            "recent_context": "",
+            "symbol": "",
+            "freshness_required": True,
+            "freshness_query_target": "SpaceX",
+            "quick_answer_scenario": "freshness",
+        }
+        fresh_answer = "SpaceX 已上市交易，股票代码 SPCX，在 Nasdaq 交易，公开报道给出了 IPO 价格和交易日期。"
+
+        with patch.object(agent_core, "_invoke_search_web_direct", return_value=fresh_answer) as search_direct, \
+             patch.object(agent_core, "is_search_answer_acceptable", return_value=True), \
+             patch.object(agent_core, "create_react_agent") as create_agent:
+            result = agent_core.knowledge_chatter_node(state, llm=Mock())
+
+        content = result["messages"][0].content
+        self.assertIn("【实时核验】", content)
+        self.assertIn("SPCX", content)
+        search_query = search_direct.call_args.args[0]
+        self.assertIn("SpaceX", search_query)
+        self.assertIn("IPO", search_query)
+        self.assertIn("股票代码", search_query)
+        create_agent.assert_not_called()
+
+    def test_freshness_listing_query_rejects_stale_answer_without_llm_fallback(self):
+        state = {
+            "user_query": "今天spacex是不是要上市",
+            "focus_mode_hint": "",
+            "focus_topic": "",
+            "recent_context": "",
+            "symbol": "",
+            "freshness_required": True,
+            "freshness_query_target": "SpaceX",
+            "quick_answer_scenario": "freshness",
+        }
+        llm = Mock()
+
+        with patch.object(agent_core, "_invoke_search_web_direct", return_value="截至我知识更新时间，SpaceX 仍是私营公司。"), \
+             patch.object(agent_core, "is_search_answer_acceptable", return_value=False), \
+             patch.object(agent_core, "create_react_agent") as create_agent:
+            result = agent_core.knowledge_chatter_node(state, llm=llm)
+
+        content = result["messages"][0].content
+        self.assertIn("不能凭模型记忆判断是否已上市", content)
+        create_agent.assert_not_called()
+        llm.invoke.assert_not_called()
+
+    def test_listing_query_without_freshness_state_still_uses_evidence_gate(self):
+        state = {
+            "user_query": "今天spacex是不是要上市",
+            "focus_mode_hint": "",
+            "focus_topic": "",
+            "recent_context": "",
+            "symbol": "",
+        }
+        fresh_answer = "SpaceX 已上市，股票代码 SPCX，Nasdaq 报道显示其股票已经开始交易。"
+
+        with patch.object(agent_core, "_invoke_search_web_direct", return_value=fresh_answer) as search_direct, \
+             patch.object(agent_core, "is_search_answer_acceptable", return_value=True), \
+             patch.object(agent_core, "create_react_agent") as create_agent:
+            result = agent_core.knowledge_chatter_node(state, llm=Mock())
+
+        self.assertIn("SPCX", result["messages"][0].content)
+        self.assertIn("IPO", search_direct.call_args.args[0])
+        create_agent.assert_not_called()
+
+    def test_state_context_payload_preserves_freshness_fields(self):
+        payload = agent_core._state_context_payload({
+            "user_query": "今天spacex是不是要上市",
+            "freshness_required": True,
+            "freshness_quick_status": "timeout",
+            "freshness_query_target": "SpaceX",
+            "quick_answer_scenario": "freshness",
+        })
+
+        self.assertTrue(payload.get("freshness_required"))
+        self.assertEqual(payload.get("freshness_quick_status"), "timeout")
+        self.assertEqual(payload.get("freshness_query_target"), "SpaceX")
+        self.assertEqual(payload.get("quick_answer_scenario"), "freshness")
 
     def test_concept_question_still_uses_react_path(self):
         state = {
