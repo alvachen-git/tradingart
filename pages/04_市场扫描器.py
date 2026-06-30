@@ -19,7 +19,7 @@ from ui_components import inject_sidebar_toggle_style
 # ============================================================
 
 st.set_page_config(
-    page_title="爱波塔-全市场监控波动率",
+    page_title="爱波塔-市场扫描器",
     page_icon="favicon.ico",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -1378,7 +1378,7 @@ with col_title:
                 -webkit-background-clip: text;
                 -webkit-text-fill-color: transparent;
                 letter-spacing: -0.5px;
-            ">全商品监控</h1>
+            ">市场扫描器</h1>
             <p style="margin: 4px 0 0; font-size: 14px; color: #64748b;">
                 追踪波动率和持仓数据动向
             </p>
@@ -1549,7 +1549,7 @@ if refresh_requested:
 # 数据加载：保留缓存，移除固定 sleep，避免命中缓存时仍然“看起来很慢”
 start_time = time.time()
 if refresh_requested:
-    with st.spinner("🔄 正在刷新排行榜数据..."):
+    with st.spinner("🔄 正在刷新市场扫描器数据..."):
         df_monitor = load_data()
 else:
     df_monitor = load_data()
