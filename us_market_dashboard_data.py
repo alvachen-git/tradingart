@@ -128,6 +128,7 @@ HISTORICAL_PERCENTILE_FIELDS = {
     "term_slope_30_60": "term_slope_percentile",
     "put_skew_5pct": "put_skew_5pct_percentile",
     "call_skew_5pct": "call_skew_5pct_percentile",
+    "put_call_skew_5pct": "put_call_skew_5pct_percentile",
     "put_call_oi": "put_call_oi_percentile",
     "put_call_volume": "put_call_volume_percentile",
     "zero_dte_volume_share_pct": "zero_dte_volume_share_percentile",
@@ -734,35 +735,30 @@ def load_iv_history(
     if not table_exists(engine, contracts) or not table_exists(engine, iv):
         return _empty_df(["trade_date", "iv", "iv_pct", "source_rows", "provider_rows", "computed_rows"])
 
-    # Keep the row window aligned with get_us_underlying_iv_rank so the dashboard
-    # can derive rank and history from one query without changing the visible IV Rank口径.
-    limit = max(min(int(window or 252), 1500) * 300, 1000)
+    # Keep the day window aligned with get_us_underlying_iv_rank. Do not limit
+    # raw option rows before filtering, because one trading day can contain
+    # thousands of monthly contracts and an early row cap hides older dates.
+    day_limit = max(min(int(window or 252), 1500), 1)
+    row_limit = max(day_limit * 5000, 1000)
     if getattr(getattr(engine, "dialect", None), "name", "") in {"mysql", "mariadb"}:
         sql = text(
             f"""
-            WITH candidate AS (
+            WITH filtered AS (
                 SELECT h.trade_date, h.provider_iv, h.computed_iv, h.open_interest,
-                       h.underlying_price, c.strike, c.expiration_date
+                       CASE
+                           WHEN COALESCE(h.provider_iv, h.computed_iv) > 3
+                               THEN COALESCE(h.provider_iv, h.computed_iv) / 100
+                           ELSE COALESCE(h.provider_iv, h.computed_iv)
+                       END AS iv_value
                 FROM {iv} h
                 JOIN {contracts} c ON h.option_ticker = c.option_ticker
                 WHERE h.underlying = :underlying
                   AND c.expiration_type = 'monthly'
-                ORDER BY h.trade_date DESC
-                LIMIT :row_limit
-            ),
-            filtered AS (
-                SELECT trade_date, provider_iv, computed_iv, open_interest,
-                       CASE
-                           WHEN COALESCE(provider_iv, computed_iv) > 3
-                               THEN COALESCE(provider_iv, computed_iv) / 100
-                           ELSE COALESCE(provider_iv, computed_iv)
-                       END AS iv_value
-                FROM candidate
-                WHERE COALESCE(provider_iv, computed_iv) IS NOT NULL
-                  AND underlying_price > 0
-                  AND DATEDIFF(STR_TO_DATE(expiration_date, '%Y-%m-%d'), STR_TO_DATE(trade_date, '%Y%m%d')) BETWEEN 20 AND 90
-                  AND ABS(strike - underlying_price) / underlying_price <= 0.10
-                  AND (open_interest IS NULL OR open_interest > 0)
+                  AND COALESCE(h.provider_iv, h.computed_iv) IS NOT NULL
+                  AND h.underlying_price > 0
+                  AND DATEDIFF(STR_TO_DATE(c.expiration_date, '%Y-%m-%d'), STR_TO_DATE(h.trade_date, '%Y%m%d')) BETWEEN 20 AND 90
+                  AND ABS(c.strike - h.underlying_price) / h.underlying_price <= 0.10
+                  AND (h.open_interest IS NULL OR h.open_interest > 0)
             )
             SELECT trade_date,
                    CASE
@@ -775,19 +771,20 @@ def load_iv_history(
                    SUM(CASE WHEN computed_iv IS NOT NULL THEN 1 ELSE 0 END) AS computed_rows
             FROM filtered
             GROUP BY trade_date
-            ORDER BY trade_date ASC
+            ORDER BY trade_date DESC
+            LIMIT :day_limit
             """
         )
         try:
             out = pd.read_sql(
                 sql,
                 engine,
-                params={"underlying": normalize_underlying(underlying), "row_limit": limit},
+                params={"underlying": normalize_underlying(underlying), "day_limit": day_limit},
             )
             if not out.empty:
                 for col in ("iv", "source_rows", "provider_rows", "computed_rows"):
                     out[col] = pd.to_numeric(out[col], errors="coerce")
-                out = out.dropna(subset=["iv"]).tail(window).reset_index(drop=True)
+                out = out.dropna(subset=["iv"]).sort_values("trade_date").tail(window).reset_index(drop=True)
                 out["iv_pct"] = out["iv"] * 100
                 return out[["trade_date", "iv", "iv_pct", "source_rows", "provider_rows", "computed_rows"]]
         except Exception:
@@ -803,7 +800,7 @@ def load_iv_history(
         WHERE h.underlying = :underlying
           AND c.expiration_type = 'monthly'
         ORDER BY h.trade_date DESC
-        LIMIT {limit}
+        LIMIT {row_limit}
         """
     )
     try:
@@ -1162,8 +1159,10 @@ def _skew_metrics(chain_df: pd.DataFrame) -> dict[str, Any]:
             "skew_expiration": None,
             "put_skew_5pct": None,
             "call_skew_5pct": None,
+            "put_call_skew_5pct": None,
             "put_skew_5pct_percentile": None,
             "call_skew_5pct_percentile": None,
+            "put_call_skew_5pct_percentile": None,
         }
     monthly = df[
         (df["expiration_type"] == "monthly")
@@ -1177,8 +1176,10 @@ def _skew_metrics(chain_df: pd.DataFrame) -> dict[str, Any]:
             "skew_expiration": None,
             "put_skew_5pct": None,
             "call_skew_5pct": None,
+            "put_call_skew_5pct": None,
             "put_skew_5pct_percentile": None,
             "call_skew_5pct_percentile": None,
+            "put_call_skew_5pct_percentile": None,
         }
 
     skew_rows = []
@@ -1195,6 +1196,10 @@ def _skew_metrics(chain_df: pd.DataFrame) -> dict[str, Any]:
             }
         )
     skew_table = pd.DataFrame(skew_rows).dropna(subset=["dte"])
+    if not skew_table.empty and {"put_skew_5pct", "call_skew_5pct"}.issubset(skew_table.columns):
+        skew_table["put_call_skew_5pct"] = pd.to_numeric(
+            skew_table["put_skew_5pct"], errors="coerce"
+        ) - pd.to_numeric(skew_table["call_skew_5pct"], errors="coerce")
 
     candidates = monthly[monthly["dte"].between(20, 45)]
     if candidates.empty:
@@ -1211,15 +1216,20 @@ def _skew_metrics(chain_df: pd.DataFrame) -> dict[str, Any]:
     call_iv = _fixed_moneyness_iv(slice_df, call_put="C", center=5, band=1.0)
     put_skew = put_iv - atm_iv if put_iv is not None and atm_iv is not None else None
     call_skew = call_iv - atm_iv if call_iv is not None and atm_iv is not None else None
+    put_call_skew = put_skew - call_skew if put_skew is not None and call_skew is not None else None
     return {
         "skew_expiration": str(expiration),
         "put_skew_5pct": put_skew,
         "call_skew_5pct": call_skew,
+        "put_call_skew_5pct": put_call_skew,
         "put_skew_5pct_percentile": _percentile_rank(skew_table["put_skew_5pct"], put_skew)
         if "put_skew_5pct" in skew_table
         else None,
         "call_skew_5pct_percentile": _percentile_rank(skew_table["call_skew_5pct"], call_skew)
         if "call_skew_5pct" in skew_table
+        else None,
+        "put_call_skew_5pct_percentile": _percentile_rank(skew_table["put_call_skew_5pct"], put_call_skew)
+        if "put_call_skew_5pct" in skew_table
         else None,
     }
 
@@ -1350,6 +1360,14 @@ def _clean_metric_value(value: Any) -> float | None:
     return out
 
 
+def _derive_put_call_skew(put_skew: Any, call_skew: Any) -> float | None:
+    put_value = _clean_metric_value(put_skew)
+    call_value = _clean_metric_value(call_skew)
+    if put_value is None or call_value is None:
+        return None
+    return put_value - call_value
+
+
 def apply_historical_percentiles(
     metrics: dict[str, Any],
     metrics_history: pd.DataFrame,
@@ -1367,6 +1385,7 @@ def apply_historical_percentiles(
         out[percentile_key] = None
 
     if history.empty:
+        out["put_call_skew_5pct"] = _derive_put_call_skew(out.get("put_skew_5pct"), out.get("call_skew_5pct"))
         for field in HISTORICAL_PERCENTILE_FIELDS:
             out[f"{field}_history_count"] = 0
             out[f"{field}_insufficient_history"] = True
@@ -1381,6 +1400,12 @@ def apply_historical_percentiles(
             value = exact_row.get(col)
             if pd.notna(value):
                 out[col] = value
+
+    out["put_call_skew_5pct"] = _derive_put_call_skew(out.get("put_skew_5pct"), out.get("call_skew_5pct"))
+    if {"put_skew_5pct", "call_skew_5pct"}.issubset(history.columns):
+        history["put_call_skew_5pct"] = pd.to_numeric(history["put_skew_5pct"], errors="coerce") - pd.to_numeric(
+            history["call_skew_5pct"], errors="coerce"
+        )
 
     history_window = max(int(window or 252), 1)
     min_count = max(int(min_samples or 1), 1)

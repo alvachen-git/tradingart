@@ -83,6 +83,7 @@ def show_navigation() -> None:
             _safe_page_link("pages/期权学习.py", label="期权学习")
         _safe_page_link("pages/01_ETF期权.py", label="ETF期权")
         _safe_page_link("pages/02_商品期权.py", label="商品期权")
+        _safe_page_link("pages/29_美股数据实验台.py", label="美股期权")
         _safe_page_link("pages/12_策略回测.py", label="策略回测")
         _safe_page_link("pages/04_市场扫描器.py", label="市场扫描器")
         _safe_page_link("pages/10_跨资产IV温度.py", label="跨资产IV温度")

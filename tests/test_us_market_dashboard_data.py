@@ -516,6 +516,7 @@ class UsMarketDashboardDataTests(unittest.TestCase):
                     "iv_rv20_spread": float(idx - 30),
                     "term_slope_30_60": float(idx / 10),
                     "put_skew_5pct": float(idx / 5),
+                    "call_skew_5pct": float(-idx / 10),
                     "put_call_oi": float(idx / 20),
                 }
             )
@@ -525,6 +526,7 @@ class UsMarketDashboardDataTests(unittest.TestCase):
             "iv_rv20_spread": 39.0,
             "term_slope_30_60": 6.9,
             "put_skew_5pct": 13.8,
+            "call_skew_5pct": -6.9,
             "put_call_oi": 69 / 20,
         }
 
@@ -540,6 +542,9 @@ class UsMarketDashboardDataTests(unittest.TestCase):
         self.assertAlmostEqual(result["iv_rv20_percentile"], 100.0)
         self.assertAlmostEqual(result["term_slope_percentile"], 100.0)
         self.assertAlmostEqual(result["put_skew_5pct_percentile"], 100.0)
+        self.assertAlmostEqual(result["call_skew_5pct_percentile"], 1 / 70 * 100)
+        self.assertAlmostEqual(result["put_call_skew_5pct"], 20.7)
+        self.assertAlmostEqual(result["put_call_skew_5pct_percentile"], 100.0)
         self.assertAlmostEqual(result["put_call_oi_percentile"], 100.0)
         self.assertFalse(result["iv_change_1d_insufficient_history"])
 
@@ -710,8 +715,10 @@ class UsMarketDashboardDataTests(unittest.TestCase):
         self.assertEqual(metrics["term_state"], "Backwardation")
         self.assertAlmostEqual(metrics["put_skew_5pct"], 5.0)
         self.assertAlmostEqual(metrics["call_skew_5pct"], -2.0)
+        self.assertAlmostEqual(metrics["put_call_skew_5pct"], 7.0)
         self.assertAlmostEqual(metrics["put_skew_5pct_percentile"], 100.0)
         self.assertAlmostEqual(metrics["call_skew_5pct_percentile"], 100.0)
+        self.assertAlmostEqual(metrics["put_call_skew_5pct_percentile"], 100.0)
         self.assertAlmostEqual(metrics["put_call_oi"], 300 / 270)
         self.assertAlmostEqual(metrics["put_call_volume"], 430 / 200)
         self.assertAlmostEqual(metrics["put_call_oi_percentile"], 2 / 3 * 100)
