@@ -1,0 +1,4 @@
+# US options daily snapshot update (Asia/Shanghai): Tue-Sat 08:30.
+# Runs after the previous US trading session has settled enough for Massive snapshot IV/OI.
+CRON_TZ=Asia/Shanghai
+30 8 * * 2-6 /bin/bash /root/finance_app/future-app/run_us_options_daily.sh
