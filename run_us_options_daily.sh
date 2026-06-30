@@ -14,6 +14,39 @@ US_OPTIONS_EXTRA_ARGS="${US_OPTIONS_EXTRA_ARGS:-}"
 
 cd "${APP_DIR}" || exit 1
 
+load_env_file() {
+  ENV_PATH="$1"
+  if [ ! -f "${ENV_PATH}" ]; then
+    return 0
+  fi
+  while IFS= read -r ENV_LINE || [ -n "${ENV_LINE}" ]; do
+    case "${ENV_LINE}" in
+      ""|\#*) continue ;;
+    esac
+    case "${ENV_LINE}" in
+      *=*) ;;
+      *) continue ;;
+    esac
+    ENV_KEY="${ENV_LINE%%=*}"
+    ENV_VALUE="${ENV_LINE#*=}"
+    case "${ENV_KEY}" in
+      ""|*[!A-Za-z0-9_]*|[0-9]*) continue ;;
+    esac
+    ENV_VALUE="${ENV_VALUE%$'\r'}"
+    if [ "${#ENV_VALUE}" -ge 2 ]; then
+      FIRST_CHAR="${ENV_VALUE:0:1}"
+      LAST_CHAR="${ENV_VALUE: -1}"
+      if { [ "${FIRST_CHAR}" = "\"" ] && [ "${LAST_CHAR}" = "\"" ]; } || { [ "${FIRST_CHAR}" = "'" ] && [ "${LAST_CHAR}" = "'" ]; }; then
+        ENV_VALUE="${ENV_VALUE:1:${#ENV_VALUE}-2}"
+      fi
+    fi
+    export "${ENV_KEY}=${ENV_VALUE}"
+  done < "${ENV_PATH}"
+}
+
+load_env_file "${APP_DIR}/../.env"
+load_env_file "${APP_DIR}/.env"
+
 if [ ! -x "${PYTHON_BIN}" ]; then
   echo "" >> "${LOG_FILE}"
   echo "========================================" >> "${LOG_FILE}"
@@ -39,6 +72,11 @@ echo "" >> "${LOG_FILE}"
 echo "========================================" >> "${LOG_FILE}"
 echo "US_OPTIONS_DAILY START: $(date)" >> "${LOG_FILE}"
 echo "US_OPTIONS_DAILY CONFIG: underlyings=${US_OPTIONS_UNDERLYINGS}, timeout=${US_OPTIONS_TIMEOUT_SECONDS}s, short_band=${US_OPTIONS_SHORT_STRIKE_BAND_PCT}" >> "${LOG_FILE}"
+if [ -n "${MASSIVE_API_KEY:-${POLYGON_API_KEY:-}}" ]; then
+  echo "US_OPTIONS_DAILY ENV: api_key_present=true" >> "${LOG_FILE}"
+else
+  echo "US_OPTIONS_DAILY ENV: api_key_present=false" >> "${LOG_FILE}"
+fi
 
 if command -v timeout >/dev/null 2>&1; then
   timeout --signal=TERM --kill-after=30 "${US_OPTIONS_TIMEOUT_SECONDS}" \
