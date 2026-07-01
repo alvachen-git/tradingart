@@ -211,6 +211,14 @@ class UsMarketDashboardDataTests(unittest.TestCase):
         self.assertEqual(dash.option_table_names(False)["daily"], "us_option_daily")
         self.assertEqual(dash.option_table_names(False)["metrics"], "us_option_market_metrics_daily")
 
+    def test_dashboard_underlyings_include_labels_and_exclude_index_symbols(self):
+        symbols = set(dash.DEFAULT_DASHBOARD_UNDERLYINGS)
+
+        self.assertFalse({"SPX", "NDX", "RUT", "VIX"} & symbols)
+        for symbol in ("SPY", "QQQ", "IWM", "GLD", "TLT", "TSLA", "NVDA", "AMD", "AAPL", "AMZN"):
+            self.assertIn(symbol, symbols)
+            self.assertTrue(dash.UNDERLYING_DISPLAY_NAMES.get(symbol))
+
     def test_load_latest_option_trade_date_prefers_latest_available_option_date(self):
         self._create_option_tables(use_test_tables=True)
         names = dash.option_table_names(True)
@@ -474,6 +482,65 @@ class UsMarketDashboardDataTests(unittest.TestCase):
         self.assertEqual(summary["short_cycle"], 1)
         self.assertEqual(summary["one_dte"], 1)
 
+    def test_load_option_chain_summary_counts_without_full_chain(self):
+        self._create_option_tables(use_test_tables=True)
+
+        summary = dash.load_option_chain_summary(
+            "SPY",
+            "20260115",
+            include_short_cycle=True,
+            use_test_tables=True,
+            engine=self.engine,
+        )
+
+        self.assertEqual(summary["rows"], 3)
+        self.assertEqual(summary["monthly"], 2)
+        self.assertEqual(summary["short_cycle"], 1)
+        self.assertEqual(summary["zero_dte"], 0)
+        self.assertEqual(summary["one_dte"], 1)
+        self.assertEqual(summary["expirations"], 2)
+        self.assertEqual(summary["provider_iv_rows"], 2)
+        self.assertEqual(summary["computed_iv_rows"], 1)
+        self.assertEqual(summary["open_interest_rows"], 2)
+
+    def test_load_option_chain_summary_can_exclude_short_cycle(self):
+        self._create_option_tables(use_test_tables=True)
+
+        summary = dash.load_option_chain_summary(
+            "SPY",
+            "20260115",
+            include_short_cycle=False,
+            use_test_tables=True,
+            engine=self.engine,
+        )
+
+        self.assertEqual(summary["rows"], 2)
+        self.assertEqual(summary["monthly"], 2)
+        self.assertEqual(summary["short_cycle"], 0)
+        self.assertEqual(summary["one_dte"], 0)
+        self.assertEqual(summary["provider_iv_rows"], 1)
+        self.assertEqual(summary["computed_iv_rows"], 1)
+        self.assertEqual(summary["open_interest_rows"], 2)
+
+    def test_load_option_chain_summary_can_skip_iv_counts(self):
+        self._create_option_tables(use_test_tables=True)
+
+        summary = dash.load_option_chain_summary(
+            "SPY",
+            "20260115",
+            include_short_cycle=True,
+            include_iv_counts=False,
+            use_test_tables=True,
+            engine=self.engine,
+        )
+
+        self.assertEqual(summary["rows"], 3)
+        self.assertEqual(summary["monthly"], 2)
+        self.assertEqual(summary["short_cycle"], 1)
+        self.assertEqual(summary["provider_iv_rows"], 0)
+        self.assertEqual(summary["computed_iv_rows"], 0)
+        self.assertEqual(summary["open_interest_rows"], 2)
+
     def test_load_iv_history_uses_monthly_contracts_only(self):
         self._create_option_tables(use_test_tables=True)
 
@@ -583,6 +650,76 @@ class UsMarketDashboardDataTests(unittest.TestCase):
         expected = float(scoped_returns.std() * math.sqrt(252) * 100)
 
         self.assertAlmostEqual(rv, expected, places=8)
+
+    def test_calculate_overview_metrics_from_market_history_uses_preaggregated_rows(self):
+        trade_dates = pd.date_range("2025-11-07", periods=70, freq="D").strftime("%Y%m%d")
+        stock_df = pd.DataFrame(
+            {
+                "date": pd.date_range("2025-11-07", periods=70, freq="D"),
+                "close": [100 + idx * 0.2 + ((-1) ** idx) * 0.4 for idx in range(70)],
+            }
+        )
+        metrics_history = pd.DataFrame(
+            {
+                "trade_date": trade_dates,
+                "underlying": ["SPY"] * 70,
+                "atm_iv_pct": [15.0 + idx * 0.1 for idx in range(70)],
+                "iv_change_1d": [0.1] * 70,
+                "iv_rv20_spread": [2.0 + idx * 0.01 for idx in range(70)],
+                "iv_30d": [20.0] * 70,
+                "iv_60d": [18.0] * 70,
+                "term_slope_30_60": [-2.0] * 70,
+                "term_state": ["Backwardation"] * 70,
+                "skew_expiration": ["2026-02-20"] * 70,
+                "put_skew_5pct": [5.0] * 70,
+                "call_skew_5pct": [-1.0] * 70,
+                "put_call_oi": [1.5] * 70,
+                "put_call_volume": [1.2] * 70,
+                "zero_dte_volume_share_pct": [8.0] * 70,
+                "top_oi_strike": [600.0] * 70,
+                "top_oi": [5000.0] * 70,
+                "top5_oi_share_pct": [22.0] * 70,
+                "total_open_interest": [100000.0] * 70,
+                "total_volume": [70000.0] * 70,
+                "provider_iv_rows": [1200] * 70,
+                "computed_iv_rows": [300] * 70,
+                "open_interest_rows": [8500] * 70,
+            }
+        )
+
+        metrics = dash.calculate_overview_metrics_from_market_history(
+            stock_df=stock_df,
+            market_metrics_history=metrics_history,
+            trade_date=trade_dates[-1],
+        )
+
+        self.assertAlmostEqual(metrics["atm_iv_pct"], 21.9)
+        self.assertAlmostEqual(metrics["iv_rank"], 100.0)
+        self.assertAlmostEqual(metrics["iv_percentile"], 100.0)
+        self.assertEqual(metrics["iv_history_days"], 70)
+        self.assertAlmostEqual(metrics["iv_change_1d"], 0.1)
+        self.assertAlmostEqual(metrics["iv_30d"], 20.0)
+        self.assertAlmostEqual(metrics["term_slope_30_60"], -2.0)
+        self.assertEqual(metrics["term_state"], "Backwardation")
+        self.assertAlmostEqual(metrics["put_skew_5pct"], 5.0)
+        self.assertAlmostEqual(metrics["call_skew_5pct"], -1.0)
+        self.assertAlmostEqual(metrics["put_call_skew_5pct"], 6.0)
+        self.assertAlmostEqual(metrics["put_call_oi"], 1.5)
+        self.assertEqual(metrics["provider_iv_rows"], 1200)
+        self.assertEqual(metrics["open_interest_rows"], 8500)
+
+    def test_calculate_overview_metrics_from_market_history_degrades_without_rows(self):
+        metrics = dash.calculate_overview_metrics_from_market_history(
+            stock_df=pd.DataFrame(),
+            market_metrics_history=pd.DataFrame(),
+            trade_date="20260115",
+        )
+
+        self.assertIsNone(metrics["atm_iv_pct"])
+        self.assertIsNone(metrics["iv_rank"])
+        self.assertEqual(metrics["iv_history_days"], 0)
+        self.assertEqual(metrics["term_state"], "样本不足")
+        self.assertIsNone(metrics["put_call_oi"])
 
     def test_calculate_volatility_positioning_metrics_builds_investor_panel_values(self):
         stock_df = pd.DataFrame(

@@ -9,6 +9,7 @@ from typing import Any, Sequence
 from sqlalchemy import text
 
 from us_options_polygon import (
+    DEFAULT_UNDERLYINGS,
     MassiveOptionsClient,
     compact_date,
     default_trade_date,
@@ -19,7 +20,6 @@ from us_options_polygon import (
 )
 
 
-DEFAULT_UNDERLYINGS = ("SPY", "QQQ", "IWM")
 REQUIRED_METRIC_FIELDS = ("put_call_oi", "total_open_interest", "atm_iv_pct")
 
 

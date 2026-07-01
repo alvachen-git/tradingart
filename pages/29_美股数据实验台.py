@@ -29,7 +29,9 @@ dashboard_data = importlib.reload(dashboard_data)
 
 from us_market_dashboard_data import (
     DEFAULT_DASHBOARD_UNDERLYINGS,
+    UNDERLYING_DISPLAY_NAMES,
     calculate_atm_iv_pct,
+    calculate_overview_metrics_from_market_history,
     calculate_volatility_positioning_metrics,
     dashboard_engine,
     load_available_option_trade_dates,
@@ -38,6 +40,7 @@ from us_market_dashboard_data import (
     load_latest_option_trade_date,
     load_market_metrics_history,
     load_option_chain_daily,
+    load_option_chain_summary,
     load_stock_daily,
     selected_underlying_price,
     summarize_option_chain,
@@ -167,22 +170,26 @@ def _inject_page_style() -> None:
         .us-lab-kpi-strip {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
-            border: 1px solid #e2e8f0;
-            border-radius: 8px;
-            background: #ffffff;
-            overflow: hidden;
-            margin: 6px 0 12px;
+            gap: 8px;
+            border: 0;
+            border-radius: 0;
+            background: transparent;
+            overflow: visible;
+            margin: 8px 0 14px;
         }
         .us-lab-kpi {
             min-height: 76px;
-            padding: 12px 13px 10px;
-            border-right: 1px solid #e2e8f0;
+            padding: 13px 14px 11px;
+            border: 1px solid #e2e8f0;
+            border-radius: 8px;
+            background: #ffffff;
+            box-shadow: 0 1px 2px rgba(15, 23, 42, .03);
         }
         .us-lab-kpi:last-child {
-            border-right: 0;
+            border-right: 1px solid #e2e8f0;
         }
         .us-lab-kpi-label {
-            color: #64748b;
+            color: #64758b;
             font-size: 12px;
             line-height: 1.2;
             margin-bottom: 7px;
@@ -197,7 +204,7 @@ def _inject_page_style() -> None:
             white-space: nowrap;
         }
         .us-lab-kpi-detail {
-            color: #64748b;
+            color: #708199;
             font-size: 11px;
             line-height: 1.25;
             margin-top: 6px;
@@ -278,7 +285,7 @@ def _inject_page_style() -> None:
         .us-lab-rail {
             border: 1px solid #e2e8f0;
             border-radius: 8px;
-            background: linear-gradient(180deg, #ffffff 0%, #fbfdff 100%);
+            background: #ffffff;
             padding: 18px 18px 14px;
             min-height: 626px;
         }
@@ -390,13 +397,14 @@ def _inject_page_style() -> None:
             gap: 14px;
             min-height: 104px;
             padding: 14px 14px;
-            border: 1px solid #dbeafe;
+            border: 1px solid #e2e8f0;
             border-radius: 8px;
-            background: linear-gradient(90deg, rgba(239,246,255,.94), #ffffff 76%);
+            background: #fbfcfe;
+            box-shadow: 0 1px 2px rgba(15, 23, 42, .035);
         }
         .us-lab-ledger-row.hot {
-            border-color: #fed7aa;
-            background: linear-gradient(90deg, rgba(255,247,237,.96), #ffffff 76%);
+            border-color: #e2e8f0;
+            background: #fbfcfe;
         }
         .us-lab-ledger-row.compact {
             min-height: 104px;
@@ -409,14 +417,14 @@ def _inject_page_style() -> None:
             min-width: 0;
         }
         .us-lab-ledger-label {
-            color: #0f172a;
+            color: #111827;
             font-size: 14px;
             line-height: 1.2;
             font-weight: 760;
             white-space: nowrap;
         }
         .us-lab-ledger-sub {
-            color: #64748b;
+            color: #64758b;
             font-size: 11px;
             line-height: 1.25;
             margin-top: 7px;
@@ -435,9 +443,9 @@ def _inject_page_style() -> None:
             max-width: 100%;
             border: 1px solid #dbe3ef;
             border-radius: 999px;
-            background: rgba(255,255,255,.76);
+            background: #ffffff;
             padding: 4px 7px;
-            color: #64748b;
+            color: #64758b;
             font-size: 10px;
             line-height: 1;
             white-space: nowrap;
@@ -470,7 +478,7 @@ def _inject_page_style() -> None:
             font-size: 22px;
         }
         .us-lab-ledger-pct {
-            color: #64748b;
+            color: #64758b;
             font-size: 11px;
             line-height: 1.2;
             min-width: 0;
@@ -902,6 +910,12 @@ def _format_trade_date(value: str | dt.date | dt.datetime | None) -> str:
     return f"{raw[:4]}/{raw[4:6]}/{raw[6:8]}"
 
 
+def _underlying_option_label(symbol: str) -> str:
+    code = str(symbol or "").upper()
+    name = UNDERLYING_DISPLAY_NAMES.get(code)
+    return f"{code}  {name}" if name else code
+
+
 def _clean_float(value: Any) -> float | None:
     try:
         numeric = float(value)
@@ -1016,54 +1030,95 @@ def _prepare_iv_series(iv_history: pd.DataFrame, trade_date: str, current_iv_pct
     )
 
 
-def _tradingview_symbol(symbol: str) -> str:
-    mapping = {
-        "SPY": "AMEX:SPY",
-        "QQQ": "NASDAQ:QQQ",
-        "IWM": "AMEX:IWM",
-        "SPX": "SP:SPX",
-        "NDX": "NASDAQ:NDX",
-        "RUT": "TVC:RUT",
-        "VIX": "CBOE:VIX",
+def _iv_history_from_market_metrics(market_metrics_history: pd.DataFrame) -> pd.DataFrame:
+    columns = ["trade_date", "iv", "iv_pct", "source_rows", "provider_rows", "computed_rows"]
+    if (
+        market_metrics_history is None
+        or market_metrics_history.empty
+        or "trade_date" not in market_metrics_history.columns
+        or "atm_iv_pct" not in market_metrics_history.columns
+    ):
+        return pd.DataFrame(columns=columns)
+
+    source = market_metrics_history.copy()
+    out = pd.DataFrame()
+    out["trade_date"] = source["trade_date"].astype(str).str.replace("-", "", regex=False).str[:8]
+    out["iv_pct"] = pd.to_numeric(source["atm_iv_pct"], errors="coerce")
+    out = out.dropna(subset=["trade_date", "iv_pct"])
+    if out.empty:
+        return pd.DataFrame(columns=columns)
+
+    out["iv"] = out["iv_pct"] / 100
+    out["source_rows"] = 0
+    if "provider_iv_rows" in source.columns:
+        out["provider_rows"] = pd.to_numeric(source["provider_iv_rows"], errors="coerce").fillna(0).astype(int)
+    else:
+        out["provider_rows"] = 0
+    if "computed_iv_rows" in source.columns:
+        out["computed_rows"] = pd.to_numeric(source["computed_iv_rows"], errors="coerce").fillna(0).astype(int)
+    else:
+        out["computed_rows"] = 0
+    return out[columns].sort_values("trade_date").reset_index(drop=True)
+
+
+def _compact_trade_date_value(value: Any) -> str:
+    if value is None or pd.isna(value):
+        return ""
+    if isinstance(value, (dt.date, dt.datetime, pd.Timestamp)):
+        return pd.to_datetime(value).strftime("%Y%m%d")
+    return str(value).replace("-", "")[:8]
+
+
+def _latest_metric_trade_date(market_metrics_history: pd.DataFrame) -> str | None:
+    if market_metrics_history is None or market_metrics_history.empty or "trade_date" not in market_metrics_history.columns:
+        return None
+    dates = market_metrics_history["trade_date"].apply(_compact_trade_date_value)
+    dates = dates[dates.astype(bool)]
+    return str(dates.max()) if not dates.empty else None
+
+
+def _int_metric_value(row: pd.Series, key: str) -> int:
+    value = row.get(key)
+    if value is None or pd.isna(value):
+        return 0
+    try:
+        return int(value)
+    except Exception:
+        return 0
+
+
+def _summary_from_market_metrics(market_metrics_history: pd.DataFrame, trade_date: str) -> dict[str, int]:
+    summary = {
+        "rows": 0,
+        "monthly": 0,
+        "short_cycle": 0,
+        "zero_dte": 0,
+        "one_dte": 0,
+        "expirations": 0,
+        "provider_iv_rows": 0,
+        "computed_iv_rows": 0,
+        "open_interest_rows": 0,
     }
-    return mapping.get(str(symbol or "").upper(), str(symbol or "SPY").upper())
+    if market_metrics_history is None or market_metrics_history.empty or "trade_date" not in market_metrics_history.columns:
+        return summary
 
+    history = market_metrics_history.copy()
+    history["trade_date"] = history["trade_date"].apply(_compact_trade_date_value)
+    history = history[history["trade_date"].astype(bool)].sort_values("trade_date")
+    if trade_date:
+        history = history[history["trade_date"] <= str(trade_date)]
+    if history.empty:
+        return summary
 
-def _render_tradingview_chart(symbol: str, height: int = 650) -> None:
-    tv_symbol = _tradingview_symbol(symbol)
-    container_id = f"tv_{str(symbol).lower()}_advanced_chart"
-    html = f"""
-    <div class="tradingview-widget-container" style="height:{height}px;width:100%;">
-      <div id="{container_id}" style="height:calc(100% - 0px);width:100%;"></div>
-      <script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
-      <script type="text/javascript">
-      new TradingView.widget({{
-        "autosize": true,
-        "symbol": "{tv_symbol}",
-        "interval": "D",
-        "timezone": "America/New_York",
-        "theme": "light",
-        "style": "1",
-        "locale": "zh_CN",
-        "hide_top_toolbar": false,
-        "hide_side_toolbar": false,
-        "allow_symbol_change": false,
-        "calendar": false,
-        "overrides": {{
-          "mainSeriesProperties.candleStyle.upColor": "#ef4444",
-          "mainSeriesProperties.candleStyle.downColor": "#10b981",
-          "mainSeriesProperties.candleStyle.borderUpColor": "#ef4444",
-          "mainSeriesProperties.candleStyle.borderDownColor": "#10b981",
-          "mainSeriesProperties.candleStyle.wickUpColor": "#ef4444",
-          "mainSeriesProperties.candleStyle.wickDownColor": "#10b981"
-        }},
-        "support_host": "https://www.tradingview.com",
-        "container_id": "{container_id}"
-      }});
-      </script>
-    </div>
-    """
-    components.html(html, height=height + 4, scrolling=False)
+    exact = history[history["trade_date"] == str(trade_date)]
+    row = exact.iloc[-1] if not exact.empty else history.iloc[-1]
+    summary["monthly"] = _int_metric_value(row, "monthly_contract_count")
+    summary["short_cycle"] = _int_metric_value(row, "short_cycle_contract_count")
+    summary["provider_iv_rows"] = _int_metric_value(row, "provider_iv_rows")
+    summary["computed_iv_rows"] = _int_metric_value(row, "computed_iv_rows")
+    summary["open_interest_rows"] = _int_metric_value(row, "open_interest_rows")
+    summary["rows"] = max(summary["monthly"] + summary["short_cycle"], summary["open_interest_rows"])
+    return summary
 
 
 def _lightweight_chart_data(stock_df: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, pd.DataFrame]]:
@@ -2326,6 +2381,24 @@ def _cached_option_chain_daily(
 
 
 @st.cache_data(show_spinner=False, ttl=600)
+def _cached_option_chain_summary(
+    symbol: str,
+    trade_date: str,
+    include_short_cycle: bool,
+    include_iv_counts: bool,
+    use_test_tables: bool,
+) -> dict[str, int]:
+    return load_option_chain_summary(
+        symbol,
+        trade_date,
+        include_short_cycle=include_short_cycle,
+        include_iv_counts=include_iv_counts,
+        use_test_tables=use_test_tables,
+        engine=_cached_engine(),
+    )
+
+
+@st.cache_data(show_spinner=False, ttl=600)
 def _cached_iv_history(symbol: str, window: int, use_test_tables: bool) -> pd.DataFrame:
     return load_iv_history(symbol, window=window, use_test_tables=use_test_tables, engine=_cached_engine())
 
@@ -2384,15 +2457,45 @@ st.markdown(
 )
 
 symbol_options = list(DEFAULT_DASHBOARD_UNDERLYINGS)
-symbol = st.session_state.get("us_lab_symbol", symbol_options[0])
-if symbol not in symbol_options:
+current_symbol = st.session_state.get("us_lab_symbol", symbol_options[0])
+if current_symbol not in symbol_options:
     st.session_state.pop("us_lab_symbol", None)
-    symbol = symbol_options[0]
+    current_symbol = symbol_options[0]
 
-use_test_tables, latest_option_trade_date, table_label = _cached_auto_option_source(symbol)
+view_options = ["总览", "波动率曲面", "持仓防线"]
+if st.session_state.get("us_lab_active_view") not in view_options:
+    st.session_state["us_lab_active_view"] = "总览"
+
+nav_col, symbol_col = st.columns([0.74, 0.26], gap="small")
+with nav_col:
+    active_view = st.segmented_control(
+        "页面",
+        options=view_options,
+        label_visibility="collapsed",
+        key="us_lab_active_view",
+    )
+with symbol_col:
+    symbol = st.selectbox(
+        "标的",
+        symbol_options,
+        index=symbol_options.index(current_symbol),
+        format_func=_underlying_option_label,
+        label_visibility="collapsed",
+        key="us_lab_symbol",
+    )
+active_view = active_view or "总览"
+
 include_short_cycle = True
 stock_limit = 420
 selected_expiration = "全部到期日"
+market_metrics_history = _cached_market_metrics_history(symbol, 252, False)
+if not market_metrics_history.empty:
+    use_test_tables = False
+    latest_option_trade_date = _latest_metric_trade_date(market_metrics_history)
+    table_label = "正式表"
+else:
+    use_test_tables, latest_option_trade_date, table_label = _cached_auto_option_source(symbol)
+    market_metrics_history = _cached_market_metrics_history(symbol, 252, use_test_tables)
 stock_df = _cached_stock_daily(symbol, stock_limit)
 fallback_date = dt.datetime.strptime(default_trade_date(), "%Y%m%d").date()
 if not stock_df.empty:
@@ -2405,28 +2508,54 @@ else:
     selected_date = latest_stock_date
 trade_date = selected_date.strftime("%Y%m%d")
 underlying_price = selected_underlying_price(stock_df, trade_date)
-chain_df = _cached_option_chain_daily(
-    symbol,
-    trade_date,
-    include_short_cycle,
-    use_test_tables,
-    underlying_price,
-)
-summary = summarize_option_chain(chain_df)
-iv_history = _cached_iv_history(symbol, 252, use_test_tables)
-market_metrics_history = _cached_market_metrics_history(symbol, 252, use_test_tables)
-current_iv_pct = calculate_atm_iv_pct(chain_df, underlying_price=underlying_price) or _atm_iv_pct(chain_df, underlying_price)
-vol_position_metrics = calculate_volatility_positioning_metrics(
+if market_metrics_history.empty:
+    summary = _cached_option_chain_summary(
+        symbol,
+        trade_date,
+        include_short_cycle,
+        True,
+        use_test_tables,
+    )
+else:
+    summary = _summary_from_market_metrics(market_metrics_history, trade_date)
+iv_history = _iv_history_from_market_metrics(market_metrics_history)
+vol_position_metrics = calculate_overview_metrics_from_market_history(
     stock_df=stock_df,
-    chain_df=chain_df,
-    iv_history=iv_history,
-    trade_date=trade_date,
-    current_iv_pct=current_iv_pct,
-    iv_rank=None,
     market_metrics_history=market_metrics_history,
+    trade_date=trade_date,
 )
-iv_rank = {"iv_rank": vol_position_metrics.get("iv_rank")}
-put_call_ratio = vol_position_metrics.get("put_call_oi") or _put_call_ratio(chain_df)
+current_iv_pct = vol_position_metrics.get("atm_iv_pct")
+if current_iv_pct is None or pd.isna(current_iv_pct):
+    current_iv_pct = vol_position_metrics.get("current_monthly_iv_pct")
+chain_df = pd.DataFrame()
+
+if market_metrics_history.empty and summary["rows"] > 0:
+    chain_df = _cached_option_chain_daily(
+        symbol,
+        trade_date,
+        include_short_cycle,
+        use_test_tables,
+        underlying_price,
+    )
+    summary = summarize_option_chain(chain_df)
+    iv_history = _cached_iv_history(symbol, 252, use_test_tables)
+    current_iv_pct = calculate_atm_iv_pct(chain_df, underlying_price=underlying_price) or _atm_iv_pct(
+        chain_df,
+        underlying_price,
+    )
+    vol_position_metrics = calculate_volatility_positioning_metrics(
+        stock_df=stock_df,
+        chain_df=chain_df,
+        iv_history=iv_history,
+        trade_date=trade_date,
+        current_iv_pct=current_iv_pct,
+        iv_rank=None,
+        market_metrics_history=market_metrics_history,
+    )
+
+put_call_ratio = vol_position_metrics.get("put_call_oi")
+if put_call_ratio is None and not chain_df.empty:
+    put_call_ratio = _put_call_ratio(chain_df)
 latest_close = stock_df["close"].iloc[-1] if not stock_df.empty else None
 change, change_pct = _latest_change(stock_df)
 change_color = "#059669" if (change or 0) >= 0 else "#dc2626"
@@ -2459,41 +2588,25 @@ elif summary["provider_iv_rows"] == 0 or summary["open_interest_rows"] == 0:
         unsafe_allow_html=True,
     )
 
-view_options = ["总览", "波动率曲面", "持仓防线"]
-if st.session_state.get("us_lab_active_view") not in view_options:
-    st.session_state["us_lab_active_view"] = "总览"
-
-nav_col, symbol_col = st.columns([0.74, 0.26], gap="small")
-with nav_col:
-    active_view = st.segmented_control(
-        "页面",
-        options=view_options,
-        default="总览",
-        label_visibility="collapsed",
-        key="us_lab_active_view",
-    )
-with symbol_col:
-    st.selectbox(
-        "标的",
-        symbol_options,
-        index=symbol_options.index(symbol),
-        label_visibility="collapsed",
-        key="us_lab_symbol",
-    )
-active_view = active_view or "总览"
 st.markdown('<div class="us-lab-tab-divider"></div>', unsafe_allow_html=True)
 
 if active_view == "总览":
     main_col, rail_col = st.columns([2.55, 1.05], gap="small")
     with main_col:
         _render_lightweight_chart(stock_df, iv_history, symbol, trade_date, current_iv_pct, height=650)
-        with st.expander("打开 TradingView 高级图表", expanded=False):
-            st.caption("TradingView 需要访问外部资源；国内网络可能加载较慢或空白，自研 K 线不受影响。")
-            _render_tradingview_chart(symbol, height=620)
     with rail_col:
         _render_rail(vol_position_metrics, trade_date)
 
 elif active_view == "波动率曲面":
+    if chain_df.empty and summary["rows"] > 0:
+        chain_df = _cached_option_chain_daily(
+            symbol,
+            trade_date,
+            include_short_cycle,
+            use_test_tables,
+            underlying_price,
+        )
+        summary = summarize_option_chain(chain_df)
     c1, c2 = st.columns([1, 1], gap="small")
     with c1:
         st.markdown(

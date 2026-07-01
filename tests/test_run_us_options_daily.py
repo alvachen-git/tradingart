@@ -96,6 +96,12 @@ class RunUSOptionsDailyTests(unittest.TestCase):
                 )
             )
 
+    def test_daily_default_underlyings_follow_core_us_options_default(self):
+        self.assertEqual(job.DEFAULT_UNDERLYINGS, uop.DEFAULT_UNDERLYINGS)
+        self.assertIn("TSLA", job.DEFAULT_UNDERLYINGS)
+        self.assertIn("GLD", job.DEFAULT_UNDERLYINGS)
+        self.assertNotIn("SPX", job.DEFAULT_UNDERLYINGS)
+
     def _insert_rows(self, *, open_interest=100, provider_iv=0.2, metrics=True):
         names = uop.table_names(use_test_tables=True)
         with self.engine.begin() as conn:

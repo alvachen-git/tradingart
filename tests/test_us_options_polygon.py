@@ -19,6 +19,13 @@ class FakeResponse:
 
 
 class TestUSOptionsPolygon(unittest.TestCase):
+    def test_default_underlyings_cover_dashboard_symbols_without_index_options(self):
+        symbols = set(uop.DEFAULT_UNDERLYINGS)
+
+        self.assertFalse({"SPX", "NDX", "RUT", "VIX"} & symbols)
+        for symbol in ("SPY", "QQQ", "IWM", "GLD", "TLT", "TSLA", "NVDA", "AMD", "AAPL", "AMZN"):
+            self.assertIn(symbol, symbols)
+
     def test_parse_option_ticker_extracts_root_expiration_type_and_strike(self):
         parsed = uop.parse_option_ticker("O:SPY260619C00600000")
 

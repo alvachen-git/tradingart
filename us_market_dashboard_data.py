@@ -10,6 +10,7 @@ from sqlalchemy import inspect, text
 
 from us_options_polygon import (
     compact_date,
+    DEFAULT_UNDERLYINGS as DEFAULT_US_OPTION_UNDERLYINGS,
     dte_for_trade_date,
     get_db_engine,
     get_us_option_chain_daily,
@@ -19,7 +20,24 @@ from us_options_polygon import (
 )
 
 
-DEFAULT_DASHBOARD_UNDERLYINGS = ("SPY", "QQQ", "IWM", "SPX", "NDX", "RUT", "VIX")
+DEFAULT_DASHBOARD_UNDERLYINGS = DEFAULT_US_OPTION_UNDERLYINGS
+UNDERLYING_DISPLAY_NAMES = {
+    "SPY": "标普500ETF",
+    "QQQ": "纳指100ETF",
+    "IWM": "罗素2000ETF",
+    "GLD": "黄金ETF",
+    "TLT": "20年美债ETF",
+    "SLV": "白银ETF",
+    "XLF": "金融板块ETF",
+    "XLE": "能源板块ETF",
+    "DIA": "道指ETF",
+    "HYG": "高收益债ETF",
+    "TSLA": "特斯拉",
+    "NVDA": "英伟达",
+    "AMD": "超威半导体",
+    "AAPL": "苹果",
+    "AMZN": "亚马逊",
+}
 
 STOCK_DAILY_COLUMNS = ["date", "symbol", "open", "high", "low", "close", "volume", "adjClose"]
 OPTION_CHAIN_COLUMNS = [
@@ -697,6 +715,147 @@ def summarize_option_chain(chain: pd.DataFrame) -> dict[str, Any]:
         "provider_iv_rows": int(chain.get("provider_iv", pd.Series(dtype=float)).notna().sum()),
         "computed_iv_rows": int(chain.get("computed_iv", pd.Series(dtype=float)).notna().sum()),
         "open_interest_rows": int(chain.get("open_interest", pd.Series(dtype=float)).notna().sum()),
+    }
+
+
+def option_chain_empty_summary() -> dict[str, int]:
+    return {
+        "rows": 0,
+        "monthly": 0,
+        "short_cycle": 0,
+        "zero_dte": 0,
+        "one_dte": 0,
+        "expirations": 0,
+        "provider_iv_rows": 0,
+        "computed_iv_rows": 0,
+        "open_interest_rows": 0,
+    }
+
+
+def load_option_chain_summary(
+    underlying: str,
+    trade_date: str | dt.date | dt.datetime,
+    *,
+    include_short_cycle: bool = True,
+    include_iv_counts: bool = True,
+    use_test_tables: bool = True,
+    engine=None,
+) -> dict[str, int]:
+    engine = engine or dashboard_engine()
+    if engine is None:
+        return option_chain_empty_summary()
+
+    names = option_table_names(use_test_tables)
+    daily = safe_table_name(names["daily"])
+    contracts = safe_table_name(names["contracts"])
+    iv = safe_table_name(names["iv"])
+    if not table_exists(engine, daily) or not table_exists(engine, contracts):
+        return option_chain_empty_summary()
+
+    daily_columns = table_columns(engine, daily)
+    contract_columns = table_columns(engine, contracts)
+    if not {"trade_date", "underlying", "option_ticker", "open_interest"}.issubset(daily_columns):
+        return option_chain_empty_summary()
+    if not {"option_ticker", "expiration_date", "expiration_type"}.issubset(contract_columns):
+        return option_chain_empty_summary()
+
+    trade_date_text = normalize_trade_date(trade_date)
+    underlying = normalize_underlying(underlying)
+    short_cycle_clause = "" if include_short_cycle else "AND c.expiration_type = 'monthly'"
+    iv_join = ""
+    provider_expr = "0"
+    computed_expr = "0"
+    if include_iv_counts and table_exists(engine, iv):
+        iv_columns = table_columns(engine, iv)
+        if {"trade_date", "option_ticker", "provider_iv", "computed_iv"}.issubset(iv_columns):
+            iv_join = (
+                f"LEFT JOIN {iv} h "
+                "ON h.trade_date = d.trade_date AND h.option_ticker = d.option_ticker"
+            )
+            provider_expr = "CASE WHEN h.provider_iv IS NOT NULL THEN 1 ELSE 0 END"
+            computed_expr = "CASE WHEN h.computed_iv IS NOT NULL THEN 1 ELSE 0 END"
+
+    if getattr(getattr(engine, "dialect", None), "name", "") in {"mysql", "mariadb"}:
+        dte_expr = "DATEDIFF(STR_TO_DATE(c.expiration_date, '%Y-%m-%d'), STR_TO_DATE(d.trade_date, '%Y%m%d'))"
+        sql = text(
+            f"""
+            SELECT
+                COUNT(*) AS rows_count,
+                SUM(CASE WHEN c.expiration_type = 'monthly' THEN 1 ELSE 0 END) AS monthly_count,
+                SUM(CASE WHEN c.expiration_type = 'monthly' THEN 0 ELSE 1 END) AS short_cycle_count,
+                SUM(CASE WHEN {dte_expr} <= 0 THEN 1 ELSE 0 END) AS zero_dte_count,
+                SUM(CASE WHEN {dte_expr} = 1 THEN 1 ELSE 0 END) AS one_dte_count,
+                COUNT(DISTINCT c.expiration_date) AS expiration_count,
+                SUM({provider_expr}) AS provider_iv_count,
+                SUM({computed_expr}) AS computed_iv_count,
+                SUM(CASE WHEN d.open_interest IS NOT NULL THEN 1 ELSE 0 END) AS open_interest_count
+            FROM {daily} d
+            JOIN {contracts} c ON d.option_ticker = c.option_ticker
+            {iv_join}
+            WHERE d.underlying = :underlying
+              AND d.trade_date = :trade_date
+              {short_cycle_clause}
+            """
+        )
+        try:
+            row = pd.read_sql(sql, engine, params={"underlying": underlying, "trade_date": trade_date_text})
+            if not row.empty:
+                data = row.iloc[0].to_dict()
+                return {
+                    "rows": int(data.get("rows_count") or 0),
+                    "monthly": int(data.get("monthly_count") or 0),
+                    "short_cycle": int(data.get("short_cycle_count") or 0),
+                    "zero_dte": int(data.get("zero_dte_count") or 0),
+                    "one_dte": int(data.get("one_dte_count") or 0),
+                    "expirations": int(data.get("expiration_count") or 0),
+                    "provider_iv_rows": int(data.get("provider_iv_count") or 0),
+                    "computed_iv_rows": int(data.get("computed_iv_count") or 0),
+                    "open_interest_rows": int(data.get("open_interest_count") or 0),
+                }
+        except Exception:
+            pass
+
+    selected_cols = [
+        "d.trade_date AS trade_date",
+        "d.open_interest AS open_interest",
+        "c.expiration_date AS expiration_date",
+        "c.expiration_type AS expiration_type",
+    ]
+    if iv_join:
+        selected_cols.extend(["h.provider_iv AS provider_iv", "h.computed_iv AS computed_iv"])
+    else:
+        selected_cols.extend(["NULL AS provider_iv", "NULL AS computed_iv"])
+    sql = text(
+        f"""
+        SELECT {", ".join(selected_cols)}
+        FROM {daily} d
+        JOIN {contracts} c ON d.option_ticker = c.option_ticker
+        {iv_join}
+        WHERE d.underlying = :underlying
+          AND d.trade_date = :trade_date
+          {short_cycle_clause}
+        """
+    )
+    try:
+        df = pd.read_sql(sql, engine, params={"underlying": underlying, "trade_date": trade_date_text})
+    except Exception:
+        return option_chain_empty_summary()
+    if df.empty:
+        return option_chain_empty_summary()
+
+    expiration_type = df.get("expiration_type", pd.Series(dtype=object)).astype(str)
+    dte = df["expiration_date"].apply(lambda value: dte_for_trade_date(value, trade_date_text))
+    dte = pd.to_numeric(dte, errors="coerce")
+    return {
+        "rows": int(len(df)),
+        "monthly": int((expiration_type == "monthly").sum()),
+        "short_cycle": int((expiration_type != "monthly").sum()),
+        "zero_dte": int((dte <= 0).sum()),
+        "one_dte": int((dte == 1).sum()),
+        "expirations": int(df.get("expiration_date", pd.Series(dtype=object)).nunique()),
+        "provider_iv_rows": int(df.get("provider_iv", pd.Series(dtype=float)).notna().sum()),
+        "computed_iv_rows": int(df.get("computed_iv", pd.Series(dtype=float)).notna().sum()),
+        "open_interest_rows": int(df.get("open_interest", pd.Series(dtype=float)).notna().sum()),
     }
 
 
@@ -1420,6 +1579,73 @@ def apply_historical_percentiles(
         else:
             out[percentile_key] = _percentile_rank(series, current_value)
     return out
+
+
+def calculate_overview_metrics_from_market_history(
+    *,
+    stock_df: pd.DataFrame,
+    market_metrics_history: pd.DataFrame,
+    trade_date: str | dt.date | dt.datetime,
+) -> dict[str, Any]:
+    trade_date_text = normalize_trade_date(trade_date)
+    history = _metric_history_until(market_metrics_history, trade_date_text)
+    if history.empty:
+        return calculate_volatility_positioning_metrics(
+            stock_df=stock_df,
+            chain_df=pd.DataFrame(),
+            iv_history=pd.DataFrame(columns=["trade_date", "iv_pct"]),
+            trade_date=trade_date_text,
+            current_iv_pct=None,
+            iv_rank=None,
+            market_metrics_history=market_metrics_history,
+        )
+
+    exact = history[history["trade_date"] == trade_date_text]
+    current_row = exact.iloc[-1] if not exact.empty else history.iloc[-1]
+    rv20 = calculate_realized_volatility(stock_df, window=20, trade_date=trade_date_text)
+    rv60 = calculate_realized_volatility(stock_df, window=60, trade_date=trade_date_text)
+
+    metrics: dict[str, Any] = {
+        "rv20_pct": rv20,
+        "rv60_pct": rv60,
+    }
+    for col in MARKET_METRICS_COLUMNS:
+        if col in {"trade_date", "underlying", "source", "updated_at"}:
+            continue
+        value = current_row.get(col)
+        if pd.notna(value):
+            metrics[col] = value
+
+    current_iv = _clean_metric_value(metrics.get("atm_iv_pct"))
+    series = pd.to_numeric(history.get("atm_iv_pct", pd.Series(dtype=float)), errors="coerce").dropna().tail(252)
+    if current_iv is not None and not series.empty:
+        min_iv = float(series.min())
+        max_iv = float(series.max())
+        metrics["iv_rank"] = None if math.isclose(max_iv, min_iv) else (current_iv - min_iv) / (max_iv - min_iv) * 100
+        metrics["iv_percentile"] = float((series <= current_iv).sum() / len(series) * 100)
+        metrics["current_monthly_iv_pct"] = current_iv
+        metrics["iv_history_days"] = int(len(series))
+
+        if _clean_metric_value(metrics.get("iv_change_1d")) is None:
+            metrics["iv_change_1d"] = current_iv - float(series.iloc[-2]) if len(series) >= 2 else None
+        metrics["iv_change_5d"] = current_iv - float(series.iloc[-6]) if len(series) >= 6 else None
+        metrics["iv_change_20d"] = current_iv - float(series.iloc[-21]) if len(series) >= 21 else None
+    else:
+        metrics.setdefault("iv_rank", None)
+        metrics.setdefault("iv_percentile", None)
+        metrics.setdefault("current_monthly_iv_pct", current_iv)
+        metrics.setdefault("iv_history_days", 0)
+        metrics.setdefault("iv_change_5d", None)
+        metrics.setdefault("iv_change_20d", None)
+
+    if _clean_metric_value(metrics.get("iv_rv20_spread")) is None and current_iv is not None and rv20 is not None:
+        metrics["iv_rv20_spread"] = current_iv - rv20
+
+    return apply_historical_percentiles(
+        metrics,
+        history,
+        trade_date=trade_date_text,
+    )
 
 
 def calculate_volatility_positioning_metrics(

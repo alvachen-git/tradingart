@@ -1,0 +1,26 @@
+#!/bin/bash
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+APP_DIR="${APP_DIR:-$(cd "${SCRIPT_DIR}/.." && pwd)}"
+PYTHON_BIN="${PYTHON_BIN:-${APP_DIR}/.venv311/bin/python}"
+
+US_OPTIONS_BACKFILL_START="${US_OPTIONS_BACKFILL_START:-20250701}"
+US_OPTIONS_BACKFILL_END="${US_OPTIONS_BACKFILL_END:-20260630}"
+US_OPTIONS_BACKFILL_UNDERLYINGS="${US_OPTIONS_BACKFILL_UNDERLYINGS:-GLD,TLT,SLV,XLF,XLE,DIA,HYG,TSLA,NVDA,AMD,AAPL,AMZN}"
+US_OPTIONS_BACKFILL_EXTRA_ARGS="${US_OPTIONS_BACKFILL_EXTRA_ARGS:-}"
+
+if [ ! -x "${PYTHON_BIN}" ]; then
+  PYTHON_BIN="python3"
+fi
+
+cd "${APP_DIR}"
+
+exec "${PYTHON_BIN}" -u update_us_options_polygon.py \
+  --mode backfill \
+  --start "${US_OPTIONS_BACKFILL_START}" \
+  --end "${US_OPTIONS_BACKFILL_END}" \
+  --underlyings "${US_OPTIONS_BACKFILL_UNDERLYINGS}" \
+  --progress \
+  ${US_OPTIONS_BACKFILL_EXTRA_ARGS}

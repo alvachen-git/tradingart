@@ -90,7 +90,23 @@ _LOCAL_ENV = _CURRENT_DIR / ".env"
 _load_env(_PARENT_ENV, override=True)
 _load_env(_LOCAL_ENV, override=True)
 
-DEFAULT_UNDERLYINGS = ("SPX", "NDX", "RUT", "VIX", "SPY", "QQQ", "IWM")
+DEFAULT_UNDERLYINGS = (
+    "SPY",
+    "QQQ",
+    "IWM",
+    "GLD",
+    "TLT",
+    "SLV",
+    "XLF",
+    "XLE",
+    "DIA",
+    "HYG",
+    "TSLA",
+    "NVDA",
+    "AMD",
+    "AAPL",
+    "AMZN",
+)
 OPTION_TICKER_RE = re.compile(r"^O:([A-Z0-9]+?)(\d{6})([CP])(\d{8})$")
 MASSIVE_BASE_URL = os.getenv("MASSIVE_API_BASE_URL", "https://api.massive.com").rstrip("/")
 POLYGON_BASE_URL = os.getenv("POLYGON_API_BASE_URL", "https://api.polygon.io").rstrip("/")
