@@ -1,3 +1,4 @@
+import json
 import math
 import unittest
 
@@ -65,6 +66,7 @@ class UsMarketDashboardDataTests(unittest.TestCase):
                     """
                 )
             )
+
             conn.execute(
                 text(
                     f"""
@@ -188,6 +190,139 @@ class UsMarketDashboardDataTests(unittest.TestCase):
                 )
             )
 
+    def _create_market_climate_tables(self):
+        with self.engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE macro_daily (
+                        trade_date TEXT,
+                        indicator_code TEXT,
+                        indicator_name TEXT,
+                        category TEXT,
+                        close_value REAL,
+                        change_value REAL,
+                        change_pct REAL
+                    )
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE market_climate_daily (
+                        indicator_code TEXT,
+                        as_of_date TEXT,
+                        value REAL,
+                        secondary_value REAL,
+                        unit TEXT,
+                        source TEXT,
+                        payload_json TEXT,
+                        updated_at TEXT
+                    )
+                    """
+                )
+            )
+            macro_rows = [
+                ("2026-05-30", "BAMLH0A0HYM2", "HY OAS", "credit", 3.20, 0, 0),
+                ("2026-06-24", "DFII10", "10Y TIPS", "bond", 2.10, 0, 0),
+                ("2026-06-29", "DGS10", "10Y", "bond", 4.38, 0.02, 0.46),
+                ("2026-06-29", "DFII10", "10Y TIPS", "bond", 2.16, 0.02, 0.94),
+                ("2026-06-29", "BAMLH0A0HYM2", "HY OAS", "credit", 2.80, -0.04, -1.4),
+                ("2026-06-29", "SOFR", "SOFR", "policy", 3.62, -0.01, -0.28),
+                ("2026-05-01", "FEDFUNDS", "Fed Funds", "policy", 3.63, 0, 0),
+                ("2026-06-30", "T10Y3M", "10Y-3M", "bond", 0.57, 0.02, 3.6),
+            ]
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO macro_daily
+                    (trade_date, indicator_code, indicator_name, category, close_value, change_value, change_pct)
+                    VALUES (:trade_date, :indicator_code, :indicator_name, :category, :close_value, :change_value, :change_pct)
+                    """
+                ),
+                [
+                    {
+                        "trade_date": trade_date,
+                        "indicator_code": indicator_code,
+                        "indicator_name": indicator_name,
+                        "category": category,
+                        "close_value": close_value,
+                        "change_value": change_value,
+                        "change_pct": change_pct,
+                    }
+                    for trade_date, indicator_code, indicator_name, category, close_value, change_value, change_pct in macro_rows
+                ],
+            )
+            climate_rows = [
+                (
+                    "VIX_TERM",
+                    "2026-06-30",
+                    -1.4,
+                    16.2,
+                    "vol_points",
+                    "cboe",
+                    {"vix9d": 14.8, "vix": 16.2, "vix3m": 16.2},
+                ),
+                (
+                    "FEDWATCH",
+                    "2026-06-30",
+                    62.4,
+                    None,
+                    "%",
+                    "cme",
+                    {"action_label": "维持", "meeting_date": "2026-07-29"},
+                ),
+                (
+                    "AAII_BULL_BEAR",
+                    "2026-06-25",
+                    -0.7,
+                    None,
+                    "pp",
+                    "aaii",
+                    {"bullish_pct": 36.3, "bearish_pct": 37.0},
+                ),
+                (
+                    "CFTC_VIX_LEV_NET",
+                    "2026-06-24",
+                    -8.2,
+                    -12345,
+                    "%_oi",
+                    "cftc",
+                    {"open_interest": 150000},
+                ),
+                (
+                    "GSCPI",
+                    "2026-05-01",
+                    -0.12,
+                    0.18,
+                    "index",
+                    "ny_fed",
+                    {},
+                ),
+            ]
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO market_climate_daily
+                    (indicator_code, as_of_date, value, secondary_value, unit, source, payload_json, updated_at)
+                    VALUES (:indicator_code, :as_of_date, :value, :secondary_value, :unit, :source, :payload_json, '')
+                    """
+                ),
+                [
+                    {
+                        "indicator_code": indicator_code,
+                        "as_of_date": as_of_date,
+                        "value": value,
+                        "secondary_value": secondary_value,
+                        "unit": unit,
+                        "source": source,
+                        "payload_json": json.dumps(payload),
+                    }
+                    for indicator_code, as_of_date, value, secondary_value, unit, source, payload in climate_rows
+                ],
+            )
+
     def test_load_stock_daily_returns_sorted_symbol_rows(self):
         self._create_stock_prices()
 
@@ -218,6 +353,64 @@ class UsMarketDashboardDataTests(unittest.TestCase):
         for symbol in ("SPY", "QQQ", "IWM", "GLD", "TLT", "TSLA", "NVDA", "AMD", "AAPL", "AMZN"):
             self.assertIn(symbol, symbols)
             self.assertTrue(dash.UNDERLYING_DISPLAY_NAMES.get(symbol))
+
+    def test_load_market_climate_strip_missing_tables_returns_placeholders(self):
+        cards = dash.load_market_climate_strip(engine=self.engine, today=pd.Timestamp("2026-07-01").date())
+
+        self.assertEqual([card["label"] for card in cards], dash.MARKET_CLIMATE_CARD_ORDER)
+        self.assertEqual(len(cards), 8)
+        self.assertTrue(all(card["value"] == "--" for card in cards))
+        self.assertTrue(all(card["freshness"] == "missing" for card in cards))
+
+    def test_load_market_climate_strip_uses_cached_and_macro_rows(self):
+        self._create_market_climate_tables()
+
+        cards = dash.load_market_climate_strip(engine=self.engine, today=pd.Timestamp("2026-07-01").date())
+        by_label = {card["label"]: card for card in cards}
+
+        self.assertEqual([card["label"] for card in cards], dash.MARKET_CLIMATE_CARD_ORDER)
+        self.assertEqual(by_label["VIX期限"]["value"], "-1.4点")
+        self.assertIn("VIX 16.2", by_label["VIX期限"]["detail"])
+        self.assertEqual(by_label["利率曲线"]["value"], "4.38%")
+        self.assertIn("10Y-3M +0.57pp", by_label["利率曲线"]["detail"])
+        self.assertEqual(by_label["实际利率"]["value"], "2.16%")
+        self.assertIn("5日 +6bp", by_label["实际利率"]["detail"])
+        self.assertEqual(by_label["政策预期"]["value"], "维持 62%")
+        self.assertIn("会议 07/29", by_label["政策预期"]["detail"])
+        self.assertEqual(by_label["AAII情绪"]["value"], "-0.7pp")
+        self.assertIn("牛36 熊37", by_label["AAII情绪"]["detail"])
+        self.assertEqual(by_label["VIX净仓"]["value"], "-8.2%")
+        self.assertIn("净-12,345张", by_label["VIX净仓"]["detail"])
+        self.assertEqual(by_label["供应链压力"]["value"], "-0.12")
+        self.assertIn("3M +0.18", by_label["供应链压力"]["detail"])
+        self.assertEqual(by_label["信用利差"]["value"], "2.80%")
+        self.assertIn("1M -40bp", by_label["信用利差"]["detail"])
+        self.assertTrue(all(card.get("hint") for card in cards))
+        self.assertIn(">0", by_label["VIX期限"]["hint"])
+        self.assertIn(">2%", by_label["实际利率"]["hint"])
+        self.assertIn(">5%", by_label["信用利差"]["hint"])
+
+    def test_load_market_climate_strip_uses_policy_rate_fallback_without_fedwatch(self):
+        self._create_market_climate_tables()
+        with self.engine.begin() as conn:
+            conn.execute(text("DELETE FROM market_climate_daily WHERE indicator_code = 'FEDWATCH'"))
+
+        cards = dash.load_market_climate_strip(engine=self.engine, today=pd.Timestamp("2026-07-01").date())
+        policy = {card["label"]: card for card in cards}["政策预期"]
+
+        self.assertEqual(policy["value"], "3.62%")
+        self.assertIn("SOFR-Fed -1bp", policy["detail"])
+        self.assertEqual(policy["freshness"], "fresh")
+        self.assertIn("美联储", policy["hint"])
+
+    def test_load_market_climate_strip_marks_stale_cache(self):
+        self._create_market_climate_tables()
+
+        cards = dash.load_market_climate_strip(engine=self.engine, today=pd.Timestamp("2026-07-15").date())
+        cftc = {card["label"]: card for card in cards}["VIX净仓"]
+
+        self.assertEqual(cftc["freshness"], "stale")
+        self.assertIn("旧21天", cftc["detail"])
 
     def test_load_latest_option_trade_date_prefers_latest_available_option_date(self):
         self._create_option_tables(use_test_tables=True)

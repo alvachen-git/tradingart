@@ -38,6 +38,7 @@ from us_market_dashboard_data import (
     load_iv_history,
     load_oi_defense_history,
     load_latest_option_trade_date,
+    load_market_climate_strip,
     load_market_metrics_history,
     load_option_chain_daily,
     load_option_chain_summary,
@@ -192,8 +193,64 @@ def _inject_page_style() -> None:
             color: #64758b;
             font-size: 12px;
             line-height: 1.2;
-            margin-bottom: 7px;
             white-space: nowrap;
+        }
+        .us-lab-kpi-label-row {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+            margin-bottom: 7px;
+            min-width: 0;
+        }
+        .us-lab-kpi-info {
+            position: relative;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 14px;
+            height: 14px;
+            border: 1px solid #cbd5e1;
+            border-radius: 999px;
+            color: #64748b;
+            background: #f8fafc;
+            font-size: 10px;
+            line-height: 1;
+            font-weight: 700;
+            cursor: help;
+            flex: 0 0 auto;
+        }
+        .us-lab-kpi-tooltip {
+            position: absolute;
+            z-index: 80;
+            top: 18px;
+            left: 0;
+            transform: translateX(-6px);
+            width: 340px;
+            max-width: min(340px, calc(100vw - 32px));
+            padding: 10px 12px;
+            border-radius: 8px;
+            background: #0f172a;
+            color: #f8fafc;
+            box-shadow: 0 12px 30px rgba(15, 23, 42, .22);
+            font-size: 12px;
+            line-height: 1.5;
+            font-weight: 500;
+            text-align: left;
+            white-space: normal;
+            opacity: 0;
+            visibility: hidden;
+            pointer-events: none;
+            transition: opacity .12s ease, visibility .12s ease;
+        }
+        .us-lab-kpi-info:hover .us-lab-kpi-tooltip,
+        .us-lab-kpi-info:focus .us-lab-kpi-tooltip {
+            opacity: 1;
+            visibility: visible;
+        }
+        .us-lab-kpi:nth-child(n+6) .us-lab-kpi-tooltip {
+            left: auto;
+            right: 0;
+            transform: translateX(6px);
         }
         .us-lab-kpi-value {
             color: #0f172a;
@@ -659,6 +716,11 @@ def _inject_page_style() -> None:
             .us-lab-kpi {
                 border-bottom: 1px solid #e2e8f0;
             }
+            .us-lab-kpi:nth-child(3n) .us-lab-kpi-tooltip {
+                left: auto;
+                right: 0;
+                transform: translateX(6px);
+            }
         }
         div.us-lab-control-band {
             display: none !important;
@@ -982,17 +1044,28 @@ def _put_call_ratio(chain_df: pd.DataFrame) -> float | None:
     return put_oi / call_oi
 
 
-def _kpi_html(label: str, value: str, detail: str = "", color: str = "#0f172a") -> str:
+def _kpi_html(label: str, value: str, detail: str = "", color: str = "#0f172a", hint: str = "") -> str:
+    info_html = ""
+    if hint:
+        info_html = (
+            '<span class="us-lab-kpi-info" tabindex="0" aria-label="数据说明">'
+            "i"
+            f'<span class="us-lab-kpi-tooltip">{escape(hint)}</span>'
+            "</span>"
+        )
     return (
         '<div class="us-lab-kpi">'
-        f'<div class="us-lab-kpi-label">{escape(label)}</div>'
+        '<div class="us-lab-kpi-label-row">'
+        f'<span class="us-lab-kpi-label">{escape(label)}</span>'
+        f"{info_html}"
+        "</div>"
         f'<div class="us-lab-kpi-value" style="color:{escape(color)}">{escape(value)}</div>'
         f'<div class="us-lab-kpi-detail">{escape(detail)}</div>'
         "</div>"
     )
 
 
-def _render_kpi_strip(rows: list[tuple[str, str, str, str]]) -> None:
+def _render_kpi_strip(rows: list[tuple[str, str, str, str, str]]) -> None:
     st.markdown(
         '<div class="us-lab-kpi-strip">' + "".join(_kpi_html(*row) for row in rows) + "</div>",
         unsafe_allow_html=True,
@@ -2414,6 +2487,11 @@ def _cached_market_metrics_history(symbol: str, window: int, use_test_tables: bo
 
 
 @st.cache_data(show_spinner=False, ttl=600)
+def _cached_market_climate_strip() -> list[dict[str, Any]]:
+    return load_market_climate_strip(engine=_cached_engine())
+
+
+@st.cache_data(show_spinner=False, ttl=600)
 def _cached_oi_defense_history(symbol: str, end_date: str, window: int, use_test_tables: bool) -> pd.DataFrame:
     return load_oi_defense_history(
         symbol,
@@ -2553,23 +2631,16 @@ if market_metrics_history.empty and summary["rows"] > 0:
         market_metrics_history=market_metrics_history,
     )
 
-put_call_ratio = vol_position_metrics.get("put_call_oi")
-if put_call_ratio is None and not chain_df.empty:
-    put_call_ratio = _put_call_ratio(chain_df)
-latest_close = stock_df["close"].iloc[-1] if not stock_df.empty else None
-change, change_pct = _latest_change(stock_df)
-change_color = "#059669" if (change or 0) >= 0 else "#dc2626"
-
 _render_kpi_strip(
     [
-        ("最新收盘价", _fmt_number(latest_close), f"{_fmt_number(change)} · {_fmt_pct(change_pct, 2)}", change_color),
-        ("IV Rank（月结算）", _fmt_number(vol_position_metrics.get("iv_rank"), 1), "仅使用 monthly", "#2563eb"),
-        ("今日 IV 变化", _fmt_signed_pct(vol_position_metrics.get("iv_change_1d"), 1), f"分位 {_fmt_pct(vol_position_metrics.get('iv_change_1d_percentile'), 0)}", "#2563eb"),
-        ("IV - RV20", _fmt_signed_pct(vol_position_metrics.get("iv_rv20_spread"), 1), f"分位 {_fmt_pct(vol_position_metrics.get('iv_rv20_percentile'), 0)}", "#ea580c"),
-        ("Put/Call（总量）", _fmt_number(put_call_ratio, 2), "基于 OI", "#ea580c"),
-        ("总 OI 行数", _fmt_int(summary["open_interest_rows"]), f"总行数 {summary['rows']:,}", "#0f172a"),
-        ("月结算 OI", _fmt_int(summary["monthly"]), "参与 IV Rank", "#2563eb"),
-        ("短周期 OI", _fmt_int(summary["short_cycle"]), f"0DTE {summary['zero_dte']:,}", "#059669"),
+        (
+            str(card.get("label") or ""),
+            str(card.get("value") or "--"),
+            str(card.get("detail") or ""),
+            str(card.get("color") or "#0f172a"),
+            str(card.get("hint") or ""),
+        )
+        for card in _cached_market_climate_strip()
     ]
 )
 

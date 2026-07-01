@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import json
 import math
 import re
 from typing import Any
@@ -140,6 +141,64 @@ MARKET_METRIC_NUMERIC_COLUMNS = [
     "computed_iv_rows",
     "open_interest_rows",
 ]
+MARKET_CLIMATE_COLUMNS = [
+    "indicator_code",
+    "as_of_date",
+    "value",
+    "secondary_value",
+    "unit",
+    "source",
+    "payload_json",
+    "updated_at",
+]
+MARKET_CLIMATE_CARD_ORDER = [
+    "VIX期限",
+    "利率曲线",
+    "实际利率",
+    "政策预期",
+    "AAII情绪",
+    "VIX净仓",
+    "供应链压力",
+    "信用利差",
+]
+MARKET_CLIMATE_CACHE_CODES = [
+    "VIX_TERM",
+    "FEDWATCH",
+    "AAII_BULL_BEAR",
+    "CFTC_VIX_LEV_NET",
+    "GSCPI",
+]
+MARKET_CLIMATE_MACRO_CODES = [
+    "DGS10",
+    "T10Y3M",
+    "DFII10",
+    "BAMLH0A0HYM2",
+    "SOFR",
+    "FEDFUNDS",
+]
+MARKET_CLIMATE_FRESHNESS_DAYS = {
+    "VIX_TERM": 7,
+    "FEDWATCH": 7,
+    "AAII_BULL_BEAR": 14,
+    "CFTC_VIX_LEV_NET": 14,
+    "GSCPI": 60,
+    "DGS10": 7,
+    "T10Y3M": 7,
+    "DFII10": 7,
+    "BAMLH0A0HYM2": 7,
+    "SOFR": 7,
+    "FEDFUNDS": 90,
+}
+MARKET_CLIMATE_HINTS = {
+    "VIX期限": "读法：VIX9D减VIX3M。>0代表短期恐慌高于中期，事件压力高，偏看空或防守；-5到0较常见；<-5说明短期压力低，偏利好风险偏好。",
+    "利率曲线": "读法：10年美债减3个月利率。<0是倒挂，越深越担心经济放慢，偏压股市；0到1%算修复区；>1.5%可能是长端利率太高，也会压估值。",
+    "实际利率": "读法：扣掉通胀后的10年真实利率。>2%资金成本偏高，压股票估值；1到2%中性偏紧；<1%较宽松。上行偏空，下行偏多。",
+    "政策预期": "读法：市场认为美联储下次FOMC最可能的动作。维持或降息概率高，通常说明政策压力没有加大，偏利好；加息概率升，或高利率更久，偏压股市。",
+    "AAII情绪": "读法：散户看多比例减看空比例。>+20pp很乐观，容易拥挤，要防追高；<-20pp很悲观，反而常有反弹土壤；-10到+10大致中性。",
+    "VIX净仓": "读法：杠杆基金VIX净仓占未平仓比例。>+10%说明防波动的人多，市场紧张；<-10%说明押平静的人多，短线利好风险偏好，但坏消息来时波动会放大。",
+    "供应链压力": "读法：0附近算正常。>1说明供应链紧、成本和通胀压力高，偏压估值；<-1说明供应链很顺，偏利多。看趋势：上行偏空，下行偏多。",
+    "信用利差": "读法：高收益债比国债多给的利差。<3%风险偏好好，偏利多；3到5%是警戒区；>5%信用压力大，偏看空；>8%通常是明显风险事件。",
+}
 HISTORICAL_PERCENTILE_FIELDS = {
     "iv_change_1d": "iv_change_1d_percentile",
     "iv_rv20_spread": "iv_rv20_percentile",
@@ -213,6 +272,447 @@ def _scalar(engine, sql, params: dict[str, Any] | None = None) -> Any:
             return conn.execute(sql, params or {}).scalar()
     except Exception:
         return None
+
+
+def _clean_number(value: Any) -> float | None:
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    if math.isnan(out) or math.isinf(out):
+        return None
+    return out
+
+
+def _as_date(value: Any) -> dt.date | None:
+    parsed = pd.to_datetime(value, errors="coerce")
+    if pd.isna(parsed):
+        return None
+    return parsed.date()
+
+
+def _date_detail(value: Any) -> str:
+    as_of = _as_date(value)
+    if as_of is None:
+        return ""
+    return as_of.strftime("%m/%d")
+
+
+def _format_plain_number(value: Any, digits: int = 1) -> str:
+    number = _clean_number(value)
+    if number is None:
+        return "--"
+    return f"{number:,.{digits}f}"
+
+
+def _format_pct_card(value: Any, digits: int = 1, *, signed: bool = False) -> str:
+    number = _clean_number(value)
+    if number is None:
+        return "--"
+    prefix = "+" if signed and number > 0 else ""
+    return f"{prefix}{number:.{digits}f}%"
+
+
+def _format_pp_card(value: Any, digits: int = 1, *, signed: bool = True) -> str:
+    number = _clean_number(value)
+    if number is None:
+        return "--"
+    prefix = "+" if signed and number > 0 else ""
+    return f"{prefix}{number:.{digits}f}pp"
+
+
+def _format_signed_value(value: Any, digits: int = 1, suffix: str = "") -> str:
+    number = _clean_number(value)
+    if number is None:
+        return "--"
+    prefix = "+" if number > 0 else ""
+    return f"{prefix}{number:.{digits}f}{suffix}"
+
+
+def _format_bp_change(value: Any, *, signed: bool = True) -> str:
+    number = _clean_number(value)
+    if number is None:
+        return "--"
+    bps = number * 100
+    prefix = "+" if signed and bps > 0 else ""
+    return f"{prefix}{bps:.0f}bp"
+
+
+def _payload_dict(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if value in (None, ""):
+        return {}
+    try:
+        parsed = json.loads(str(value))
+    except Exception:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _freshness_status(as_of: Any, code: str, today: dt.date | None = None) -> tuple[str, int | None]:
+    as_of_date = _as_date(as_of)
+    if as_of_date is None:
+        return "missing", None
+    today = today or dt.datetime.now().date()
+    age = (today - as_of_date).days
+    max_age = MARKET_CLIMATE_FRESHNESS_DAYS.get(code, 14)
+    return ("stale" if age > max_age else "fresh"), age
+
+
+def _detail_with_date(detail: str, as_of: Any, code: str, today: dt.date | None) -> str:
+    parts = [part for part in [detail, _date_detail(as_of)] if part]
+    status, age = _freshness_status(as_of, code, today)
+    if status == "stale" and age is not None:
+        parts.append(f"旧{age}天")
+    return " · ".join(parts) if parts else "暂无缓存"
+
+
+def _market_climate_card(
+    label: str,
+    value: str = "--",
+    detail: str = "暂无缓存",
+    color: str = "#94a3b8",
+    *,
+    as_of: Any = None,
+    code: str = "",
+    today: dt.date | None = None,
+) -> dict[str, Any]:
+    status, age = _freshness_status(as_of, code, today) if code else ("missing", None)
+    return {
+        "label": label,
+        "value": value or "--",
+        "detail": detail or "暂无缓存",
+        "color": color,
+        "as_of": _as_date(as_of).isoformat() if _as_date(as_of) else None,
+        "freshness": status,
+        "age_days": age,
+        "hint": MARKET_CLIMATE_HINTS.get(label, ""),
+    }
+
+
+def _empty_market_climate_card(label: str) -> dict[str, Any]:
+    return _market_climate_card(label)
+
+
+def _load_latest_market_climate_rows(engine, codes: list[str]) -> dict[str, dict[str, Any]]:
+    if engine is None or not table_exists(engine, "market_climate_daily"):
+        return {}
+    columns = table_columns(engine, "market_climate_daily")
+    if not {"indicator_code", "as_of_date", "value"}.issubset(columns):
+        return {}
+
+    selected = [_select_expr(columns, col) for col in MARKET_CLIMATE_COLUMNS]
+    out: dict[str, dict[str, Any]] = {}
+    for code in codes:
+        sql = text(
+            f"""
+            SELECT {", ".join(selected)}
+            FROM market_climate_daily
+            WHERE indicator_code = :code
+            ORDER BY as_of_date DESC
+            LIMIT 1
+            """
+        )
+        try:
+            df = pd.read_sql(sql, engine, params={"code": code})
+        except Exception:
+            continue
+        if df.empty:
+            continue
+        row = df.iloc[0].to_dict()
+        row["value"] = _clean_number(row.get("value"))
+        row["secondary_value"] = _clean_number(row.get("secondary_value"))
+        row["payload"] = _payload_dict(row.get("payload_json"))
+        out[code] = row
+    return out
+
+
+def _load_macro_history_rows(engine, codes: list[str], limit: int = 90) -> dict[str, pd.DataFrame]:
+    if engine is None or not table_exists(engine, "macro_daily"):
+        return {}
+    columns = table_columns(engine, "macro_daily")
+    if not {"trade_date", "indicator_code", "close_value"}.issubset(columns):
+        return {}
+
+    selected = [
+        _select_expr(columns, "trade_date"),
+        _select_expr(columns, "indicator_code"),
+        _select_expr(columns, "indicator_name"),
+        _select_expr(columns, "close_value"),
+        _select_expr(columns, "change_value"),
+        _select_expr(columns, "change_pct"),
+    ]
+    limit = min(max(int(limit or 90), 2), 500)
+    out: dict[str, pd.DataFrame] = {}
+    for code in codes:
+        sql = text(
+            f"""
+            SELECT {", ".join(selected)}
+            FROM macro_daily
+            WHERE indicator_code = :code
+            ORDER BY trade_date DESC
+            LIMIT {limit}
+            """
+        )
+        try:
+            df = pd.read_sql(sql, engine, params={"code": code})
+        except Exception:
+            continue
+        if df.empty:
+            continue
+        df["trade_date"] = pd.to_datetime(df["trade_date"], errors="coerce")
+        for col in ("close_value", "change_value", "change_pct"):
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+        df = df.dropna(subset=["trade_date", "close_value"]).sort_values("trade_date").reset_index(drop=True)
+        if not df.empty:
+            out[code] = df
+    return out
+
+
+def _latest_macro_row(macro_rows: dict[str, pd.DataFrame], code: str) -> pd.Series | None:
+    df = macro_rows.get(code)
+    if df is None or df.empty:
+        return None
+    return df.iloc[-1]
+
+
+def _macro_change_since(macro_rows: dict[str, pd.DataFrame], code: str, days: int) -> float | None:
+    df = macro_rows.get(code)
+    if df is None or len(df) < 2:
+        return None
+    latest = df.iloc[-1]
+    latest_date = _as_date(latest.get("trade_date"))
+    latest_value = _clean_number(latest.get("close_value"))
+    if latest_date is None or latest_value is None:
+        return None
+    target_date = latest_date - dt.timedelta(days=max(int(days or 1), 1))
+    eligible = df[df["trade_date"].dt.date <= target_date]
+    if eligible.empty:
+        eligible = df.iloc[:-1]
+    if eligible.empty:
+        return None
+    base = _clean_number(eligible.iloc[-1].get("close_value"))
+    if base is None:
+        return None
+    return latest_value - base
+
+
+def _rate_curve_card(macro_rows: dict[str, pd.DataFrame], today: dt.date | None) -> dict[str, Any]:
+    ten_year = _latest_macro_row(macro_rows, "DGS10")
+    curve = _latest_macro_row(macro_rows, "T10Y3M")
+    if ten_year is None:
+        return _empty_market_climate_card("利率曲线")
+    ten_value = _clean_number(ten_year.get("close_value"))
+    curve_value = _clean_number(curve.get("close_value")) if curve is not None else None
+    color = "#dc2626" if curve_value is not None and curve_value < 0 else "#2563eb"
+    detail = "10Y-3M " + (_format_pp_card(curve_value, 2) if curve_value is not None else "--")
+    return _market_climate_card(
+        "利率曲线",
+        _format_pct_card(ten_value, 2),
+        _detail_with_date(detail, ten_year.get("trade_date"), "DGS10", today),
+        color,
+        as_of=ten_year.get("trade_date"),
+        code="DGS10",
+        today=today,
+    )
+
+
+def _real_yield_card(macro_rows: dict[str, pd.DataFrame], today: dt.date | None) -> dict[str, Any]:
+    row = _latest_macro_row(macro_rows, "DFII10")
+    if row is None:
+        return _empty_market_climate_card("实际利率")
+    change = _macro_change_since(macro_rows, "DFII10", 5)
+    value = _clean_number(row.get("close_value"))
+    color = "#dc2626" if value is not None and value >= 2.0 else "#2563eb"
+    detail = "5日 " + (_format_bp_change(change) if change is not None else "--")
+    return _market_climate_card(
+        "实际利率",
+        _format_pct_card(value, 2),
+        _detail_with_date(detail, row.get("trade_date"), "DFII10", today),
+        color,
+        as_of=row.get("trade_date"),
+        code="DFII10",
+        today=today,
+    )
+
+
+def _credit_spread_card(macro_rows: dict[str, pd.DataFrame], today: dt.date | None) -> dict[str, Any]:
+    row = _latest_macro_row(macro_rows, "BAMLH0A0HYM2")
+    if row is None:
+        return _empty_market_climate_card("信用利差")
+    change = _macro_change_since(macro_rows, "BAMLH0A0HYM2", 30)
+    value = _clean_number(row.get("close_value"))
+    color = "#dc2626" if change is not None and change > 0 else "#059669"
+    detail = "1M " + (_format_bp_change(change) if change is not None else "--")
+    return _market_climate_card(
+        "信用利差",
+        _format_pct_card(value, 2),
+        _detail_with_date(detail, row.get("trade_date"), "BAMLH0A0HYM2", today),
+        color,
+        as_of=row.get("trade_date"),
+        code="BAMLH0A0HYM2",
+        today=today,
+    )
+
+
+def _vix_term_card(climate_rows: dict[str, dict[str, Any]], today: dt.date | None) -> dict[str, Any]:
+    row = climate_rows.get("VIX_TERM")
+    if not row:
+        return _empty_market_climate_card("VIX期限")
+    spread = _clean_number(row.get("value"))
+    payload = row.get("payload") or {}
+    state = "近端倒挂" if spread is not None and spread > 0 else "远端更高"
+    detail = state
+    vix = _clean_number(payload.get("vix"))
+    if vix is not None:
+        detail = f"VIX {_format_plain_number(vix, 1)}"
+    color = "#dc2626" if spread is not None and spread > 0 else "#059669"
+    return _market_climate_card(
+        "VIX期限",
+        _format_signed_value(spread, 1, "点"),
+        _detail_with_date(detail, row.get("as_of_date"), "VIX_TERM", today),
+        color,
+        as_of=row.get("as_of_date"),
+        code="VIX_TERM",
+        today=today,
+    )
+
+
+def _policy_rate_fallback_card(macro_rows: dict[str, pd.DataFrame], today: dt.date | None) -> dict[str, Any]:
+    sofr = _latest_macro_row(macro_rows, "SOFR")
+    fedfunds = _latest_macro_row(macro_rows, "FEDFUNDS")
+    row = sofr if sofr is not None else fedfunds
+    if row is None:
+        return _empty_market_climate_card("政策预期")
+    value = _clean_number(row.get("close_value"))
+    source_label = "SOFR" if sofr is not None else "Fed Funds"
+    detail = f"{source_label}替代"
+    if sofr is not None and fedfunds is not None:
+        sofr_value = _clean_number(sofr.get("close_value"))
+        fedfunds_value = _clean_number(fedfunds.get("close_value"))
+        spread = sofr_value - fedfunds_value if sofr_value is not None and fedfunds_value is not None else None
+        detail = "SOFR-Fed " + (_format_bp_change(spread) if spread is not None else "--")
+    return _market_climate_card(
+        "政策预期",
+        _format_pct_card(value, 2),
+        _detail_with_date(detail, row.get("trade_date"), str(row.get("indicator_code") or "SOFR"), today),
+        "#7c3aed",
+        as_of=row.get("trade_date"),
+        code=str(row.get("indicator_code") or "SOFR"),
+        today=today,
+    )
+
+
+def _fedwatch_card(
+    climate_rows: dict[str, dict[str, Any]],
+    macro_rows: dict[str, pd.DataFrame],
+    today: dt.date | None,
+) -> dict[str, Any]:
+    row = climate_rows.get("FEDWATCH")
+    if not row:
+        return _policy_rate_fallback_card(macro_rows, today)
+    payload = row.get("payload") or {}
+    probability = _clean_number(row.get("value"))
+    action_label = str(payload.get("action_label") or payload.get("action") or "最高概率")
+    meeting_date = payload.get("meeting_date") or payload.get("event_date")
+    detail = f"会议 {_date_detail(meeting_date)}" if meeting_date else "下次会议"
+    return _market_climate_card(
+        "政策预期",
+        f"{action_label} {_format_pct_card(probability, 0)}",
+        _detail_with_date(detail, row.get("as_of_date"), "FEDWATCH", today),
+        "#7c3aed",
+        as_of=row.get("as_of_date"),
+        code="FEDWATCH",
+        today=today,
+    )
+
+
+def _aaii_card(climate_rows: dict[str, dict[str, Any]], today: dt.date | None) -> dict[str, Any]:
+    row = climate_rows.get("AAII_BULL_BEAR")
+    if not row:
+        return _empty_market_climate_card("AAII情绪")
+    payload = row.get("payload") or {}
+    spread = _clean_number(row.get("value"))
+    bullish = _clean_number(payload.get("bullish_pct"))
+    bearish = _clean_number(payload.get("bearish_pct"))
+    detail = "多空差"
+    if bullish is not None and bearish is not None:
+        detail = f"牛{bullish:.0f} 熊{bearish:.0f}"
+    color = "#dc2626" if spread is not None and spread > 15 else "#2563eb"
+    return _market_climate_card(
+        "AAII情绪",
+        _format_pp_card(spread, 1),
+        _detail_with_date(detail, row.get("as_of_date"), "AAII_BULL_BEAR", today),
+        color,
+        as_of=row.get("as_of_date"),
+        code="AAII_BULL_BEAR",
+        today=today,
+    )
+
+
+def _cftc_vix_card(climate_rows: dict[str, dict[str, Any]], today: dt.date | None) -> dict[str, Any]:
+    row = climate_rows.get("CFTC_VIX_LEV_NET")
+    if not row:
+        return _empty_market_climate_card("VIX净仓")
+    ratio = _clean_number(row.get("value"))
+    net_contracts = _clean_number(row.get("secondary_value"))
+    detail = "杠杆基金/OI"
+    if net_contracts is not None:
+        detail = f"净{net_contracts:,.0f}张"
+    color = "#dc2626" if ratio is not None and ratio > 0 else "#2563eb"
+    return _market_climate_card(
+        "VIX净仓",
+        _format_pct_card(ratio, 1, signed=True),
+        _detail_with_date(detail, row.get("as_of_date"), "CFTC_VIX_LEV_NET", today),
+        color,
+        as_of=row.get("as_of_date"),
+        code="CFTC_VIX_LEV_NET",
+        today=today,
+    )
+
+
+def _gscpi_card(climate_rows: dict[str, dict[str, Any]], today: dt.date | None) -> dict[str, Any]:
+    row = climate_rows.get("GSCPI")
+    if not row:
+        return _empty_market_climate_card("供应链压力")
+    value = _clean_number(row.get("value"))
+    change_3m = _clean_number(row.get("secondary_value"))
+    color = "#dc2626" if value is not None and value > 1 else "#059669"
+    detail = "3M " + (_format_signed_value(change_3m, 2) if change_3m is not None else "--")
+    return _market_climate_card(
+        "供应链压力",
+        _format_plain_number(value, 2),
+        _detail_with_date(detail, row.get("as_of_date"), "GSCPI", today),
+        color,
+        as_of=row.get("as_of_date"),
+        code="GSCPI",
+        today=today,
+    )
+
+
+def load_market_climate_strip(engine=None, today: dt.date | None = None) -> list[dict[str, Any]]:
+    """Return eight cached market-climate cards for the US options dashboard.
+
+    This function deliberately performs only local database reads. External
+    market data is refreshed by update_market_climate_daily.py and cached in
+    market_climate_daily so the Streamlit first paint stays fast.
+    """
+    engine = engine or dashboard_engine()
+    climate_rows = _load_latest_market_climate_rows(engine, MARKET_CLIMATE_CACHE_CODES)
+    macro_rows = _load_macro_history_rows(engine, MARKET_CLIMATE_MACRO_CODES)
+    cards = [
+        _vix_term_card(climate_rows, today),
+        _rate_curve_card(macro_rows, today),
+        _real_yield_card(macro_rows, today),
+        _fedwatch_card(climate_rows, macro_rows, today),
+        _aaii_card(climate_rows, today),
+        _cftc_vix_card(climate_rows, today),
+        _gscpi_card(climate_rows, today),
+        _credit_spread_card(macro_rows, today),
+    ]
+    by_label = {card["label"]: card for card in cards}
+    return [by_label.get(label, _empty_market_climate_card(label)) for label in MARKET_CLIMATE_CARD_ORDER]
 
 
 def load_stock_daily(symbol: str, limit: int = 420, engine=None) -> pd.DataFrame:
