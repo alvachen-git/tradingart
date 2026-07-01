@@ -275,6 +275,7 @@ PRODUCT_CATEGORY = {
 CATEGORIES = ["全部", "股指", "国债", "农产", "工业", "化工", "有色", "贵金属", "新能源", "航运"]
 FOCUS_IV_TREND_CACHE_VERSION = "v2"
 FOCUS_HOLDING_TREND_CACHE_VERSION = "v1"
+MARKET_SCANNER_TUTORIAL_VIDEO_URL = "https://www.bilibili.com/video/BV1ueTF6vEWc/?share_source=copy_web&vd_source=1e83a23c959faa0f220b1c66759550c5"
 if "rank_focus_open" not in st.session_state:
     st.session_state.rank_focus_open = False
 rank_sort_param = st.query_params.get("rank_sort", "")
@@ -964,6 +965,71 @@ st.markdown("""
         font-size: 12px;
         line-height: 1.55;
     }
+    .data-help-video {
+        min-height: 52px;
+        width: 100%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 8px;
+        padding: 0 16px;
+        border-radius: 10px;
+        border: 1px solid rgba(96, 165, 250, 0.48);
+        background: linear-gradient(135deg, rgba(37, 99, 235, 0.95), rgba(29, 78, 216, 0.88));
+        color: #eff6ff !important;
+        font-size: 14px;
+        font-weight: 800;
+        line-height: 1;
+        text-decoration: none !important;
+        box-shadow: 0 10px 24px rgba(37, 99, 235, 0.18);
+    }
+    .data-help-video:hover {
+        border-color: rgba(147, 197, 253, 0.72);
+        background: linear-gradient(135deg, rgba(59, 130, 246, 0.98), rgba(37, 99, 235, 0.92));
+    }
+    .data-help-video-icon {
+        width: 22px;
+        height: 22px;
+        border-radius: 999px;
+        background: rgba(239, 246, 255, 0.18);
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        flex: 0 0 auto;
+        box-shadow: inset 0 0 0 1px rgba(239, 246, 255, 0.26);
+    }
+    .data-help-video-icon::before {
+        content: "";
+        width: 0;
+        height: 0;
+        margin-left: 2px;
+        border-top: 6px solid transparent;
+        border-bottom: 6px solid transparent;
+        border-left: 8px solid #f8fafc;
+    }
+    .st-key-refresh_btn div.stButton > button,
+    .st-key-refresh_btn button {
+        min-height: 38px;
+        padding: 7px 10px !important;
+        border-radius: 9px !important;
+        font-size: 12px !important;
+        font-weight: 700 !important;
+        background: rgba(37, 99, 235, 0.82) !important;
+        border: 1px solid rgba(96, 165, 250, 0.34) !important;
+        box-shadow: none !important;
+        white-space: nowrap;
+    }
+    .latest-date-inline {
+        margin-top: 6px;
+        color: #94a3b8;
+        font-size: 12px;
+        line-height: 1.2;
+        white-space: nowrap;
+    }
+    .latest-date-inline span {
+        color: #e2e8f0;
+        font-weight: 600;
+    }
 
     /* === Metric卡片 === */
     [data-testid="stMetric"] {
@@ -1332,7 +1398,7 @@ inject_sidebar_toggle_style(mode="high_contrast")
 # 页面标题区域
 # ============================================================
 
-col_title, col_info_top, col_refresh = st.columns([3.0, 2.6, 1.2], gap="large")
+col_title, col_info_top, col_video_top, col_refresh = st.columns([3.0, 2.25, 1.15, 0.85], gap="large")
 
 
 def _format_latest_date(date_text):
@@ -1387,6 +1453,7 @@ with col_title:
     """, unsafe_allow_html=True)
 
 with col_info_top:
+    tutorial_video_url = html.escape(MARKET_SCANNER_TUTORIAL_VIDEO_URL, quote=True)
     with st.expander("数据说明", expanded=False):
         st.markdown("""
 <div class="data-help-grid">
@@ -1400,19 +1467,27 @@ with col_info_top:
   <span>IV Rank &gt; 80 关注卖方机会；IV Rank &lt; 20 关注买方机会；机构流入 + 散户流出作为资金共振线索继续核对。</span>
 </div>
         """, unsafe_allow_html=True)
-
-refresh_requested = False
-with col_refresh:
-    refresh_requested = st.button("🔄 刷新数据", key="refresh_btn", use_container_width=True)
     latest_date_placeholder = st.empty()
     latest_date_placeholder.markdown(
-        f"""
-        <div style="margin-top:6px; text-align:right; font-size:12px; color:#94a3b8;">
-            最新数据日期：<span style="color:#e2e8f0; font-weight:600;">读取中</span>
+        """
+        <div class="latest-date-inline">
+            最新数据日期：<span>读取中</span>
         </div>
         """,
         unsafe_allow_html=True,
     )
+
+with col_video_top:
+    st.markdown(f"""
+<a class="data-help-video" href="{tutorial_video_url}" target="_blank" rel="noopener noreferrer">
+  <span class="data-help-video-icon" aria-hidden="true"></span>
+  <span>视频教学</span>
+</a>
+        """, unsafe_allow_html=True)
+
+refresh_requested = False
+with col_refresh:
+    refresh_requested = st.button("🔄 刷新", key="refresh_btn", use_container_width=True, help="刷新市场扫描器数据")
 
 
 # ============================================================
@@ -1560,8 +1635,8 @@ if not latest_date_value:
 latest_date_display = _format_latest_date(latest_date_value)
 latest_date_placeholder.markdown(
     f"""
-    <div style="margin-top:6px; text-align:right; font-size:12px; color:#94a3b8;">
-        最新数据日期：<span style="color:#e2e8f0; font-weight:600;">{latest_date_display}</span>
+    <div class="latest-date-inline">
+        最新数据日期：<span>{latest_date_display}</span>
     </div>
     """,
     unsafe_allow_html=True,
