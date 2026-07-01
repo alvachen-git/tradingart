@@ -275,7 +275,7 @@ PRODUCT_CATEGORY = {
 CATEGORIES = ["全部", "股指", "国债", "农产", "工业", "化工", "有色", "贵金属", "新能源", "航运"]
 FOCUS_IV_TREND_CACHE_VERSION = "v2"
 FOCUS_HOLDING_TREND_CACHE_VERSION = "v1"
-MARKET_SCANNER_TUTORIAL_VIDEO_URL = "https://www.bilibili.com/video/BV1ueTF6vEWc/"
+MARKET_SCANNER_TUTORIAL_VIDEO_URL = "https://player.bilibili.com/player.html?isOutside=true&bvid=BV1ueTF6vEWc&p=1"
 if "rank_focus_open" not in st.session_state:
     st.session_state.rank_focus_open = False
 rank_sort_param = st.query_params.get("rank_sort", "")
