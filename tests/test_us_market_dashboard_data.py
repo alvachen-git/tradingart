@@ -640,6 +640,59 @@ class UsMarketDashboardDataTests(unittest.TestCase):
         self.assertNotEqual(latest["call_strike"], 900.0)
         self.assertNotEqual(latest["call_strike"], 700.0)
 
+    def test_load_oi_defense_history_prefers_preaggregated_cache(self):
+        with self.engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE us_option_oi_defense_daily (
+                        trade_date TEXT,
+                        date TEXT,
+                        underlying TEXT,
+                        underlying_close REAL,
+                        call_strike REAL,
+                        call_oi REAL,
+                        call_distance_pct REAL,
+                        call_expiration TEXT,
+                        put_strike REAL,
+                        put_oi REAL,
+                        put_distance_pct REAL,
+                        put_expiration TEXT,
+                        total_call_oi REAL,
+                        total_put_oi REAL,
+                        put_call_oi REAL
+                    )
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO us_option_oi_defense_daily
+                    (trade_date, date, underlying, underlying_close, call_strike, call_oi,
+                     call_distance_pct, call_expiration, put_strike, put_oi,
+                     put_distance_pct, put_expiration, total_call_oi, total_put_oi, put_call_oi)
+                    VALUES
+                    ('20260120', '2026-01-20', 'SPY', 600, 610, 1000, 1.67, '2026-02-20',
+                     590, 900, -1.67, '2026-02-20', 5000, 4500, 0.9),
+                    ('20260121', '2026-01-21', 'SPY', 604, 615, 1100, 1.82, '2026-02-20',
+                     595, 950, -1.49, '2026-02-20', 5200, 4700, 0.903846)
+                    """
+                )
+            )
+
+        result = dash.load_oi_defense_history(
+            "SPY",
+            "20260121",
+            window=20,
+            use_test_tables=True,
+            engine=self.engine,
+        )
+
+        self.assertEqual(result["trade_date"].tolist(), ["20260120", "20260121"])
+        self.assertAlmostEqual(float(result["call_strike"].iloc[-1]), 615.0)
+        self.assertAlmostEqual(float(result["put_call_oi"].iloc[-1]), 0.903846)
+
     def test_load_oi_defense_history_degrades_without_oi_rows(self):
         self._create_option_tables(use_test_tables=True)
 
@@ -770,6 +823,236 @@ class UsMarketDashboardDataTests(unittest.TestCase):
         self.assertEqual(df["trade_date"].tolist(), ["20260114", "20260115"])
         self.assertAlmostEqual(float(df["iv_rv20_spread"].iloc[-1]), 2.0)
         self.assertEqual(df["term_state"].iloc[-1], "Backwardation")
+
+    def test_load_volatility_cone_history_builds_dte_percentile_buckets(self):
+        self._create_option_tables(use_test_tables=True)
+        names = dash.option_table_names(True)
+        contract_rows = []
+        iv_rows = []
+        for idx, trade_date in enumerate(["20260101", "20260102", "20260103"], start=1):
+            base = pd.to_datetime(trade_date, format="%Y%m%d")
+            for dte, iv_value in [(7, 0.10 + idx / 100), (30, 0.20 + idx / 100)]:
+                expiration = (base + pd.Timedelta(days=dte)).strftime("%Y-%m-%d")
+                ticker = f"O:SPY{trade_date}{dte:03d}C00100000"
+                contract_rows.append(
+                    {
+                        "option_ticker": ticker,
+                        "underlying": "SPY",
+                        "call_put": "C",
+                        "strike": 100,
+                        "expiration_date": expiration,
+                        "contract_root": "SPY",
+                        "expiration_type": "monthly",
+                        "settlement_type": "physical",
+                        "exercise_style": "",
+                        "shares_per_contract": 100,
+                        "source": "test",
+                        "updated_at": "",
+                    }
+                )
+                iv_rows.append(
+                    {
+                        "trade_date": trade_date,
+                        "option_ticker": ticker,
+                        "underlying": "SPY",
+                        "provider_iv": iv_value,
+                        "computed_iv": None,
+                        "iv_source": "provider_snapshot",
+                        "open_interest": 100 + idx,
+                        "underlying_price": 100,
+                    }
+                )
+        with self.engine.begin() as conn:
+            conn.execute(
+                text(
+                    f"""
+                    INSERT INTO {names['contracts']}
+                    (option_ticker, underlying, call_put, strike, expiration_date, contract_root,
+                     expiration_type, settlement_type, exercise_style, shares_per_contract, source, updated_at)
+                    VALUES (:option_ticker, :underlying, :call_put, :strike, :expiration_date, :contract_root,
+                            :expiration_type, :settlement_type, :exercise_style, :shares_per_contract, :source, :updated_at)
+                    """
+                ),
+                contract_rows,
+            )
+            conn.execute(
+                text(
+                    f"""
+                    INSERT INTO {names['iv']}
+                    (trade_date, option_ticker, underlying, provider_iv, computed_iv,
+                     iv_source, open_interest, underlying_price)
+                    VALUES (:trade_date, :option_ticker, :underlying, :provider_iv, :computed_iv,
+                            :iv_source, :open_interest, :underlying_price)
+                    """
+                ),
+                iv_rows,
+            )
+
+        cone = dash.load_volatility_cone_history(
+            "SPY",
+            "20260103",
+            window=3,
+            dte_targets=(7, 30),
+            use_test_tables=True,
+            engine=self.engine,
+        )
+
+        self.assertEqual(cone["dte_target"].tolist(), [7, 30])
+        self.assertEqual(cone["sample_count"].tolist(), [3, 3])
+        self.assertAlmostEqual(float(cone.loc[cone["dte_target"] == 7, "p50"].iloc[0]), 12.0)
+        self.assertAlmostEqual(float(cone.loc[cone["dte_target"] == 30, "p50"].iloc[0]), 22.0)
+        self.assertAlmostEqual(float(cone.loc[cone["dte_target"] == 7, "p10"].iloc[0]), 11.2)
+
+    def test_load_volatility_cone_history_missing_tables_returns_empty(self):
+        cone = dash.load_volatility_cone_history(
+            "SPY",
+            "20260103",
+            window=3,
+            dte_targets=(7, 30),
+            use_test_tables=True,
+            engine=self.engine,
+        )
+
+        self.assertTrue(cone.empty)
+        self.assertEqual(cone.columns.tolist(), dash.VOLATILITY_CONE_COLUMNS)
+
+    def test_build_otm_volatility_curve_uses_only_otm_put_and_call(self):
+        chain = pd.DataFrame(
+            [
+                {"call_put": "P", "moneyness_pct": -5, "iv_pct": 30, "open_interest": 100, "dte": 30, "expiration_date": "2026-02-20"},
+                {"call_put": "P", "moneyness_pct": -0.2, "iv_pct": 55, "open_interest": 100, "dte": 30, "expiration_date": "2026-02-20"},
+                {"call_put": "P", "moneyness_pct": 5, "iv_pct": 80, "open_interest": 100, "dte": 30, "expiration_date": "2026-02-20"},
+                {"call_put": "C", "moneyness_pct": 5, "iv_pct": 20, "open_interest": 100, "dte": 30, "expiration_date": "2026-02-20"},
+                {"call_put": "C", "moneyness_pct": 0.2, "iv_pct": 45, "open_interest": 100, "dte": 30, "expiration_date": "2026-02-20"},
+                {"call_put": "C", "moneyness_pct": -5, "iv_pct": 70, "open_interest": 100, "dte": 30, "expiration_date": "2026-02-20"},
+                {"call_put": "C", "moneyness_pct": 0, "iv_pct": 60, "open_interest": 100, "dte": 30, "expiration_date": "2026-02-20"},
+                {"call_put": "C", "moneyness_pct": 4, "iv_pct": 99, "open_interest": 100, "dte": 60, "expiration_date": "2026-03-20"},
+            ]
+        )
+
+        curve = dash.build_otm_volatility_curve(chain)
+
+        self.assertEqual(curve["moneyness_pct"].tolist(), [-5.0, 5.0])
+        self.assertEqual(curve["call_put"].tolist(), ["P", "C"])
+        self.assertEqual(curve["iv_pct"].tolist(), [30.0, 20.0])
+
+    def test_load_option_surface_snapshot_filters_to_needed_slice(self):
+        self._create_option_tables(use_test_tables=True)
+        names = dash.option_table_names(True)
+        contract_rows = [
+            {
+                "option_ticker": "O:SPY260220C00750000",
+                "underlying": "SPY",
+                "call_put": "C",
+                "strike": 750,
+                "expiration_date": "2026-02-20",
+                "contract_root": "SPY",
+                "expiration_type": "monthly",
+                "settlement_type": "physical",
+                "exercise_style": "",
+                "shares_per_contract": 100,
+                "source": "test",
+                "updated_at": "",
+            },
+            {
+                "option_ticker": "O:SPY270115C00600000",
+                "underlying": "SPY",
+                "call_put": "C",
+                "strike": 600,
+                "expiration_date": "2027-01-15",
+                "contract_root": "SPY",
+                "expiration_type": "monthly",
+                "settlement_type": "physical",
+                "exercise_style": "",
+                "shares_per_contract": 100,
+                "source": "test",
+                "updated_at": "",
+            },
+        ]
+        daily_rows = [
+            {
+                "trade_date": "20260115",
+                "option_ticker": row["option_ticker"],
+                "underlying": "SPY",
+                "open": 1,
+                "high": 1,
+                "low": 1,
+                "close": 1,
+                "volume": 1,
+                "vwap": 1,
+                "transactions": 1,
+                "open_interest": 1,
+                "source": "test",
+                "updated_at": "",
+            }
+            for row in contract_rows
+        ]
+        iv_rows = [
+            {
+                "trade_date": "20260115",
+                "option_ticker": row["option_ticker"],
+                "underlying": "SPY",
+                "provider_iv": 0.25,
+                "computed_iv": None,
+                "iv_source": "provider_snapshot",
+                "open_interest": 1,
+                "underlying_price": 600,
+            }
+            for row in contract_rows
+        ]
+        with self.engine.begin() as conn:
+            conn.execute(
+                text(
+                    f"""
+                    INSERT INTO {names['contracts']}
+                    (option_ticker, underlying, call_put, strike, expiration_date, contract_root,
+                     expiration_type, settlement_type, exercise_style, shares_per_contract, source, updated_at)
+                    VALUES (:option_ticker, :underlying, :call_put, :strike, :expiration_date, :contract_root,
+                            :expiration_type, :settlement_type, :exercise_style, :shares_per_contract, :source, :updated_at)
+                    """
+                ),
+                contract_rows,
+            )
+            conn.execute(
+                text(
+                    f"""
+                    INSERT INTO {names['daily']}
+                    (trade_date, option_ticker, underlying, open, high, low, close, volume,
+                     vwap, transactions, open_interest, source, updated_at)
+                    VALUES (:trade_date, :option_ticker, :underlying, :open, :high, :low, :close, :volume,
+                            :vwap, :transactions, :open_interest, :source, :updated_at)
+                    """
+                ),
+                daily_rows,
+            )
+            conn.execute(
+                text(
+                    f"""
+                    INSERT INTO {names['iv']}
+                    (trade_date, option_ticker, underlying, provider_iv, computed_iv,
+                     iv_source, open_interest, underlying_price)
+                    VALUES (:trade_date, :option_ticker, :underlying, :provider_iv, :computed_iv,
+                            :iv_source, :open_interest, :underlying_price)
+                    """
+                ),
+                iv_rows,
+            )
+
+        surface = dash.load_option_surface_snapshot(
+            "SPY",
+            "20260115",
+            moneyness_range=10,
+            max_dte=60,
+            use_test_tables=True,
+            underlying_price=600,
+            engine=self.engine,
+        )
+
+        self.assertFalse(surface.empty)
+        self.assertNotIn("O:SPY260220C00750000", surface["option_ticker"].tolist())
+        self.assertNotIn("O:SPY270115C00600000", surface["option_ticker"].tolist())
+        self.assertLessEqual(float(surface["moneyness_pct"].abs().max()), 10.0)
+        self.assertLessEqual(float(pd.to_numeric(surface["dte"], errors="coerce").max()), 60.0)
 
     def test_apply_historical_percentiles_uses_252_day_history(self):
         rows = []

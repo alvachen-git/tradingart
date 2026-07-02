@@ -21,6 +21,10 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
+CHART_RENDER_WINDOW = 260
+TODAY_LINE_COLOR = "#2563eb"
+PREVIOUS_LINE_COLOR = "#f97316"
+
 import us_market_dashboard_data as dashboard_data
 from sidebar_navigation import show_navigation
 from ui_components import inject_sidebar_toggle_style
@@ -30,6 +34,8 @@ dashboard_data = importlib.reload(dashboard_data)
 from us_market_dashboard_data import (
     DEFAULT_DASHBOARD_UNDERLYINGS,
     UNDERLYING_DISPLAY_NAMES,
+    build_otm_volatility_curve,
+    build_volatility_cone_line,
     calculate_atm_iv_pct,
     calculate_overview_metrics_from_market_history,
     calculate_volatility_positioning_metrics,
@@ -42,7 +48,9 @@ from us_market_dashboard_data import (
     load_market_metrics_history,
     load_option_chain_daily,
     load_option_chain_summary,
+    load_option_surface_snapshot,
     load_stock_daily,
+    load_volatility_cone_history,
     selected_underlying_price,
     summarize_option_chain,
 )
@@ -831,6 +839,10 @@ def _fmt_pct(value: Any, digits: int = 1) -> str:
     return _fmt_number(value, digits, "%")
 
 
+def _fmt_rank_pct(value: Any, digits: int = 1) -> str:
+    return _fmt_number(value, digits, "%")
+
+
 def _fmt_signed(value: Any, digits: int = 1, suffix: str = "") -> str:
     if value is None:
         return "-"
@@ -1194,7 +1206,10 @@ def _summary_from_market_metrics(market_metrics_history: pd.DataFrame, trade_dat
     return summary
 
 
-def _lightweight_chart_data(stock_df: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, pd.DataFrame]]:
+def _lightweight_chart_data(
+    stock_df: pd.DataFrame,
+    render_window: int | None = None,
+) -> tuple[pd.DataFrame, dict[str, pd.DataFrame]]:
     empty_lines = {
         "ma5": pd.DataFrame(columns=["date", "MA5"]),
         "ma20": pd.DataFrame(columns=["date", "MA20"]),
@@ -1223,6 +1238,15 @@ def _lightweight_chart_data(stock_df: pd.DataFrame) -> tuple[pd.DataFrame, dict[
         "ma20": df[["date", "MA20"]].dropna().copy(),
         "ma60": df[["date", "MA60"]].dropna().copy(),
     }
+    if render_window is not None:
+        window = max(int(render_window or CHART_RENDER_WINDOW), 80)
+        if len(candle_df) > window:
+            candle_df = candle_df.tail(window).copy()
+            visible_dates = set(candle_df["date"].astype(str))
+            line_dfs = {
+                key: value[value["date"].astype(str).isin(visible_dates)].copy()
+                for key, value in line_dfs.items()
+            }
     return candle_df, line_dfs
 
 
@@ -1235,6 +1259,13 @@ def _lightweight_charts_script() -> str:
         return script_path.read_text(encoding="utf-8", errors="ignore").replace("</script>", "<\\/script>")
     except Exception:
         return ""
+
+
+def _lightweight_chart_loader_html() -> str:
+    chart_js = _lightweight_charts_script()
+    if not chart_js:
+        return ""
+    return f"<script>{chart_js}</script>"
 
 
 def _chart_line_records(df: pd.DataFrame, value_col: str) -> list[dict[str, Any]]:
@@ -1254,14 +1285,23 @@ def _chart_line_records(df: pd.DataFrame, value_col: str) -> list[dict[str, Any]
     return rows
 
 
-def _iv_chart_data(iv_history: pd.DataFrame, trade_date: str, current_iv_pct: float | None) -> pd.DataFrame:
+def _iv_chart_data(
+    iv_history: pd.DataFrame,
+    trade_date: str,
+    current_iv_pct: float | None,
+    *,
+    start_date: str | None = None,
+) -> pd.DataFrame:
     iv_series = _prepare_iv_series(iv_history, trade_date, current_iv_pct)
     if iv_series.empty:
         return pd.DataFrame(columns=["date", "IV"])
     out = iv_series.copy()
     out["date"] = pd.to_datetime(out["date"], errors="coerce").dt.strftime("%Y-%m-%d")
     out["IV"] = pd.to_numeric(out["iv_pct"], errors="coerce")
-    return out.dropna(subset=["date", "IV"])[["date", "IV"]]
+    out = out.dropna(subset=["date", "IV"])[["date", "IV"]]
+    if start_date:
+        out = out[out["date"] >= str(start_date)]
+    return out
 
 
 def _chart_payload(
@@ -1320,17 +1360,18 @@ def _render_lightweight_chart(
     current_iv_pct: float | None,
     height: int = 650,
 ) -> None:
-    candle_df, line_dfs = _lightweight_chart_data(stock_df)
+    candle_df, line_dfs = _lightweight_chart_data(stock_df, render_window=CHART_RENDER_WINDOW)
     if candle_df.empty:
         st.info("本地 stock_prices 暂无该标的日线，暂时无法渲染自研 K 线。")
         return
 
-    chart_js = _lightweight_charts_script()
-    if not chart_js:
+    chart_loader_html = _lightweight_chart_loader_html()
+    if not chart_loader_html:
         st.warning("本地图表库加载失败，暂时无法渲染自研 K 线。")
         return
 
-    iv_df = _iv_chart_data(iv_history, trade_date, current_iv_pct)
+    chart_start_date = str(candle_df["date"].min()) if not candle_df.empty else None
+    iv_df = _iv_chart_data(iv_history, trade_date, current_iv_pct, start_date=chart_start_date)
     payload = _chart_payload(candle_df, line_dfs, iv_df, symbol)
     if not payload["candles"]:
         st.info("本地 stock_prices 暂无有效 OHLC 数据，暂时无法渲染自研 K 线。")
@@ -1537,9 +1578,7 @@ def _render_lightweight_chart(
             <div id="lwc-chart" class="lwc-chart"></div>
             <div id="lwc-error" class="lwc-error"></div>
           </div>
-          <script>
-          ${chart_js}
-          </script>
+          ${chart_loader_html}
           <script>
           (function() {
             const payload = ${payload_json};
@@ -1801,7 +1840,7 @@ def _render_lightweight_chart(
         """
     ).substitute(
         height=chart_height,
-        chart_js=chart_js,
+        chart_loader_html=chart_loader_html,
         payload_json=payload_json,
     )
     components.html(html, height=chart_height + 2, scrolling=False)
@@ -1930,7 +1969,7 @@ def _build_composite_figure(
 
     chip_text = (
         f"{symbol} · 1D · IV {_fmt_pct(current_iv_pct, 2)} · "
-        f"IV Rank {_fmt_number((iv_rank or {}).get('iv_rank'), 1)} · Put/Call {_fmt_number(put_call_ratio, 2)}"
+        f"IV Rank {_fmt_rank_pct((iv_rank or {}).get('iv_rank'), 1)} · Put/Call {_fmt_number(put_call_ratio, 2)}"
     )
     fig.add_annotation(
         text=chip_text,
@@ -1963,115 +2002,235 @@ def _build_composite_figure(
     return fig
 
 
-def _term_structure(chain_df: pd.DataFrame) -> pd.DataFrame:
-    if chain_df is None or chain_df.empty:
-        return pd.DataFrame(columns=["expiration_date", "dte", "expiration_type", "iv_pct"])
-    df = chain_df.copy()
-    df["iv_pct"] = pd.to_numeric(df["iv_pct"], errors="coerce")
-    df["open_interest"] = pd.to_numeric(df["open_interest"], errors="coerce")
-    df["dte"] = pd.to_numeric(df["dte"], errors="coerce")
-    df = df.dropna(subset=["iv_pct", "expiration_date"])
-    if df.empty:
-        return pd.DataFrame(columns=["expiration_date", "dte", "expiration_type", "iv_pct"])
-    rows = []
-    for (expiration, exp_type), group in df.groupby(["expiration_date", "expiration_type"], dropna=False):
-        rows.append(
-            {
-                "expiration_date": str(expiration),
-                "dte": float(pd.to_numeric(group["dte"], errors="coerce").median()),
-                "expiration_type": str(exp_type or "unknown"),
-                "iv_pct": _weighted_average(group["iv_pct"], group["open_interest"]),
-            }
+def _add_empty_chart_annotation(fig: go.Figure, text: str) -> None:
+    fig.add_annotation(
+        text=text,
+        xref="paper",
+        yref="paper",
+        x=0.5,
+        y=0.52,
+        showarrow=False,
+        font=dict(size=13, color="#64748b"),
+        bgcolor="rgba(248,250,252,.9)",
+        bordercolor="#dbe3ef",
+        borderpad=8,
+    )
+
+
+def _add_cone_line(fig: go.Figure, line_df: pd.DataFrame, *, name: str, color: str, dash: str = "solid") -> None:
+    if line_df is None or line_df.empty:
+        return
+    line = line_df.copy()
+    for col in ("dte_target", "iv_pct", "dte"):
+        line[col] = pd.to_numeric(line.get(col), errors="coerce")
+    line = line.dropna(subset=["dte_target", "iv_pct"]).sort_values("dte_target")
+    if line.empty:
+        return
+    custom = pd.DataFrame(
+        {
+            "expiration": line.get("expiration_date", pd.Series(["-"] * len(line))).fillna("-").astype(str),
+            "actual_dte": pd.to_numeric(line.get("dte"), errors="coerce"),
+        }
+    ).to_numpy()
+    fig.add_trace(
+        go.Scatter(
+            x=line["dte_target"],
+            y=line["iv_pct"],
+            customdata=custom,
+            mode="lines+markers",
+            name=name,
+            line=dict(color=color, width=2.4, dash=dash),
+            marker=dict(size=6, color=color),
+            hovertemplate=(
+                "目标DTE %{x}<br>"
+                "IV %{y:.2f}%<br>"
+                "实际DTE %{customdata[1]:.0f}<br>"
+                "到期 %{customdata[0]}<extra></extra>"
+            ),
         )
-    return pd.DataFrame(rows).dropna(subset=["iv_pct"]).sort_values("dte").head(14)
+    )
 
 
-def _build_term_structure_figure(chain_df: pd.DataFrame, chart_id: str) -> go.Figure:
-    term = _term_structure(chain_df)
+def _build_volatility_cone_figure(
+    cone_df: pd.DataFrame,
+    today_line: pd.DataFrame,
+    previous_line: pd.DataFrame,
+    chart_id: str,
+) -> go.Figure:
     fig = go.Figure()
-    if not term.empty:
-        monthly = term[term["expiration_type"] == "monthly"]
-        short = term[term["expiration_type"] != "monthly"]
+    cone = cone_df.copy() if cone_df is not None else pd.DataFrame()
+    if not cone.empty:
+        for col in ("dte_target", "p10", "p25", "p50", "p75", "p90", "sample_count"):
+            cone[col] = pd.to_numeric(cone.get(col), errors="coerce")
+        cone = cone.dropna(subset=["dte_target"]).sort_values("dte_target")
+    if not cone.empty and {"p10", "p25", "p50", "p75", "p90"}.issubset(cone.columns):
+        x = cone["dte_target"]
+        fig.add_trace(
+            go.Scatter(x=x, y=cone["p90"], mode="lines", line=dict(width=0), showlegend=False, hoverinfo="skip")
+        )
         fig.add_trace(
             go.Scatter(
-                x=monthly["dte"],
-                y=monthly["iv_pct"],
-                mode="lines+markers",
-                name="月结算",
-                line=dict(color="#2563eb", width=2),
+                x=x,
+                y=cone["p10"],
+                mode="lines",
+                fill="tonexty",
+                fillcolor="rgba(37, 99, 235, 0.08)",
+                line=dict(width=0),
+                name="10-90%区间",
+                hovertemplate="DTE %{x}<br>p10 %{y:.2f}%<extra></extra>",
+            )
+        )
+        fig.add_trace(
+            go.Scatter(x=x, y=cone["p75"], mode="lines", line=dict(width=0), showlegend=False, hoverinfo="skip")
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=x,
+                y=cone["p25"],
+                mode="lines",
+                fill="tonexty",
+                fillcolor="rgba(37, 99, 235, 0.14)",
+                line=dict(width=0),
+                name="25-75%区间",
+                hovertemplate="DTE %{x}<br>p25 %{y:.2f}%<extra></extra>",
             )
         )
         fig.add_trace(
             go.Scatter(
-                x=short["dte"],
-                y=short["iv_pct"],
+                x=x,
+                y=cone["p50"],
                 mode="lines+markers",
-                name="短周期",
-                line=dict(color="#16a34a", width=2),
+                name="历史中位数",
+                line=dict(color="#64748b", width=1.8),
+                marker=dict(size=5, color="#64748b"),
+                hovertemplate="DTE %{x}<br>中位数 %{y:.2f}%<extra></extra>",
             )
         )
+        if pd.to_numeric(cone.get("sample_count"), errors="coerce").max() < 20:
+            _add_empty_chart_annotation(fig, "历史样本不足：分位锥仅供参考")
+    else:
+        _add_empty_chart_annotation(fig, "历史样本不足：先显示今日/昨日曲线")
+    _add_cone_line(fig, previous_line, name="昨日", color=PREVIOUS_LINE_COLOR, dash="dash")
+    _add_cone_line(fig, today_line, name="今日", color=TODAY_LINE_COLOR)
     fig.update_layout(
-        height=280,
+        height=320,
         template="plotly_white",
         meta={"chart_id": chart_id},
-        margin=dict(l=12, r=12, t=22, b=26),
+        margin=dict(l=12, r=12, t=22, b=34),
         yaxis_title="IV %",
         xaxis_title="DTE",
         legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
+        paper_bgcolor="#ffffff",
+        plot_bgcolor="#ffffff",
     )
+    fig.update_xaxes(showgrid=False)
+    fig.update_yaxes(gridcolor="#edf2f7")
     return fig
 
 
-def _skew_slice(chain_df: pd.DataFrame, selected_expiration: str) -> pd.DataFrame:
-    if chain_df is None or chain_df.empty:
-        return pd.DataFrame()
-    df = chain_df.copy()
-    df["iv_pct"] = pd.to_numeric(df["iv_pct"], errors="coerce")
-    df["moneyness_pct"] = pd.to_numeric(df["moneyness_pct"], errors="coerce")
-    df["dte"] = pd.to_numeric(df["dte"], errors="coerce")
-    df = df.dropna(subset=["iv_pct", "moneyness_pct"])
-    df = df[df["moneyness_pct"].between(-10, 10)]
-    if df.empty:
-        return df
-    if selected_expiration != "全部到期日":
-        filtered = df[df["expiration_date"].astype(str) == selected_expiration]
-        if not filtered.empty:
-            return filtered.sort_values(["moneyness_pct", "call_put"])
-    target = df[(df["dte"] >= 20) & (df["dte"] <= 45)]
-    if target.empty:
-        target = df
-    expiry = target.assign(dte_distance=(target["dte"] - 30).abs()).sort_values("dte_distance")["expiration_date"].iloc[0]
-    return df[df["expiration_date"] == expiry].sort_values(["moneyness_pct", "call_put"])
+def _add_otm_curve(fig: go.Figure, curve_df: pd.DataFrame, *, name: str, color: str, dash: str = "solid") -> None:
+    if curve_df is None or curve_df.empty:
+        return
+    curve = curve_df.copy()
+    for col in ("moneyness_pct", "iv_pct", "dte"):
+        curve[col] = pd.to_numeric(curve.get(col), errors="coerce")
+    curve = curve.dropna(subset=["moneyness_pct", "iv_pct"]).sort_values("moneyness_pct")
+    if curve.empty:
+        return
+    negative = curve[curve["moneyness_pct"] < 0]
+    positive = curve[curve["moneyness_pct"] > 0]
+    if not negative.empty and not positive.empty:
+        separator = pd.DataFrame([{col: None for col in curve.columns}])
+        separator["moneyness_pct"] = 0.0
+        separator["iv_pct"] = None
+        separator["call_put"] = ""
+        separator["expiration_date"] = "-"
+        separator["dte"] = None
+        curve = pd.concat([negative, separator, positive], ignore_index=True)
+    custom = pd.DataFrame(
+        {
+            "side": curve.get("call_put", pd.Series([""] * len(curve))).fillna("").astype(str),
+            "expiration": curve.get("expiration_date", pd.Series(["-"] * len(curve))).fillna("-").astype(str),
+            "dte": pd.to_numeric(curve.get("dte"), errors="coerce"),
+        }
+    ).to_numpy()
+    fig.add_trace(
+        go.Scatter(
+            x=curve["moneyness_pct"],
+            y=curve["iv_pct"],
+            customdata=custom,
+            mode="lines+markers",
+            name=name,
+            line=dict(color=color, width=2.4, dash=dash),
+            marker=dict(size=5.5, color=color),
+            hovertemplate=(
+                "相对ATM %{x:+.2f}%<br>"
+                "IV %{y:.2f}%<br>"
+                "%{customdata[0]} · DTE %{customdata[2]:.0f}<br>"
+                "到期 %{customdata[1]}<extra></extra>"
+            ),
+        )
+    )
 
 
-def _build_skew_figure(chain_df: pd.DataFrame, selected_expiration: str, chart_id: str) -> go.Figure:
-    skew = _skew_slice(chain_df, selected_expiration)
+def _otm_curve_x_range(*curves: pd.DataFrame) -> list[float]:
+    values: list[float] = []
+    for curve in curves:
+        if curve is None or curve.empty or "moneyness_pct" not in curve.columns:
+            continue
+        series = pd.to_numeric(curve["moneyness_pct"], errors="coerce").abs().dropna()
+        values.extend(float(value) for value in series if float(value) > 0)
+    if not values:
+        return [-5.5, 5.5]
+    padded = math.ceil((max(values) + 0.35) * 2) / 2
+    padded = min(10.5, max(3.5, padded))
+    return [-padded, padded]
+
+
+def _build_otm_volatility_curve_figure(
+    today_curve: pd.DataFrame,
+    previous_curve: pd.DataFrame,
+    chart_id: str,
+) -> go.Figure:
     fig = go.Figure()
-    if not skew.empty:
-        for call_put, name, color in [("C", "看涨 IV", "#2563eb"), ("P", "看跌 IV", "#ef4444")]:
-            side = skew[skew["call_put"] == call_put].sort_values("moneyness_pct")
-            if side.empty:
-                continue
-            grouped = side.groupby("moneyness_pct", as_index=False)["iv_pct"].mean()
-            fig.add_trace(
-                go.Scatter(
-                    x=grouped["moneyness_pct"],
-                    y=grouped["iv_pct"],
-                    mode="lines+markers",
-                    name=name,
-                    line=dict(color=color, width=2),
-                )
-            )
+    _add_otm_curve(fig, previous_curve, name="昨日OTM曲线", color=PREVIOUS_LINE_COLOR, dash="dash")
+    _add_otm_curve(fig, today_curve, name="今日OTM曲线", color=TODAY_LINE_COLOR)
+    if (today_curve is None or today_curve.empty) and (previous_curve is None or previous_curve.empty):
+        _add_empty_chart_annotation(fig, "暂无可计算的 OTM 波动率曲线")
+    elif previous_curve is None or previous_curve.empty:
+        _add_empty_chart_annotation(fig, "暂无昨日曲线：仅显示今日")
     fig.add_vline(x=0, line_width=1, line_dash="dash", line_color="#94a3b8")
+    fig.add_annotation(
+        text="OTM Put",
+        xref="paper",
+        yref="paper",
+        x=0.02,
+        y=0.98,
+        showarrow=False,
+        font=dict(size=11, color="#64748b"),
+    )
+    fig.add_annotation(
+        text="OTM Call",
+        xref="paper",
+        yref="paper",
+        x=0.98,
+        y=0.98,
+        showarrow=False,
+        font=dict(size=11, color="#64748b"),
+    )
     fig.update_layout(
-        height=280,
+        height=320,
         template="plotly_white",
         meta={"chart_id": chart_id},
-        margin=dict(l=12, r=12, t=22, b=26),
+        margin=dict(l=12, r=12, t=22, b=34),
         yaxis_title="IV %",
         xaxis_title="相对 ATM %",
         legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
+        paper_bgcolor="#ffffff",
+        plot_bgcolor="#ffffff",
     )
+    fig.update_xaxes(showgrid=False, range=_otm_curve_x_range(today_curve, previous_curve), zeroline=False)
+    fig.update_yaxes(gridcolor="#edf2f7")
     return fig
 
 
@@ -2398,7 +2557,7 @@ def _render_rail(
         <div class="us-lab-ledger">
             {_rail_card_html(title="今日 IV 变化", sub="较前一交易日", value=_fmt_signed_pct(metrics.get("iv_change_1d"), 1), pct_label="历史分位", pct_value=metrics.get("iv_change_1d_percentile"), color="#2563eb", history_count=metrics.get("iv_change_1d_history_count"), min_samples=metrics.get("historical_percentile_min_samples"))}
             {_rail_card_html(title="IV - RV20", sub="隐含波动率 - 实际波动率", value=_fmt_signed_pct(metrics.get("iv_rv20_spread"), 1), pct_label="历史分位", pct_value=metrics.get("iv_rv20_percentile"), color="#ea580c", tone="hot", history_count=metrics.get("iv_rv20_spread_history_count"), min_samples=metrics.get("historical_percentile_min_samples"))}
-            {_rail_card_html(title="IV Rank", sub="月结算 IV 排名", value=_fmt_number(metrics.get("iv_rank"), 1), pct_label="历史分位", pct_value=metrics.get("iv_rank"), color="#2563eb", tone="compact", history_count=metrics.get("iv_history_days"), min_samples=metrics.get("historical_percentile_min_samples"))}
+            {_rail_card_html(title="IV Rank", sub="月结算 IV 排名", value=_fmt_rank_pct(metrics.get("iv_rank"), 1), pct_label="历史分位", pct_value=metrics.get("iv_rank"), color="#2563eb", tone="compact", history_count=metrics.get("iv_history_days"), min_samples=metrics.get("historical_percentile_min_samples"))}
             {_rail_card_html(title="期限结构", sub=term_sub, value=_fmt_signed_pct(metrics.get("term_slope_30_60"), 1), pct_label="历史分位", pct_value=metrics.get("term_slope_percentile"), color=term_color, tone="compact wide", history_count=metrics.get("term_slope_30_60_history_count"), min_samples=metrics.get("historical_percentile_min_samples"), extra_html=term_extra)}
             {_rail_card_html(title="Put Skew", sub="下方保护相对 ATM", value=_fmt_signed_pct(put_skew, 1), pct_label="历史分位", pct_value=metrics.get("put_skew_5pct_percentile"), color="#dc2626", tone="compact", history_count=metrics.get("put_skew_5pct_history_count"), min_samples=metrics.get("historical_percentile_min_samples"), extra_html=skew_expiry_chip)}
             {_rail_card_html(title="Call Skew", sub="上方追涨相对 ATM", value=_fmt_signed_pct(call_skew, 1), pct_label="历史分位", pct_value=metrics.get("call_skew_5pct_percentile"), color="#2563eb", tone="compact", history_count=metrics.get("call_skew_5pct_history_count"), min_samples=metrics.get("historical_percentile_min_samples"), extra_html=skew_expiry_chip)}
@@ -2454,6 +2613,28 @@ def _cached_option_chain_daily(
 
 
 @st.cache_data(show_spinner=False, ttl=600)
+def _cached_option_surface_snapshot(
+    symbol: str,
+    trade_date: str,
+    include_short_cycle: bool,
+    use_test_tables: bool,
+    underlying_price: float | None,
+    moneyness_range: float,
+    max_dte: int,
+) -> pd.DataFrame:
+    return load_option_surface_snapshot(
+        symbol,
+        trade_date,
+        include_short_cycle=include_short_cycle,
+        use_test_tables=use_test_tables,
+        underlying_price=underlying_price,
+        moneyness_range=moneyness_range,
+        max_dte=max_dte,
+        engine=_cached_engine(),
+    )
+
+
+@st.cache_data(show_spinner=False, ttl=600)
 def _cached_option_chain_summary(
     symbol: str,
     trade_date: str,
@@ -2480,6 +2661,17 @@ def _cached_iv_history(symbol: str, window: int, use_test_tables: bool) -> pd.Da
 def _cached_market_metrics_history(symbol: str, window: int, use_test_tables: bool) -> pd.DataFrame:
     return load_market_metrics_history(
         symbol,
+        window=window,
+        use_test_tables=use_test_tables,
+        engine=_cached_engine(),
+    )
+
+
+@st.cache_data(show_spinner=False, ttl=600)
+def _cached_volatility_cone_history(symbol: str, end_date: str, window: int, use_test_tables: bool) -> pd.DataFrame:
+    return load_volatility_cone_history(
+        symbol,
+        end_date,
         window=window,
         use_test_tables=use_test_tables,
         engine=_cached_engine(),
@@ -2565,7 +2757,6 @@ active_view = active_view or "总览"
 
 include_short_cycle = True
 stock_limit = 420
-selected_expiration = "全部到期日"
 market_metrics_history = _cached_market_metrics_history(symbol, 252, False)
 if not market_metrics_history.empty:
     use_test_tables = False
@@ -2669,57 +2860,59 @@ if active_view == "总览":
         _render_rail(vol_position_metrics, trade_date)
 
 elif active_view == "波动率曲面":
-    if chain_df.empty and summary["rows"] > 0:
-        chain_df = _cached_option_chain_daily(
+    surface_df = _cached_option_surface_snapshot(
+        symbol,
+        trade_date,
+        include_short_cycle,
+        use_test_tables,
+        underlying_price,
+        10.0,
+        135,
+    )
+    available_dates = _cached_available_option_trade_dates(symbol, use_test_tables, 8)
+    previous_trade_date = next((value for value in available_dates if str(value or "") < str(trade_date)), None)
+    previous_surface_df = pd.DataFrame()
+    if previous_trade_date:
+        previous_price = selected_underlying_price(stock_df, previous_trade_date)
+        previous_surface_df = _cached_option_surface_snapshot(
             symbol,
-            trade_date,
+            previous_trade_date,
             include_short_cycle,
             use_test_tables,
-            underlying_price,
+            previous_price,
+            10.0,
+            135,
         )
-        summary = summarize_option_chain(chain_df)
+    cone_history = _cached_volatility_cone_history(symbol, trade_date, 252, use_test_tables)
+    today_cone_line = build_volatility_cone_line(surface_df)
+    previous_cone_line = build_volatility_cone_line(previous_surface_df)
+    today_otm_curve = build_otm_volatility_curve(surface_df)
+    previous_otm_curve = build_otm_volatility_curve(previous_surface_df)
     c1, c2 = st.columns([1, 1], gap="small")
     with c1:
         st.markdown(
-            '<div class="us-lab-panel"><div class="us-lab-panel-title"><strong>期限结构</strong><span>月结算与短周期对比</span></div>',
+            '<div class="us-lab-panel"><div class="us-lab-panel-title"><strong>波动率锥</strong><span>近一年历史分位 + 今日/昨日</span></div>',
             unsafe_allow_html=True,
         )
-        if chain_df.empty:
-            st.info("该交易日暂无期权数据。")
-        else:
-            st.plotly_chart(
-                _build_term_structure_figure(chain_df, "vol_term"),
-                width="stretch",
-                config={"displaylogo": False},
-                key=f"vol_term_{symbol}_{trade_date}_{table_label}",
-            )
+        st.plotly_chart(
+            _build_volatility_cone_figure(cone_history, today_cone_line, previous_cone_line, "vol_cone"),
+            width="stretch",
+            config={"displaylogo": False},
+            key=f"vol_cone_{symbol}_{trade_date}_{previous_trade_date or 'none'}_{table_label}",
+        )
         st.markdown("</div>", unsafe_allow_html=True)
     with c2:
         st.markdown(
-            '<div class="us-lab-panel"><div class="us-lab-panel-title"><strong>Skew</strong><span>按行权价相对 ATM</span></div>',
+            '<div class="us-lab-panel"><div class="us-lab-panel-title"><strong>波动率曲线</strong><span>OTM Put + OTM Call</span></div>',
             unsafe_allow_html=True,
         )
-        if chain_df.empty:
-            st.info("该交易日暂无可计算的 IV smile。")
-        else:
-            st.plotly_chart(
-                _build_skew_figure(chain_df, selected_expiration, "vol_skew"),
-                width="stretch",
-                config={"displaylogo": False},
-                key=f"vol_skew_{symbol}_{trade_date}_{table_label}_{selected_expiration}",
-            )
+        st.plotly_chart(
+            _build_otm_volatility_curve_figure(today_otm_curve, previous_otm_curve, "otm_vol_curve"),
+            width="stretch",
+            config={"displaylogo": False},
+            key=f"otm_vol_curve_{symbol}_{trade_date}_{previous_trade_date or 'none'}_{table_label}",
+        )
         st.markdown("</div>", unsafe_allow_html=True)
-    source_rows = [
-        {"来源": "provider_iv", "行数": summary["provider_iv_rows"]},
-        {"来源": "computed_iv", "行数": summary["computed_iv_rows"]},
-        {"来源": "open_interest", "行数": summary["open_interest_rows"]},
-    ]
-    st.dataframe(
-        pd.DataFrame(source_rows),
-        width="stretch",
-        hide_index=True,
-        key=f"iv_source_rows_{symbol}_{trade_date}_{table_label}",
-    )
 
 elif active_view == "持仓防线":
     defense_history = _cached_oi_defense_history(symbol, trade_date, 20, use_test_tables)
