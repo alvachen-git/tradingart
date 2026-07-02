@@ -354,6 +354,12 @@ class UsMarketDashboardDataTests(unittest.TestCase):
             self.assertIn(symbol, symbols)
             self.assertTrue(dash.UNDERLYING_DISPLAY_NAMES.get(symbol))
 
+    def test_dashboard_underlyings_prioritize_core_etfs_then_sort_symbols(self):
+        symbols = list(dash.DEFAULT_DASHBOARD_UNDERLYINGS)
+
+        self.assertEqual(symbols[:4], ["SPY", "QQQ", "DIA", "IWM"])
+        self.assertEqual(symbols[4:], sorted(symbols[4:]))
+
     def test_load_market_climate_strip_missing_tables_returns_placeholders(self):
         cards = dash.load_market_climate_strip(engine=self.engine, today=pd.Timestamp("2026-07-01").date())
 
