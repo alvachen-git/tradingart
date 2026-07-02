@@ -446,7 +446,7 @@ def classify_contract(
         else:
             exp_type = "unknown"
             settlement_type = "unknown"
-    elif underlying_norm in {"SPY", "QQQ", "IWM"}:
+    else:
         if is_third_friday(expiration_date):
             exp_type = "monthly"
         else:

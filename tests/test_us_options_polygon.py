@@ -51,6 +51,15 @@ class TestUSOptionsPolygon(unittest.TestCase):
         self.assertEqual(monthly[0], "monthly")
         self.assertEqual(weekly[0], "short_cycle")
 
+    def test_classify_equity_and_etf_underlyings_by_third_friday(self):
+        tsla_monthly = uop.classify_contract("O:TSLA260619C00400000", "TSLA", "2026-06-19")
+        tsla_weekly = uop.classify_contract("O:TSLA260612C00400000", "TSLA", "2026-06-12")
+        gld_monthly = uop.classify_contract("O:GLD260619C00250000", "GLD", "2026-06-19")
+
+        self.assertEqual(tsla_monthly[:2], ("monthly", "physical"))
+        self.assertEqual(tsla_weekly[:2], ("short_cycle", "physical"))
+        self.assertEqual(gld_monthly[:2], ("monthly", "physical"))
+
     def test_storage_filter_keeps_monthly_full_chain_but_short_cycle_only_band(self):
         monthly = uop.OptionContract(
             option_ticker="O:SPY260619C00650000",
@@ -86,6 +95,22 @@ class TestUSOptionsPolygon(unittest.TestCase):
         self.assertTrue(uop.should_keep_contract_for_storage(monthly, "20260610", 600.0, 5.0))
         self.assertTrue(uop.should_keep_contract_for_storage(weekly_near, "20260610", 600.0, 5.0))
         self.assertFalse(uop.should_keep_contract_for_storage(weekly_far, "20260610", 600.0, 5.0))
+
+    def test_storage_filter_keeps_equity_monthly_full_chain_after_classification(self):
+        exp_type, settlement, root = uop.classify_contract("O:TSLA260619C00600000", "TSLA", "2026-06-19")
+        monthly = uop.OptionContract(
+            option_ticker="O:TSLA260619C00600000",
+            underlying="TSLA",
+            call_put="C",
+            strike=600.0,
+            expiration_date="2026-06-19",
+            contract_root=root,
+            expiration_type=exp_type,
+            settlement_type=settlement,
+        )
+
+        self.assertEqual(monthly.expiration_type, "monthly")
+        self.assertTrue(uop.should_keep_contract_for_storage(monthly, "20260610", 400.0, 5.0))
 
     def test_monthly_contract_becomes_short_cycle_for_storage_on_0dte(self):
         contract = uop.OptionContract(
