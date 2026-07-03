@@ -1,4 +1,5 @@
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -6,6 +7,22 @@ from sqlalchemy import create_engine, text
 
 import run_us_options_daily as job
 import us_options_polygon as uop
+
+
+NEW_OPTION_UNDERLYINGS = {
+    "AVGO",
+    "COIN",
+    "GOOGL",
+    "HOOD",
+    "INTC",
+    "META",
+    "MSFT",
+    "MSTR",
+    "NFLX",
+    "PLTR",
+    "SMCI",
+    "TSM",
+}
 
 
 class RunUSOptionsDailyTests(unittest.TestCase):
@@ -100,7 +117,22 @@ class RunUSOptionsDailyTests(unittest.TestCase):
         self.assertEqual(job.DEFAULT_UNDERLYINGS, uop.DEFAULT_UNDERLYINGS)
         self.assertIn("TSLA", job.DEFAULT_UNDERLYINGS)
         self.assertIn("GLD", job.DEFAULT_UNDERLYINGS)
+        self.assertTrue(NEW_OPTION_UNDERLYINGS <= set(job.DEFAULT_UNDERLYINGS))
         self.assertNotIn("SPX", job.DEFAULT_UNDERLYINGS)
+
+    def test_daily_shell_default_underlyings_include_new_symbols(self):
+        script_text = Path("run_us_options_daily.sh").read_text(encoding="utf-8")
+
+        self.assertIn("US_OPTIONS_UNDERLYINGS=", script_text)
+        for symbol in NEW_OPTION_UNDERLYINGS:
+            self.assertIn(symbol, script_text)
+        self.assertNotIn("SPX", script_text)
+
+    def test_backfill_script_defaults_to_new_batch(self):
+        script_text = Path("scripts/backfill_us_options_new_underlyings_1y.sh").read_text(encoding="utf-8")
+        expected = "AVGO,COIN,GOOGL,HOOD,INTC,META,MSFT,MSTR,NFLX,PLTR,SMCI,TSM"
+
+        self.assertIn(f"US_OPTIONS_BACKFILL_UNDERLYINGS=\"${{US_OPTIONS_BACKFILL_UNDERLYINGS:-{expected}}}\"", script_text)
 
     def _insert_rows(self, *, open_interest=100, provider_iv=0.2, metrics=True):
         names = uop.table_names(use_test_tables=True)

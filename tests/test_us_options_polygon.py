@@ -21,10 +21,26 @@ class FakeResponse:
 class TestUSOptionsPolygon(unittest.TestCase):
     def test_default_underlyings_cover_dashboard_symbols_without_index_options(self):
         symbols = set(uop.DEFAULT_UNDERLYINGS)
+        new_symbols = {
+            "AVGO",
+            "COIN",
+            "GOOGL",
+            "HOOD",
+            "INTC",
+            "META",
+            "MSFT",
+            "MSTR",
+            "NFLX",
+            "PLTR",
+            "SMCI",
+            "TSM",
+        }
 
         self.assertFalse({"SPX", "NDX", "RUT", "VIX"} & symbols)
         for symbol in ("SPY", "QQQ", "IWM", "GLD", "TLT", "TSLA", "NVDA", "AMD", "AAPL", "AMZN"):
             self.assertIn(symbol, symbols)
+        self.assertTrue(new_symbols <= symbols)
+        self.assertEqual(len(uop.DEFAULT_UNDERLYINGS), 27)
 
     def test_parse_option_ticker_extracts_root_expiration_type_and_strike(self):
         parsed = uop.parse_option_ticker("O:SPY260619C00600000")
@@ -55,10 +71,14 @@ class TestUSOptionsPolygon(unittest.TestCase):
         tsla_monthly = uop.classify_contract("O:TSLA260619C00400000", "TSLA", "2026-06-19")
         tsla_weekly = uop.classify_contract("O:TSLA260612C00400000", "TSLA", "2026-06-12")
         gld_monthly = uop.classify_contract("O:GLD260619C00250000", "GLD", "2026-06-19")
+        googl_monthly = uop.classify_contract("O:GOOGL260619C00200000", "GOOGL", "2026-06-19")
+        tsm_monthly = uop.classify_contract("O:TSM260619C00200000", "TSM", "2026-06-19")
 
         self.assertEqual(tsla_monthly[:2], ("monthly", "physical"))
         self.assertEqual(tsla_weekly[:2], ("short_cycle", "physical"))
         self.assertEqual(gld_monthly[:2], ("monthly", "physical"))
+        self.assertEqual(googl_monthly[:2], ("monthly", "physical"))
+        self.assertEqual(tsm_monthly[:2], ("monthly", "physical"))
 
     def test_storage_filter_keeps_monthly_full_chain_but_short_cycle_only_band(self):
         monthly = uop.OptionContract(

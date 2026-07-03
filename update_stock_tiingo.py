@@ -111,7 +111,7 @@ db_url = f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}
 SECTOR_SYMBOLS = {
     # 科技与互联网龙头（半导体/云计算/软件/平台）
     "tech": [
-        "AAPL", "MSFT", "NVDA", "GOOG", "META", "AMZN", "TSM", "AVGO", "AMD", "INTC",
+        "AAPL", "MSFT", "NVDA", "GOOG", "GOOGL", "META", "AMZN", "TSM", "AVGO", "AMD", "INTC",
         "ORCL", "ADBE", "CRM", "CSCO", "QCOM", "TXN", "MU", "AMAT", "LRCX", "KLAC","TSLA",
         "PANW", "CRWD", "PLTR", "SNOW", "NOW", "ANET", "CDNS", "SNPS", "INTU", "SHOP",
     ],
