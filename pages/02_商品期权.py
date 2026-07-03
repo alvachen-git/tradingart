@@ -909,39 +909,40 @@ if target_contract:
 
 
         # --- K线数据处理 ---
-        st.subheader(f"历史日线与波动率")
-        chart_k = df_kline.rename(columns={'trade_date': 'time'})
-        chart_k['time'] = pd.to_datetime(chart_k['time']).dt.strftime('%Y-%m-%d')
-        chart_k = chart_k[['time', 'open', 'high', 'low', 'close']]
+        st.subheader("📊 价格与波动率")
+        chart_k = df_kline[['trade_date', 'open', 'high', 'low', 'close']].copy()
+        chart_k.columns = ['date', 'open', 'high', 'low', 'close']
+        chart_k['date'] = pd.to_datetime(chart_k['date']).dt.strftime('%Y-%m-%d')
 
         # --- IV数据处理 ---
         chart_iv = pd.DataFrame()
         if df_iv is not None and not df_iv.empty:
-            df_iv['time'] = pd.to_datetime(df_iv['trade_date']).dt.strftime('%Y-%m-%d')
+            df_iv = df_iv.copy()
 
-            # 【修改点 1】定义线条名称变量，保证前后一致
-            line_name = '隐含波动率 (IV)'
+            line_name = '隐含波动率'
 
-            # 【修改点 2】将列名重命名为 line_name (而不是 'value')
-            chart_iv = df_iv[['time', 'iv']].rename(columns={'iv': line_name})
-
-            # 【修改点 3】过滤时也使用这个变量名
-            chart_iv = chart_iv[chart_iv[line_name] > 0]  # 过滤无效IV
+            chart_iv = df_iv[['trade_date', 'iv']].rename(
+                columns={'trade_date': 'date', 'iv': line_name}
+            )
+            chart_iv['date'] = pd.to_datetime(chart_iv['date']).dt.strftime('%Y-%m-%d')
+            chart_iv = chart_iv[chart_iv[line_name] > 0]
 
         # --- 绘图 ---
-        chart = StreamlitChart(height=500)
-        chart.legend(visible=True)
+        chart = StreamlitChart(height=500, width=None)
         chart.grid(vert_enabled=False, horz_enabled=False)
+        chart.layout(background_color='white', text_color='#333333')
+        chart.legend(visible=True, font_size=14, color='#333333')
 
         # 1. K线 (右轴)
-        chart.candle_style(up_color='#ef232a', down_color='#14b143', border_up_color='#ef232a',
-                           border_down_color='#14b143', wick_up_color='#ef232a', wick_down_color='#14b143')
+        chart.candle_style(
+            up_color='#ef232a', down_color='#14b143',
+            border_up_color='#ef232a', border_down_color='#14b143',
+            wick_up_color='#ef232a', wick_down_color='#14b143'
+        )
         chart.set(chart_k)
 
         # 2. IV (左轴)
         if not chart_iv.empty:
-            # 注意：这里的 name 参数是图例上显示的名称，跟 DataFrame 列名无关
-            # DataFrame 列名必须是 'time' 和 'value'
             line = chart.create_line(name=line_name, color='#2962FF', width=2, price_scale_id='left')
             line.set(chart_iv)
 
