@@ -26,6 +26,60 @@ OPTION_STRATEGY_ACTION_KEYWORDS: Tuple[str, ...] = (
     "实值",
 )
 
+OPTION_STRATEGY_ENGLISH_TERMS: Tuple[str, ...] = (
+    "put",
+    "call",
+    "covered call",
+    "cash-secured put",
+    "cash secured put",
+    "csp",
+    "sell put",
+    "sell call",
+    "buy put",
+    "buy call",
+    "short put",
+    "short call",
+    "long put",
+    "long call",
+    "wheel",
+    "strangle",
+    "straddle",
+    "short strangle",
+    "short straddle",
+    "iron condor",
+    "bear call spread",
+    "bull put spread",
+)
+
+US_OPTION_UNDERLYING_SYMBOLS: Tuple[str, ...] = (
+    "SPY",
+    "QQQ",
+    "DIA",
+    "IWM",
+    "GLD",
+    "TLT",
+    "SLV",
+    "XLF",
+    "XLE",
+    "HYG",
+    "AAPL",
+    "TSLA",
+    "NVDA",
+    "AMZN",
+    "MSFT",
+    "META",
+    "GOOG",
+    "GOOGL",
+    "AMD",
+    "AVGO",
+    "INTC",
+    "TSM",
+    "NFLX",
+    "COIN",
+    "MSTR",
+    "SMH",
+)
+
 ETF_UNDERLYING_ALIASES: Tuple[str, ...] = (
     "50ETF",
     "上证50ETF",
@@ -827,8 +881,38 @@ def is_option_strategy_question(query: str) -> bool:
         return False
     if "期权" in text or any(k in text for k in ["认购", "认沽"]):
         return True
-    has_option_strategy_term = any(k in text for k in ["价差", "双卖", "买方", "卖方"])
+    text_lower = text.lower()
+    if _has_english_option_strategy_term(text_lower) and any(k in text for k in OPTION_STRATEGY_ACTION_KEYWORDS):
+        return True
+    has_option_strategy_term = any(
+        k in text
+        for k in [
+            "价差",
+            "双卖",
+            "买方",
+            "卖方",
+            "跨式",
+            "宽跨",
+            "卖跨",
+            "卖宽跨",
+            "铁鹰",
+            "铁秃鹰",
+            "备兑",
+            "担保卖沽",
+        ]
+    )
     return bool(has_option_strategy_term and any(k in text for k in OPTION_STRATEGY_ACTION_KEYWORDS))
+
+
+def _has_english_option_strategy_term(text_lower: str) -> bool:
+    normalized = str(text_lower or "").replace("-", " ")
+    for term in OPTION_STRATEGY_ENGLISH_TERMS:
+        normalized_term = term.replace("-", " ")
+        if " " in normalized_term and normalized_term in normalized:
+            return True
+        if re.search(rf"(?<![a-z0-9]){re.escape(term)}(?![a-z0-9])", str(text_lower or "")):
+            return True
+    return False
 
 
 def has_explicit_option_underlying(query: str, symbol_hint: str = "") -> bool:
@@ -839,10 +923,29 @@ def has_explicit_option_underlying(query: str, symbol_hint: str = "") -> bool:
         return True
     if re.search(r"\b[A-Z]{1,3}\d{3,4}\b", text):
         return True
+    if _has_explicit_us_option_symbol(text):
+        return True
     raw = str(query or "")
     if any(hint.upper() in text or hint in raw for hint in OPTION_UNDERLYING_HINTS):
         return True
     return _has_explicit_futures_option_code(text)
+
+
+def extract_us_option_underlying_symbol(query: str, symbol_hint: str = "") -> str:
+    hint = str(symbol_hint or "").strip().upper()
+    if hint in US_OPTION_UNDERLYING_SYMBOLS:
+        return hint
+
+    upper_text = str(query or "").upper()
+    for symbol in sorted(US_OPTION_UNDERLYING_SYMBOLS, key=len, reverse=True):
+        pattern = rf"(?<![A-Z0-9]){re.escape(symbol)}(?![A-Z0-9])"
+        if re.search(pattern, upper_text):
+            return symbol
+    return ""
+
+
+def _has_explicit_us_option_symbol(upper_text: str) -> bool:
+    return bool(extract_us_option_underlying_symbol(upper_text))
 
 
 def _has_explicit_futures_option_code(upper_text: str) -> bool:

@@ -588,6 +588,24 @@ class UnspecifiedOptionStrategyRoutingTest(unittest.TestCase):
         self.assertEqual(plan, ["analyst", "strategist"])
         self.assertEqual(symbol, "510500")
 
+    def test_us_option_symbol_keeps_strategy_route(self):
+        for query, expected_symbol in [
+            ("aapl现在适合用什么期权策略操作，详细教我", "AAPL"),
+            ("AAPL现在适合卖put吗", "AAPL"),
+            ("SPY期权IV高吗，适合卖put吗", "SPY"),
+            ("SPY铁鹰适合吗", "SPY"),
+            ("AAPL卖宽跨可以吗", "AAPL"),
+            ("NVDA short strangle 适合做吗", "NVDA"),
+        ]:
+            with self.subTest(query=query):
+                plan, symbol = agent_core._enforce_unspecified_option_strategy_routing(
+                    query,
+                    ["chatter"],
+                    "",
+                )
+                self.assertEqual(plan, ["analyst", "strategist"])
+                self.assertEqual(symbol, expected_symbol)
+
     def test_generic_option_concept_routes_to_chatter_not_default_underlying(self):
         plan, symbol = agent_core._enforce_unspecified_option_strategy_routing(
             "不涉及标的，单纯想象题：突破行情里买方策略一般怎么考虑？",
@@ -614,3 +632,29 @@ def test_market_data_query_with_strategy_keeps_original_plan():
     plan = ["researcher", "macro_analyst", "analyst", "strategist"]
     out = agent_core._enforce_option_data_monitor_routing("甲醇2609波动率高吗，适合卖方吗", plan)
     assert out == plan
+
+
+def test_monitor_worker_response_uses_us_options_profile_tag():
+    out = agent_core._tag_monitor_worker_response("【美股期权体检】\nAAPL IV Rank 75%")
+    assert out.startswith("【美股期权体检】")
+    assert not out.startswith("【数据监控】")
+
+
+def test_monitor_worker_response_defaults_to_data_monitor_tag():
+    out = agent_core._tag_monitor_worker_response("甲醇持仓数据")
+    assert out.startswith("【数据监控】")
+
+
+def test_clean_finalizer_internal_audit_labels_keeps_revised_report_only():
+    raw = (
+        "报告审核结论：存在致命异常常识性错误与边界规则冲突，已修正并重写。\n\n"
+        "直接回答：原报告存在两处关键问题需修正。\n\n"
+        "依据说明：本次修正依据主要来自数据缺口。\n\n"
+        "【修正后报告】\n"
+        "【期权策略】\n"
+        "AAPL 基于本地体检数据先看 IV Rank。"
+    )
+    out = agent_core._clean_finalizer_internal_labels(raw)
+    assert out.startswith("【期权策略】")
+    assert "报告审核结论" not in out
+    assert "原报告存在" not in out

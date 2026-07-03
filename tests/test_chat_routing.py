@@ -7,6 +7,7 @@ from chat_routing import (
     classify_chat_mode,
     is_market_data_query,
     is_pure_option_data_query,
+    is_us_option_market_profile_query,
     is_volatility_divergence_query,
     is_volatility_mechanism_knowledge_query,
     is_volatility_market_view_query,
@@ -374,6 +375,38 @@ class TestChatRouting(unittest.TestCase):
         self.assertFalse(is_market_data_query("如果创业板ETF周一-10%开盘，IV会到多少，平值认沽涨多少"))
         self.assertFalse(is_market_data_query("如果黄金跌破支撑，后面怎么看"))
         self.assertFalse(is_market_data_query("解释一下IV"))
+
+    def test_us_option_market_profile_routes_only_us_option_data(self):
+        self.assertTrue(is_us_option_market_profile_query("SPY期权IV高吗"))
+        self.assertTrue(is_us_option_market_profile_query("NVDA 0DTE 活跃吗"))
+        self.assertTrue(is_us_option_market_profile_query("QQQ skew 怎么看"))
+        self.assertTrue(is_market_data_query("QQQ skew 怎么看"))
+        self.assertEqual(classify_chat_mode("SPY期权IV高吗"), CHAT_MODE_ANALYSIS)
+        self.assertEqual(classify_chat_mode("NVDA 0DTE 活跃吗"), CHAT_MODE_ANALYSIS)
+        self.assertEqual(classify_chat_mode("QQQ skew 怎么看"), CHAT_MODE_ANALYSIS)
+
+        self.assertFalse(is_us_option_market_profile_query("创业板ETF期权IV现在多少"))
+        self.assertFalse(is_us_option_market_profile_query("甲醇期权skew怎么看"))
+        self.assertFalse(is_us_option_market_profile_query("什么是 skew"))
+        self.assertEqual(classify_chat_mode("什么是 skew"), CHAT_MODE_KNOWLEDGE)
+
+    def test_us_option_market_profile_does_not_steal_strategy_questions(self):
+        self.assertFalse(is_us_option_market_profile_query("SPY期权IV高吗，适合卖put吗"))
+        self.assertFalse(is_us_option_market_profile_query("SPY期权IV高吗，适合铁鹰吗"))
+
+    def test_us_option_strategy_routes_to_analysis_not_knowledge_or_pure_monitor(self):
+        self.assertEqual(
+            classify_chat_mode("aapl现在适合用什么期权策略操作，详细教我"),
+            CHAT_MODE_ANALYSIS,
+        )
+        self.assertEqual(classify_chat_mode("AAPL现在适合卖put吗"), CHAT_MODE_ANALYSIS)
+        self.assertEqual(classify_chat_mode("SPY铁鹰适合吗"), CHAT_MODE_ANALYSIS)
+        self.assertEqual(classify_chat_mode("AAPL卖宽跨可以吗"), CHAT_MODE_ANALYSIS)
+        self.assertEqual(classify_chat_mode("NVDA short strangle 适合做吗"), CHAT_MODE_ANALYSIS)
+        self.assertFalse(is_us_option_market_profile_query("AAPL现在适合卖put吗"))
+        self.assertFalse(is_market_data_query("AAPL现在适合卖put吗"))
+        self.assertFalse(is_market_data_query("SPY铁鹰适合吗"))
+        self.assertEqual(classify_chat_mode("什么是 covered call"), CHAT_MODE_KNOWLEDGE)
 
     def test_detect_iv_scanner_market_data_query(self):
         self.assertTrue(is_market_data_query("列出2026年6月11日到2026年6月12日 ATM IV增幅由大到小的合约"))

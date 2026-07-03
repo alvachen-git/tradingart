@@ -14,14 +14,23 @@ class IVScannerToolMountingTest(unittest.TestCase):
     def test_generalist_tools_include_iv_scanner(self):
         self.assertIn("scan_iv_change_ranking", _tool_name_set(agent_core.build_generalist_tools()))
         self.assertIn("scan_volatility_divergence", _tool_name_set(agent_core.build_generalist_tools()))
+        self.assertIn("get_us_option_market_profile", _tool_name_set(agent_core.build_generalist_tools()))
+        self.assertIn("get_us_option_strategy_candidates", _tool_name_set(agent_core.build_generalist_tools()))
 
     def test_monitor_tools_include_iv_scanner(self):
         self.assertIn("scan_iv_change_ranking", _tool_name_set(agent_core.build_monitor_tools()))
         self.assertIn("scan_volatility_divergence", _tool_name_set(agent_core.build_monitor_tools()))
+        self.assertIn("get_us_option_market_profile", _tool_name_set(agent_core.build_monitor_tools()))
 
     def test_strategist_tools_include_iv_scanner(self):
         self.assertIn("scan_iv_change_ranking", _tool_name_set(agent_core.build_strategist_tools()))
         self.assertIn("scan_volatility_divergence", _tool_name_set(agent_core.build_strategist_tools()))
+        self.assertIn("get_us_option_market_profile", _tool_name_set(agent_core.build_strategist_tools()))
+        self.assertIn("get_us_option_strategy_candidates", _tool_name_set(agent_core.build_strategist_tools()))
+
+    def test_chatter_tools_do_not_include_us_option_profile(self):
+        self.assertNotIn("get_us_option_market_profile", _tool_name_set(agent_core.build_chatter_tools()))
+        self.assertNotIn("get_us_option_strategy_candidates", _tool_name_set(agent_core.build_chatter_tools()))
 
     def test_volatility_divergence_routes_to_monitor(self):
         self.assertEqual(

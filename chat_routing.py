@@ -128,6 +128,7 @@ MARKET_SUBJECT_KEYWORDS = (
     "策略", "期权", "认购", "认沽", "iv", "delta", "gamma", "vega", "theta",
     "牛市价差", "熊市价差", "跨式", "宽跨", "勒式", "美联储", "降息", "黄金",
     "白银", "创业板", "etf", "股票", "指数", "铜价", "原油", "波动率", "升波", "降波",
+    "skew", "偏斜", "0dte", "put/call", "oi防线", "持仓墙", "期权墙", "期限结构",
 ) + TECHNICAL_KNOWLEDGE_KEYWORDS
 
 OPTION_DATA_SUBJECT_KEYWORDS = (
@@ -188,6 +189,34 @@ MARKET_DATA_INTENT_KEYWORDS = MARKET_DATA_INTENT_KEYWORDS + IV_SCAN_INTENT_KEYWO
 MARKET_DATA_EXCLUDED_KEYWORDS = OPTION_DATA_EXCLUDED_KEYWORDS + (
     "解释", "什么是", "什么意思", "原理", "为什么", "原因", "意味着", "举例", "护城河", "竞争对手",
     "隐忧", "值不值得", "该怎么做",
+)
+
+US_OPTION_SYMBOL_HINTS = (
+    "spy", "qqq", "dia", "iwm", "gld", "tlt", "slv", "xlf", "xle", "hyg",
+    "tsla", "nvda", "amd", "aapl", "amzn", "msft", "meta", "goog", "googl",
+    "avgo", "intc", "tsm", "nflx", "coin", "mstr", "smh",
+)
+US_OPTION_CONTEXT_KEYWORDS = (
+    "美股期权", "美股", "美股etf", "us option", "u.s. option", "us options", "opra",
+    "纳斯达克", "纽交所", "标普", "纳指", "英伟达", "特斯拉", "苹果", "亚马逊",
+)
+US_OPTION_PROFILE_SUBJECT_KEYWORDS = (
+    "0dte", "zero dte", "skew", "偏斜", "波动率偏斜", "put/call", "put call",
+    "put-call", "putcall", "oi防线", "持仓墙", "期权墙", "iv rank", "ivrank",
+    "期限结构", "term structure", "term slope", "rv", "realized volatility",
+    "隐含波动率", "波动率", "atm iv",
+)
+US_OPTION_PROFILE_INTENT_KEYWORDS = MARKET_DATA_INTENT_KEYWORDS + (
+    "活跃", "活跃吗", "怎么看", "怎么样", "什么水平", "高不高", "低不低",
+    "偏高", "偏低", "拥挤", "防线", "压力", "支撑",
+)
+US_OPTION_PROFILE_STRATEGY_EXCLUDED_KEYWORDS = (
+    "策略", "建议", "怎么做", "怎么办", "适合", "能买吗", "能不能买", "买入", "卖出",
+    "开仓", "平仓", "移仓", "调仓", "对冲", "做什么", "卖put", "卖call", "买put", "买call",
+    "卖认沽", "卖认购", "买认沽", "买认购", "双卖", "卖跨", "卖宽跨", "跨式", "宽跨",
+    "铁鹰", "铁秃鹰", "备兑", "担保卖沽", "covered call", "cash-secured put",
+    "cash secured put", "short put", "short call", "short strangle", "short straddle",
+    "iron condor", "bull put spread", "bear call spread",
 )
 
 BROKER_SIGNAL_SUBJECT_KEYWORDS = (
@@ -471,6 +500,39 @@ def is_pure_option_data_query(prompt_text: str) -> bool:
     return has_intent
 
 
+def is_us_option_market_profile_query(prompt_text: str) -> bool:
+    text = str(prompt_text or "").strip()
+    text_lower = text.lower()
+    if not text_lower:
+        return False
+
+    upper_text = text.upper()
+    has_us_symbol = any(
+        re.search(rf"(?<![A-Z0-9]){re.escape(symbol.upper())}(?![A-Z0-9])", upper_text)
+        for symbol in US_OPTION_SYMBOL_HINTS
+    )
+    has_us_context = has_us_symbol or any(keyword in text_lower for keyword in US_OPTION_CONTEXT_KEYWORDS)
+    if not has_us_context:
+        return False
+
+    has_profile_subject = any(keyword in text_lower for keyword in US_OPTION_PROFILE_SUBJECT_KEYWORDS)
+    has_option_context = "期权" in text_lower or "option" in text_lower or has_profile_subject
+    if not has_option_context:
+        return False
+
+    has_intent = any(keyword in text_lower for keyword in US_OPTION_PROFILE_INTENT_KEYWORDS)
+    if any(keyword in text_lower for keyword in US_OPTION_PROFILE_STRATEGY_EXCLUDED_KEYWORDS):
+        return False
+
+    has_knowledge_prefix = any(keyword in text_lower for keyword in KNOWLEDGE_PREFIXES) or any(
+        keyword in text_lower for keyword in CONVERSATIONAL_KNOWLEDGE_PREFIXES
+    )
+    if has_knowledge_prefix and not has_intent:
+        return False
+
+    return has_profile_subject or has_intent
+
+
 def is_market_data_query(prompt_text: str) -> bool:
     text = str(prompt_text or "").strip().lower()
     if not text:
@@ -480,6 +542,9 @@ def is_market_data_query(prompt_text: str) -> bool:
         return True
 
     if is_pure_option_data_query(prompt_text):
+        return True
+
+    if is_us_option_market_profile_query(prompt_text):
         return True
 
     has_subject = any(keyword in text for keyword in MARKET_DATA_SUBJECT_KEYWORDS)

@@ -13,6 +13,7 @@ from agent_prompt_policy import (
     build_subject_policy,
     classify_analysis_task_type,
     enforce_unspecified_option_strategy_routing,
+    extract_us_option_underlying_symbol,
 )
 
 
@@ -40,6 +41,29 @@ class SubjectPolicyTest(unittest.TestCase):
         self.assertTrue(policy.is_option_strategy)
         self.assertTrue(policy.has_explicit_subject)
         self.assertFalse(policy.needs_clarification)
+
+    def test_us_option_symbol_is_explicit_strategy_subject(self):
+        for query in [
+            "aapl现在适合用什么期权策略操作，详细教我",
+            "AAPL现在适合卖put吗",
+            "SPY covered call 适合做吗",
+            "SPY铁鹰适合吗",
+            "AAPL卖宽跨可以吗",
+            "NVDA short strangle 适合做吗",
+        ]:
+            with self.subTest(query=query):
+                policy = build_subject_policy(query)
+                self.assertTrue(policy.is_option_strategy)
+                self.assertTrue(policy.has_explicit_subject)
+                self.assertFalse(policy.needs_clarification)
+
+    def test_extract_us_option_symbol_from_lowercase_chinese_query(self):
+        self.assertEqual(
+            extract_us_option_underlying_symbol("aapl现在适合用什么期权策略操作，详细教我"),
+            "AAPL",
+        )
+        self.assertEqual(extract_us_option_underlying_symbol("SPY期权IV高吗，适合卖put吗"), "SPY")
+        self.assertEqual(extract_us_option_underlying_symbol("现在适合用什么期权策略操作？"), "")
 
     def test_commodity_underlying_aliases_are_explicit_subjects(self):
         for query in [
@@ -126,6 +150,19 @@ class AnalysisTaskPolicyTest(unittest.TestCase):
         policy = classify_analysis_task_type("500ETF趋势突破有效，到期还长，能不能买深虚期权？")
         self.assertEqual(policy.task_type, TASK_TYPE_OPTION_STRATEGY_WITH_SUBJECT)
         self.assertEqual(policy.recommended_plan, ("analyst", "strategist"))
+
+    def test_us_option_strategy_with_subject_task_type(self):
+        for query in [
+            "aapl现在适合用什么期权策略操作，详细教我",
+            "AAPL现在适合卖put吗",
+            "SPY铁鹰适合吗",
+            "AAPL卖宽跨可以吗",
+            "NVDA short strangle 适合做吗",
+        ]:
+            with self.subTest(query=query):
+                policy = classify_analysis_task_type(query)
+                self.assertEqual(policy.task_type, TASK_TYPE_OPTION_STRATEGY_WITH_SUBJECT)
+                self.assertEqual(policy.recommended_plan, ("analyst", "strategist"))
 
     def test_option_scenario_projection_with_subject_keeps_strategy_policy(self):
         policy = classify_analysis_task_type("如果创业板ETF周一-10%开盘，IV会到多少，平值认沽涨多少")

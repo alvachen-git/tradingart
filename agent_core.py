@@ -77,6 +77,7 @@ from option_delta_tools import (
     fetch_underlying_spot_map,
     DELTA_EXECUTION_COVERAGE_THRESHOLD,
 )
+from us_options_ai_tools import get_us_option_market_profile, get_us_option_strategy_candidates
 from portfolio_tools import (
     get_user_portfolio_summary,
     get_user_portfolio_details,
@@ -106,6 +107,7 @@ from agent_prompt_policy import (
     build_profile_policy,
     build_subject_policy,
     classify_analysis_task_type,
+    extract_us_option_underlying_symbol,
     has_explicit_option_underlying,
     is_generic_option_strategy_question,
     is_option_strategy_question,
@@ -643,6 +645,9 @@ def _apply_analysis_task_policy(
         return filtered, "" if policy.clear_symbol else current_symbol
 
     if policy.task_type == TASK_TYPE_OPTION_STRATEGY_WITH_SUBJECT:
+        us_option_symbol = extract_us_option_underlying_symbol(query, symbol_hint=current_symbol)
+        if us_option_symbol:
+            current_symbol = us_option_symbol
         if not current_plan or set(current_plan).issubset({"monitor", "chatter"}):
             return list(policy.recommended_plan), current_symbol
         if "strategist" not in current_plan:
@@ -829,6 +834,14 @@ def _is_option_position_query(query: str) -> bool:
     if not _contains_any(text, OPTION_QUERY_KEYWORDS):
         return False
     return _contains_any(text, ["持仓", "仓位", "持有", "组合", "怎么调", "如何调", "调整"])
+
+
+def _tag_monitor_worker_response(response: str) -> str:
+    content = str(response or "")
+    report_tag = "【美股期权体检】" if "【美股期权体检】" in content else "【数据监控】"
+    if content.lstrip().startswith(report_tag):
+        return content
+    return f"{report_tag}\n{content}"
 
 
 def _strip_stock_portfolio_sections(text: str) -> str:
@@ -2409,8 +2422,17 @@ def _extract_recent_company_subject(query: str, *, symbol: str = "", symbol_name
 
 def _clean_finalizer_internal_labels(text: str) -> str:
     cleaned = str(text or "")
+    for marker in ("【修正后报告】", "修正后报告：", "修正后报告:"):
+        if marker in cleaned:
+            cleaned = cleaned.split(marker, 1)[1]
+            break
     cleaned = re.sub(r"^【风控修正】\s*", "", cleaned).strip()
     cleaned = re.sub(r"^经审核，原报告未通过。[^\n]*\n*", "", cleaned).strip()
+    while True:
+        next_cleaned = re.sub(r"^(?:报告审核结论|直接回答|依据说明)[:：][^\n]*(?:\n|$)", "", cleaned).strip()
+        if next_cleaned == cleaned:
+            break
+        cleaned = next_cleaned
     return cleaned
 
 
@@ -2464,7 +2486,7 @@ def build_generalist_tools():
     return [
         interpret_market_news_tool,
         analyze_kline_pattern, search_investment_knowledge, get_market_snapshot, get_commodity_iv_info,
-        scan_iv_change_ranking, scan_volatility_divergence,
+        scan_iv_change_ranking, scan_volatility_divergence, get_us_option_market_profile, get_us_option_strategy_candidates,
         search_broker_holdings_on_date, tool_analyze_position_change,
         tool_query_specific_option, get_historical_price, get_volume_oi, get_futures_oi_ranking,
         get_option_oi_ranking, get_option_volume_abnormal, get_option_oi_abnormal,
@@ -2490,6 +2512,7 @@ def build_monitor_tools():
         get_futures_inventory_receipt_profile,  # 库存/仓单
         get_futures_delivery_tospot_profile,  # 交割/期转现
         get_commodity_iv_info,  # IV/波动率/Rank
+        get_us_option_market_profile,  # 美股/美股ETF期权波动率体检
         scan_iv_change_ranking,  # IV增幅/降幅排名/扫描
         scan_volatility_divergence,  # 价格/IV波动率背离扫描
         search_broker_holdings_on_date,  # 期货商持仓排名
@@ -2516,6 +2539,8 @@ def build_monitor_tools():
 def build_strategist_tools():
     return [
         get_commodity_iv_info,  # IV排名/波动率
+        get_us_option_market_profile,  # 美股/美股ETF期权波动率体检
+        get_us_option_strategy_candidates,  # 美股/美股ETF期权策略候选合约
         scan_iv_change_ranking,  # IV增幅/降幅排名/扫描
         scan_volatility_divergence,  # 价格/IV波动率背离扫描
         check_option_expiry_status,  # 到期日状态
@@ -3476,6 +3501,8 @@ def generalist_node(state: AgentState, llm):
         13.查成交量和持仓量 -> get_volume_oi
         14.查期货持仓量排名 -> get_futures_oi_ranking
         15.查单个标的最新IV/IV Rank/近期趋势 -> get_commodity_iv_info
+        15.05 查美股/美股ETF期权体检（IV Rank、RV、期限结构、skew、Put/Call、0DTE、OI防线） -> get_us_option_market_profile；只限美股期权，不用于A股ETF/商品/股指期权。
+        15.06 查美股/美股ETF期权策略候选合约（卖put、卖call、备兑、双卖、铁鹰、信用价差等） -> get_us_option_strategy_candidates；只有该工具返回候选时，才能引用具体行权价、EOD权利金、估算Delta、盈亏平衡或最大亏损。
         15.1 查IV增幅/降幅排行、IV扫描、指定日期区间ATM IV变化排序 -> scan_iv_change_ranking
         15.2 查价格与IV是否出现波动率背离 -> scan_volatility_divergence（只在复杂多品种/综合任务中使用；简单背离扫描应由 monitor 处理）
         16.查期权合约价格-> tool_query_specific_option
@@ -3495,6 +3522,8 @@ def generalist_node(state: AgentState, llm):
         5. 若处于连续追问模式，第一段必须先承接上一轮关键结论，再回答当前问题。
         6. 东证期货、海通期货、中信期货是正指标期货商；中信建投、东方财富、方正中期是反指标期货商。反指标做多是一种利空，反指标做空是一种利多；只问某期货商加多/加空时，必须先调用 get_futures_broker_indicator_profile；问正/反指标组最近在哪些商品上做多/做空时，必须调用 get_futures_broker_group_position_moves。
         7. 用户问“波动率背离/IV背离/价格和IV背离”时，必须调用 scan_volatility_divergence；禁止用 scan_iv_change_ranking 替代背离判断。
+        8. 用户问美股/美股ETF期权（如 SPY、QQQ、NVDA、TSLA、AAPL）的skew、0DTE、Put/Call、OI防线、期限结构、IV Rank时，才可调用 get_us_option_market_profile；其他期权市场禁止调用该工具。
+        9. 用户问美股/美股ETF期权策略执行、行权价、权利金、双卖/铁鹰/信用价差候选时，必须调用 get_us_option_strategy_candidates；缺候选时只能给筛选条件和风险框架。
         """
 
     if wants_chart:
@@ -3853,6 +3882,7 @@ def monitor_node(state: AgentState, llm):
 
     【你的工具箱 - 根据问题类型选择正确的工具】
     - 查单个标的最新IV/IV Rank/近期趋势 -> get_commodity_iv_info
+    - 查美股/美股ETF期权体检（IV Rank、RV、期限结构、skew、Put/Call、0DTE、OI防线） -> get_us_option_market_profile
     - 查IV增幅/降幅排行、IV扫描、指定日期区间ATM IV变化排序 -> scan_iv_change_ranking
     - 查价格与IV是否出现波动率背离 -> scan_volatility_divergence
     - 查股票行业资金 -> tool_get_retail_money_flow
@@ -3891,6 +3921,7 @@ def monitor_node(state: AgentState, llm):
     4.1 用户问 IV增幅/降幅/排行/扫描/哪些合约升波最多或降波最多/指定日期区间ATM IV变化排序时，必须调用 `scan_iv_change_ranking`。
     4.2 用户说“由大到小/增幅最大/升波最多”时，`direction="increase"`；用户说“由小到大/降幅最大/回落最多/降波最多”时，`direction="decrease"`。
     4.3 用户问“波动率背离/IV背离/隐波背离/价格和IV背离”时，必须调用 `scan_volatility_divergence`；禁止用 `scan_iv_change_ranking` 替代背离判断。
+    4.4 `get_us_option_market_profile` 只允许用于美股/美股ETF/美股代码的期权问题（如 SPY、QQQ、NVDA、TSLA、AAPL）；A股ETF期权、商品期权、股指期权继续使用原有期权/IV工具，禁止误调用美股期权工具。
     5. 商品都有期权，禁止说商品没有场内期权。
     6. 用户要“某天价格”优先用 `get_historical_price`；用户要“区间统计”优先用 `get_price_statistics`。
     7. 用户要“最近N天/最近N个交易日/列表/逐日明细/走势数据表”时，优先用 `get_recent_price_series`，不要只返回 `get_market_snapshot`。
@@ -3922,7 +3953,7 @@ def monitor_node(state: AgentState, llm):
         partial_response = last_response
 
         return {
-            "messages": [HumanMessage(content=f"【数据监控】\n{last_response}")],
+            "messages": [HumanMessage(content=_tag_monitor_worker_response(last_response))],
             "fund_data": last_response
         }
 
@@ -3930,7 +3961,7 @@ def monitor_node(state: AgentState, llm):
         # 🔥 GeneratorExit 不是 Exception 子类，需要单独捕获
         fallback_msg = partial_response if partial_response else f"资金数据查询完成"
         return {
-            "messages": [HumanMessage(content=f"【数据监控】\n{fallback_msg}")],
+            "messages": [HumanMessage(content=_tag_monitor_worker_response(fallback_msg))],
             "fund_data": fallback_msg
         }
     except Exception as e:
@@ -4209,6 +4240,12 @@ def strategist_node(state: AgentState, llm):
         - 普通知识解释、概念类比、宽泛讨论，不要为了预检索而查工具。
         - 只要进入“适合我怎么做 / 推荐策略 / 买卖哪个合约 / 仓位风险 / 具体执行”的回答，必须按需检查三件事：标的现价、IV Rank、距离到期日。
         - 用 `get_market_snapshot` 获取现价，用 `get_commodity_iv_info` 看IV/IV Rank，用 `check_option_expiry_status` 看到期日；工具失败时改为条件式建议，不编造数据。
+        - 如果是美股/美股ETF期权（如 SPY、QQQ、NVDA、TSLA、AAPL）的 IV Rank、skew、0DTE、Put/Call、OI防线、期限结构或策略适配问题，必须先用 `get_us_option_market_profile` 读取本地EOD体检数据。
+        - 美股期权策略适配问题包括“适合什么期权策略/怎么操作/卖put/卖call/双卖/铁鹰/covered call/cash-secured put/备兑/担保卖沽”等问法；回答开头必须先引用工具返回的数据日期、ATM IV/IV Rank、期限结构、skew或Put/Call、OI/0DTE和数据缺口，再解释策略适配。
+        - 美股期权只要进入策略执行、行权价、权利金、价差宽度、双卖或卖方收租候选，就必须继续调用 `get_us_option_strategy_candidates`；只有该候选工具返回有效结果时，才允许给具体行权价、EOD权利金、估算Delta、盈亏平衡或最大亏损。
+        - 卖方策略可以被正式推荐：当 IV Rank/IV Percentile 较高、流动性足够、趋势与客户风险偏好匹配时，可优先考虑卖认沽、备兑、信用价差、双卖、铁鹰等收权利金策略；激进偏好可讨论裸卖/双卖，但必须说明保证金、极端风险、止损/移仓条件和有限风险替代方案。
+        - `get_us_option_market_profile` 或 `get_us_option_strategy_candidates` 返回缺数据或覆盖不足时，只能给条件式策略框架，禁止补造 IV、OI、0DTE、合约报价、权利金、Delta或实时行情。
+        - `get_us_option_market_profile` 禁止用于 A股ETF期权、商品期权、股指期权；这些标的继续使用 `get_commodity_iv_info`、`check_option_expiry_status`、`tool_query_specific_option` 等原有工具。
         - 如果用户问 IV增幅/降幅排行、IV扫描、哪些合约升波最多/降波最多，必须用 `scan_iv_change_ranking`，不要用单标的 IV 查询替代。
         - 如果用户问波动率背离/IV背离并进一步要求策略，必须使用 monitor 传入的背离结论；需要补查时调用 `scan_volatility_divergence`，禁止用 `scan_iv_change_ranking` 替代背离判断。
 
@@ -4226,6 +4263,7 @@ def strategist_node(state: AgentState, llm):
         - **合约选择**：一定要根据标的现价，再来找合适的行权价合约。
         - **查询合约**：用 `tool_query_specific_option` 查具体期权价格（格式："标的 行权价 认购/认沽"），权利金价格也要乘上合约乘数。
         - 只有当工具返回了有效的价格数据时，才能推荐该合约。
+        - 对美股/美股ETF期权，如果 `get_us_option_strategy_candidates` 没有返回具体候选，禁止给精确合约、精确行权价、权利金或收益测算；只能给 DTE、Delta/虚实程度、OTM百分比和风险上限这类筛选条件。
         - 如果工具返回“未找到”，请尝试调整行权价再次查询，或者诚实告知用户该档位无合约。
         - 如果客户问“回测/策略表现”，优先用 `run_option_strategy_backtest` 给出回测结果。
         - 如果客户问“某策略在某时间段的胜率/盈亏比/最大回撤”，必须调用回测工具并传入 `start_date/end_date` 或 `time_expr`，禁止口头估算。
@@ -5644,7 +5682,7 @@ def finalizer_node(state: AgentState, llm):
     # 且排除掉可能是空的或者无关的
     # 🔥 [修复] 只收集有标签的 worker 输出，排除用户原始消息
     WORKER_TAGS = [
-        "【技术分析】", "【数据监控】", "【期权策略】", "【情报与舆情】",
+        "【技术分析】", "【数据监控】", "【美股期权体检】", "【期权策略】", "【情报与舆情】",
         "【宏观策略】", "【知识问答】", "【精选股票】", "【毒舌点评】",
         "【王牌分析】", "【闲聊】", "【风控修正】", "【持仓分析】"
     ]
