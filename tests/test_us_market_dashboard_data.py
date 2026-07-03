@@ -989,6 +989,72 @@ class UsMarketDashboardDataTests(unittest.TestCase):
         self.assertTrue(cone.empty)
         self.assertEqual(cone.columns.tolist(), dash.VOLATILITY_CONE_COLUMNS)
 
+    def test_load_volatility_cone_history_uses_daily_cache_table(self):
+        with self.engine.begin() as conn:
+            conn.execute(
+                text(
+                    f"""
+                    CREATE TABLE {dash.VOLATILITY_CONE_DAILY_CACHE_TABLE} (
+                        trade_date TEXT,
+                        underlying TEXT,
+                        dte_target INTEGER,
+                        dte REAL,
+                        expiration_date TEXT,
+                        iv_pct REAL,
+                        sample_count INTEGER
+                    )
+                    """
+                )
+            )
+            rows = []
+            for idx, trade_date in enumerate(["20260101", "20260102", "20260103"], start=1):
+                rows.extend(
+                    [
+                        {
+                            "trade_date": trade_date,
+                            "underlying": "SPY",
+                            "dte_target": 7,
+                            "dte": 7,
+                            "expiration_date": "2026-01-10",
+                            "iv_pct": 10.0 + idx,
+                            "sample_count": 2,
+                        },
+                        {
+                            "trade_date": trade_date,
+                            "underlying": "SPY",
+                            "dte_target": 30,
+                            "dte": 30,
+                            "expiration_date": "2026-02-01",
+                            "iv_pct": 20.0 + idx,
+                            "sample_count": 2,
+                        },
+                    ]
+                )
+            conn.execute(
+                text(
+                    f"""
+                    INSERT INTO {dash.VOLATILITY_CONE_DAILY_CACHE_TABLE}
+                    (trade_date, underlying, dte_target, dte, expiration_date, iv_pct, sample_count)
+                    VALUES (:trade_date, :underlying, :dte_target, :dte, :expiration_date, :iv_pct, :sample_count)
+                    """
+                ),
+                rows,
+            )
+
+        cone = dash.load_volatility_cone_history(
+            "SPY",
+            "20260103",
+            window=3,
+            dte_targets=(7, 30),
+            use_test_tables=True,
+            engine=self.engine,
+        )
+
+        self.assertEqual(cone["dte_target"].tolist(), [7, 30])
+        self.assertEqual(cone["sample_count"].tolist(), [3, 3])
+        self.assertAlmostEqual(float(cone.loc[cone["dte_target"] == 7, "p50"].iloc[0]), 12.0)
+        self.assertAlmostEqual(float(cone.loc[cone["dte_target"] == 30, "p90"].iloc[0]), 22.8)
+
     def test_build_otm_volatility_curve_uses_only_otm_put_and_call(self):
         chain = pd.DataFrame(
             [
@@ -1004,6 +1070,75 @@ class UsMarketDashboardDataTests(unittest.TestCase):
         )
 
         curve = dash.build_otm_volatility_curve(chain)
+
+        self.assertEqual(curve["moneyness_pct"].tolist(), [-5.0, 5.0])
+        self.assertEqual(curve["call_put"].tolist(), ["P", "C"])
+        self.assertEqual(curve["iv_pct"].tolist(), [30.0, 20.0])
+
+    def test_load_volatility_cone_line_snapshot_aggregates_small_slice(self):
+        self._create_option_tables(use_test_tables=True)
+
+        line = dash.load_volatility_cone_line_snapshot(
+            "SPY",
+            "20260115",
+            dte_targets=(1, 30),
+            use_test_tables=True,
+            engine=self.engine,
+        )
+
+        self.assertEqual(line["dte_target"].tolist(), [1, 30])
+        near_30 = line[line["dte_target"] == 30].iloc[0]
+        self.assertEqual(float(near_30["dte"]), 36.0)
+        self.assertAlmostEqual(float(near_30["iv_pct"]), 20.947368421, places=6)
+
+    def test_load_otm_volatility_curve_snapshot_uses_only_otm_put_and_call(self):
+        self._create_option_tables(use_test_tables=True)
+        names = dash.option_table_names(True)
+        contract_rows = [
+            ("O:SPY260220P00570000", "P", 570, 0.30),
+            ("O:SPY260220P00630000", "P", 630, 0.70),
+            ("O:SPY260220C00570000", "C", 570, 0.80),
+            ("O:SPY260220C00630000", "C", 630, 0.20),
+        ]
+        with self.engine.begin() as conn:
+            conn.execute(
+                text(
+                    f"""
+                    INSERT INTO {names['contracts']}
+                    (option_ticker, underlying, call_put, strike, expiration_date, contract_root,
+                     expiration_type, settlement_type, exercise_style, shares_per_contract, source, updated_at)
+                    VALUES (:option_ticker, 'SPY', :call_put, :strike, '2026-02-20', 'SPY',
+                            'monthly', 'physical', '', 100, 'test', '')
+                    """
+                ),
+                [
+                    {"option_ticker": ticker, "call_put": call_put, "strike": strike}
+                    for ticker, call_put, strike, _iv in contract_rows
+                ],
+            )
+            conn.execute(
+                text(
+                    f"""
+                    INSERT INTO {names['iv']}
+                    (trade_date, option_ticker, underlying, provider_iv, computed_iv,
+                     iv_source, open_interest, underlying_price)
+                    VALUES ('20260115', :option_ticker, 'SPY', :provider_iv, NULL,
+                            'provider_snapshot', 100, 600)
+                    """
+                ),
+                [
+                    {"option_ticker": ticker, "provider_iv": iv_value}
+                    for ticker, _call_put, _strike, iv_value in contract_rows
+                ],
+            )
+
+        curve = dash.load_otm_volatility_curve_snapshot(
+            "SPY",
+            "20260115",
+            use_test_tables=True,
+            underlying_price=600,
+            engine=self.engine,
+        )
 
         self.assertEqual(curve["moneyness_pct"].tolist(), [-5.0, 5.0])
         self.assertEqual(curve["call_put"].tolist(), ["P", "C"])

@@ -74,6 +74,16 @@ OPTION_CHAIN_COLUMNS = [
 VOLATILITY_CONE_TARGETS = (7, 14, 21, 30, 45, 60, 90)
 VOLATILITY_CONE_COLUMNS = ["dte_target", "p10", "p25", "p50", "p75", "p90", "sample_count"]
 VOLATILITY_CONE_LINE_COLUMNS = ["dte_target", "dte", "expiration_date", "iv_pct", "sample_count"]
+VOLATILITY_CONE_DAILY_CACHE_TABLE = "us_option_volatility_cone_daily"
+VOLATILITY_CONE_DAILY_CACHE_COLUMNS = [
+    "trade_date",
+    "underlying",
+    "dte_target",
+    "dte",
+    "expiration_date",
+    "iv_pct",
+    "sample_count",
+]
 OTM_VOLATILITY_CURVE_COLUMNS = ["moneyness_pct", "iv_pct", "call_put", "expiration_date", "dte"]
 OI_DEFENSE_COLUMNS = [
     "trade_date",
@@ -1580,6 +1590,238 @@ def build_otm_volatility_curve(
     return pd.DataFrame(rows, columns=OTM_VOLATILITY_CURVE_COLUMNS).sort_values("moneyness_pct").reset_index(drop=True)
 
 
+def load_volatility_cone_line_snapshot(
+    underlying: str,
+    trade_date: str | dt.date | dt.datetime,
+    *,
+    include_short_cycle: bool = True,
+    use_test_tables: bool = True,
+    underlying_price: float | None = None,
+    dte_targets: tuple[int, ...] | list[int] | None = None,
+    moneyness_band: float = 2.5,
+    engine=None,
+) -> pd.DataFrame:
+    engine = engine or dashboard_engine()
+    targets = _valid_dte_targets(dte_targets)
+    if engine is None or not targets:
+        return _empty_df(VOLATILITY_CONE_LINE_COLUMNS)
+
+    names = option_table_names(use_test_tables)
+    contracts_table = safe_table_name(names["contracts"])
+    iv_table = safe_table_name(names["iv"])
+    if not table_exists(engine, contracts_table) or not table_exists(engine, iv_table):
+        return _empty_df(VOLATILITY_CONE_LINE_COLUMNS)
+
+    iv_columns = table_columns(engine, iv_table)
+    contract_columns = table_columns(engine, contracts_table)
+    required_iv = {"trade_date", "option_ticker", "underlying", "provider_iv", "computed_iv", "underlying_price"}
+    required_contracts = {"option_ticker", "strike", "expiration_date"}
+    if not required_iv.issubset(iv_columns) or not required_contracts.issubset(contract_columns):
+        return _empty_df(VOLATILITY_CONE_LINE_COLUMNS)
+
+    underlying = normalize_underlying(underlying)
+    trade_date_text = normalize_trade_date(trade_date)
+    trade_dt = pd.to_datetime(trade_date_text, format="%Y%m%d", errors="coerce")
+    if not underlying or pd.isna(trade_dt):
+        return _empty_df(VOLATILITY_CONE_LINE_COLUMNS)
+
+    price_param = float(underlying_price) if underlying_price is not None and pd.notna(underlying_price) else None
+    price_expr = "COALESCE(h.underlying_price, :underlying_price)"
+    iv_value_expr = (
+        "CASE WHEN COALESCE(h.provider_iv, h.computed_iv) > 3 "
+        "THEN COALESCE(h.provider_iv, h.computed_iv) / 100.0 "
+        "ELSE COALESCE(h.provider_iv, h.computed_iv) END"
+    )
+    weight_expr = (
+        "CASE WHEN h.open_interest IS NOT NULL AND h.open_interest > 0 THEN h.open_interest ELSE 1 END"
+        if "open_interest" in iv_columns
+        else "1"
+    )
+    where_cycle = "" if include_short_cycle else "AND c.expiration_type = 'monthly'"
+    sql = text(
+        f"""
+        SELECT c.expiration_date,
+               SUM(({iv_value_expr}) * ({weight_expr})) / NULLIF(SUM({weight_expr}), 0) * 100.0 AS iv_pct,
+               COUNT(*) AS sample_count
+        FROM {iv_table} h{_mysql_force_index(engine, "idx_underlying_date")}
+        JOIN {contracts_table} c ON h.option_ticker = c.option_ticker
+        WHERE h.underlying = :underlying
+          AND h.trade_date = :trade_date
+          AND COALESCE(h.provider_iv, h.computed_iv) IS NOT NULL
+          AND {price_expr} > 0
+          AND c.expiration_date >= :expiration_start
+          AND c.expiration_date <= :expiration_end
+          AND ABS(c.strike - {price_expr}) / {price_expr} <= :moneyness_limit
+          {where_cycle}
+        GROUP BY c.expiration_date
+        ORDER BY c.expiration_date
+        """
+    )
+    params = {
+        "underlying": underlying,
+        "trade_date": trade_date_text,
+        "underlying_price": price_param,
+        "expiration_start": trade_dt.strftime("%Y-%m-%d"),
+        "expiration_end": (trade_dt + pd.Timedelta(days=max(targets) + 45)).strftime("%Y-%m-%d"),
+        "moneyness_limit": max(float(moneyness_band or 2.5), 0.1) / 100.0,
+    }
+    try:
+        raw = pd.read_sql(sql, engine, params=params)
+    except Exception:
+        return _empty_df(VOLATILITY_CONE_LINE_COLUMNS)
+    if raw.empty:
+        return _empty_df(VOLATILITY_CONE_LINE_COLUMNS)
+
+    raw["iv_pct"] = pd.to_numeric(raw.get("iv_pct"), errors="coerce")
+    raw["sample_count"] = pd.to_numeric(raw.get("sample_count"), errors="coerce").fillna(0)
+    raw["dte"] = raw["expiration_date"].apply(lambda value: dte_for_trade_date(value, trade_date_text))
+    raw = raw.dropna(subset=["iv_pct", "dte"])
+    if raw.empty:
+        return _empty_df(VOLATILITY_CONE_LINE_COLUMNS)
+
+    rows: list[dict[str, Any]] = []
+    for target in targets:
+        scoped = raw.assign(dte_distance=(pd.to_numeric(raw["dte"], errors="coerce") - target).abs())
+        scoped = scoped.dropna(subset=["dte_distance", "iv_pct"])
+        if scoped.empty:
+            continue
+        selected = scoped.sort_values(["dte_distance", "dte", "expiration_date"]).iloc[0]
+        rows.append(
+            {
+                "dte_target": int(target),
+                "dte": float(selected["dte"]),
+                "expiration_date": str(selected["expiration_date"] or ""),
+                "iv_pct": float(selected["iv_pct"]),
+                "sample_count": int(selected["sample_count"]),
+            }
+        )
+    if not rows:
+        return _empty_df(VOLATILITY_CONE_LINE_COLUMNS)
+    return pd.DataFrame(rows, columns=VOLATILITY_CONE_LINE_COLUMNS)
+
+
+def load_otm_volatility_curve_snapshot(
+    underlying: str,
+    trade_date: str | dt.date | dt.datetime,
+    *,
+    include_short_cycle: bool = True,
+    use_test_tables: bool = True,
+    underlying_price: float | None = None,
+    target_dte: int = 30,
+    dte_min: int = 20,
+    dte_max: int = 45,
+    moneyness_range: float = 10.0,
+    min_abs_moneyness: float = 0.5,
+    engine=None,
+) -> pd.DataFrame:
+    engine = engine or dashboard_engine()
+    if engine is None:
+        return _empty_df(OTM_VOLATILITY_CURVE_COLUMNS)
+
+    names = option_table_names(use_test_tables)
+    contracts_table = safe_table_name(names["contracts"])
+    iv_table = safe_table_name(names["iv"])
+    if not table_exists(engine, contracts_table) or not table_exists(engine, iv_table):
+        return _empty_df(OTM_VOLATILITY_CURVE_COLUMNS)
+
+    iv_columns = table_columns(engine, iv_table)
+    contract_columns = table_columns(engine, contracts_table)
+    required_iv = {"trade_date", "option_ticker", "underlying", "provider_iv", "computed_iv", "underlying_price"}
+    required_contracts = {"option_ticker", "call_put", "strike", "expiration_date"}
+    if not required_iv.issubset(iv_columns) or not required_contracts.issubset(contract_columns):
+        return _empty_df(OTM_VOLATILITY_CURVE_COLUMNS)
+
+    underlying = normalize_underlying(underlying)
+    trade_date_text = normalize_trade_date(trade_date)
+    trade_dt = pd.to_datetime(trade_date_text, format="%Y%m%d", errors="coerce")
+    if not underlying or pd.isna(trade_dt):
+        return _empty_df(OTM_VOLATILITY_CURVE_COLUMNS)
+
+    price_param = float(underlying_price) if underlying_price is not None and pd.notna(underlying_price) else None
+    price_expr = "COALESCE(h.underlying_price, :underlying_price)"
+    iv_value_expr = (
+        "CASE WHEN COALESCE(h.provider_iv, h.computed_iv) > 3 "
+        "THEN COALESCE(h.provider_iv, h.computed_iv) / 100.0 "
+        "ELSE COALESCE(h.provider_iv, h.computed_iv) END"
+    )
+    weight_expr = (
+        "CASE WHEN h.open_interest IS NOT NULL AND h.open_interest > 0 THEN h.open_interest ELSE 1 END"
+        if "open_interest" in iv_columns
+        else "1"
+    )
+    where_cycle = "" if include_short_cycle else "AND c.expiration_type = 'monthly'"
+    dte_min_value = max(int(dte_min), 1)
+    dte_max_value = max(int(dte_max), dte_min_value)
+    span = max(float(moneyness_range or 10.0), 0.1)
+    sql = text(
+        f"""
+        SELECT c.call_put,
+               c.strike,
+               c.expiration_date,
+               {price_expr} AS underlying_price,
+               SUM(({iv_value_expr}) * ({weight_expr})) / NULLIF(SUM({weight_expr}), 0) * 100.0 AS iv_pct,
+               COUNT(*) AS sample_count
+        FROM {iv_table} h{_mysql_force_index(engine, "idx_underlying_date")}
+        JOIN {contracts_table} c ON h.option_ticker = c.option_ticker
+        WHERE h.underlying = :underlying
+          AND h.trade_date = :trade_date
+          AND COALESCE(h.provider_iv, h.computed_iv) IS NOT NULL
+          AND {price_expr} > 0
+          AND c.expiration_date >= :expiration_start
+          AND c.expiration_date <= :expiration_end
+          AND ABS(c.strike - {price_expr}) / {price_expr} <= :moneyness_limit
+          {where_cycle}
+        GROUP BY c.expiration_date, c.call_put, c.strike, {price_expr}
+        ORDER BY c.expiration_date, c.strike, c.call_put
+        """
+    )
+    params = {
+        "underlying": underlying,
+        "trade_date": trade_date_text,
+        "underlying_price": price_param,
+        "expiration_start": (trade_dt + pd.Timedelta(days=dte_min_value)).strftime("%Y-%m-%d"),
+        "expiration_end": (trade_dt + pd.Timedelta(days=dte_max_value)).strftime("%Y-%m-%d"),
+        "moneyness_limit": span / 100.0,
+    }
+    try:
+        raw = pd.read_sql(sql, engine, params=params)
+    except Exception:
+        return _empty_df(OTM_VOLATILITY_CURVE_COLUMNS)
+    if raw.empty:
+        return _empty_df(OTM_VOLATILITY_CURVE_COLUMNS)
+
+    raw["call_put"] = raw.get("call_put", "").astype(str).str.upper()
+    for col in ("strike", "underlying_price", "iv_pct"):
+        raw[col] = pd.to_numeric(raw.get(col), errors="coerce")
+    raw["dte"] = raw["expiration_date"].apply(lambda value: dte_for_trade_date(value, trade_date_text))
+    raw["moneyness_pct"] = ((raw["strike"] - raw["underlying_price"]) / raw["underlying_price"] * 100).where(
+        raw["underlying_price"] > 0
+    )
+    raw = raw.dropna(subset=["iv_pct", "moneyness_pct", "dte"])
+    raw = raw[raw["dte"].between(dte_min_value, dte_max_value)]
+    if raw.empty:
+        return _empty_df(OTM_VOLATILITY_CURVE_COLUMNS)
+
+    expiry = (
+        raw.assign(dte_distance=(raw["dte"] - int(target_dte)).abs())
+        .sort_values(["dte_distance", "dte", "expiration_date"])["expiration_date"]
+        .iloc[0]
+    )
+    curve = raw[raw["expiration_date"].astype(str) == str(expiry)].copy()
+    curve = curve[
+        ((curve["call_put"] == "P") & (curve["moneyness_pct"] < 0))
+        | ((curve["call_put"] == "C") & (curve["moneyness_pct"] > 0))
+    ]
+    min_abs = max(float(min_abs_moneyness or 0.0), 0.0)
+    if min_abs > 0:
+        curve = curve[curve["moneyness_pct"].abs() >= min_abs]
+    if curve.empty:
+        return _empty_df(OTM_VOLATILITY_CURVE_COLUMNS)
+
+    out = curve[["moneyness_pct", "iv_pct", "call_put", "expiration_date", "dte"]].copy()
+    return out.sort_values("moneyness_pct").reset_index(drop=True)
+
+
 def _normalize_cone_source_frame(raw: pd.DataFrame) -> pd.DataFrame:
     if raw is None or raw.empty:
         return _empty_df(OPTION_CHAIN_COLUMNS)
@@ -1601,6 +1843,110 @@ def _normalize_cone_source_frame(raw: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def _percentile_cone_from_daily_rows(history: pd.DataFrame) -> pd.DataFrame:
+    if history is None or history.empty:
+        return _empty_df(VOLATILITY_CONE_COLUMNS)
+    source = history.copy()
+    source["dte_target"] = pd.to_numeric(source.get("dte_target"), errors="coerce")
+    source["iv_pct"] = pd.to_numeric(source.get("iv_pct"), errors="coerce")
+    source = source.dropna(subset=["dte_target", "iv_pct"])
+    if source.empty:
+        return _empty_df(VOLATILITY_CONE_COLUMNS)
+
+    rows: list[dict[str, Any]] = []
+    for target in sorted(source["dte_target"].dropna().astype(int).unique().tolist()):
+        values = pd.to_numeric(source.loc[source["dte_target"] == target, "iv_pct"], errors="coerce").dropna()
+        if values.empty:
+            continue
+        rows.append(
+            {
+                "dte_target": int(target),
+                "p10": float(values.quantile(0.10)),
+                "p25": float(values.quantile(0.25)),
+                "p50": float(values.quantile(0.50)),
+                "p75": float(values.quantile(0.75)),
+                "p90": float(values.quantile(0.90)),
+                "sample_count": int(len(values)),
+            }
+        )
+    if not rows:
+        return _empty_df(VOLATILITY_CONE_COLUMNS)
+    return pd.DataFrame(rows, columns=VOLATILITY_CONE_COLUMNS).sort_values("dte_target").reset_index(drop=True)
+
+
+def _load_cached_volatility_cone_history(
+    underlying: str,
+    end_date: str,
+    *,
+    window: int,
+    dte_targets: tuple[int, ...] | list[int] | None = None,
+    engine=None,
+) -> pd.DataFrame:
+    if engine is None or not table_exists(engine, VOLATILITY_CONE_DAILY_CACHE_TABLE):
+        return _empty_df(VOLATILITY_CONE_COLUMNS)
+    columns = table_columns(engine, VOLATILITY_CONE_DAILY_CACHE_TABLE)
+    required = {"trade_date", "underlying", "dte_target", "iv_pct"}
+    if not required.issubset(columns):
+        return _empty_df(VOLATILITY_CONE_COLUMNS)
+
+    targets = _valid_dte_targets(dte_targets)
+    date_limit = min(max(int(window or 252), 2), 500)
+    target_clause = ""
+    params: dict[str, Any] = {"underlying": underlying, "end_date": end_date}
+    if targets:
+        placeholders, target_params = _named_in_clause("target", targets)
+        params.update(target_params)
+        target_clause = f"AND dte_target IN ({placeholders})"
+
+    dates_sql = text(
+        f"""
+        SELECT trade_date
+        FROM {VOLATILITY_CONE_DAILY_CACHE_TABLE}
+        WHERE underlying = :underlying
+          AND trade_date <= :end_date
+          {target_clause}
+        GROUP BY trade_date
+        ORDER BY trade_date DESC
+        LIMIT {date_limit}
+        """
+    )
+    try:
+        dates_df = pd.read_sql(dates_sql, engine, params=params)
+    except Exception:
+        return _empty_df(VOLATILITY_CONE_COLUMNS)
+    if dates_df.empty:
+        return _empty_df(VOLATILITY_CONE_COLUMNS)
+
+    date_values = [normalize_trade_date(value) for value in dates_df["trade_date"].tolist()]
+    date_values = [value for value in date_values if value]
+    if not date_values or max(date_values) < end_date:
+        return _empty_df(VOLATILITY_CONE_COLUMNS)
+
+    date_placeholders, date_params = _named_in_clause("cache_date", date_values)
+    read_params = {"underlying": underlying, **date_params}
+    if targets:
+        target_placeholders, target_params = _named_in_clause("cache_target", targets)
+        read_params.update(target_params)
+        read_target_clause = f"AND dte_target IN ({target_placeholders})"
+    else:
+        read_target_clause = ""
+    sql = text(
+        f"""
+        SELECT trade_date, dte_target, iv_pct
+        FROM {VOLATILITY_CONE_DAILY_CACHE_TABLE}
+        WHERE underlying = :underlying
+          AND trade_date IN ({date_placeholders})
+          {read_target_clause}
+        ORDER BY trade_date, dte_target
+        """
+    )
+    try:
+        history = pd.read_sql(sql, engine, params=read_params)
+    except Exception:
+        return _empty_df(VOLATILITY_CONE_COLUMNS)
+    return _percentile_cone_from_daily_rows(history)
+
+
 def load_volatility_cone_history(
     underlying: str,
     end_date: str | dt.date | dt.datetime,
@@ -1609,12 +1955,30 @@ def load_volatility_cone_history(
     dte_targets: tuple[int, ...] | list[int] | None = None,
     moneyness_band: float = 2.5,
     use_test_tables: bool = True,
+    prefer_cache: bool = True,
     engine=None,
 ) -> pd.DataFrame:
     engine = engine or dashboard_engine()
     targets = _valid_dte_targets(dte_targets)
     if engine is None or not targets:
         return _empty_df(VOLATILITY_CONE_COLUMNS)
+
+    underlying = normalize_underlying(underlying)
+    end_text = normalize_trade_date(end_date)
+    if not underlying or not end_text:
+        return _empty_df(VOLATILITY_CONE_COLUMNS)
+
+    date_limit = min(max(int(window or 252), 2), 500)
+    if prefer_cache:
+        cached = _load_cached_volatility_cone_history(
+            underlying,
+            end_text,
+            window=date_limit,
+            dte_targets=targets,
+            engine=engine,
+        )
+        if not cached.empty:
+            return cached
 
     names = option_table_names(use_test_tables)
     iv_table = safe_table_name(names["iv"])
@@ -1629,12 +1993,6 @@ def load_volatility_cone_history(
     if not required_iv.issubset(iv_columns) or not required_contracts.issubset(contract_columns):
         return _empty_df(VOLATILITY_CONE_COLUMNS)
 
-    underlying = normalize_underlying(underlying)
-    end_text = normalize_trade_date(end_date)
-    if not underlying or not end_text:
-        return _empty_df(VOLATILITY_CONE_COLUMNS)
-
-    date_limit = min(max(int(window or 252), 2), 500)
     dates_sql = text(
         f"""
         SELECT trade_date
@@ -1742,26 +2100,7 @@ def load_volatility_cone_history(
     if not line_rows:
         return _empty_df(VOLATILITY_CONE_COLUMNS)
 
-    history = pd.concat(line_rows, ignore_index=True)
-    rows: list[dict[str, Any]] = []
-    for target in targets:
-        values = pd.to_numeric(history.loc[history["dte_target"] == target, "iv_pct"], errors="coerce").dropna()
-        if values.empty:
-            continue
-        rows.append(
-            {
-                "dte_target": int(target),
-                "p10": float(values.quantile(0.10)),
-                "p25": float(values.quantile(0.25)),
-                "p50": float(values.quantile(0.50)),
-                "p75": float(values.quantile(0.75)),
-                "p90": float(values.quantile(0.90)),
-                "sample_count": int(len(values)),
-            }
-        )
-    if not rows:
-        return _empty_df(VOLATILITY_CONE_COLUMNS)
-    return pd.DataFrame(rows, columns=VOLATILITY_CONE_COLUMNS).sort_values("dte_target").reset_index(drop=True)
+    return _percentile_cone_from_daily_rows(pd.concat(line_rows, ignore_index=True))
 
 
 def summarize_option_chain(chain: pd.DataFrame) -> dict[str, Any]:

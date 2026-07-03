@@ -13,6 +13,9 @@ US_OPTIONS_SHORT_STRIKE_BAND_PCT="${US_OPTIONS_SHORT_STRIKE_BAND_PCT:-5}"
 US_OPTIONS_EXTRA_ARGS="${US_OPTIONS_EXTRA_ARGS:-}"
 MARKET_CLIMATE_DAILY_ENABLED="${MARKET_CLIMATE_DAILY_ENABLED:-1}"
 MARKET_CLIMATE_TIMEOUT_SECONDS="${MARKET_CLIMATE_TIMEOUT_SECONDS:-240}"
+US_OPTIONS_CONE_CACHE_ENABLED="${US_OPTIONS_CONE_CACHE_ENABLED:-1}"
+US_OPTIONS_CONE_CACHE_WINDOW="${US_OPTIONS_CONE_CACHE_WINDOW:-5}"
+US_OPTIONS_CONE_CACHE_TIMEOUT_SECONDS="${US_OPTIONS_CONE_CACHE_TIMEOUT_SECONDS:-900}"
 
 cd "${APP_DIR}" || exit 1
 
@@ -128,6 +131,37 @@ if [ "${MARKET_CLIMATE_DAILY_ENABLED}" = "1" ]; then
   rm -f "${TMP_CLIMATE_LOG}"
 else
   echo "MARKET_CLIMATE_DAILY SKIP: disabled" >> "${LOG_FILE}"
+fi
+
+if [ "${US_OPTIONS_CONE_CACHE_ENABLED}" = "1" ]; then
+  TMP_CONE_LOG="$(mktemp /tmp/us_options_cone_cache.XXXXXX.log)"
+  CONE_RC=0
+  echo "US_OPTIONS_CONE_CACHE START: $(date)" >> "${LOG_FILE}"
+  if command -v timeout >/dev/null 2>&1; then
+    timeout --signal=TERM --kill-after=15 "${US_OPTIONS_CONE_CACHE_TIMEOUT_SECONDS}" \
+      "${PYTHON_BIN}" -u "scripts/rebuild_us_option_volatility_cone_cache.py" \
+      --underlyings "${US_OPTIONS_UNDERLYINGS}" \
+      --window "${US_OPTIONS_CONE_CACHE_WINDOW}" \
+      --apply > "${TMP_CONE_LOG}" 2>&1
+    CONE_RC=$?
+  else
+    "${PYTHON_BIN}" -u "scripts/rebuild_us_option_volatility_cone_cache.py" \
+      --underlyings "${US_OPTIONS_UNDERLYINGS}" \
+      --window "${US_OPTIONS_CONE_CACHE_WINDOW}" \
+      --apply > "${TMP_CONE_LOG}" 2>&1
+    CONE_RC=$?
+  fi
+  cat "${TMP_CONE_LOG}" >> "${LOG_FILE}"
+  if [ "${CONE_RC}" -eq 124 ]; then
+    echo "US_OPTIONS_CONE_CACHE WARN: timeout(${US_OPTIONS_CONE_CACHE_TIMEOUT_SECONDS}s)" >> "${LOG_FILE}"
+  elif [ "${CONE_RC}" -ne 0 ]; then
+    echo "US_OPTIONS_CONE_CACHE WARN: rc=${CONE_RC}" >> "${LOG_FILE}"
+  else
+    echo "US_OPTIONS_CONE_CACHE OK: rc=0" >> "${LOG_FILE}"
+  fi
+  rm -f "${TMP_CONE_LOG}"
+else
+  echo "US_OPTIONS_CONE_CACHE SKIP: disabled" >> "${LOG_FILE}"
 fi
 
 echo "US_OPTIONS_DAILY END: $(date)" >> "${LOG_FILE}"

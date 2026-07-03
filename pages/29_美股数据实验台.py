@@ -34,8 +34,6 @@ dashboard_data = importlib.reload(dashboard_data)
 from us_market_dashboard_data import (
     DEFAULT_DASHBOARD_UNDERLYINGS,
     UNDERLYING_DISPLAY_NAMES,
-    build_otm_volatility_curve,
-    build_volatility_cone_line,
     calculate_atm_iv_pct,
     calculate_overview_metrics_from_market_history,
     calculate_volatility_positioning_metrics,
@@ -43,13 +41,14 @@ from us_market_dashboard_data import (
     load_available_option_trade_dates,
     load_iv_history,
     load_oi_defense_history,
+    load_otm_volatility_curve_snapshot,
     load_latest_option_trade_date,
     load_market_climate_strip,
     load_market_metrics_history,
     load_option_chain_daily,
     load_option_chain_summary,
-    load_option_surface_snapshot,
     load_stock_daily,
+    load_volatility_cone_line_snapshot,
     load_volatility_cone_history,
     oi_defense_y_axis_range,
     selected_underlying_price,
@@ -3097,28 +3096,6 @@ def _cached_option_chain_daily(
 
 
 @st.cache_data(show_spinner=False, ttl=600)
-def _cached_option_surface_snapshot(
-    symbol: str,
-    trade_date: str,
-    include_short_cycle: bool,
-    use_test_tables: bool,
-    underlying_price: float | None,
-    moneyness_range: float,
-    max_dte: int,
-) -> pd.DataFrame:
-    return load_option_surface_snapshot(
-        symbol,
-        trade_date,
-        include_short_cycle=include_short_cycle,
-        use_test_tables=use_test_tables,
-        underlying_price=underlying_price,
-        moneyness_range=moneyness_range,
-        max_dte=max_dte,
-        engine=_cached_engine(),
-    )
-
-
-@st.cache_data(show_spinner=False, ttl=600)
 def _cached_option_chain_summary(
     symbol: str,
     trade_date: str,
@@ -3152,14 +3129,63 @@ def _cached_market_metrics_history(symbol: str, window: int, use_test_tables: bo
 
 
 @st.cache_data(show_spinner=False, ttl=600)
-def _cached_volatility_cone_history(symbol: str, end_date: str, window: int, use_test_tables: bool) -> pd.DataFrame:
-    return load_volatility_cone_history(
+def _cached_volatility_surface_payload(
+    symbol: str,
+    trade_date: str,
+    previous_trade_date: str | None,
+    include_short_cycle: bool,
+    use_test_tables: bool,
+    underlying_price: float | None,
+    previous_underlying_price: float | None,
+) -> dict[str, pd.DataFrame]:
+    today_cone_line = load_volatility_cone_line_snapshot(
         symbol,
-        end_date,
-        window=window,
+        trade_date,
+        include_short_cycle=include_short_cycle,
         use_test_tables=use_test_tables,
+        underlying_price=underlying_price,
         engine=_cached_engine(),
     )
+    today_otm_curve = load_otm_volatility_curve_snapshot(
+        symbol,
+        trade_date,
+        include_short_cycle=include_short_cycle,
+        use_test_tables=use_test_tables,
+        underlying_price=underlying_price,
+        engine=_cached_engine(),
+    )
+    previous_cone_line = pd.DataFrame()
+    previous_otm_curve = pd.DataFrame()
+    if previous_trade_date:
+        previous_cone_line = load_volatility_cone_line_snapshot(
+            symbol,
+            previous_trade_date,
+            include_short_cycle=include_short_cycle,
+            use_test_tables=use_test_tables,
+            underlying_price=previous_underlying_price,
+            engine=_cached_engine(),
+        )
+        previous_otm_curve = load_otm_volatility_curve_snapshot(
+            symbol,
+            previous_trade_date,
+            include_short_cycle=include_short_cycle,
+            use_test_tables=use_test_tables,
+            underlying_price=previous_underlying_price,
+            engine=_cached_engine(),
+        )
+    return {
+        "cone_history": load_volatility_cone_history(
+            symbol,
+            trade_date,
+            window=252,
+            use_test_tables=use_test_tables,
+            engine=_cached_engine(),
+        ),
+        "today_cone_line": today_cone_line,
+        "previous_cone_line": previous_cone_line,
+        "today_otm_curve": today_otm_curve,
+        "previous_otm_curve": previous_otm_curve,
+    }
 
 
 @st.cache_data(show_spinner=False, ttl=600)
@@ -3345,34 +3371,23 @@ if active_view == "总览":
         _render_rail(vol_position_metrics, trade_date)
 
 elif active_view == "波动率曲面":
-    surface_df = _cached_option_surface_snapshot(
+    available_dates = _cached_available_option_trade_dates(symbol, use_test_tables, 8)
+    previous_trade_date = next((value for value in available_dates if str(value or "") < str(trade_date)), None)
+    previous_price = selected_underlying_price(stock_df, previous_trade_date) if previous_trade_date else None
+    surface_payload = _cached_volatility_surface_payload(
         symbol,
         trade_date,
+        previous_trade_date,
         include_short_cycle,
         use_test_tables,
         underlying_price,
-        10.0,
-        135,
+        previous_price,
     )
-    available_dates = _cached_available_option_trade_dates(symbol, use_test_tables, 8)
-    previous_trade_date = next((value for value in available_dates if str(value or "") < str(trade_date)), None)
-    previous_surface_df = pd.DataFrame()
-    if previous_trade_date:
-        previous_price = selected_underlying_price(stock_df, previous_trade_date)
-        previous_surface_df = _cached_option_surface_snapshot(
-            symbol,
-            previous_trade_date,
-            include_short_cycle,
-            use_test_tables,
-            previous_price,
-            10.0,
-            135,
-        )
-    cone_history = _cached_volatility_cone_history(symbol, trade_date, 252, use_test_tables)
-    today_cone_line = build_volatility_cone_line(surface_df)
-    previous_cone_line = build_volatility_cone_line(previous_surface_df)
-    today_otm_curve = build_otm_volatility_curve(surface_df)
-    previous_otm_curve = build_otm_volatility_curve(previous_surface_df)
+    cone_history = surface_payload.get("cone_history", pd.DataFrame())
+    today_cone_line = surface_payload.get("today_cone_line", pd.DataFrame())
+    previous_cone_line = surface_payload.get("previous_cone_line", pd.DataFrame())
+    today_otm_curve = surface_payload.get("today_otm_curve", pd.DataFrame())
+    previous_otm_curve = surface_payload.get("previous_otm_curve", pd.DataFrame())
     c1, c2 = st.columns([1, 1], gap="small")
     with c1:
         st.markdown(
