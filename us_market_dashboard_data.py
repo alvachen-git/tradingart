@@ -41,6 +41,18 @@ UNDERLYING_DISPLAY_NAMES = {
     "AMD": "超威半导体",
     "AAPL": "苹果",
     "AMZN": "亚马逊",
+    "AVGO": "博通",
+    "COIN": "Coinbase",
+    "GOOGL": "谷歌",
+    "HOOD": "Robinhood",
+    "INTC": "英特尔",
+    "META": "Meta",
+    "MSFT": "微软",
+    "MSTR": "MicroStrategy",
+    "NFLX": "奈飞",
+    "PLTR": "帕兰提尔",
+    "SMCI": "超微电脑",
+    "TSM": "台积电",
 }
 
 STOCK_DAILY_COLUMNS = ["date", "symbol", "open", "high", "low", "close", "volume", "adjClose"]
