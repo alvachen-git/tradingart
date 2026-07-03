@@ -51,6 +51,7 @@ from us_market_dashboard_data import (
     load_option_surface_snapshot,
     load_stock_daily,
     load_volatility_cone_history,
+    oi_defense_y_axis_range,
     selected_underlying_price,
     summarize_option_chain,
 )
@@ -2716,6 +2717,7 @@ def _build_oi_distribution_figure(chain_df: pd.DataFrame) -> go.Figure:
 
 def _build_oi_defense_figure(defense_df: pd.DataFrame, symbol: str) -> go.Figure:
     fig = go.Figure()
+    y_axis_range = oi_defense_y_axis_range(defense_df)
     if defense_df is not None and not defense_df.empty:
         df = defense_df.copy()
         df["date"] = pd.to_datetime(df["date"], errors="coerce")
@@ -2729,14 +2731,19 @@ def _build_oi_defense_figure(defense_df: pd.DataFrame, symbol: str) -> go.Figure
                     name=f"{symbol} 收盘价",
                     line=dict(color="#64748b", width=2, dash="dot"),
                     hovertemplate="日期 %{x|%Y-%m-%d}<br>收盘价 %{y:,.2f}<extra></extra>",
+                    cliponaxis=False,
                 )
             )
         for side, name, color in [
-            ("call", "Call 压力线", "#dc2626"),
-            ("put", "Put 支撑线", "#16a34a"),
+            ("call", "Call 最大OI压力线", "#dc2626"),
+            ("put", "Put 最大OI支撑线", "#16a34a"),
         ]:
             strike = pd.to_numeric(df[f"{side}_strike"], errors="coerce")
             if strike.notna().any():
+                label_prefix = "Call最大OI" if side == "call" else "Put最大OI"
+                labels = [""] * len(df)
+                latest_idx = strike.dropna().index[-1]
+                labels[df.index.get_loc(latest_idx)] = f"{label_prefix} {_fmt_strike(strike.loc[latest_idx])}"
                 custom = pd.DataFrame(
                     {
                         "oi": pd.to_numeric(df[f"{side}_oi"], errors="coerce"),
@@ -2749,14 +2756,18 @@ def _build_oi_defense_figure(defense_df: pd.DataFrame, symbol: str) -> go.Figure
                         x=df["date"],
                         y=strike,
                         customdata=custom,
-                        mode="lines+markers",
+                        mode="lines+markers+text",
                         name=name,
+                        text=labels,
+                        textposition="top center" if side == "call" else "bottom center",
+                        textfont=dict(color=color, size=12),
                         line=dict(color=color, width=3),
                         marker=dict(size=7, color=color),
+                        cliponaxis=False,
                         hovertemplate=(
                             "日期 %{x|%Y-%m-%d}<br>"
-                            "防线 %{y:,.2f}<br>"
-                            "OI %{customdata[0]:,.0f}<br>"
+                            "最大OI行权价 %{y:,.2f}<br>"
+                            "最大持仓量 OI %{customdata[0]:,.0f}<br>"
                             "距现价 %{customdata[1]:+.2f}%<br>"
                             "主要到期 %{customdata[2]}<extra></extra>"
                         ),
@@ -2765,16 +2776,29 @@ def _build_oi_defense_figure(defense_df: pd.DataFrame, symbol: str) -> go.Figure
     fig.update_layout(
         height=460,
         template="plotly_white",
-        margin=dict(l=14, r=18, t=26, b=34),
+        margin=dict(l=14, r=18, t=58, b=34),
         hovermode="x unified",
         legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
         xaxis_title="日期",
         yaxis_title="行权价 / 收盘价",
+        annotations=[
+            dict(
+                text="Call/Put 防线按近价 0-90D 期权最大持仓量（OI）所在行权价绘制",
+                xref="paper",
+                yref="paper",
+                x=0,
+                y=1.12,
+                xanchor="left",
+                yanchor="bottom",
+                showarrow=False,
+                font=dict(size=12, color="#64748b"),
+            )
+        ],
         paper_bgcolor="#ffffff",
         plot_bgcolor="#ffffff",
     )
     fig.update_xaxes(showgrid=False, tickformat="%m/%d")
-    fig.update_yaxes(gridcolor="#edf2f7")
+    fig.update_yaxes(gridcolor="#edf2f7", range=y_axis_range)
     return fig
 
 

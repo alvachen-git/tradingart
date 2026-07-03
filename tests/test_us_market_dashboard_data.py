@@ -749,6 +749,23 @@ class UsMarketDashboardDataTests(unittest.TestCase):
         self.assertAlmostEqual(float(latest["put_oi"]), 450.0)
         self.assertAlmostEqual(float(latest["put_call_oi"]), 450 / 500)
 
+    def test_oi_defense_y_axis_range_pads_strike_extremes(self):
+        df = pd.DataFrame(
+            {
+                "underlying_close": [540.0, 517.82],
+                "call_strike": [500.0, 500.0],
+                "put_strike": [590.0, 400.0],
+            }
+        )
+
+        axis_range = dash.oi_defense_y_axis_range(df)
+
+        self.assertIsNotNone(axis_range)
+        self.assertLess(axis_range[0], 400.0)
+        self.assertGreater(axis_range[1], 590.0)
+        self.assertGreaterEqual(400.0 - axis_range[0], 20.0)
+        self.assertGreaterEqual(axis_range[1] - 590.0, 20.0)
+
     def test_load_oi_defense_history_degrades_without_oi_rows(self):
         self._create_option_tables(use_test_tables=True)
 

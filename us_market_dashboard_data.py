@@ -124,6 +124,38 @@ MARKET_METRICS_COLUMNS = [
     "source",
     "updated_at",
 ]
+
+
+def oi_defense_y_axis_range(
+    defense_df: pd.DataFrame | None,
+    *,
+    padding_ratio: float = 0.12,
+    min_padding: float = 1.0,
+) -> list[float] | None:
+    if defense_df is None or defense_df.empty:
+        return None
+
+    value_series = []
+    for col in ("underlying_close", "call_strike", "put_strike"):
+        if col in defense_df.columns:
+            values = pd.to_numeric(defense_df[col], errors="coerce").dropna()
+            if not values.empty:
+                value_series.append(values)
+    if not value_series:
+        return None
+
+    all_values = pd.concat(value_series, ignore_index=True)
+    low = float(all_values.min())
+    high = float(all_values.max())
+    if not math.isfinite(low) or not math.isfinite(high):
+        return None
+
+    span = high - low
+    if span <= 0:
+        padding = max(float(min_padding), abs(high or 1.0) * float(padding_ratio))
+    else:
+        padding = max(float(min_padding), span * float(padding_ratio))
+    return [low - padding, high + padding]
 MARKET_METRIC_NUMERIC_COLUMNS = [
     "atm_iv_pct",
     "iv_change_1d",
