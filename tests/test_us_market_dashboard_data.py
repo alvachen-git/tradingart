@@ -693,6 +693,62 @@ class UsMarketDashboardDataTests(unittest.TestCase):
         self.assertAlmostEqual(float(result["call_strike"].iloc[-1]), 615.0)
         self.assertAlmostEqual(float(result["put_call_oi"].iloc[-1]), 0.903846)
 
+    def test_load_oi_defense_history_ignores_stale_preaggregated_cache(self):
+        self._create_option_tables(use_test_tables=True)
+        with self.engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE us_option_oi_defense_daily (
+                        trade_date TEXT,
+                        date TEXT,
+                        underlying TEXT,
+                        underlying_close REAL,
+                        call_strike REAL,
+                        call_oi REAL,
+                        call_distance_pct REAL,
+                        call_expiration TEXT,
+                        put_strike REAL,
+                        put_oi REAL,
+                        put_distance_pct REAL,
+                        put_expiration TEXT,
+                        total_call_oi REAL,
+                        total_put_oi REAL,
+                        put_call_oi REAL
+                    )
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO us_option_oi_defense_daily
+                    (trade_date, date, underlying, underlying_close, call_strike, call_oi,
+                     call_distance_pct, call_expiration, put_strike, put_oi,
+                     put_distance_pct, put_expiration, total_call_oi, total_put_oi, put_call_oi)
+                    VALUES
+                    ('20260114', '2026-01-14', 'SPY', 590, 999, 9999, 69.32, '2026-02-20',
+                     111, 8888, -81.19, '2026-02-20', 9999, 8888, 0.8888)
+                    """
+                )
+            )
+
+        result = dash.load_oi_defense_history(
+            "SPY",
+            "20260115",
+            window=20,
+            use_test_tables=True,
+            engine=self.engine,
+        )
+
+        self.assertEqual(result["trade_date"].tolist(), ["20260115"])
+        latest = result.iloc[-1]
+        self.assertAlmostEqual(float(latest["call_strike"]), 600.0)
+        self.assertAlmostEqual(float(latest["call_oi"]), 500.0)
+        self.assertAlmostEqual(float(latest["put_strike"]), 600.0)
+        self.assertAlmostEqual(float(latest["put_oi"]), 450.0)
+        self.assertAlmostEqual(float(latest["put_call_oi"]), 450 / 500)
+
     def test_load_oi_defense_history_degrades_without_oi_rows(self):
         self._create_option_tables(use_test_tables=True)
 

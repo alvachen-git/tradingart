@@ -1052,7 +1052,15 @@ def load_oi_defense_history(
     if prefer_cache:
         cached = _load_cached_oi_defense_history(underlying, end_text, window=window, engine=engine)
         if not cached.empty:
-            return cached
+            latest_cached_date = (
+                cached["trade_date"]
+                .dropna()
+                .astype(str)
+                .loc[lambda series: series.str.len() > 0]
+                .max()
+            )
+            if latest_cached_date >= end_text:
+                return cached
 
     names = option_table_names(use_test_tables)
     daily_table = safe_table_name(names["daily"])
