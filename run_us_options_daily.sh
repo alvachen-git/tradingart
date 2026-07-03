@@ -16,6 +16,9 @@ MARKET_CLIMATE_TIMEOUT_SECONDS="${MARKET_CLIMATE_TIMEOUT_SECONDS:-240}"
 US_OPTIONS_CONE_CACHE_ENABLED="${US_OPTIONS_CONE_CACHE_ENABLED:-1}"
 US_OPTIONS_CONE_CACHE_WINDOW="${US_OPTIONS_CONE_CACHE_WINDOW:-5}"
 US_OPTIONS_CONE_CACHE_TIMEOUT_SECONDS="${US_OPTIONS_CONE_CACHE_TIMEOUT_SECONDS:-900}"
+US_OPTIONS_OI_DEFENSE_CACHE_ENABLED="${US_OPTIONS_OI_DEFENSE_CACHE_ENABLED:-1}"
+US_OPTIONS_OI_DEFENSE_CACHE_WINDOW="${US_OPTIONS_OI_DEFENSE_CACHE_WINDOW:-20}"
+US_OPTIONS_OI_DEFENSE_CACHE_TIMEOUT_SECONDS="${US_OPTIONS_OI_DEFENSE_CACHE_TIMEOUT_SECONDS:-900}"
 
 cd "${APP_DIR}" || exit 1
 
@@ -162,6 +165,37 @@ if [ "${US_OPTIONS_CONE_CACHE_ENABLED}" = "1" ]; then
   rm -f "${TMP_CONE_LOG}"
 else
   echo "US_OPTIONS_CONE_CACHE SKIP: disabled" >> "${LOG_FILE}"
+fi
+
+if [ "${US_OPTIONS_OI_DEFENSE_CACHE_ENABLED}" = "1" ]; then
+  TMP_OI_DEFENSE_LOG="$(mktemp /tmp/us_options_oi_defense_cache.XXXXXX.log)"
+  OI_DEFENSE_RC=0
+  echo "US_OPTIONS_OI_DEFENSE_CACHE START: $(date)" >> "${LOG_FILE}"
+  if command -v timeout >/dev/null 2>&1; then
+    timeout --signal=TERM --kill-after=15 "${US_OPTIONS_OI_DEFENSE_CACHE_TIMEOUT_SECONDS}" \
+      "${PYTHON_BIN}" -u "scripts/rebuild_us_option_oi_defense_cache.py" \
+      --underlyings "${US_OPTIONS_UNDERLYINGS}" \
+      --window "${US_OPTIONS_OI_DEFENSE_CACHE_WINDOW}" \
+      --apply > "${TMP_OI_DEFENSE_LOG}" 2>&1
+    OI_DEFENSE_RC=$?
+  else
+    "${PYTHON_BIN}" -u "scripts/rebuild_us_option_oi_defense_cache.py" \
+      --underlyings "${US_OPTIONS_UNDERLYINGS}" \
+      --window "${US_OPTIONS_OI_DEFENSE_CACHE_WINDOW}" \
+      --apply > "${TMP_OI_DEFENSE_LOG}" 2>&1
+    OI_DEFENSE_RC=$?
+  fi
+  cat "${TMP_OI_DEFENSE_LOG}" >> "${LOG_FILE}"
+  if [ "${OI_DEFENSE_RC}" -eq 124 ]; then
+    echo "US_OPTIONS_OI_DEFENSE_CACHE WARN: timeout(${US_OPTIONS_OI_DEFENSE_CACHE_TIMEOUT_SECONDS}s)" >> "${LOG_FILE}"
+  elif [ "${OI_DEFENSE_RC}" -ne 0 ]; then
+    echo "US_OPTIONS_OI_DEFENSE_CACHE WARN: rc=${OI_DEFENSE_RC}" >> "${LOG_FILE}"
+  else
+    echo "US_OPTIONS_OI_DEFENSE_CACHE OK: rc=0" >> "${LOG_FILE}"
+  fi
+  rm -f "${TMP_OI_DEFENSE_LOG}"
+else
+  echo "US_OPTIONS_OI_DEFENSE_CACHE SKIP: disabled" >> "${LOG_FILE}"
 fi
 
 echo "US_OPTIONS_DAILY END: $(date)" >> "${LOG_FILE}"
