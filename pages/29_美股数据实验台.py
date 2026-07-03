@@ -1468,6 +1468,12 @@ def _render_lightweight_chart(
               backdrop-filter: blur(8px);
               pointer-events: auto;
             }
+            .lwc-tool-divider {
+              width: 1px;
+              height: 22px;
+              margin: 0 2px;
+              background: #e2e8f0;
+            }
             .lwc-toggle {
               display: inline-flex;
               align-items: center;
@@ -1502,6 +1508,29 @@ def _render_lightweight_chart(
             .lwc-toggle:disabled {
               opacity: .42;
               cursor: not-allowed;
+            }
+            .lwc-draw-tool {
+              height: 26px;
+              padding: 0 8px;
+              border: 0;
+              border-radius: 6px;
+              background: transparent;
+              color: #475569;
+              font-size: 11px;
+              font-weight: 760;
+              line-height: 1;
+              cursor: pointer;
+              font-family: inherit;
+            }
+            .lwc-draw-tool:hover,
+            .lwc-draw-tool.active {
+              background: #fff7ed;
+              color: #ea580c;
+            }
+            .lwc-draw-tool.danger:hover,
+            .lwc-draw-tool.danger.active {
+              background: #fef2f2;
+              color: #dc2626;
             }
             .lwc-readout {
               position: absolute;
@@ -1544,6 +1573,65 @@ def _render_lightweight_chart(
               inset: 0;
               background: #ffffff;
             }
+            .lwc-chart.drawing-hover {
+              cursor: grab;
+            }
+            .lwc-chart.dragging-drawing {
+              cursor: grabbing;
+            }
+            .lwc-drawing-layer {
+              position: absolute;
+              inset: 0;
+              z-index: 2;
+              width: 100%;
+              height: 100%;
+              pointer-events: none;
+              overflow: visible;
+            }
+            .lwc-drawing-layer.active {
+              pointer-events: auto;
+              cursor: crosshair;
+            }
+            .lwc-drawing-line {
+              vector-effect: non-scaling-stroke;
+              pointer-events: none;
+            }
+            .lwc-drawing-hit {
+              stroke: transparent;
+              stroke-width: 14;
+              vector-effect: non-scaling-stroke;
+              pointer-events: stroke;
+              cursor: grab;
+            }
+            .lwc-drawing-label {
+              fill: #475569;
+              font-size: 11px;
+              font-weight: 760;
+              paint-order: stroke;
+              stroke: rgba(255,255,255,.94);
+              stroke-width: 4px;
+              stroke-linejoin: round;
+            }
+            .lwc-draw-hint {
+              position: absolute;
+              right: 16px;
+              bottom: 12px;
+              z-index: 3;
+              display: none;
+              padding: 6px 9px;
+              border: 1px solid rgba(251, 146, 60, .35);
+              border-radius: 8px;
+              background: rgba(255, 247, 237, .92);
+              color: #9a3412;
+              font-size: 11px;
+              font-weight: 700;
+              pointer-events: none;
+              box-shadow: 0 8px 28px rgba(15,23,42,.05);
+              backdrop-filter: blur(8px);
+            }
+            .lwc-draw-hint.visible {
+              display: block;
+            }
             .lwc-error {
               position: absolute;
               inset: 0;
@@ -1570,12 +1658,19 @@ def _render_lightweight_chart(
                   <button class="lwc-toggle active" style="--line-color:#2563eb" data-series="ma20" type="button">MA20</button>
                   <button class="lwc-toggle" style="--line-color:#7c3aed" data-series="ma60" type="button">MA60</button>
                   <button class="lwc-toggle active" style="--line-color:#db2777" data-series="iv" type="button">ATM IV</button>
+                  <span class="lwc-tool-divider"></span>
+                  <button class="lwc-draw-tool" data-draw-mode="hline" type="button" title="点击图表价格位置添加水平线">水平线</button>
+                  <button class="lwc-draw-tool" data-draw-mode="trend" type="button" title="点击两个位置添加趋势线">趋势线</button>
+                  <button class="lwc-draw-tool danger" data-draw-mode="delete" type="button" title="点击已有画线删除">删除</button>
+                  <button id="lwc-clear-drawings" class="lwc-draw-tool danger" type="button" title="清空当前标的全部本地画线">清空</button>
                 </div>
               </div>
               <div class="lwc-latest"><span>最新</span><strong id="lwc-close"></strong><span id="lwc-change"></span></div>
             </div>
             <div id="lwc-readout" class="lwc-readout">移动十字光标查看每日 OHLC / 均线 / IV</div>
             <div id="lwc-chart" class="lwc-chart"></div>
+            <svg id="lwc-drawing-layer" class="lwc-drawing-layer" aria-hidden="true"></svg>
+            <div id="lwc-draw-hint" class="lwc-draw-hint"></div>
             <div id="lwc-error" class="lwc-error"></div>
           </div>
           ${chart_loader_html}
@@ -1662,6 +1757,352 @@ def _render_lightweight_chart(
                 lastValueVisible: true
               });
               candleSeries.setData(payload.candles || []);
+
+              const drawingLayer = document.getElementById("lwc-drawing-layer");
+              const drawHintEl = document.getElementById("lwc-draw-hint");
+              const clearDrawingsButton = document.getElementById("lwc-clear-drawings");
+              const storageKey = "us-options-chart-drawings:" + String(payload.symbol || "UNKNOWN").toUpperCase();
+              const drawingColors = { hline: "#f97316", trend: "#2563eb", draft: "#64748b" };
+              let drawings = loadDrawings();
+              let drawMode = "none";
+              let pendingTrend = null;
+              let draftPoint = null;
+              let dragState = null;
+
+              function loadDrawings() {
+                try {
+                  const raw = window.localStorage.getItem(storageKey);
+                  const rows = raw ? JSON.parse(raw) : [];
+                  if (!Array.isArray(rows)) return [];
+                  return rows.filter((item) => item && (item.type === "hline" || item.type === "trend"));
+                } catch (_) {
+                  return [];
+                }
+              }
+              function saveDrawings() {
+                try {
+                  window.localStorage.setItem(storageKey, JSON.stringify(drawings));
+                } catch (_) {}
+              }
+              function drawingId() {
+                return "d" + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+              }
+              function setDrawHint(text) {
+                if (!text) {
+                  drawHintEl.classList.remove("visible");
+                  drawHintEl.textContent = "";
+                  return;
+                }
+                drawHintEl.textContent = text;
+                drawHintEl.classList.add("visible");
+              }
+              function setDrawMode(nextMode) {
+                drawMode = drawMode === nextMode ? "none" : nextMode;
+                pendingTrend = null;
+                draftPoint = null;
+                drawingLayer.classList.toggle("active", drawMode !== "none");
+                document.querySelectorAll("[data-draw-mode]").forEach((button) => {
+                  button.classList.toggle("active", button.dataset.drawMode === drawMode);
+                });
+                if (drawMode === "hline") setDrawHint("点击图表任意价格位置添加水平线；Esc 退出");
+                else if (drawMode === "trend") setDrawHint("依次点击趋势线的起点和终点；Esc 退出");
+                else if (drawMode === "delete") setDrawHint("点击已有画线删除；Esc 退出");
+                else setDrawHint("");
+                renderDrawings();
+              }
+              function pointFromEvent(event) {
+                const box = chartEl.getBoundingClientRect();
+                const x = event.clientX - box.left;
+                const y = event.clientY - box.top;
+                const time = chart.timeScale().coordinateToTime(x);
+                const price = candleSeries.coordinateToPrice(y);
+                if (!time || price === null || price === undefined || Number.isNaN(Number(price))) return null;
+                return { x, y, time: timeKey(time), price: Number(price) };
+              }
+              function chartPointFromEvent(event) {
+                const box = chartEl.getBoundingClientRect();
+                return { x: event.clientX - box.left, y: event.clientY - box.top };
+              }
+              function createSvgLine(x1, y1, x2, y2, color, width, id, dashed) {
+                const visibleLine = document.createElementNS("http://www.w3.org/2000/svg", "line");
+                visibleLine.setAttribute("x1", x1);
+                visibleLine.setAttribute("y1", y1);
+                visibleLine.setAttribute("x2", x2);
+                visibleLine.setAttribute("y2", y2);
+                visibleLine.setAttribute("stroke", color);
+                visibleLine.setAttribute("stroke-width", width);
+                visibleLine.setAttribute("stroke-linecap", "round");
+                visibleLine.setAttribute("class", "lwc-drawing-line");
+                if (dashed) visibleLine.setAttribute("stroke-dasharray", "6 5");
+                drawingLayer.appendChild(visibleLine);
+
+                if (id) {
+                  const hitLine = document.createElementNS("http://www.w3.org/2000/svg", "line");
+                  hitLine.setAttribute("x1", x1);
+                  hitLine.setAttribute("y1", y1);
+                  hitLine.setAttribute("x2", x2);
+                  hitLine.setAttribute("y2", y2);
+                  hitLine.setAttribute("data-drawing-id", id);
+                  hitLine.setAttribute("class", "lwc-drawing-hit");
+                  drawingLayer.appendChild(hitLine);
+                }
+              }
+              function createSvgLabel(text, x, y) {
+                const label = document.createElementNS("http://www.w3.org/2000/svg", "text");
+                label.setAttribute("x", x);
+                label.setAttribute("y", y);
+                label.setAttribute("class", "lwc-drawing-label");
+                label.textContent = text;
+                drawingLayer.appendChild(label);
+              }
+              function renderDrawings() {
+                drawingLayer.replaceChildren();
+                const box = chartEl.getBoundingClientRect();
+                const width = Math.max(box.width, 480);
+                const height = Math.max(box.height, 420);
+                drawingLayer.setAttribute("viewBox", "0 0 " + width + " " + height);
+                drawingLayer.setAttribute("width", width);
+                drawingLayer.setAttribute("height", height);
+
+                drawings.forEach((drawing) => {
+                  if (drawing.type === "hline") {
+                    const y = candleSeries.priceToCoordinate(Number(drawing.price));
+                    if (y === null || y === undefined || y < -40 || y > height + 40) return;
+                    createSvgLine(0, y, width, y, drawing.color || drawingColors.hline, 1.6, drawing.id, false);
+                    createSvgLabel(fmt(drawing.price, 2), Math.max(width - 70, 8), Math.max(y - 6, 14));
+                    return;
+                  }
+                  if (drawing.type === "trend") {
+                    const x1 = chart.timeScale().timeToCoordinate(drawing.time1);
+                    const x2 = chart.timeScale().timeToCoordinate(drawing.time2);
+                    const y1 = candleSeries.priceToCoordinate(Number(drawing.price1));
+                    const y2 = candleSeries.priceToCoordinate(Number(drawing.price2));
+                    if ([x1, x2, y1, y2].some((value) => value === null || value === undefined)) return;
+                    createSvgLine(x1, y1, x2, y2, drawing.color || drawingColors.trend, 1.8, drawing.id, false);
+                  }
+                });
+
+                if (pendingTrend && draftPoint) {
+                  createSvgLine(pendingTrend.x, pendingTrend.y, draftPoint.x, draftPoint.y, drawingColors.draft, 1.5, null, true);
+                }
+              }
+              function removeDrawing(id) {
+                drawings = drawings.filter((item) => item.id !== id);
+                saveDrawings();
+                renderDrawings();
+              }
+              function drawingCoords(drawing) {
+                if (!drawing) return null;
+                if (drawing.type === "hline") {
+                  const y = candleSeries.priceToCoordinate(Number(drawing.price));
+                  if (y === null || y === undefined) return null;
+                  return { y };
+                }
+                if (drawing.type === "trend") {
+                  const x1 = chart.timeScale().timeToCoordinate(drawing.time1);
+                  const x2 = chart.timeScale().timeToCoordinate(drawing.time2);
+                  const y1 = candleSeries.priceToCoordinate(Number(drawing.price1));
+                  const y2 = candleSeries.priceToCoordinate(Number(drawing.price2));
+                  if ([x1, x2, y1, y2].some((value) => value === null || value === undefined)) return null;
+                  return { x1, y1, x2, y2 };
+                }
+                return null;
+              }
+              function distanceToSegment(px, py, x1, y1, x2, y2) {
+                const dx = x2 - x1;
+                const dy = y2 - y1;
+                if (dx === 0 && dy === 0) {
+                  return Math.hypot(px - x1, py - y1);
+                }
+                const t = Math.max(0, Math.min(1, ((px - x1) * dx + (py - y1) * dy) / (dx * dx + dy * dy)));
+                const projectionX = x1 + t * dx;
+                const projectionY = y1 + t * dy;
+                return Math.hypot(px - projectionX, py - projectionY);
+              }
+              function nearestDrawing(point, threshold) {
+                let best = null;
+                drawings.forEach((drawing) => {
+                  const coords = drawingCoords(drawing);
+                  if (!coords) return;
+                  let distance = Infinity;
+                  if (drawing.type === "hline") {
+                    distance = Math.abs(point.y - coords.y);
+                  } else if (drawing.type === "trend") {
+                    distance = distanceToSegment(point.x, point.y, coords.x1, coords.y1, coords.x2, coords.y2);
+                  }
+                  if (distance <= threshold && (!best || distance < best.distance)) {
+                    best = { drawing, coords, distance };
+                  }
+                });
+                return best;
+              }
+              function startDrawingDrag(event, drawingId) {
+                const point = chartPointFromEvent(event);
+                const hit = drawingId
+                  ? (() => {
+                      const drawing = drawings.find((item) => item.id === drawingId);
+                      const coords = drawingCoords(drawing);
+                      return drawing && coords ? { drawing, coords, distance: 0 } : null;
+                    })()
+                  : nearestDrawing(point, 8);
+                if (!hit) return false;
+                event.preventDefault();
+                event.stopPropagation();
+                dragState = {
+                  id: hit.drawing.id,
+                  type: hit.drawing.type,
+                  startX: point.x,
+                  startY: point.y,
+                  coords: { ...hit.coords },
+                  drawing: { ...hit.drawing },
+                };
+                chartEl.classList.add("dragging-drawing");
+                setDrawHint("拖动画线调整位置，松开后自动保存");
+                window.addEventListener("pointermove", dragDrawing, true);
+                window.addEventListener("pointerup", stopDrawingDrag, true);
+                window.addEventListener("pointercancel", stopDrawingDrag, true);
+                return true;
+              }
+              function dragDrawing(event) {
+                if (!dragState) return;
+                event.preventDefault();
+                event.stopPropagation();
+                const point = chartPointFromEvent(event);
+                const dx = point.x - dragState.startX;
+                const dy = point.y - dragState.startY;
+                const drawing = drawings.find((item) => item.id === dragState.id);
+                if (!drawing) return;
+                if (dragState.type === "hline") {
+                  const price = candleSeries.coordinateToPrice(dragState.coords.y + dy);
+                  if (price !== null && price !== undefined && !Number.isNaN(Number(price))) {
+                    drawing.price = Number(price);
+                  }
+                } else if (dragState.type === "trend") {
+                  const time1 = chart.timeScale().coordinateToTime(dragState.coords.x1 + dx);
+                  const time2 = chart.timeScale().coordinateToTime(dragState.coords.x2 + dx);
+                  const price1 = candleSeries.coordinateToPrice(dragState.coords.y1 + dy);
+                  const price2 = candleSeries.coordinateToPrice(dragState.coords.y2 + dy);
+                  if (
+                    time1 && time2 &&
+                    price1 !== null && price1 !== undefined &&
+                    price2 !== null && price2 !== undefined &&
+                    !Number.isNaN(Number(price1)) &&
+                    !Number.isNaN(Number(price2))
+                  ) {
+                    drawing.time1 = timeKey(time1);
+                    drawing.time2 = timeKey(time2);
+                    drawing.price1 = Number(price1);
+                    drawing.price2 = Number(price2);
+                  }
+                }
+                renderDrawings();
+              }
+              function stopDrawingDrag(event) {
+                if (!dragState) return;
+                event.preventDefault();
+                event.stopPropagation();
+                dragState = null;
+                chartEl.classList.remove("dragging-drawing");
+                saveDrawings();
+                setDrawHint(drawMode === "hline" ? "点击图表任意价格位置添加水平线；Esc 退出"
+                  : drawMode === "trend" ? "依次点击趋势线的起点和终点；Esc 退出"
+                  : drawMode === "delete" ? "点击已有画线删除；Esc 退出"
+                  : "");
+                window.removeEventListener("pointermove", dragDrawing, true);
+                window.removeEventListener("pointerup", stopDrawingDrag, true);
+                window.removeEventListener("pointercancel", stopDrawingDrag, true);
+              }
+              function updateDrawingHover(event) {
+                if (drawMode !== "none" || dragState) {
+                  chartEl.classList.remove("drawing-hover");
+                  return;
+                }
+                const hit = nearestDrawing(chartPointFromEvent(event), 8);
+                chartEl.classList.toggle("drawing-hover", Boolean(hit));
+              }
+              document.querySelectorAll("[data-draw-mode]").forEach((button) => {
+                button.addEventListener("click", () => setDrawMode(button.dataset.drawMode));
+              });
+              clearDrawingsButton.addEventListener("click", () => {
+                if (!drawings.length) return;
+                drawings = [];
+                pendingTrend = null;
+                draftPoint = null;
+                saveDrawings();
+                renderDrawings();
+              });
+              drawingLayer.addEventListener("pointerdown", (event) => {
+                const target = event.target && event.target.closest ? event.target.closest("[data-drawing-id]") : null;
+                if (drawMode === "none") {
+                  if (target && target.dataset.drawingId) {
+                    startDrawingDrag(event, target.dataset.drawingId);
+                  }
+                  return;
+                }
+                event.preventDefault();
+                event.stopPropagation();
+                if (drawMode === "delete") {
+                  if (target && target.dataset.drawingId) removeDrawing(target.dataset.drawingId);
+                  return;
+                }
+                if (target && target.dataset.drawingId && startDrawingDrag(event, target.dataset.drawingId)) {
+                  return;
+                }
+                const point = pointFromEvent(event);
+                if (!point) return;
+                if (drawMode === "hline") {
+                  drawings.push({
+                    id: drawingId(),
+                    type: "hline",
+                    price: point.price,
+                    color: drawingColors.hline
+                  });
+                  saveDrawings();
+                  renderDrawings();
+                  return;
+                }
+                if (drawMode === "trend") {
+                  if (!pendingTrend) {
+                    pendingTrend = point;
+                    draftPoint = point;
+                    setDrawHint("已选择起点，再点击一次设置终点；Esc 取消");
+                    renderDrawings();
+                  } else {
+                    drawings.push({
+                      id: drawingId(),
+                      type: "trend",
+                      time1: pendingTrend.time,
+                      price1: pendingTrend.price,
+                      time2: point.time,
+                      price2: point.price,
+                      color: drawingColors.trend
+                    });
+                    pendingTrend = null;
+                    draftPoint = null;
+                    setDrawHint("趋势线已添加，可继续画线；Esc 退出");
+                    saveDrawings();
+                    renderDrawings();
+                  }
+                }
+              });
+              drawingLayer.addEventListener("pointermove", (event) => {
+                if (drawMode !== "trend" || !pendingTrend) return;
+                const point = pointFromEvent(event);
+                if (!point) return;
+                draftPoint = point;
+                renderDrawings();
+              });
+              window.addEventListener("keydown", (event) => {
+                if (event.key === "Escape" && drawMode !== "none") setDrawMode("none");
+              });
+              chartEl.addEventListener("pointerdown", (event) => {
+                if (drawMode !== "none") return;
+                startDrawingDrag(event, null);
+              }, true);
+              chartEl.addEventListener("pointermove", updateDrawingHover, true);
+              chartEl.addEventListener("mouseleave", () => {
+                if (!dragState) chartEl.classList.remove("drawing-hover");
+              });
 
               const volumeSeries = chart.addHistogramSeries({
                 priceFormat: { type: "volume" },
@@ -1819,10 +2260,13 @@ def _render_lightweight_chart(
               if (length > 130) {
                 chart.timeScale().setVisibleLogicalRange({ from: length - 126, to: length + 6 });
               }
+              renderDrawings();
+              chart.timeScale().subscribeVisibleLogicalRangeChange(() => renderDrawings());
 
               function resize() {
                 const box = chartEl.getBoundingClientRect();
                 chart.resize(Math.max(box.width, 480), Math.max(box.height, 420));
+                renderDrawings();
               }
               if ("ResizeObserver" in window) {
                 new ResizeObserver(resize).observe(chartEl);
