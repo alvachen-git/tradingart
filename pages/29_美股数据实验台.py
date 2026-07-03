@@ -27,7 +27,7 @@ PREVIOUS_LINE_COLOR = "#f97316"
 
 import us_market_dashboard_data as dashboard_data
 from sidebar_navigation import show_navigation
-from ui_components import inject_sidebar_toggle_style
+from ui_components import inject_sidebar_toggle_style, render_option_sidebar_footer
 
 dashboard_data = importlib.reload(dashboard_data)
 
@@ -3211,6 +3211,7 @@ _inject_home_sidebar_button_style()
 
 with st.sidebar:
     show_navigation()
+    render_option_sidebar_footer("us_option")
 
 engine_error = None
 try:

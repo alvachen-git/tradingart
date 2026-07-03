@@ -14,6 +14,7 @@ import etf_option_tool as de
 current_dir = os.path.dirname(os.path.abspath(__file__))
 root_dir = os.path.dirname(current_dir)
 sys.path.append(root_dir)
+from ui_components import inject_option_page_header_style, render_option_page_title, render_option_sidebar_footer
 
 # 1. 页面配置
 st.set_page_config(
@@ -35,6 +36,9 @@ sys.path.insert(0, root_dir)
 from sidebar_navigation import show_navigation
 with st.sidebar:
     show_navigation()
+    render_option_sidebar_footer("etf_option")
+
+inject_option_page_header_style()
 
 PAGE_NAME = "ETF期权"
 _PAGE_T0 = time.perf_counter()
@@ -97,14 +101,16 @@ def _cached_kline_and_iv_data(
 
 
 # --- 页面逻辑 ---
-st.markdown('<div class="mobile-top-container">', unsafe_allow_html=True)
-c1, c2 = st.columns([1, 2])
-with c1:
-    st.markdown("### 💹 **ETF 期权**")
-with c2:
-    target = st.selectbox("选择标的", ["510300 (300ETF)", "510050 (50ETF)","510500 (500ETF)", "588000 (科创50ETF)",
-                                       "159915 (创业板ETF)"], label_visibility="collapsed")
-st.markdown('</div>', unsafe_allow_html=True)
+title_col, target_col = st.columns([0.74, 0.26], gap="small")
+with title_col:
+    render_option_page_title("ETF 期权")
+with target_col:
+    target = st.selectbox(
+        "标的",
+        ["510300 (300ETF)", "510050 (50ETF)", "510500 (500ETF)", "588000 (科创50ETF)", "159915 (创业板ETF)"],
+        label_visibility="collapsed",
+    )
+st.markdown('<div class="option-page-header-divider"></div>', unsafe_allow_html=True)
 
 # 1. 获取基础代码
 etf_code = target.split(' ')[0] # 得到 "510050"

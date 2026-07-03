@@ -2,6 +2,223 @@ import streamlit as st
 from html import escape
 
 
+def inject_option_page_header_style() -> None:
+    """Inject a shared compact header style for option dashboard pages."""
+    st.markdown(
+        """
+        <style>
+        .stApp,
+        [data-testid="stAppViewContainer"],
+        [data-testid="stMainBlockContainer"],
+        [data-testid="stHeader"],
+        [data-testid="stHeader"] > div,
+        header[data-testid="stHeader"] {
+            background-color: #f5f7f9 !important;
+        }
+
+        [data-testid="stHeader"],
+        header[data-testid="stHeader"] {
+            box-shadow: none !important;
+        }
+
+        [data-testid="stAppViewContainer"] > .main .block-container,
+        .block-container {
+            padding-top: 2.35rem !important;
+        }
+
+        div[data-testid="stHorizontalBlock"]:has(.option-page-title-wrap) {
+            align-items: center !important;
+            gap: 14px;
+            margin: 0 0 18px !important;
+            padding: 0 !important;
+            border: 0 !important;
+            border-radius: 0 !important;
+            background: transparent !important;
+            box-shadow: none !important;
+        }
+
+        div[data-testid="stHorizontalBlock"]:has(.option-page-title-wrap) div[data-testid="column"] {
+            display: flex;
+            align-items: center !important;
+        }
+
+        div[data-testid="stHorizontalBlock"]:has(.option-page-title-wrap) div[data-testid="column"] > div {
+            width: 100%;
+            display: flex;
+            align-items: center;
+            background: transparent !important;
+            border: 0 !important;
+            box-shadow: none !important;
+        }
+
+        .option-page-title-wrap {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            min-height: 44px;
+            margin: 0 !important;
+        }
+
+        div[data-testid="stMarkdownContainer"]:has(.option-page-title-wrap) {
+            display: flex !important;
+            align-items: center !important;
+            height: 44px !important;
+            margin: 0 !important;
+            padding: 0 !important;
+            background: transparent !important;
+        }
+
+        .option-page-mark {
+            flex: 0 0 auto;
+            width: 30px;
+            height: 30px;
+            border-radius: 8px;
+            background: linear-gradient(135deg, #2563eb 0%, #14b8a6 100%);
+            box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.42);
+        }
+
+        .option-page-title {
+            margin: 0;
+            color: #0f172a;
+            font-size: 27px !important;
+            line-height: 1.1;
+            font-weight: 760;
+            letter-spacing: 0;
+        }
+
+        .option-page-header-divider {
+            display: none;
+        }
+
+        div[data-testid="stHorizontalBlock"]:has(.option-page-title-wrap) div[data-testid="stSelectbox"] {
+            min-width: 0;
+            margin: 0 !important;
+        }
+
+        div[data-testid="stHorizontalBlock"]:has(.option-page-title-wrap) div[data-testid="stSelectbox"] > div {
+            margin-bottom: 0 !important;
+        }
+
+        div[data-testid="stHorizontalBlock"]:has(.option-page-title-wrap) div[data-testid="stSelectbox"] [data-baseweb="select"] {
+            width: 100% !important;
+        }
+
+        div[data-testid="stElementContainer"]:has(.option-page-title-wrap) {
+            background: transparent !important;
+            border: 0 !important;
+            box-shadow: none !important;
+        }
+
+        div[data-testid="stVerticalBlockBorderWrapper"]:has(.option-page-title-wrap),
+        div[data-testid="stVerticalBlock"]:has(.option-page-title-wrap) > div[data-testid="stVerticalBlockBorderWrapper"] {
+            padding: 0 !important;
+            border: 0 !important;
+            border-radius: 0 !important;
+            background: transparent !important;
+            box-shadow: none !important;
+        }
+
+        div[data-testid="stSelectbox"] label {
+            color: #64748b !important;
+            font-size: 12px !important;
+            font-weight: 700 !important;
+            line-height: 1.1 !important;
+            margin-bottom: 4px !important;
+        }
+
+        div[data-testid="stSelectbox"] [data-baseweb="select"] {
+            min-height: 42px;
+            border-radius: 8px;
+            border-color: #dbe3ef;
+            background: #ffffff;
+            box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+        }
+
+        div[data-testid="stSelectbox"] [data-baseweb="select"] > div {
+            color: #0f172a;
+            font-weight: 700;
+        }
+
+        div[data-testid="stSelectbox"] [data-baseweb="select"] svg {
+            fill: #64748b;
+        }
+
+        div[data-testid="stSegmentedControl"] {
+            display: inline-flex;
+            width: auto;
+        }
+
+        div[data-testid="stSegmentedControl"] > div {
+            gap: 2px;
+            padding: 4px;
+            border: 1px solid #dbe3ef;
+            border-radius: 8px;
+            background: #ffffff;
+            box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+        }
+
+        div[data-testid="stSegmentedControl"] button {
+            min-height: 34px;
+            border-radius: 6px !important;
+            color: #475569 !important;
+            font-weight: 700 !important;
+        }
+
+        div[data-testid="stSegmentedControl"] button[aria-pressed="true"] {
+            background: #eff6ff !important;
+            color: #2563eb !important;
+            box-shadow: inset 0 -2px 0 #ff4b4b;
+        }
+
+        @media (max-width: 768px) {
+            .option-page-title {
+                font-size: 24px !important;
+            }
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_option_page_title(title: str) -> None:
+    """Render the shared option page title mark."""
+    safe_title = escape(title or "")
+    st.markdown(
+        (
+            '<div class="option-page-title-wrap">'
+            '<div class="option-page-mark"></div>'
+            f'<h1 class="option-page-title">{safe_title}</h1>'
+            "</div>"
+        ),
+        unsafe_allow_html=True,
+    )
+
+
+def render_option_sidebar_footer(page: str) -> None:
+    """Render the shared logged-in footer menu used by option pages."""
+    try:
+        from sidebar_footer_menu import render_sidebar_footer_menu
+    except Exception:
+        return
+
+    user_id = (
+        st.session_state.get("user_id")
+        or st.session_state.get("username")
+        or st.session_state.get("user")
+    )
+    is_logged_in = bool(st.session_state.get("is_logged_in", False) and user_id)
+    render_sidebar_footer_menu(
+        page=page,
+        user_id=str(user_id or ""),
+        is_logged_in=is_logged_in,
+        on_logout=None,
+        show_invite_entry=True,
+        invite_preview_mode=True,
+        reward_points=300,
+    )
+
+
 def inject_quant_ops_header_style() -> None:
     """注入量化操盘室风格的大标题样式。"""
     st.markdown(

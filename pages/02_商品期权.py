@@ -9,7 +9,12 @@ import logging
 import data_engine as de
 from sqlalchemy import text
 import datetime as dt
-from ui_components import inject_sidebar_toggle_style
+from ui_components import (
+    inject_option_page_header_style,
+    inject_sidebar_toggle_style,
+    render_option_page_title,
+    render_option_sidebar_footer,
+)
 from symbol_match import sql_prefix_condition
 # 1. 基础配置
 st.set_page_config(
@@ -28,6 +33,19 @@ CONTRACT_LOOKBACK_DAYS = 420
 MAX_CONTRACT_POOL_ROWS = 1200
 MAX_CONTRACT_OPTIONS = 120
 MAX_CHART_ROWS = 520
+
+COMMODITY_MAP = {
+    "IH": "上证50", "IF": "沪深300", "IM": "中证1000",
+    "au": "黄金", "ag": "白银", "cu": "铜", "al": "铝", "zn": "锌", "ni": "镍", "sn": "锡",
+    "lc": "碳酸锂", "si": "工业硅", "ps": "多晶硅", "pt": "铂金", "pd": "钯金",
+    "rb": "螺纹钢", "i": "铁矿石", "hc": "热卷", "jm": "焦煤", "ad": "铝合金", "fg": "玻璃",
+    "sa": "纯碱", "ao": "氧化铝", "sh": "烧碱", "sp": "纸浆", "lg": "原木",
+    "M": "豆粕", "a": "豆一", "RM": "菜粕", "y": "豆油", "oi": "菜油", "p": "棕榈油", "pk": "花生",
+    "sc": "原油", "ta": "PTA", "px": "对二甲苯", "PR": "瓶片", "ma": "甲醇", "v": "PVC",
+    "eb": "苯乙烯", "bz": "纯苯", "eg": "乙二醇", "pp": "聚丙烯", "l": "塑料", "bu": "沥青",
+    "fu": "燃料油", "br": "BR橡胶", "ur": "尿素",
+    "ru": "橡胶", "c": "玉米", "jd": "鸡蛋", "CF": "棉花", "SR": "白糖", "ap": "苹果", "lh": "生猪",
+}
 
 
 def _perf_user_id() -> str:
@@ -128,6 +146,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from sidebar_navigation import show_navigation
 with st.sidebar:
     show_navigation()
+    render_option_sidebar_footer("commodity_option")
 
 with open('style.css', encoding='utf-8') as f:
     st.markdown(f'<style>{f.read()}</style>', unsafe_allow_html=True)
@@ -643,133 +662,99 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 inject_sidebar_toggle_style(mode="high_contrast")
-
-# 2. 侧边栏逻辑
-with st.sidebar:
-    st.header("1. 选择品种")
-    # 映射表：前端显示中文，后端查询用代码
-    COMMODITY_MAP = {
-        "IH": "上证50","IF": "沪深300","IM": "中证1000",
-        "au": "黄金","ag": "白银","cu": "铜","al": "铝","zn": "锌","ni": "镍","sn": "锡",
-        "lc": "碳酸锂", "si": "工业硅", "ps": "多晶硅","pt": "铂金","pd": "钯金",
-        "rb": "螺纹钢", "i": "铁矿石", "hc": "热卷","jm": "焦煤","ad": "铝合金","fg": "玻璃","sa": "纯碱","ao": "氧化铝","sh": "烧碱","sp": "纸浆","lg": "原木",
-        "M": "豆粕", "a": "豆一", "RM": "菜粕","y": "豆油","oi": "菜油","p": "棕榈油","pk": "花生",
-        "sc": "原油","ta": "PTA","px": "对二甲苯","PR": "瓶片",  "ma": "甲醇", "v": "PVC", "eb": "苯乙烯","bz": "纯苯","eg": "乙二醇","pp": "聚丙烯","l": "塑料","bu": "沥青","fu": "燃料油","br": "BR橡胶","ur": "尿素",
-        "ru": "橡胶", "c": "玉米", "jd": "鸡蛋", "CF": "棉花", "SR": "白糖", "ap": "苹果", "lh": "生猪"
-    }
-    variety = st.selectbox("品种", list(COMMODITY_MAP.keys()), format_func=lambda x: f"{x} ({COMMODITY_MAP[x]})")
-
-    st.header("2. 选择合约")
+inject_option_page_header_style()
 
 
-    # 获取合约列表函数 (已修复 % 报错问题)
-    @st.cache_data(ttl=300, show_spinner=False)
-    def get_contracts(user_id, page, symbol, date_window, v):
-        if de.engine is None: return []
-        try:
-            # 直接按品种前缀在 SQL 过滤，避免全表合约池扫描
-            now = dt.datetime.now()
-            cutoff_yyyymmdd = (now - dt.timedelta(days=CONTRACT_LOOKBACK_DAYS)).strftime("%Y%m%d")
-            raw_codes = _cached_recent_contract_pool(
-                user_id, page, v, "contracts_pool_300s", cutoff_yyyymmdd, v
-            )
-            valid_subs = []
-            current_yymm = int(now.strftime('%y%m'))
+# 获取合约列表函数 (已修复 % 报错问题)
+@st.cache_data(ttl=300, show_spinner=False)
+def get_contracts(user_id, page, symbol, date_window, v):
+    if de.engine is None:
+        return []
+    try:
+        # 直接按品种前缀在 SQL 过滤，避免全表合约池扫描
+        now = dt.datetime.now()
+        cutoff_yyyymmdd = (now - dt.timedelta(days=CONTRACT_LOOKBACK_DAYS)).strftime("%Y%m%d")
+        raw_codes = _cached_recent_contract_pool(
+            user_id, page, v, "contracts_pool_300s", cutoff_yyyymmdd, v
+        )
+        valid_subs = []
+        current_yymm = int(now.strftime('%y%m'))
 
-            for code in raw_codes:
-                # 正则提取：字母部分 + 数字部分
-                match = re.match(r"([a-zA-Z]+)(\d+)", code)
-                if not match: continue
+        for code in raw_codes:
+            # 正则提取：字母部分 + 数字部分
+            match = re.match(r"([a-zA-Z]+)(\d+)", code)
+            if not match:
+                continue
 
-                prefix = match.group(1)
-                num_part = match.group(2)
+            prefix = match.group(1)
+            num_part = match.group(2)
 
-                # SQL端已做严格前缀过滤，这里仅做最终保险
-                if prefix.upper() != v.upper():
-                    continue
+            # SQL端已做严格前缀过滤，这里仅做最终保险
+            if prefix.upper() != v.upper():
+                continue
 
-                # --- 修复 2: 过滤过期合约 ---
-                # 处理年份：郑商所 3位 (501 -> 2501)，其他 4位 (2501)
-                if len(num_part) == 3:
-                    # 假设是 2020 年代，补全为 2501 这种格式
-                    compare_val = int('2' + num_part)
-                elif len(num_part) == 4:
-                    compare_val = int(num_part)
-                else:
-                    continue
+            # --- 修复 2: 过滤过期合约 ---
+            # 处理年份：郑商所 3位 (501 -> 2501)，其他 4位 (2501)
+            if len(num_part) == 3:
+                # 假设是 2020 年代，补全为 2501 这种格式
+                compare_val = int('2' + num_part)
+            elif len(num_part) == 4:
+                compare_val = int(num_part)
+            else:
+                continue
 
-                    # 过滤逻辑：只显示 未过期 或 最近1个月内过期 的合约
-                # 比如现在是 2512，那么 2511 还会显示，2510 就不显示了
-                if compare_val >= (current_yymm - 1):
-                    valid_subs.append(code)
+            # 过滤逻辑：只显示 未过期 或 最近1个月内过期 的合约
+            # 比如现在是 2512，那么 2511 还会显示，2510 就不显示了
+            if compare_val >= (current_yymm - 1):
+                valid_subs.append(code)
 
-            # 去重并限制展示数量，降低 selectbox 与前端渲染负载
-            valid_subs = sorted(list(dict.fromkeys(valid_subs)), reverse=True)[:MAX_CONTRACT_OPTIONS]
+        # 去重并限制展示数量，降低 selectbox 与前端渲染负载
+        valid_subs = sorted(list(dict.fromkeys(valid_subs)), reverse=True)[:MAX_CONTRACT_OPTIONS]
 
-            # 把 "主力连续" 放在第一个
-            options = [f"{v.upper()} (主力连续)"] + valid_subs
-            return options
+        # 把 "主力连续" 放在第一个
+        options = [f"{v.upper()} (主力连续)"] + valid_subs
+        return options
 
-        except Exception as e:
-            st.error(f"合约加载失败: {e}")
-            return []
+    except Exception as e:
+        st.error(f"合约加载失败: {e}")
+        return []
 
-    user_id = _perf_user_id()
-    contracts_window = "contracts_120s"
-    contracts_sig = f"{user_id}|{PAGE_NAME}|{variety}|{contracts_window}"
-    contracts_hit = _probe_cache("contracts", contracts_sig)
-    _db_t0 = time.perf_counter()
-    options = get_contracts(user_id, PAGE_NAME, variety, contracts_window, variety)
-    _perf_page_log(
-        page=PAGE_NAME,
-        db_ms=(time.perf_counter() - _db_t0) * 1000,
-        cache_hit=contracts_hit,
-        stage="get_contracts",
+
+user_id = _perf_user_id()
+title_col, variety_col, contract_col = st.columns([0.50, 0.22, 0.28], gap="small")
+with title_col:
+    render_option_page_title("商品期权")
+with variety_col:
+    variety = st.selectbox(
+        "品种",
+        list(COMMODITY_MAP.keys()),
+        format_func=lambda x: f"{x} ({COMMODITY_MAP[x]})",
+        label_visibility="collapsed",
     )
 
-    if not options:
-        st.warning(f"未找到 {variety} 的相关合约数据")
-        selected_opt = None
+contracts_window = "contracts_120s"
+contracts_sig = f"{user_id}|{PAGE_NAME}|{variety}|{contracts_window}"
+contracts_hit = _probe_cache("contracts", contracts_sig)
+_db_t0 = time.perf_counter()
+options = get_contracts(user_id, PAGE_NAME, variety, contracts_window, variety)
+_perf_page_log(
+    page=PAGE_NAME,
+    db_ms=(time.perf_counter() - _db_t0) * 1000,
+    cache_hit=contracts_hit,
+    stage="get_contracts",
+)
+
+with contract_col:
+    if options:
+        selected_opt = st.selectbox("合约", options, label_visibility="collapsed")
     else:
-        selected_opt = st.selectbox("合约代码", options)
+        st.selectbox("合约", ["暂无可用合约"], disabled=True, label_visibility="collapsed")
+        selected_opt = None
 
-    # 客服卡片 CSS 样式
-    st.markdown("""
-        <style>
-            .contact-card {
-                background-color: #1E2329;
-                border: 1px solid #31333F;
-                border-radius: 8px;
-                padding: 15px;
-                margin-top: 10px;
-                text-align: center;
-            }
-            .contact-title {
-                font-size: 14px;
-                font-weight: bold;
-                color: #e6e6e6;
-                margin-bottom: 8px;
-            }
-            .contact-item {
-                font-size: 13px;
-                color: #8b949e;
-                margin-bottom: 4px;
-            }
-            .wechat-highlight {
-                color: #00e676; /* 微信绿 */
-                font-weight: bold;
-            }
-        </style>
+st.markdown('<div class="option-page-header-divider"></div>', unsafe_allow_html=True)
 
-        <div class="contact-card">
-            <div class="contact-title">🤝 客服联系</div>
-            <div class="contact-item">微信：<span class="wechat-highlight">trader-sec</span></div>
-            <div class="contact-item">电话：<span class="wechat-highlight">17521591756</span></div>
-            <div class="contact-item" style="font-size: 12px; margin-top: 8px;">
-                沪ICP备2021018087号-2
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
+if not options:
+    st.warning(f"未找到 {variety} 的相关合约数据")
 
 if selected_opt and "主力连续" in selected_opt:
     target_contract = variety.upper()
