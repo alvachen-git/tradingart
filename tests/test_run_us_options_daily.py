@@ -11,17 +11,40 @@ import us_options_polygon as uop
 
 NEW_OPTION_UNDERLYINGS = {
     "AVGO",
+    "BABA",
+    "BAC",
     "COIN",
+    "DIS",
     "GOOGL",
     "HOOD",
     "INTC",
+    "JPM",
+    "MARA",
     "META",
     "MSFT",
     "MSTR",
+    "MU",
     "NFLX",
     "PLTR",
+    "RIVN",
     "SMCI",
+    "SOFI",
     "TSM",
+    "UBER",
+    "WMT",
+}
+
+LATEST_BACKFILL_UNDERLYINGS = {
+    "BABA",
+    "BAC",
+    "DIS",
+    "JPM",
+    "MARA",
+    "MU",
+    "RIVN",
+    "SOFI",
+    "UBER",
+    "WMT",
 }
 
 
@@ -130,9 +153,10 @@ class RunUSOptionsDailyTests(unittest.TestCase):
 
     def test_backfill_script_defaults_to_new_batch(self):
         script_text = Path("scripts/backfill_us_options_new_underlyings_1y.sh").read_text(encoding="utf-8")
-        expected = "AVGO,COIN,GOOGL,HOOD,INTC,META,MSFT,MSTR,NFLX,PLTR,SMCI,TSM"
+        expected = "BABA,BAC,DIS,JPM,MARA,MU,RIVN,SOFI,UBER,WMT"
 
         self.assertIn(f"US_OPTIONS_BACKFILL_UNDERLYINGS=\"${{US_OPTIONS_BACKFILL_UNDERLYINGS:-{expected}}}\"", script_text)
+        self.assertEqual(set(expected.split(",")), LATEST_BACKFILL_UNDERLYINGS)
 
     def _insert_rows(self, *, open_interest=100, provider_iv=0.2, metrics=True):
         names = uop.table_names(use_test_tables=True)

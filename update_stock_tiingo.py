@@ -137,6 +137,10 @@ SECTOR_SYMBOLS = {
     "stablecoin_infra": [
         "COIN", "HOOD", "PYPL", "XYZ", "MSTR",
     ],
+    # 期权高活跃补充池（配合美股期权页面新增标的，避免回补 IV 时临时补价）
+    "option_active": [
+        "BABA", "UBER", "SOFI", "RIVN", "MARA",
+    ],
     # 石油与油服炼化
     "oil_energy": [
         "XOM", "CVX", "COP", "EOG", "OXY", "SLB", "HAL", "MPC", "VLO",
@@ -166,6 +170,7 @@ SECTOR_LABELS = {
     "consumer": "消费",
     "space": "太空",
     "stablecoin_infra": "稳定币基础设施",
+    "option_active": "期权活跃",
     "oil_energy": "石油能源",
     "us_etf_broad": "美股宽基ETF",
     "us_etf_sector": "美股行业ETF",

@@ -23,24 +23,34 @@ class TestUSOptionsPolygon(unittest.TestCase):
         symbols = set(uop.DEFAULT_UNDERLYINGS)
         new_symbols = {
             "AVGO",
+            "BABA",
+            "BAC",
             "COIN",
+            "DIS",
             "GOOGL",
             "HOOD",
             "INTC",
+            "JPM",
+            "MARA",
             "META",
             "MSFT",
             "MSTR",
+            "MU",
             "NFLX",
             "PLTR",
+            "RIVN",
             "SMCI",
+            "SOFI",
             "TSM",
+            "UBER",
+            "WMT",
         }
 
         self.assertFalse({"SPX", "NDX", "RUT", "VIX"} & symbols)
         for symbol in ("SPY", "QQQ", "IWM", "GLD", "TLT", "TSLA", "NVDA", "AMD", "AAPL", "AMZN"):
             self.assertIn(symbol, symbols)
         self.assertTrue(new_symbols <= symbols)
-        self.assertEqual(len(uop.DEFAULT_UNDERLYINGS), 27)
+        self.assertEqual(len(uop.DEFAULT_UNDERLYINGS), 37)
 
     def test_parse_option_ticker_extracts_root_expiration_type_and_strike(self):
         parsed = uop.parse_option_ticker("O:SPY260619C00600000")
@@ -73,12 +83,16 @@ class TestUSOptionsPolygon(unittest.TestCase):
         gld_monthly = uop.classify_contract("O:GLD260619C00250000", "GLD", "2026-06-19")
         googl_monthly = uop.classify_contract("O:GOOGL260619C00200000", "GOOGL", "2026-06-19")
         tsm_monthly = uop.classify_contract("O:TSM260619C00200000", "TSM", "2026-06-19")
+        mu_monthly = uop.classify_contract("O:MU260619C00100000", "MU", "2026-06-19")
+        baba_monthly = uop.classify_contract("O:BABA260619C00100000", "BABA", "2026-06-19")
 
         self.assertEqual(tsla_monthly[:2], ("monthly", "physical"))
         self.assertEqual(tsla_weekly[:2], ("short_cycle", "physical"))
         self.assertEqual(gld_monthly[:2], ("monthly", "physical"))
         self.assertEqual(googl_monthly[:2], ("monthly", "physical"))
         self.assertEqual(tsm_monthly[:2], ("monthly", "physical"))
+        self.assertEqual(mu_monthly[:2], ("monthly", "physical"))
+        self.assertEqual(baba_monthly[:2], ("monthly", "physical"))
 
     def test_storage_filter_keeps_monthly_full_chain_but_short_cycle_only_band(self):
         monthly = uop.OptionContract(

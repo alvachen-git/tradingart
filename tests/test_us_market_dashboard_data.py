@@ -350,17 +350,27 @@ class UsMarketDashboardDataTests(unittest.TestCase):
         symbols = set(dash.DEFAULT_DASHBOARD_UNDERLYINGS)
         new_symbols = {
             "AVGO",
+            "BABA",
+            "BAC",
             "COIN",
+            "DIS",
             "GOOGL",
             "HOOD",
             "INTC",
+            "JPM",
+            "MARA",
             "META",
             "MSFT",
             "MSTR",
+            "MU",
             "NFLX",
             "PLTR",
+            "RIVN",
             "SMCI",
+            "SOFI",
             "TSM",
+            "UBER",
+            "WMT",
         }
 
         self.assertFalse({"SPX", "NDX", "RUT", "VIX"} & symbols)
@@ -380,7 +390,7 @@ class UsMarketDashboardDataTests(unittest.TestCase):
             self.assertIn(symbol, symbols)
             self.assertTrue(dash.UNDERLYING_DISPLAY_NAMES.get(symbol))
         self.assertTrue(new_symbols <= symbols)
-        self.assertEqual(len(dash.DEFAULT_DASHBOARD_UNDERLYINGS), 27)
+        self.assertEqual(len(dash.DEFAULT_DASHBOARD_UNDERLYINGS), 37)
 
     def test_dashboard_underlyings_prioritize_core_etfs_then_sort_symbols(self):
         symbols = list(dash.DEFAULT_DASHBOARD_UNDERLYINGS)
@@ -1083,6 +1093,119 @@ class UsMarketDashboardDataTests(unittest.TestCase):
         self.assertAlmostEqual(float(cone.loc[cone["dte_target"] == 7, "p50"].iloc[0]), 12.0)
         self.assertAlmostEqual(float(cone.loc[cone["dte_target"] == 30, "p90"].iloc[0]), 22.8)
 
+    def test_load_volatility_cone_history_falls_back_when_cache_is_too_short(self):
+        self._create_option_tables(use_test_tables=True)
+        names = dash.option_table_names(True)
+        with self.engine.begin() as conn:
+            conn.execute(
+                text(
+                    f"""
+                    CREATE TABLE {dash.VOLATILITY_CONE_DAILY_CACHE_TABLE} (
+                        trade_date TEXT,
+                        underlying TEXT,
+                        dte_target INTEGER,
+                        dte REAL,
+                        expiration_date TEXT,
+                        iv_pct REAL,
+                        sample_count INTEGER
+                    )
+                    """
+                )
+            )
+            cache_rows = []
+            for idx in range(5):
+                trade_date = (pd.Timestamp("2026-01-21") + pd.Timedelta(days=idx)).strftime("%Y%m%d")
+                cache_rows.extend(
+                    [
+                        {"trade_date": trade_date, "underlying": "SPY", "dte_target": 7, "dte": 7, "expiration_date": "2026-02-01", "iv_pct": 99.0, "sample_count": 1},
+                        {"trade_date": trade_date, "underlying": "SPY", "dte_target": 30, "dte": 30, "expiration_date": "2026-03-01", "iv_pct": 99.0, "sample_count": 1},
+                    ]
+                )
+            conn.execute(
+                text(
+                    f"""
+                    INSERT INTO {dash.VOLATILITY_CONE_DAILY_CACHE_TABLE}
+                    (trade_date, underlying, dte_target, dte, expiration_date, iv_pct, sample_count)
+                    VALUES (:trade_date, :underlying, :dte_target, :dte, :expiration_date, :iv_pct, :sample_count)
+                    """
+                ),
+                cache_rows,
+            )
+
+            contract_rows = []
+            iv_rows = []
+            for idx in range(25):
+                trade_date = (pd.Timestamp("2026-01-01") + pd.Timedelta(days=idx)).strftime("%Y%m%d")
+                base = pd.to_datetime(trade_date, format="%Y%m%d")
+                for dte, iv_value in [(7, 0.10 + idx / 100), (30, 0.20 + idx / 100)]:
+                    expiration = (base + pd.Timedelta(days=dte)).strftime("%Y-%m-%d")
+                    ticker = f"O:SPYFALLBACK{idx:02d}{dte:03d}C00100000"
+                    contract_rows.append(
+                        {
+                            "option_ticker": ticker,
+                            "underlying": "SPY",
+                            "call_put": "C",
+                            "strike": 100,
+                            "expiration_date": expiration,
+                            "contract_root": "SPY",
+                            "expiration_type": "monthly",
+                            "settlement_type": "physical",
+                            "exercise_style": "",
+                            "shares_per_contract": 100,
+                            "source": "test",
+                            "updated_at": "",
+                        }
+                    )
+                    iv_rows.append(
+                        {
+                            "trade_date": trade_date,
+                            "option_ticker": ticker,
+                            "underlying": "SPY",
+                            "provider_iv": iv_value,
+                            "computed_iv": None,
+                            "iv_source": "provider_snapshot",
+                            "open_interest": 100,
+                            "underlying_price": 100,
+                        }
+                    )
+            conn.execute(
+                text(
+                    f"""
+                    INSERT INTO {names['contracts']}
+                    (option_ticker, underlying, call_put, strike, expiration_date, contract_root,
+                     expiration_type, settlement_type, exercise_style, shares_per_contract, source, updated_at)
+                    VALUES (:option_ticker, :underlying, :call_put, :strike, :expiration_date, :contract_root,
+                            :expiration_type, :settlement_type, :exercise_style, :shares_per_contract, :source, :updated_at)
+                    """
+                ),
+                contract_rows,
+            )
+            conn.execute(
+                text(
+                    f"""
+                    INSERT INTO {names['iv']}
+                    (trade_date, option_ticker, underlying, provider_iv, computed_iv,
+                     iv_source, open_interest, underlying_price)
+                    VALUES (:trade_date, :option_ticker, :underlying, :provider_iv, :computed_iv,
+                            :iv_source, :open_interest, :underlying_price)
+                    """
+                ),
+                iv_rows,
+            )
+
+        cone = dash.load_volatility_cone_history(
+            "SPY",
+            "20260125",
+            window=252,
+            dte_targets=(7, 30),
+            use_test_tables=True,
+            engine=self.engine,
+        )
+
+        self.assertEqual(cone["dte_target"].tolist(), [7, 30])
+        self.assertEqual(cone["sample_count"].tolist(), [25, 25])
+        self.assertNotAlmostEqual(float(cone.loc[cone["dte_target"] == 7, "p50"].iloc[0]), 99.0)
+
     def test_build_otm_volatility_curve_uses_only_otm_put_and_call(self):
         chain = pd.DataFrame(
             [
@@ -1101,7 +1224,42 @@ class UsMarketDashboardDataTests(unittest.TestCase):
 
         self.assertEqual(curve["moneyness_pct"].tolist(), [-5.0, 5.0])
         self.assertEqual(curve["call_put"].tolist(), ["P", "C"])
-        self.assertEqual(curve["iv_pct"].tolist(), [30.0, 20.0])
+        self.assertAlmostEqual(float(curve["iv_pct"].iloc[0]), 30.0)
+        self.assertAlmostEqual(float(curve["iv_pct"].iloc[1]), 20.0)
+        self.assertEqual(curve["quality"].tolist(), ["sparse", "sparse"])
+        self.assertEqual(curve["point_count"].tolist(), [1, 1])
+
+    def test_build_binned_otm_volatility_curve_uses_single_front_expiration(self):
+        chain = pd.DataFrame(
+            [
+                {"call_put": "P", "moneyness_pct": -6.1, "iv_pct": 32, "open_interest": 100, "dte": 29, "expiration_date": "2026-02-19"},
+                {"call_put": "P", "moneyness_pct": -4.1, "iv_pct": 30, "open_interest": 100, "dte": 30, "expiration_date": "2026-02-20"},
+                {"call_put": "P", "moneyness_pct": -2.1, "iv_pct": 31, "open_interest": 100, "dte": 30, "expiration_date": "2026-02-20"},
+                {"call_put": "C", "moneyness_pct": 2.1, "iv_pct": 21, "open_interest": 100, "dte": 29, "expiration_date": "2026-02-19"},
+                {"call_put": "C", "moneyness_pct": 4.1, "iv_pct": 20, "open_interest": 100, "dte": 30, "expiration_date": "2026-02-20"},
+                {"call_put": "C", "moneyness_pct": 6.1, "iv_pct": 22, "open_interest": 100, "dte": 30, "expiration_date": "2026-02-20"},
+            ]
+        )
+
+        curve = dash.build_binned_otm_volatility_curve(chain)
+
+        self.assertEqual(curve["moneyness_pct"].tolist(), [-6.1, 2.1])
+        self.assertEqual(curve["expiration_date"].tolist(), ["2026-02-19", "2026-02-19"])
+        self.assertEqual(curve["quality"].tolist(), ["sparse", "sparse"])
+        self.assertEqual(curve["expiration_count"].tolist(), [1, 1])
+
+    def test_build_binned_otm_volatility_curve_does_not_extrapolate_far_tails(self):
+        chain = pd.DataFrame(
+            [
+                {"call_put": "P", "moneyness_pct": -9.6, "iv_pct": 50, "open_interest": 100, "dte": 30, "expiration_date": "2026-02-20"},
+                {"call_put": "C", "moneyness_pct": 9.6, "iv_pct": 40, "open_interest": 100, "dte": 30, "expiration_date": "2026-02-20"},
+            ]
+        )
+
+        curve = dash.build_binned_otm_volatility_curve(chain)
+
+        self.assertTrue(curve.empty)
+        self.assertEqual(curve.columns.tolist(), dash.OTM_VOLATILITY_CURVE_COLUMNS)
 
     def test_load_volatility_cone_line_snapshot_aggregates_small_slice(self):
         self._create_option_tables(use_test_tables=True)
@@ -1123,10 +1281,12 @@ class UsMarketDashboardDataTests(unittest.TestCase):
         self._create_option_tables(use_test_tables=True)
         names = dash.option_table_names(True)
         contract_rows = [
-            ("O:SPY260220P00570000", "P", 570, 0.30),
-            ("O:SPY260220P00630000", "P", 630, 0.70),
-            ("O:SPY260220C00570000", "C", 570, 0.80),
-            ("O:SPY260220C00630000", "C", 630, 0.20),
+            ("O:SPY260206P00570000", "P", 570, "2026-02-06", "weekly", 0.99),
+            ("O:SPY260206C00630000", "C", 630, "2026-02-06", "weekly", 0.88),
+            ("O:SPY260220P00570000", "P", 570, "2026-02-20", "monthly", 0.30),
+            ("O:SPY260220P00630000", "P", 630, "2026-02-20", "monthly", 0.70),
+            ("O:SPY260220C00570000", "C", 570, "2026-02-20", "monthly", 0.80),
+            ("O:SPY260220C00630000", "C", 630, "2026-02-20", "monthly", 0.20),
         ]
         with self.engine.begin() as conn:
             conn.execute(
@@ -1135,13 +1295,19 @@ class UsMarketDashboardDataTests(unittest.TestCase):
                     INSERT INTO {names['contracts']}
                     (option_ticker, underlying, call_put, strike, expiration_date, contract_root,
                      expiration_type, settlement_type, exercise_style, shares_per_contract, source, updated_at)
-                    VALUES (:option_ticker, 'SPY', :call_put, :strike, '2026-02-20', 'SPY',
-                            'monthly', 'physical', '', 100, 'test', '')
+                    VALUES (:option_ticker, 'SPY', :call_put, :strike, :expiration_date, 'SPY',
+                            :expiration_type, 'physical', '', 100, 'test', '')
                     """
                 ),
                 [
-                    {"option_ticker": ticker, "call_put": call_put, "strike": strike}
-                    for ticker, call_put, strike, _iv in contract_rows
+                    {
+                        "option_ticker": ticker,
+                        "call_put": call_put,
+                        "strike": strike,
+                        "expiration_date": expiration_date,
+                        "expiration_type": expiration_type,
+                    }
+                    for ticker, call_put, strike, expiration_date, expiration_type, _iv in contract_rows
                 ],
             )
             conn.execute(
@@ -1156,7 +1322,7 @@ class UsMarketDashboardDataTests(unittest.TestCase):
                 ),
                 [
                     {"option_ticker": ticker, "provider_iv": iv_value}
-                    for ticker, _call_put, _strike, iv_value in contract_rows
+                    for ticker, _call_put, _strike, _expiration_date, _expiration_type, iv_value in contract_rows
                 ],
             )
 
@@ -1170,7 +1336,11 @@ class UsMarketDashboardDataTests(unittest.TestCase):
 
         self.assertEqual(curve["moneyness_pct"].tolist(), [-5.0, 5.0])
         self.assertEqual(curve["call_put"].tolist(), ["P", "C"])
-        self.assertEqual(curve["iv_pct"].tolist(), [30.0, 20.0])
+        self.assertEqual(curve["expiration_date"].tolist(), ["2026-02-20", "2026-02-20"])
+        self.assertAlmostEqual(float(curve["iv_pct"].iloc[0]), 30.0)
+        self.assertAlmostEqual(float(curve["iv_pct"].iloc[1]), 20.0)
+        self.assertEqual(curve["quality"].tolist(), ["sparse", "sparse"])
+        self.assertEqual(curve["expiration_count"].tolist(), [1, 1])
 
     def test_load_option_surface_snapshot_filters_to_needed_slice(self):
         self._create_option_tables(use_test_tables=True)

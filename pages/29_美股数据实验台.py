@@ -2461,6 +2461,63 @@ def _add_empty_chart_annotation(fig: go.Figure, text: str) -> None:
     )
 
 
+def _add_chart_note(fig: go.Figure, text: str) -> None:
+    fig.add_annotation(
+        text=text,
+        xref="paper",
+        yref="paper",
+        x=0.5,
+        y=0.08,
+        showarrow=False,
+        font=dict(size=12, color="#64748b"),
+        bgcolor="rgba(248,250,252,.82)",
+        bordercolor="#dbe3ef",
+        borderpad=6,
+    )
+
+
+def _cone_history_sample_days(cone_df: pd.DataFrame) -> int:
+    if cone_df is None or cone_df.empty or "sample_count" not in cone_df.columns:
+        return 0
+    counts = pd.to_numeric(cone_df["sample_count"], errors="coerce").dropna()
+    counts = counts[counts > 0]
+    if counts.empty:
+        return 0
+    return int(counts.min())
+
+
+def _volatility_cone_subtitle(cone_df: pd.DataFrame) -> str:
+    sample_days = _cone_history_sample_days(cone_df)
+    if sample_days <= 0:
+        return "今日/昨日"
+    return f"历史样本 {sample_days}/252 + 今日/昨日"
+
+
+def _otm_curve_valid_points(curve_df: pd.DataFrame) -> int:
+    if curve_df is None or curve_df.empty or "moneyness_pct" not in curve_df.columns:
+        return 0
+    return int(pd.to_numeric(curve_df["moneyness_pct"], errors="coerce").dropna().shape[0])
+
+
+def _otm_curve_expiration_label(curve_df: pd.DataFrame) -> str | None:
+    if curve_df is None or curve_df.empty or "expiration_date" not in curve_df.columns:
+        return None
+    expirations = [
+        str(value).strip()
+        for value in curve_df["expiration_date"].dropna().astype(str).unique().tolist()
+        if str(value).strip() and "," not in str(value)
+    ]
+    if len(expirations) != 1:
+        return None
+    return expirations[0]
+
+
+def _otm_curve_subtitle(today_curve: pd.DataFrame, previous_curve: pd.DataFrame) -> str:
+    expiration = _otm_curve_expiration_label(today_curve)
+    prefix = f"最近月期权 {expiration}" if expiration else "最近月期权"
+    return f"{prefix} · 今日 {_otm_curve_valid_points(today_curve)}点 / 昨日 {_otm_curve_valid_points(previous_curve)}点"
+
+
 def _add_cone_line(fig: go.Figure, line_df: pd.DataFrame, *, name: str, color: str, dash: str = "solid") -> None:
     if line_df is None or line_df.empty:
         return
@@ -2503,12 +2560,18 @@ def _build_volatility_cone_figure(
 ) -> go.Figure:
     fig = go.Figure()
     cone = cone_df.copy() if cone_df is not None else pd.DataFrame()
+    sample_days = _cone_history_sample_days(cone)
+    show_history_bands = sample_days >= 20
+    muted_history = 20 <= sample_days < 60
     if not cone.empty:
         for col in ("dte_target", "p10", "p25", "p50", "p75", "p90", "sample_count"):
             cone[col] = pd.to_numeric(cone.get(col), errors="coerce")
         cone = cone.dropna(subset=["dte_target"]).sort_values("dte_target")
-    if not cone.empty and {"p10", "p25", "p50", "p75", "p90"}.issubset(cone.columns):
+    if show_history_bands and not cone.empty and {"p10", "p25", "p50", "p75", "p90"}.issubset(cone.columns):
         x = cone["dte_target"]
+        outer_fill = "rgba(37, 99, 235, 0.04)" if muted_history else "rgba(37, 99, 235, 0.08)"
+        inner_fill = "rgba(37, 99, 235, 0.08)" if muted_history else "rgba(37, 99, 235, 0.14)"
+        median_color = "rgba(100,116,139,.55)" if muted_history else "#64748b"
         fig.add_trace(
             go.Scatter(x=x, y=cone["p90"], mode="lines", line=dict(width=0), showlegend=False, hoverinfo="skip")
         )
@@ -2518,7 +2581,7 @@ def _build_volatility_cone_figure(
                 y=cone["p10"],
                 mode="lines",
                 fill="tonexty",
-                fillcolor="rgba(37, 99, 235, 0.08)",
+                fillcolor=outer_fill,
                 line=dict(width=0),
                 name="10-90%区间",
                 hovertemplate="DTE %{x}<br>p10 %{y:.2f}%<extra></extra>",
@@ -2533,7 +2596,7 @@ def _build_volatility_cone_figure(
                 y=cone["p25"],
                 mode="lines",
                 fill="tonexty",
-                fillcolor="rgba(37, 99, 235, 0.14)",
+                fillcolor=inner_fill,
                 line=dict(width=0),
                 name="25-75%区间",
                 hovertemplate="DTE %{x}<br>p25 %{y:.2f}%<extra></extra>",
@@ -2545,13 +2608,15 @@ def _build_volatility_cone_figure(
                 y=cone["p50"],
                 mode="lines+markers",
                 name="历史中位数",
-                line=dict(color="#64748b", width=1.8),
-                marker=dict(size=5, color="#64748b"),
+                line=dict(color=median_color, width=1.8),
+                marker=dict(size=5, color=median_color),
                 hovertemplate="DTE %{x}<br>中位数 %{y:.2f}%<extra></extra>",
             )
         )
-        if pd.to_numeric(cone.get("sample_count"), errors="coerce").max() < 20:
-            _add_empty_chart_annotation(fig, "历史样本不足：分位锥仅供参考")
+        if muted_history:
+            _add_chart_note(fig, f"历史样本 {sample_days}/252：分位锥仅供参考")
+    elif sample_days > 0:
+        _add_empty_chart_annotation(fig, f"历史样本 {sample_days}/252：先显示今日/昨日曲线")
     else:
         _add_empty_chart_annotation(fig, "历史样本不足：先显示今日/昨日曲线")
     _add_cone_line(fig, previous_line, name="昨日", color=PREVIOUS_LINE_COLOR, dash="dash")
@@ -2572,49 +2637,67 @@ def _build_volatility_cone_figure(
     return fig
 
 
+def _curve_side_is_sparse(side_df: pd.DataFrame) -> bool:
+    if side_df is None or side_df.empty or len(side_df) < 3:
+        return True
+    if "quality" not in side_df.columns:
+        return False
+    quality = side_df["quality"].fillna("").astype(str).str.lower()
+    return bool((quality == "sparse").any())
+
+
 def _add_otm_curve(fig: go.Figure, curve_df: pd.DataFrame, *, name: str, color: str, dash: str = "solid") -> None:
     if curve_df is None or curve_df.empty:
         return
     curve = curve_df.copy()
-    for col in ("moneyness_pct", "iv_pct", "dte"):
+    for col in ("moneyness_pct", "iv_pct", "dte", "point_count", "expiration_count"):
+        if col not in curve.columns:
+            curve[col] = None
         curve[col] = pd.to_numeric(curve.get(col), errors="coerce")
     curve = curve.dropna(subset=["moneyness_pct", "iv_pct"]).sort_values("moneyness_pct")
     if curve.empty:
         return
-    negative = curve[curve["moneyness_pct"] < 0]
-    positive = curve[curve["moneyness_pct"] > 0]
-    if not negative.empty and not positive.empty:
-        separator = pd.DataFrame([{col: None for col in curve.columns}])
-        separator["moneyness_pct"] = 0.0
-        separator["iv_pct"] = None
-        separator["call_put"] = ""
-        separator["expiration_date"] = "-"
-        separator["dte"] = None
-        curve = pd.concat([negative, separator, positive], ignore_index=True)
-    custom = pd.DataFrame(
-        {
-            "side": curve.get("call_put", pd.Series([""] * len(curve))).fillna("").astype(str),
-            "expiration": curve.get("expiration_date", pd.Series(["-"] * len(curve))).fillna("-").astype(str),
-            "dte": pd.to_numeric(curve.get("dte"), errors="coerce"),
-        }
-    ).to_numpy()
-    fig.add_trace(
-        go.Scatter(
-            x=curve["moneyness_pct"],
-            y=curve["iv_pct"],
-            customdata=custom,
-            mode="lines+markers",
-            name=name,
-            line=dict(color=color, width=2.4, dash=dash),
-            marker=dict(size=5.5, color=color),
-            hovertemplate=(
-                "相对ATM %{x:+.2f}%<br>"
-                "IV %{y:.2f}%<br>"
-                "%{customdata[0]} · DTE %{customdata[2]:.0f}<br>"
-                "到期 %{customdata[1]}<extra></extra>"
-            ),
+    sides = [
+        curve[curve["moneyness_pct"] < 0],
+        curve[curve["moneyness_pct"] > 0],
+    ]
+    shown_legend = False
+    for side_curve in sides:
+        if side_curve.empty:
+            continue
+        side_curve = side_curve.sort_values("moneyness_pct")
+        sparse = _curve_side_is_sparse(side_curve)
+        custom = pd.DataFrame(
+            {
+                "side": side_curve.get("call_put", pd.Series([""] * len(side_curve))).fillna("").astype(str),
+                "expiration": side_curve.get("expiration_date", pd.Series(["-"] * len(side_curve))).fillna("-").astype(str),
+                "dte": pd.to_numeric(side_curve.get("dte"), errors="coerce"),
+                "points": pd.to_numeric(side_curve.get("point_count"), errors="coerce"),
+                "expirations": pd.to_numeric(side_curve.get("expiration_count"), errors="coerce"),
+                "quality": side_curve.get("quality", pd.Series([""] * len(side_curve))).fillna("").astype(str),
+            }
+        ).to_numpy()
+        fig.add_trace(
+            go.Scatter(
+                x=side_curve["moneyness_pct"],
+                y=side_curve["iv_pct"],
+                customdata=custom,
+                mode="markers" if sparse else "lines+markers",
+                name=name,
+                legendgroup=name,
+                showlegend=not shown_legend,
+                line=dict(color=color, width=2.4, dash=dash),
+                marker=dict(size=6.5 if sparse else 5.5, color=color),
+                hovertemplate=(
+                    "相对ATM %{x:+.2f}%<br>"
+                    "IV %{y:.2f}%<br>"
+                    "%{customdata[0]} · DTE %{customdata[2]:.0f}<br>"
+                    "样本 %{customdata[3]:.0f} · 到期日 %{customdata[4]:.0f}<br>"
+                    "到期 %{customdata[1]}<extra></extra>"
+                ),
+            )
         )
-    )
+        shown_legend = True
 
 
 def _otm_curve_x_range(*curves: pd.DataFrame) -> list[float]:
@@ -2625,10 +2708,23 @@ def _otm_curve_x_range(*curves: pd.DataFrame) -> list[float]:
         series = pd.to_numeric(curve["moneyness_pct"], errors="coerce").abs().dropna()
         values.extend(float(value) for value in series if float(value) > 0)
     if not values:
-        return [-5.5, 5.5]
+        return [-4.0, 4.0]
     padded = math.ceil((max(values) + 0.35) * 2) / 2
-    padded = min(10.5, max(3.5, padded))
+    padded = min(10.0, max(4.0, padded))
     return [-padded, padded]
+
+
+def _otm_curve_has_sparse_side(*curves: pd.DataFrame) -> bool:
+    for curve in curves:
+        if curve is None or curve.empty:
+            continue
+        data = curve.copy()
+        data["moneyness_pct"] = pd.to_numeric(data.get("moneyness_pct"), errors="coerce")
+        data = data.dropna(subset=["moneyness_pct"])
+        for side_curve in (data[data["moneyness_pct"] < 0], data[data["moneyness_pct"] > 0]):
+            if not side_curve.empty and _curve_side_is_sparse(side_curve):
+                return True
+    return False
 
 
 def _build_otm_volatility_curve_figure(
@@ -2637,12 +2733,14 @@ def _build_otm_volatility_curve_figure(
     chart_id: str,
 ) -> go.Figure:
     fig = go.Figure()
-    _add_otm_curve(fig, previous_curve, name="昨日OTM曲线", color=PREVIOUS_LINE_COLOR, dash="dash")
-    _add_otm_curve(fig, today_curve, name="今日OTM曲线", color=TODAY_LINE_COLOR)
+    _add_otm_curve(fig, previous_curve, name="昨日曲线", color=PREVIOUS_LINE_COLOR, dash="dash")
+    _add_otm_curve(fig, today_curve, name="今日曲线", color=TODAY_LINE_COLOR)
     if (today_curve is None or today_curve.empty) and (previous_curve is None or previous_curve.empty):
         _add_empty_chart_annotation(fig, "暂无可计算的 OTM 波动率曲线")
     elif previous_curve is None or previous_curve.empty:
         _add_empty_chart_annotation(fig, "暂无昨日曲线：仅显示今日")
+    elif _otm_curve_has_sparse_side(today_curve, previous_curve):
+        _add_chart_note(fig, "最近月期权部分侧数据点不足：只显示点，不跨到期日拼线")
     fig.add_vline(x=0, line_width=1, line_dash="dash", line_color="#94a3b8")
     fig.add_annotation(
         text="OTM Put",
@@ -3389,10 +3487,12 @@ elif active_view == "波动率曲面":
     previous_cone_line = surface_payload.get("previous_cone_line", pd.DataFrame())
     today_otm_curve = surface_payload.get("today_otm_curve", pd.DataFrame())
     previous_otm_curve = surface_payload.get("previous_otm_curve", pd.DataFrame())
+    cone_subtitle = escape(_volatility_cone_subtitle(cone_history))
+    curve_subtitle = escape(_otm_curve_subtitle(today_otm_curve, previous_otm_curve))
     c1, c2 = st.columns([1, 1], gap="small")
     with c1:
         st.markdown(
-            '<div class="us-lab-panel"><div class="us-lab-panel-title"><strong>波动率锥</strong><span>近一年历史分位 + 今日/昨日</span></div>',
+            f'<div class="us-lab-panel"><div class="us-lab-panel-title"><strong>波动率锥</strong><span>{cone_subtitle}</span></div>',
             unsafe_allow_html=True,
         )
         st.plotly_chart(
@@ -3404,7 +3504,7 @@ elif active_view == "波动率曲面":
         st.markdown("</div>", unsafe_allow_html=True)
     with c2:
         st.markdown(
-            '<div class="us-lab-panel"><div class="us-lab-panel-title"><strong>波动率曲线</strong><span>OTM Put + OTM Call</span></div>',
+            f'<div class="us-lab-panel"><div class="us-lab-panel-title"><strong>波动率曲线</strong><span>{curve_subtitle}</span></div>',
             unsafe_allow_html=True,
         )
         st.plotly_chart(

@@ -42,17 +42,27 @@ UNDERLYING_DISPLAY_NAMES = {
     "AAPL": "苹果",
     "AMZN": "亚马逊",
     "AVGO": "博通",
+    "BABA": "阿里巴巴",
+    "BAC": "美国银行",
     "COIN": "Coinbase",
+    "DIS": "迪士尼",
     "GOOGL": "谷歌",
     "HOOD": "Robinhood",
     "INTC": "英特尔",
+    "JPM": "摩根大通",
+    "MARA": "Marathon Digital",
     "META": "Meta",
     "MSFT": "微软",
     "MSTR": "MicroStrategy",
+    "MU": "美光",
     "NFLX": "奈飞",
     "PLTR": "帕兰提尔",
+    "RIVN": "Rivian",
     "SMCI": "超微电脑",
+    "SOFI": "SoFi",
     "TSM": "台积电",
+    "UBER": "优步",
+    "WMT": "沃尔玛",
 }
 
 STOCK_DAILY_COLUMNS = ["date", "symbol", "open", "high", "low", "close", "volume", "adjClose"]
@@ -86,6 +96,7 @@ OPTION_CHAIN_COLUMNS = [
 VOLATILITY_CONE_TARGETS = (7, 14, 21, 30, 45, 60, 90)
 VOLATILITY_CONE_COLUMNS = ["dte_target", "p10", "p25", "p50", "p75", "p90", "sample_count"]
 VOLATILITY_CONE_LINE_COLUMNS = ["dte_target", "dte", "expiration_date", "iv_pct", "sample_count"]
+VOLATILITY_CONE_MIN_CACHE_DAYS = 20
 VOLATILITY_CONE_DAILY_CACHE_TABLE = "us_option_volatility_cone_daily"
 VOLATILITY_CONE_DAILY_CACHE_COLUMNS = [
     "trade_date",
@@ -96,7 +107,35 @@ VOLATILITY_CONE_DAILY_CACHE_COLUMNS = [
     "iv_pct",
     "sample_count",
 ]
-OTM_VOLATILITY_CURVE_COLUMNS = ["moneyness_pct", "iv_pct", "call_put", "expiration_date", "dte"]
+OTM_VOLATILITY_CURVE_GRID = (
+    -8.0,
+    -7.0,
+    -6.0,
+    -5.0,
+    -4.0,
+    -3.0,
+    -2.0,
+    -1.0,
+    1.0,
+    2.0,
+    3.0,
+    4.0,
+    5.0,
+    6.0,
+    7.0,
+    8.0,
+)
+OTM_VOLATILITY_CURVE_MIN_SIDE_POINTS = 3
+OTM_VOLATILITY_CURVE_COLUMNS = [
+    "moneyness_pct",
+    "iv_pct",
+    "call_put",
+    "expiration_date",
+    "dte",
+    "point_count",
+    "expiration_count",
+    "quality",
+]
 OI_DEFENSE_COLUMNS = [
     "trade_date",
     "date",
@@ -1547,11 +1586,136 @@ def build_otm_volatility_curve(
     moneyness_range: float = 10.0,
     min_abs_moneyness: float = 0.5,
 ) -> pd.DataFrame:
+    return build_binned_otm_volatility_curve(
+        chain,
+        target_dte=target_dte,
+        dte_min=dte_min,
+        dte_max=dte_max,
+        moneyness_range=moneyness_range,
+        min_abs_moneyness=min_abs_moneyness,
+    )
+
+
+def _curve_side_point_counts(curve: pd.DataFrame) -> dict[str, int]:
+    if curve is None or curve.empty or "call_put" not in curve.columns:
+        return {"P": 0, "C": 0}
+    counts = curve["call_put"].fillna("").astype(str).str.upper().value_counts()
+    return {"P": int(counts.get("P", 0)), "C": int(counts.get("C", 0))}
+
+
+def _curve_quality_from_side_counts(curve: pd.DataFrame) -> pd.Series:
+    if curve is None or curve.empty or "call_put" not in curve.columns:
+        return pd.Series(dtype=object)
+    side_counts = curve.groupby("call_put")["moneyness_pct"].transform("count")
+    return pd.Series(
+        ["sparse" if count < OTM_VOLATILITY_CURVE_MIN_SIDE_POINTS else "ok" for count in side_counts],
+        index=curve.index,
+    )
+
+
+def _raw_otm_curve_from_candidates(
+    df: pd.DataFrame,
+    *,
+    target_dte: int,
+    max_points_per_side: int = 9,
+) -> pd.DataFrame:
+    if df is None or df.empty:
+        return _empty_df(OTM_VOLATILITY_CURVE_COLUMNS)
+    raw = df.copy()
+    raw["base_weight"] = pd.to_numeric(raw.get("open_interest"), errors="coerce").fillna(0)
+    raw.loc[raw["base_weight"] <= 0, "base_weight"] = 1.0
+    raw["dte_weight"] = 1.0 / (1.0 + (pd.to_numeric(raw["dte"], errors="coerce") - int(target_dte)).abs())
+    raw["curve_weight"] = raw["base_weight"] * raw["dte_weight"].fillna(0)
+    raw.loc[raw["curve_weight"] <= 0, "curve_weight"] = raw["base_weight"]
+    raw["sample_count"] = pd.to_numeric(raw.get("sample_count"), errors="coerce").fillna(1)
+
+    rows: list[dict[str, Any]] = []
+    for (moneyness, call_put), group in raw.groupby(["moneyness_pct", "call_put"], dropna=False):
+        iv_pct = _weighted_average(group["iv_pct"], group.get("curve_weight"))
+        if iv_pct is None:
+            continue
+        expirations_text = ",".join(sorted(str(value) for value in group["expiration_date"].dropna().astype(str).unique() if value))
+        rows.append(
+            {
+                "moneyness_pct": float(moneyness),
+                "iv_pct": iv_pct,
+                "call_put": str(call_put or ""),
+                "expiration_date": expirations_text,
+                "dte": float(_weighted_average(group["dte"], group.get("curve_weight")) or pd.to_numeric(group["dte"], errors="coerce").median()),
+                "point_count": int(pd.to_numeric(group.get("sample_count"), errors="coerce").fillna(1).sum()),
+                "expiration_count": int(group["expiration_date"].dropna().astype(str).nunique()),
+                "quality": "ok",
+            }
+        )
+    if not rows:
+        return _empty_df(OTM_VOLATILITY_CURVE_COLUMNS)
+
+    out = pd.DataFrame(rows, columns=OTM_VOLATILITY_CURVE_COLUMNS).sort_values("moneyness_pct").reset_index(drop=True)
+    parts: list[pd.DataFrame] = []
+    for side in ("P", "C"):
+        side_df = out[out["call_put"] == side].sort_values("moneyness_pct").reset_index(drop=True)
+        if side_df.empty:
+            continue
+        max_points = max(OTM_VOLATILITY_CURVE_MIN_SIDE_POINTS, int(max_points_per_side or 9))
+        if len(side_df) > max_points:
+            positions = sorted({round(idx * (len(side_df) - 1) / (max_points - 1)) for idx in range(max_points)})
+            side_df = side_df.iloc[positions].copy()
+        parts.append(side_df)
+    if not parts:
+        return _empty_df(OTM_VOLATILITY_CURVE_COLUMNS)
+
+    out = pd.concat(parts, ignore_index=True).sort_values("moneyness_pct").reset_index(drop=True)
+    out["quality"] = _curve_quality_from_side_counts(out)
+    out.loc[out["quality"] == "ok", "quality"] = "raw"
+    return out[OTM_VOLATILITY_CURVE_COLUMNS]
+
+
+def _curve_score(curve: pd.DataFrame) -> int:
+    if curve is None or curve.empty:
+        return 0
+    counts = _curve_side_point_counts(curve)
+    usable_sides = sum(1 for count in counts.values() if count >= OTM_VOLATILITY_CURVE_MIN_SIDE_POINTS)
+    return int(len(curve)) + usable_sides * 20
+
+
+def _select_front_otm_curve_expiration(df: pd.DataFrame) -> str | None:
+    if df is None or df.empty:
+        return None
+    stats = (
+        df.copy()
+        .assign(dte_numeric=pd.to_numeric(df.get("dte"), errors="coerce"))
+        .dropna(subset=["expiration_date", "dte_numeric"])
+    )
+    if stats.empty:
+        return None
+    by_expiration = (
+        stats.groupby("expiration_date", dropna=False)
+        .agg(dte=("dte_numeric", "median"), total_count=("dte_numeric", "size"))
+        .reset_index()
+        .sort_values(["dte", "expiration_date"], ascending=[True, True])
+    )
+    if by_expiration.empty:
+        return None
+    return str(by_expiration.iloc[0]["expiration_date"] or "")
+
+
+def build_binned_otm_volatility_curve(
+    chain: pd.DataFrame,
+    *,
+    target_dte: int = 30,
+    dte_min: int = 20,
+    dte_max: int = 45,
+    moneyness_range: float = 10.0,
+    min_abs_moneyness: float = 0.5,
+    grid: tuple[float, ...] | list[float] | None = None,
+    primary_radius: float = 0.85,
+    fallback_radius: float = 1.25,
+) -> pd.DataFrame:
     if chain is None or chain.empty:
         return _empty_df(OTM_VOLATILITY_CURVE_COLUMNS)
 
     df = chain.copy()
-    for col in ("iv_pct", "open_interest", "moneyness_pct", "dte"):
+    for col in ("iv_pct", "open_interest", "moneyness_pct", "dte", "sample_count"):
         if col not in df.columns:
             df[col] = None
         df[col] = pd.to_numeric(df[col], errors="coerce")
@@ -1560,46 +1724,99 @@ def build_otm_volatility_curve(
             df[col] = ""
 
     span = max(float(moneyness_range or 10.0), 0.1)
+    min_abs = max(float(min_abs_moneyness or 0.0), 0.0)
     df["call_put"] = df["call_put"].astype(str).str.upper()
     df = df.dropna(subset=["iv_pct", "moneyness_pct", "dte"])
     df = df[df["moneyness_pct"].between(-span, span)]
     df = df[df["dte"].between(int(dte_min), int(dte_max))]
+    df = df[
+        ((df["call_put"] == "P") & (df["moneyness_pct"] < 0))
+        | ((df["call_put"] == "C") & (df["moneyness_pct"] > 0))
+    ]
+    if min_abs > 0:
+        df = df[df["moneyness_pct"].abs() >= min_abs]
     if df.empty:
         return _empty_df(OTM_VOLATILITY_CURVE_COLUMNS)
 
-    expiry = (
-        df.assign(dte_distance=(df["dte"] - int(target_dte)).abs())
-        .sort_values(["dte_distance", "dte", "expiration_date"])["expiration_date"]
-        .iloc[0]
-    )
-    curve = df[df["expiration_date"].astype(str) == str(expiry)].copy()
-    curve = curve[
-        ((curve["call_put"] == "P") & (curve["moneyness_pct"] < 0))
-        | ((curve["call_put"] == "C") & (curve["moneyness_pct"] > 0))
-    ]
-    min_abs = max(float(min_abs_moneyness or 0.0), 0.0)
-    if min_abs > 0:
-        curve = curve[curve["moneyness_pct"].abs() >= min_abs]
-    if curve.empty:
+    df["expiration_date"] = df["expiration_date"].fillna("").astype(str)
+    expiration = _select_front_otm_curve_expiration(df)
+    if expiration:
+        df = df[df["expiration_date"] == expiration].copy()
+    if df.empty:
         return _empty_df(OTM_VOLATILITY_CURVE_COLUMNS)
 
+    grid_values = [float(value) for value in (grid or OTM_VOLATILITY_CURVE_GRID)]
+    grid_values = sorted(value for value in grid_values if abs(value) <= span and abs(value) >= min_abs and value != 0)
+    if not grid_values:
+        return _empty_df(OTM_VOLATILITY_CURVE_COLUMNS)
+
+    max_radius = max(float(primary_radius or 0.0), float(fallback_radius or 0.0), 0.1)
+    assignments: list[pd.DataFrame] = []
+    for side, sign in (("P", -1), ("C", 1)):
+        side_df = df[df["call_put"] == side].copy()
+        side_grid = [value for value in grid_values if value * sign > 0]
+        if side_df.empty or not side_grid:
+            continue
+        grid_frame = pd.DataFrame({"grid_moneyness_pct": side_grid})
+        joined = side_df.merge(grid_frame, how="cross")
+        joined["grid_distance"] = (joined["moneyness_pct"] - joined["grid_moneyness_pct"]).abs()
+        joined = joined[joined["grid_distance"] <= max_radius]
+        if joined.empty:
+            continue
+        joined["grid_abs"] = joined["grid_moneyness_pct"].abs()
+        joined = joined.sort_values(
+            [
+                "option_ticker" if "option_ticker" in joined.columns else "expiration_date",
+                "grid_distance",
+                "grid_abs",
+            ],
+            ascending=[True, True, False],
+        )
+        row_keys = ["expiration_date", "call_put", "moneyness_pct", "iv_pct", "dte"]
+        if "strike" in joined.columns:
+            row_keys.append("strike")
+        joined = joined.drop_duplicates(subset=row_keys, keep="first")
+        assignments.append(joined)
+    if not assignments:
+        return _empty_df(OTM_VOLATILITY_CURVE_COLUMNS)
+
+    curve = pd.concat(assignments, ignore_index=True)
+    curve["base_weight"] = pd.to_numeric(curve.get("open_interest"), errors="coerce").fillna(0)
+    curve.loc[curve["base_weight"] <= 0, "base_weight"] = 1.0
+    curve["dte_weight"] = 1.0 / (1.0 + (pd.to_numeric(curve["dte"], errors="coerce") - int(target_dte)).abs())
+    curve["curve_weight"] = curve["base_weight"] * curve["dte_weight"].fillna(0)
+    curve.loc[curve["curve_weight"] <= 0, "curve_weight"] = curve["base_weight"]
+    curve["sample_count"] = pd.to_numeric(curve.get("sample_count"), errors="coerce").fillna(1)
+
     rows: list[dict[str, Any]] = []
-    for (moneyness, call_put), group in curve.groupby(["moneyness_pct", "call_put"], dropna=False):
-        iv_pct = _weighted_average(group["iv_pct"], group.get("open_interest"))
+    for (moneyness, call_put), group in curve.groupby(["grid_moneyness_pct", "call_put"], dropna=False):
+        iv_pct = _weighted_average(group["iv_pct"], group.get("curve_weight"))
         if iv_pct is None:
             continue
+        expirations_text = ",".join(sorted(str(value) for value in group["expiration_date"].dropna().astype(str).unique() if value))
+        point_count = int(pd.to_numeric(group.get("sample_count"), errors="coerce").fillna(1).sum())
         rows.append(
             {
                 "moneyness_pct": float(moneyness),
                 "iv_pct": iv_pct,
                 "call_put": str(call_put or ""),
-                "expiration_date": str(expiry),
-                "dte": float(pd.to_numeric(group["dte"], errors="coerce").median()),
+                "expiration_date": expirations_text,
+                "dte": float(_weighted_average(group["dte"], group.get("curve_weight")) or pd.to_numeric(group["dte"], errors="coerce").median()),
+                "point_count": point_count,
+                "expiration_count": int(group["expiration_date"].dropna().astype(str).nunique()),
+                "quality": "ok",
             }
         )
     if not rows:
         return _empty_df(OTM_VOLATILITY_CURVE_COLUMNS)
-    return pd.DataFrame(rows, columns=OTM_VOLATILITY_CURVE_COLUMNS).sort_values("moneyness_pct").reset_index(drop=True)
+    out = pd.DataFrame(rows)
+    out["quality"] = _curve_quality_from_side_counts(out)
+    out.loc[out["quality"] == "ok", "quality"] = "grid"
+    out = out[OTM_VOLATILITY_CURVE_COLUMNS].sort_values("moneyness_pct").reset_index(drop=True)
+    raw_out = _raw_otm_curve_from_candidates(df, target_dte=target_dte)
+    if not raw_out.empty and (_curve_score(raw_out) > _curve_score(out) or (out["quality"] == "sparse").any()):
+        return raw_out
+    return out
 
 
 def load_volatility_cone_line_snapshot(
@@ -1720,10 +1937,11 @@ def load_otm_volatility_curve_snapshot(
     use_test_tables: bool = True,
     underlying_price: float | None = None,
     target_dte: int = 30,
-    dte_min: int = 20,
-    dte_max: int = 45,
+    dte_min: int = 7,
+    dte_max: int = 60,
     moneyness_range: float = 10.0,
     min_abs_moneyness: float = 0.5,
+    prefer_monthly_expiration: bool = True,
     engine=None,
 ) -> pd.DataFrame:
     engine = engine or dashboard_engine()
@@ -1761,7 +1979,12 @@ def load_otm_volatility_curve_snapshot(
         if "open_interest" in iv_columns
         else "1"
     )
-    where_cycle = "" if include_short_cycle else "AND c.expiration_type = 'monthly'"
+    has_expiration_type = "expiration_type" in contract_columns
+    expiration_type_expr = "c.expiration_type" if has_expiration_type else "NULL"
+    if has_expiration_type and (prefer_monthly_expiration or not include_short_cycle):
+        where_cycle = "AND c.expiration_type = 'monthly'"
+    else:
+        where_cycle = ""
     dte_min_value = max(int(dte_min), 1)
     dte_max_value = max(int(dte_max), dte_min_value)
     span = max(float(moneyness_range or 10.0), 0.1)
@@ -1770,8 +1993,10 @@ def load_otm_volatility_curve_snapshot(
         SELECT c.call_put,
                c.strike,
                c.expiration_date,
+               {expiration_type_expr} AS expiration_type,
                {price_expr} AS underlying_price,
                SUM(({iv_value_expr}) * ({weight_expr})) / NULLIF(SUM({weight_expr}), 0) * 100.0 AS iv_pct,
+               SUM({weight_expr}) AS open_interest,
                COUNT(*) AS sample_count
         FROM {iv_table} h{_mysql_force_index(engine, "idx_underlying_date")}
         JOIN {contracts_table} c ON h.option_ticker = c.option_ticker
@@ -1803,7 +2028,7 @@ def load_otm_volatility_curve_snapshot(
         return _empty_df(OTM_VOLATILITY_CURVE_COLUMNS)
 
     raw["call_put"] = raw.get("call_put", "").astype(str).str.upper()
-    for col in ("strike", "underlying_price", "iv_pct"):
+    for col in ("strike", "underlying_price", "iv_pct", "open_interest", "sample_count"):
         raw[col] = pd.to_numeric(raw.get(col), errors="coerce")
     raw["dte"] = raw["expiration_date"].apply(lambda value: dte_for_trade_date(value, trade_date_text))
     raw["moneyness_pct"] = ((raw["strike"] - raw["underlying_price"]) / raw["underlying_price"] * 100).where(
@@ -1814,24 +2039,14 @@ def load_otm_volatility_curve_snapshot(
     if raw.empty:
         return _empty_df(OTM_VOLATILITY_CURVE_COLUMNS)
 
-    expiry = (
-        raw.assign(dte_distance=(raw["dte"] - int(target_dte)).abs())
-        .sort_values(["dte_distance", "dte", "expiration_date"])["expiration_date"]
-        .iloc[0]
+    return build_binned_otm_volatility_curve(
+        raw,
+        target_dte=target_dte,
+        dte_min=dte_min_value,
+        dte_max=dte_max_value,
+        moneyness_range=span,
+        min_abs_moneyness=min_abs_moneyness,
     )
-    curve = raw[raw["expiration_date"].astype(str) == str(expiry)].copy()
-    curve = curve[
-        ((curve["call_put"] == "P") & (curve["moneyness_pct"] < 0))
-        | ((curve["call_put"] == "C") & (curve["moneyness_pct"] > 0))
-    ]
-    min_abs = max(float(min_abs_moneyness or 0.0), 0.0)
-    if min_abs > 0:
-        curve = curve[curve["moneyness_pct"].abs() >= min_abs]
-    if curve.empty:
-        return _empty_df(OTM_VOLATILITY_CURVE_COLUMNS)
-
-    out = curve[["moneyness_pct", "iv_pct", "call_put", "expiration_date", "dte"]].copy()
-    return out.sort_values("moneyness_pct").reset_index(drop=True)
 
 
 def _normalize_cone_source_frame(raw: pd.DataFrame) -> pd.DataFrame:
@@ -1959,6 +2174,16 @@ def _load_cached_volatility_cone_history(
     return _percentile_cone_from_daily_rows(history)
 
 
+def _cone_history_sample_days(cone: pd.DataFrame) -> int:
+    if cone is None or cone.empty or "sample_count" not in cone.columns:
+        return 0
+    counts = pd.to_numeric(cone["sample_count"], errors="coerce").dropna()
+    counts = counts[counts > 0]
+    if counts.empty:
+        return 0
+    return int(counts.min())
+
+
 def load_volatility_cone_history(
     underlying: str,
     end_date: str | dt.date | dt.datetime,
@@ -1981,6 +2206,7 @@ def load_volatility_cone_history(
         return _empty_df(VOLATILITY_CONE_COLUMNS)
 
     date_limit = min(max(int(window or 252), 2), 500)
+    cached = _empty_df(VOLATILITY_CONE_COLUMNS)
     if prefer_cache:
         cached = _load_cached_volatility_cone_history(
             underlying,
@@ -1989,21 +2215,22 @@ def load_volatility_cone_history(
             dte_targets=targets,
             engine=engine,
         )
-        if not cached.empty:
+        min_cache_days = min(VOLATILITY_CONE_MIN_CACHE_DAYS, date_limit)
+        if not cached.empty and _cone_history_sample_days(cached) >= min_cache_days:
             return cached
 
     names = option_table_names(use_test_tables)
     iv_table = safe_table_name(names["iv"])
     contracts_table = safe_table_name(names["contracts"])
     if not table_exists(engine, iv_table) or not table_exists(engine, contracts_table):
-        return _empty_df(VOLATILITY_CONE_COLUMNS)
+        return cached if not cached.empty else _empty_df(VOLATILITY_CONE_COLUMNS)
 
     iv_columns = table_columns(engine, iv_table)
     contract_columns = table_columns(engine, contracts_table)
     required_iv = {"trade_date", "option_ticker", "underlying", "provider_iv", "computed_iv", "underlying_price"}
     required_contracts = {"option_ticker", "strike", "expiration_date"}
     if not required_iv.issubset(iv_columns) or not required_contracts.issubset(contract_columns):
-        return _empty_df(VOLATILITY_CONE_COLUMNS)
+        return cached if not cached.empty else _empty_df(VOLATILITY_CONE_COLUMNS)
 
     dates_sql = text(
         f"""
@@ -2019,20 +2246,20 @@ def load_volatility_cone_history(
     try:
         dates_df = pd.read_sql(dates_sql, engine, params={"underlying": underlying, "end_date": end_text})
     except Exception:
-        return _empty_df(VOLATILITY_CONE_COLUMNS)
+        return cached if not cached.empty else _empty_df(VOLATILITY_CONE_COLUMNS)
     if dates_df.empty:
-        return _empty_df(VOLATILITY_CONE_COLUMNS)
+        return cached if not cached.empty else _empty_df(VOLATILITY_CONE_COLUMNS)
 
     date_values = [normalize_trade_date(value) for value in dates_df["trade_date"].tolist()]
     date_values = [value for value in date_values if value]
     if not date_values:
-        return _empty_df(VOLATILITY_CONE_COLUMNS)
+        return cached if not cached.empty else _empty_df(VOLATILITY_CONE_COLUMNS)
 
     start_date = min(date_values)
     end_dt = pd.to_datetime(end_text, format="%Y%m%d", errors="coerce")
     start_dt = pd.to_datetime(start_date, format="%Y%m%d", errors="coerce")
     if pd.isna(end_dt) or pd.isna(start_dt):
-        return _empty_df(VOLATILITY_CONE_COLUMNS)
+        return cached if not cached.empty else _empty_df(VOLATILITY_CONE_COLUMNS)
     expiration_start = start_dt.strftime("%Y-%m-%d")
     expiration_end = (end_dt + pd.Timedelta(days=max(targets) + 45)).strftime("%Y-%m-%d")
     placeholders, params = _named_in_clause("date", date_values)
@@ -2076,9 +2303,9 @@ def load_volatility_cone_history(
     try:
         raw = pd.read_sql(sql, engine, params=params)
     except Exception:
-        return _empty_df(VOLATILITY_CONE_COLUMNS)
+        return cached if not cached.empty else _empty_df(VOLATILITY_CONE_COLUMNS)
     if raw.empty:
-        return _empty_df(VOLATILITY_CONE_COLUMNS)
+        return cached if not cached.empty else _empty_df(VOLATILITY_CONE_COLUMNS)
 
     source = raw.copy()
     source["trade_date"] = source["trade_date"].apply(normalize_trade_date)
@@ -2087,7 +2314,7 @@ def load_volatility_cone_history(
     source["dte"] = source.apply(lambda row: dte_for_trade_date(row.get("expiration_date"), row.get("trade_date")), axis=1)
     source = source.dropna(subset=["trade_date", "iv_pct", "dte"])
     if source.empty:
-        return _empty_df(VOLATILITY_CONE_COLUMNS)
+        return cached if not cached.empty else _empty_df(VOLATILITY_CONE_COLUMNS)
 
     line_rows: list[pd.DataFrame] = []
     for trade_date, day in source.groupby("trade_date", dropna=False):
@@ -2110,9 +2337,10 @@ def load_volatility_cone_history(
                 )
             )
     if not line_rows:
-        return _empty_df(VOLATILITY_CONE_COLUMNS)
+        return cached if not cached.empty else _empty_df(VOLATILITY_CONE_COLUMNS)
 
-    return _percentile_cone_from_daily_rows(pd.concat(line_rows, ignore_index=True))
+    dynamic = _percentile_cone_from_daily_rows(pd.concat(line_rows, ignore_index=True))
+    return dynamic if not dynamic.empty else cached
 
 
 def summarize_option_chain(chain: pd.DataFrame) -> dict[str, Any]:
