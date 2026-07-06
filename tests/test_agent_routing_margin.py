@@ -154,6 +154,87 @@ def test_volatility_direction_monitor_only_can_bypass_finalizer():
     )
 
 
+def test_monitor_react_limit_uses_default_and_env(monkeypatch):
+    calls = []
+
+    class FakeAgent:
+        def invoke(self, _payload, config=None):
+            calls.append(config or {})
+            return {"messages": [agent_core.HumanMessage(content="资金流 fake")]}
+
+    def fake_create_agent(*_args, **_kwargs):
+        return FakeAgent()
+
+    monkeypatch.setattr(agent_core, "create_react_agent", fake_create_agent)
+    agent_core.monitor_node({"user_query": "螺纹钢资金流向", "symbol": "螺纹钢", "symbol_name": "螺纹钢"}, object())
+    assert calls[-1]["recursion_limit"] == 10
+
+    monkeypatch.setenv("AGENT_RECURSION_MONITOR", "6")
+    agent_core.monitor_node({"user_query": "白银资金流向", "symbol": "白银", "symbol_name": "白银"}, object())
+    assert calls[-1]["recursion_limit"] == 6
+
+
+def test_monitor_direct_data_paths_skip_react(monkeypatch):
+    class FakeTool:
+        def __init__(self, response):
+            self.response = response
+            self.calls = []
+
+        def invoke(self, payload):
+            self.calls.append(payload)
+            return self.response
+
+    def fail_create_agent(*_args, **_kwargs):
+        raise AssertionError("pure data monitor fast path should not create ReAct agent")
+
+    margin = FakeTool("保证金结果")
+    basis = FakeTool("基差结果")
+    inventory = FakeTool("库存仓单结果")
+    delivery = FakeTool("交割期转现结果")
+    iv = FakeTool("IV Rank结果")
+    us_profile = FakeTool("【美股期权体检】SPY IV Rank结果")
+
+    monkeypatch.setattr(agent_core, "create_react_agent", fail_create_agent)
+    monkeypatch.setattr(agent_core, "get_futures_margin_profile", margin)
+    monkeypatch.setattr(agent_core, "get_futures_basis_profile", basis)
+    monkeypatch.setattr(agent_core, "get_futures_inventory_receipt_profile", inventory)
+    monkeypatch.setattr(agent_core, "get_futures_delivery_tospot_profile", delivery)
+    monkeypatch.setattr(agent_core, "get_commodity_iv_info", iv)
+    monkeypatch.setattr(agent_core, "get_us_option_market_profile", us_profile)
+
+    cases = [
+        ("螺纹钢一手保证金是多少", margin, "保证金结果"),
+        ("螺纹钢基差多少", basis, "基差结果"),
+        ("螺纹钢库存仓单多少", inventory, "库存仓单结果"),
+        ("螺纹钢交割期转现数据", delivery, "交割期转现结果"),
+        ("300ETF期权IV Rank高吗", iv, "IV Rank结果"),
+        ("SPY期权IV Rank多少", us_profile, "SPY IV Rank结果"),
+    ]
+    for query, tool, expected in cases:
+        out = agent_core.monitor_node({"user_query": query, "symbol": "", "symbol_name": ""}, object())
+        content = out["messages"][0].content
+        assert "【数据监控】" in content or "【美股期权体检】" in content
+        assert expected in content
+        assert tool.calls
+
+
+def test_monitor_direct_data_path_keeps_strategy_questions_on_react(monkeypatch):
+    calls = []
+
+    class FakeAgent:
+        def invoke(self, _payload, config=None):
+            calls.append(config or {})
+            return {"messages": [agent_core.HumanMessage(content="策略相关问题仍走 ReAct")]}
+
+    monkeypatch.setattr(agent_core, "create_react_agent", lambda *_args, **_kwargs: FakeAgent())
+    out = agent_core.monitor_node(
+        {"user_query": "300ETF期权波动率高吗，适合卖方吗", "symbol": "300ETF", "symbol_name": "300ETF"},
+        object(),
+    )
+    assert calls
+    assert "策略相关问题仍走 ReAct" in out["messages"][0].content
+
+
 def test_fundamental_and_technical_query_forces_analyst_and_researcher():
     out = agent_core._enforce_research_analyst_routing(
         "中天科技的基本面和技术面分析下",

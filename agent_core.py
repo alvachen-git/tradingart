@@ -87,6 +87,7 @@ from portfolio_tools import (
 from chat_routing import (
     is_market_data_query,
     is_pure_option_data_query,
+    is_us_option_market_profile_query,
     is_volatility_divergence_query,
     is_volatility_market_view_query,
 )
@@ -376,6 +377,15 @@ EXPLICIT_STOCK_PORTFOLIO_COUPLING_KEYWORDS = [
 def _contains_any(text: str, keywords: list) -> bool:
     text_value = str(text or "")
     return any(k in text_value for k in keywords)
+
+
+def _get_agent_recursion_limit(agent_name: str, default: int) -> int:
+    env_name = f"AGENT_RECURSION_{str(agent_name or '').strip().upper()}"
+    try:
+        value = int(float(str(os.getenv(env_name, "")).strip()))
+    except Exception:
+        value = int(default)
+    return max(2, value)
 
 
 def _dedupe_plan(plan: List[str]) -> List[str]:
@@ -3550,8 +3560,7 @@ def generalist_node(state: AgentState, llm):
         # 给予足够的递归步数，但不要太高避免 GeneratorExit
         result = general_agent.invoke(
             {"messages": state["messages"]},
-            {"recursion_limit": 100}
-            # 降低到 15，足够完成大部分任务
+            {"recursion_limit": _get_agent_recursion_limit("generalist", 40)}
         )
 
         last_response = result["messages"][-1].content
@@ -3717,7 +3726,7 @@ def analyst_node(state: AgentState, llm):
         # 执行推理 (给予足够的递归次数，因为处理价差可能需要调2次工具)
         result = analyst_agent.invoke(
             {"messages": state["messages"]},
-            {"recursion_limit": 30}
+            {"recursion_limit": _get_agent_recursion_limit("analyst", 18)}
         )
 
         last_response = _sanitize_unauthorized_technical_indicators(
@@ -3790,6 +3799,67 @@ def analyst_node(state: AgentState, llm):
 
 
 # 🟡 2. 资金监控员 (容错跳过)
+_MONITOR_DIRECT_DATA_BLOCKERS = tuple(
+    dict.fromkeys(
+        STRATEGY_QUERY_KEYWORDS
+        + OPTION_ACTION_QUERY_KEYWORDS
+        + [
+            "怎么看", "分析", "影响", "为什么", "如果", "假如", "假设", "推演",
+            "适合", "能买吗", "能不能", "如何处理", "利好", "利空",
+        ]
+    )
+)
+
+
+def _has_monitor_direct_data_blocker(query: str) -> bool:
+    text = str(query or "").strip().lower()
+    return bool(text and any(keyword.lower() in text for keyword in _MONITOR_DIRECT_DATA_BLOCKERS))
+
+
+def _invoke_monitor_direct_tool(tool_obj: Any, payload: Dict[str, Any]) -> str:
+    try:
+        if hasattr(tool_obj, "invoke"):
+            return str(tool_obj.invoke(payload) or "").strip()
+        return str(tool_obj(**payload) or "").strip()
+    except Exception as exc:
+        tool_name = str(getattr(tool_obj, "name", "") or getattr(tool_obj, "__name__", "tool"))
+        return f"结论：数据不足\n- 原因：{tool_name} 调用失败：{exc}"
+
+
+def _try_monitor_direct_data_query(query: str, *, symbol: str = "") -> str | None:
+    text = str(query or "").strip()
+    lowered = text.lower()
+    if not text or _has_monitor_direct_data_blocker(text):
+        return None
+
+    has_margin_intent = _contains_any(text, MARGIN_QUERY_KEYWORDS)
+    has_option_context = "期权" in text or "option" in lowered
+    if has_margin_intent and not has_option_context:
+        return _invoke_monitor_direct_tool(get_futures_margin_profile, {"query": text})
+
+    if any(keyword in text for keyword in ("基差", "现期结构", "现货升贴水")):
+        return _invoke_monitor_direct_tool(get_futures_basis_profile, {"query": text})
+
+    if any(keyword in text for keyword in ("库存", "仓单")):
+        return _invoke_monitor_direct_tool(get_futures_inventory_receipt_profile, {"query": text})
+
+    if any(keyword in text for keyword in ("期转现", "交割")):
+        return _invoke_monitor_direct_tool(get_futures_delivery_tospot_profile, {"query": text})
+
+    has_iv_data_intent = any(keyword in lowered for keyword in ("iv", "iv rank", "ivrank")) or any(
+        keyword in text for keyword in ("波动率", "隐含波动率")
+    )
+    if has_iv_data_intent and not is_volatility_market_view_query(text):
+        if is_us_option_market_profile_query(text):
+            underlying = extract_us_option_underlying_symbol(text, symbol_hint=str(symbol or ""))
+            if underlying:
+                return _invoke_monitor_direct_tool(get_us_option_market_profile, {"underlying": underlying})
+        if is_pure_option_data_query(text) or is_market_data_query(text):
+            return _invoke_monitor_direct_tool(get_commodity_iv_info, {"query": text})
+
+    return None
+
+
 def monitor_node(state: AgentState, llm):
     user_q = state["user_query"]
     symbol = state.get("symbol", "")
@@ -3821,6 +3891,13 @@ def monitor_node(state: AgentState, llm):
         return {
             "messages": [HumanMessage(content=f"【数据监控】\n{last_response}")],
             "fund_data": last_response,
+        }
+
+    direct_data_response = _try_monitor_direct_data_query(user_q, symbol=str(symbol or symbol_name or ""))
+    if direct_data_response:
+        return {
+            "messages": [HumanMessage(content=_tag_monitor_worker_response(direct_data_response))],
+            "fund_data": direct_data_response,
         }
 
     # 1. 装备所有数据类工具
@@ -3947,7 +4024,7 @@ def monitor_node(state: AgentState, llm):
         # 限制迭代次数，防止死循环
         result = monitor_agent.invoke(
             {"messages": [HumanMessage(content=user_q)]},
-            {"recursion_limit": 15}  # 降低到 15
+            {"recursion_limit": _get_agent_recursion_limit("monitor", 10)}
         )
         last_response = result["messages"][-1].content
         partial_response = last_response
@@ -4296,7 +4373,7 @@ def strategist_node(state: AgentState, llm):
     try:
         result = strategist_agent.invoke(
             {"messages": [HumanMessage(content=user_q)]},
-            {"recursion_limit": 40}  # 期权分析可能需要多轮工具调用
+            {"recursion_limit": _get_agent_recursion_limit("strategist", 28)}
         )
 
         last_response = result["messages"][-1].content
@@ -4571,7 +4648,7 @@ def _researcher_node_impl(state: AgentState,llm=None):
         # 舆情查询可能需要多步（先查热榜，再搜细节），给足步数
         result = researcher_agent.invoke(
             {"messages": [HumanMessage(content=query)]},
-            {"recursion_limit": 20}
+            {"recursion_limit": _get_agent_recursion_limit("researcher", 14)}
         )
 
         last_response = result["messages"][-1].content
@@ -4937,7 +5014,7 @@ def knowledge_chatter_node(state: AgentState, llm=None):
     try:
         result = chatter_agent.invoke(
             {"messages": [HumanMessage(content=user_query)]},
-            {"recursion_limit": 15}  # 知识问答通常不需要太多轮
+            {"recursion_limit": _get_agent_recursion_limit("chatter", 10)}
         )
 
         last_response = result["messages"][-1].content
@@ -5446,7 +5523,7 @@ def screener_node(state: AgentState, llm):
         try:
             result = screener_react_agent.invoke(
                 {"messages": [HumanMessage(content=query)]},
-                {"recursion_limit": 40}
+                {"recursion_limit": _get_agent_recursion_limit("screener_react", 20)}
             )
 
             last_response = result["messages"][-1].content
@@ -5928,7 +6005,7 @@ def finalizer_node(state: AgentState, llm):
         str(getattr(msg, "content", "") or "").strip().startswith("【情报与舆情】")
         for msg in worker_msgs
     )
-    if is_pure_researcher_source:
+    if is_pure_researcher_source and not _is_news_impact_query(user_query):
         sanitized_context_text = _clean_finalizer_internal_labels(
             _sanitize_unauthorized_technical_indicators(context_text, query=user_query)
         )
