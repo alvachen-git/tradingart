@@ -1102,7 +1102,7 @@ def backfill_daily_from_flatfile(
     contract_cache: dict[str, OptionContract] = {}
     daily_rows: list[OptionDaily] = []
     iv_rows: list[OptionIV] = []
-    prices = {u: get_underlying_close(engine, u, trade_date) for u in targets}
+    prices = {u: get_underlying_close(engine, u, trade_date, fallback_yfinance=False) for u in targets}
     for raw in _iter_flatfile_rows_s3(trade_date, access_key, secret_key):
         ticker = str(raw.get("ticker") or "").strip().upper()
         underlying = _option_ticker_underlying_root(ticker, targets)

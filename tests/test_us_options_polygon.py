@@ -425,6 +425,28 @@ class TestUSOptionsPolygon(unittest.TestCase):
                     flatfile_only=True,
                 )
 
+    def test_flatfile_backfill_does_not_fallback_to_yfinance_for_prices(self):
+        engine = object()
+        with patch.dict(
+            "os.environ",
+            {"MASSIVE_FLATFILES_ACCESS_KEY": "key", "MASSIVE_FLATFILES_SECRET_KEY": "secret"},
+        ), patch("us_options_polygon.get_underlying_close", return_value=None) as get_close, \
+             patch("us_options_polygon._iter_flatfile_rows_s3", return_value=iter(())):
+            result = uop.backfill_daily_from_flatfile(
+                engine,
+                "20260706",
+                underlyings=["SOFI"],
+                dry_run=True,
+            )
+
+        self.assertEqual(result["source"], "flatfile")
+        get_close.assert_called_once_with(
+            engine,
+            "SOFI",
+            "20260706",
+            fallback_yfinance=False,
+        )
+
     def test_iv_rank_uses_only_monthly_rows(self):
         if uop.pd is None:
             self.skipTest("pandas is not available in this test environment")
