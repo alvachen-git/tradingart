@@ -116,7 +116,7 @@ for key in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"]:
         del os.environ[key]
 
 # ==================== 公告配置区 ====================
-ENABLE_HOME_ANNOUNCEMENT = False  # 临时关闭首页公告
+ENABLE_HOME_ANNOUNCEMENT = True  # 首页情报站晚报引导
 # Fast router is disabled by default to avoid false positives on
 # historical/list queries (for example: "最近两周每天价格").
 FAST_ROUTER_ENABLED = os.getenv("AIBOTA_FAST_ROUTER_ENABLED", "0").strip().lower() in {"1", "true", "yes", "on"}
@@ -124,6 +124,24 @@ HOME_PROMO_BANNER = {
     "enabled": True,
     "text": "【期权VIP群】一起把握盈利机会",
     "target_page": "https://mp.weixin.qq.com/s/9ZXH2oczlfsayHWY2kK7Ng",
+}
+INTEL_DEFAULT_CHANNEL_CODE = "daily_report"
+INTEL_REPORT_CHANNEL_PRIORITY = (
+    "daily_report",
+    "fund_flow_report",
+    "broker_position_report",
+    "expiry_option_radar",
+    "macro_risk_radar",
+    "safe_stock_report",
+)
+INTEL_PREVIEW_FALLBACK = {
+    "channel_code": INTEL_DEFAULT_CHANNEL_CODE,
+    "channel_name": "复盘晚报",
+    "channel_icon": "📡",
+    "title": "最新晚报正在整理中",
+    "summary": "情报站会在盘后整理当日主线、资金异动与明日观察点。你可以先进入情报站查看历史晚报和付费频道。",
+    "publish_time": None,
+    "is_fallback": True,
 }
 
 
@@ -673,33 +691,32 @@ def _render_pending_chat_task_fragment(task_info_snapshot: Dict[str, Any]) -> No
         return
 
 ANNOUNCEMENT_CONTENT = {
-    "title": "📡 情报站内容升级",
+    "title": "📡 今日晚报别错过",
     "sections": [
         {
-            "title": "🧠 你能在情报站看到什么",
+            "title": "盘后 10 分钟抓住重点",
             "items": [
-                "复盘晚报：盘后提炼当日主线、关键异动与次日观察点。",
+                "复盘晚报：提炼当日主线、关键异动与次日观察点。",
                 "资金流晚报：跟踪主力流向与板块强弱，辅助判断市场节奏。",
-                "交易信号：结合盘中数据，给出k线突破信号参考。",
-                "持仓密报 / 末日期权晚报：面向实盘决策场景，提供重点风险与机会提示。",
+                "持仓密报 / 末日期权晚报：面向实盘决策场景，提示重点风险与机会。",
             ]
         },
         {
-            "title": "🎯 如何高效使用",
+            "title": "适合这样用",
             "items": [
-                "盘前看资金流晚报，确定重点方向。",
-                "盘后看复盘晚报，更新交易计划。",
-                "持仓密报揭示机构和散户的期货秘密",
+                "盘后先看晚报，快速更新明天的观察清单。",
+                "不想翻太多行情时，先看摘要判断当天主线。",
+                "订阅后可以查看完整内容和历史记录。",
             ],
         },
         {
-            "title": "👉 立即查看",
+            "title": "立即查看",
             "items": [
-                "在左侧导航进入「情报站」，按频道订阅并查看历史内容。",
+                "点击下方按钮进入「情报站」，查看最新晚报与付费频道。",
             ]
         }
     ],
-    "update_date": "2026-03-29"
+    "update_date": "2026-07-07"
 }
 
 
@@ -713,6 +730,206 @@ ANNOUNCEMENT_RERUN_HOLDOFF_SECONDS = 6.0
 def get_shanghai_today_str():
     """Return today's date string in Asia/Shanghai."""
     return datetime.now(ASIA_SHANGHAI_TZ).strftime("%Y-%m-%d")
+
+
+def _is_intel_popup_day(now: Optional[datetime] = None) -> bool:
+    """Only show the paid intel reminder on Monday and Friday in Shanghai time."""
+    current = now or datetime.now(ASIA_SHANGHAI_TZ)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=ASIA_SHANGHAI_TZ)
+    else:
+        current = current.astimezone(ASIA_SHANGHAI_TZ)
+    return current.weekday() in {0, 4}
+
+
+def _normalize_intel_preview_text(value: Any, fallback: str = "") -> str:
+    text_value = re.sub(r"\s+", " ", str(value or fallback or "")).strip()
+    if len(text_value) > 132:
+        return text_value[:132].rstrip() + "..."
+    return text_value
+
+
+def _clip_intel_brief_text(value: str, limit: int = 44) -> str:
+    text_value = re.sub(r"\s+", " ", str(value or "")).strip(" ，,。.;；")
+    if len(text_value) > limit:
+        return text_value[:limit].rstrip(" ，,。.;；") + "..."
+    return text_value
+
+
+def _build_intel_briefing_rows(summary: str) -> Dict[str, str]:
+    clean = re.sub(r"\s+", " ", str(summary or "")).strip()
+    fallback_rows = {
+        "main": "盘后主线、关键异动与板块节奏已整理",
+        "funds": "跟踪主力资金方向，辅助判断市场风格",
+        "watch": "提炼次日观察点，订阅后查看完整内容",
+    }
+    if not clean:
+        return fallback_rows
+
+    clauses = [
+        part.strip()
+        for part in re.split(r"[。；;！!?？]", clean)
+        if part and part.strip()
+    ]
+    if len(clauses) < 3:
+        clauses = [
+            part.strip()
+            for part in re.split(r"[，,]", clean)
+            if part and part.strip()
+        ]
+
+    def pick_by_keywords(keywords: tuple[str, ...], default_index: int, used: set[int]) -> str:
+        for idx, clause in enumerate(clauses):
+            if idx in used:
+                continue
+            if any(keyword in clause for keyword in keywords):
+                used.add(idx)
+                return _clip_intel_brief_text(clause)
+        if len(clauses) > default_index and default_index not in used:
+            used.add(default_index)
+            return _clip_intel_brief_text(clauses[default_index])
+        for idx, clause in enumerate(clauses):
+            if idx not in used:
+                used.add(idx)
+                return _clip_intel_brief_text(clause)
+        return ""
+
+    used_indexes: set[int] = set()
+    main_text = pick_by_keywords(("主线", "产业", "市场", "板块", "宏观"), 0, used_indexes)
+    funds_text = pick_by_keywords(("资金", "流入", "流出", "风格", "撤离"), 1, used_indexes)
+    watch_text = pick_by_keywords(("观察", "明日", "短期", "风险", "预警", "防御"), 2, used_indexes)
+
+    return {
+        "main": main_text or fallback_rows["main"],
+        "funds": funds_text or fallback_rows["funds"],
+        "watch": watch_text or fallback_rows["watch"],
+    }
+
+
+def _home_intel_icon_svg(kind: str) -> str:
+    icons = {
+        "main": """
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M4 17l5-5 4 4 7-8" />
+              <path d="M15 8h5v5" />
+            </svg>
+        """,
+        "funds": """
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <ellipse cx="12" cy="5" rx="7" ry="3" />
+              <path d="M5 5v5c0 1.7 3.1 3 7 3s7-1.3 7-3V5" />
+              <path d="M5 10v5c0 1.7 3.1 3 7 3s7-1.3 7-3v-5" />
+            </svg>
+        """,
+        "watch": """
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M4 19l7-14" />
+              <path d="M11 5l7 14" />
+              <path d="M8 13h8" />
+              <path d="M6 19h12" />
+            </svg>
+        """,
+    }
+    return re.sub(r"\s+", " ", icons.get(kind, icons["main"])).strip()
+
+
+def _format_intel_preview_time(value: Any) -> str:
+    if isinstance(value, datetime):
+        dt = value
+        if dt.tzinfo is not None:
+            dt = dt.astimezone(ASIA_SHANGHAI_TZ)
+        return dt.strftime("%m月%d日 %H:%M")
+    return "最近更新"
+
+
+def _get_latest_intel_preview() -> Dict[str, Any]:
+    """Fetch the freshest usable paid-intel preview without blocking the homepage."""
+    for channel_code in INTEL_REPORT_CHANNEL_PRIORITY:
+        try:
+            contents = sub_svc.get_channel_contents(channel_code=channel_code, days=10, limit=1) or []
+        except Exception as e:
+            print(f"首页晚报预览读取失败 channel={channel_code}: {e}")
+            continue
+        if not contents:
+            continue
+
+        preview = dict(contents[0])
+        preview["channel_code"] = str(preview.get("channel_code") or channel_code or INTEL_DEFAULT_CHANNEL_CODE).strip()
+        preview["channel_name"] = str(preview.get("channel_name") or "情报站晚报").strip()
+        preview["channel_icon"] = str(preview.get("channel_icon") or "📡").strip()
+        preview["title"] = _normalize_intel_preview_text(preview.get("title"), "最新晚报")
+        preview["summary"] = _normalize_intel_preview_text(
+            preview.get("summary"),
+            "盘后主线、资金异动与明日观察点已经整理完成，订阅后可查看完整内容。",
+        )
+        preview["is_fallback"] = False
+        return preview
+
+    return dict(INTEL_PREVIEW_FALLBACK)
+
+
+def _get_paid_intel_channel_ids() -> set:
+    try:
+        channels = sub_svc.get_all_channels() or []
+    except Exception as e:
+        print(f"首页晚报订阅频道读取失败: {e}")
+        return set()
+
+    paid_ids = set()
+    for channel in channels:
+        if not channel.get("is_premium"):
+            continue
+        try:
+            paid_ids.add(int(channel.get("id")))
+        except Exception:
+            continue
+    return paid_ids
+
+
+def _user_has_paid_intel_subscription(user: str, paid_channel_ids: Optional[set] = None) -> bool:
+    current_user = str(user or "").strip()
+    if not current_user or current_user == "访客":
+        return False
+
+    paid_ids = paid_channel_ids if paid_channel_ids is not None else _get_paid_intel_channel_ids()
+    if not paid_ids:
+        return False
+
+    try:
+        subscriptions = sub_svc.get_user_subscriptions(current_user) or []
+    except Exception as e:
+        print(f"首页晚报订阅状态读取失败 user={current_user}: {e}")
+        return True
+
+    for subscription in subscriptions:
+        try:
+            channel_id = int(subscription.get("channel_id"))
+        except Exception:
+            continue
+        if channel_id in paid_ids and bool(subscription.get("is_active")):
+            return True
+    return False
+
+
+def _should_show_intel_announcement() -> bool:
+    if not _is_intel_popup_day():
+        return False
+
+    current_user = str(st.session_state.get("user_id") or "").strip()
+    if not current_user or current_user == "访客":
+        return False
+
+    paid_channel_ids = _get_paid_intel_channel_ids()
+    if not paid_channel_ids:
+        return False
+
+    return not _user_has_paid_intel_subscription(current_user, paid_channel_ids)
+
+
+def _open_intel_channel(channel_code: str = INTEL_DEFAULT_CHANNEL_CODE):
+    target_channel = str(channel_code or INTEL_DEFAULT_CHANNEL_CODE).strip() or INTEL_DEFAULT_CHANNEL_CODE
+    st.session_state.selected_channel = target_channel
+    st.switch_page("pages/11_情报站.py")
 
 
 def build_simple_runtime_context_payload(current_user: str) -> Dict[str, str]:
@@ -809,10 +1026,15 @@ def show_announcement():
 
     st.caption(f"📅 更新时间：{ANNOUNCEMENT_CONTENT['update_date']}")
 
-    col1, col2, col3 = st.columns([1, 1, 1])
+    preview = _get_latest_intel_preview()
+    target_channel = str(preview.get("channel_code") or INTEL_DEFAULT_CHANNEL_CODE).strip()
+    col1, col2 = st.columns([1.2, 1])
+    with col1:
+        if st.button("查看今日晚报", type="primary", use_container_width=True):
+            mark_announcement_shown_today()
+            _open_intel_channel(target_channel)
     with col2:
-        if st.button("我知道了", type="primary", use_container_width=True):
-            # Button is only for confirm/close interaction.
+        if st.button("我知道了", type="secondary", use_container_width=True):
             mark_announcement_shown_today()
             st.rerun()
 
@@ -820,6 +1042,9 @@ def show_announcement():
 def check_and_show_announcement():
     """检查是否需要显示公告：同浏览器/设备每天最多展示一次。"""
     today = get_shanghai_today_str()
+
+    if not _should_show_intel_announcement():
+        return
 
     # session 兜底：即使 cookie 读取/写入偶发失败，也避免当天重复打扰
     acknowledged_date = st.session_state.get("announcement_acknowledged_date")
@@ -3532,6 +3757,51 @@ def process_user_input(
         st.session_state.pending_task = None
 
 
+def _render_home_intel_promo():
+    preview = _get_latest_intel_preview()
+    target_channel = str(preview.get("channel_code") or INTEL_DEFAULT_CHANNEL_CODE).strip() or INTEL_DEFAULT_CHANNEL_CODE
+    title = html.escape(_normalize_intel_preview_text(preview.get("title"), "最新晚报"))
+    summary = _normalize_intel_preview_text(
+        preview.get("summary"),
+        "盘后主线、资金异动与明日观察点已经整理完成，订阅后可查看完整内容。",
+    )
+    briefing_rows = _build_intel_briefing_rows(summary)
+    row_config = [
+        ("main", "主线", briefing_rows["main"]),
+        ("funds", "资金", briefing_rows["funds"]),
+        ("watch", "明日观察", briefing_rows["watch"]),
+    ]
+    rows_html = "\n".join(
+        f"""
+        <div class="home-intel-row">
+            <div class="home-intel-chip">
+                <span class="home-intel-icon">{_home_intel_icon_svg(kind)}</span>
+                <span>{html.escape(label)}</span>
+            </div>
+            <div class="home-intel-row-text">{html.escape(text)}</div>
+        </div>
+        """
+        for kind, label, text in row_config
+    )
+
+    st.markdown('<div class="home-intel-panel-scope" style="display:none;"></div>', unsafe_allow_html=True)
+    panel_left, panel_right = st.columns([5.6, 1.1])
+    with panel_left:
+        st.markdown(
+            f"""
+            <div class="home-intel-panel-copy">
+                <div class="home-intel-title">{title}</div>
+                <div class="home-intel-rows">{rows_html}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    with panel_right:
+        st.markdown('<div class="home-intel-action-scope" style="display:none;"></div>', unsafe_allow_html=True)
+        if st.button("查看完整  ›", key="home_intel_card_btn", use_container_width=True):
+            _open_intel_channel(target_channel)
+
+
 # ==========================================
 #  6. 页面渲染：Welcome Screen (空状态) [修改点：新增]
 # ==========================================
@@ -3561,50 +3831,6 @@ def show_welcome_screen():
         @keyframes breathe {
             from { filter: drop-shadow(0 0 10px rgba(59, 130, 246, 0.4)); }
             to { filter: drop-shadow(0 0 25px rgba(139, 92, 246, 0.7)); }
-        }
-
-        /* B. 副标题容器 (Flex布局居中) */
-        .hero-subtitle {
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            margin-bottom: 40px;
-        }
-
-       /* 🔥 [核心修改] 打字机无限循环特效 */
-        .typewriter-text {
-            color: #94a3b8;
-            font-family: 'Courier New', monospace;
-            font-size: clamp(1rem, 2vw, 1.2rem);
-            letter-spacing: 2px;
-            
-            overflow: hidden;
-            white-space: nowrap;
-            border-right: 3px solid #3b82f6; /* 光标 */
-            
-            width: 0;
-            
-            /* 修改点说明：
-               1. typing 5s: 延长到5秒，动作更优雅。
-               2. infinite: 无限循环。
-               3. alternate: 往返播放 (打字 -> 删字 -> 打字 -> 删字...) 
-               这样看起来像是 AI 在不断输入、修正。
-            */
-            animation: 
-                typing 5s steps(22, end) infinite alternate, 
-                blink-caret 0.75s step-end infinite;
-        }
-
-        /* 宽度展开动画 */
-        @keyframes typing {
-            from { width: 0; }
-            to { width: 23ch; } 
-        }
-
-        /* 光标闪烁动画 */
-        @keyframes blink-caret {
-            from, to { border-color: transparent; }
-            50% { border-color: #3b82f6; }
         }
 
         /* C. 按钮变身：酷炫卡片 (居中版) */
@@ -3732,6 +3958,160 @@ def show_welcome_screen():
             text-overflow: ellipsis;
         }
 
+        .home-intel-panel-scope,
+        .home-intel-action-scope {
+            width: 1px;
+            height: 1px;
+        }
+
+        div[data-testid="stVerticalBlock"] > div:has(.home-intel-panel-scope) + div {
+            max-width: 58rem;
+            margin: 10px auto 18px;
+            padding: 18px 22px 18px 24px;
+            border-radius: 14px !important;
+            background: rgba(15, 23, 42, 0.52) !important;
+            border: 1px solid rgba(148, 163, 184, 0.2) !important;
+            box-shadow: 0 16px 36px rgba(15, 23, 42, 0.2) !important;
+            position: relative !important;
+            align-items: center !important;
+        }
+
+        .home-intel-panel-copy {
+            padding: 0;
+        }
+
+        .home-intel-title {
+            color: #f8fafc !important;
+            font-size: 19px !important;
+            line-height: 1.25;
+            font-weight: 800 !important;
+            margin-bottom: 13px;
+        }
+
+        .home-intel-rows {
+            display: grid;
+            gap: 9px;
+        }
+
+        .home-intel-row {
+            display: grid;
+            grid-template-columns: 124px minmax(0, 1fr);
+            gap: 16px;
+            align-items: center;
+            min-height: 32px;
+        }
+
+        .home-intel-chip {
+            display: inline-flex;
+            align-items: center;
+            gap: 9px;
+            height: 30px;
+            padding: 0 13px;
+            border-radius: 8px;
+            border: 1px solid rgba(96, 165, 250, 0.2);
+            background: rgba(30, 41, 59, 0.42);
+            color: #dbeafe;
+            font-size: 13px;
+            font-weight: 750;
+            white-space: nowrap;
+        }
+
+        .home-intel-icon {
+            display: inline-flex;
+            width: 18px;
+            height: 18px;
+            color: #3b82f6;
+        }
+
+        .home-intel-icon svg {
+            width: 18px;
+            height: 18px;
+            fill: none;
+            stroke: currentColor;
+            stroke-width: 2.3;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+        }
+
+        .home-intel-row-text {
+            color: #cbd5e1;
+            font-size: 14px;
+            line-height: 1.45;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        div[data-testid="stColumn"]:has(.home-intel-action-scope) {
+            display: flex !important;
+            align-items: center !important;
+        }
+
+        div[data-testid="stColumn"]:has(.home-intel-action-scope) div.stButton > button {
+            min-height: 0 !important;
+            padding: 9px 0 !important;
+            border: 0 !important;
+            background: transparent !important;
+            box-shadow: none !important;
+            color: #93a4bd !important;
+            font-size: 13px !important;
+            font-weight: 700 !important;
+            justify-content: flex-end !important;
+            text-align: right !important;
+        }
+
+        div[data-testid="stColumn"]:has(.home-intel-action-scope) div.stButton > button::after {
+            content: none !important;
+            display: none !important;
+        }
+
+        div[data-testid="stColumn"]:has(.home-intel-action-scope) div.stButton > button p {
+            margin: 0 !important;
+            color: inherit !important;
+            font-size: 13px !important;
+            font-weight: 700 !important;
+        }
+
+        div[data-testid="stColumn"]:has(.home-intel-action-scope) div.stButton > button:hover {
+            transform: translateX(2px) !important;
+            color: #bfdbfe !important;
+            background: transparent !important;
+            border: 0 !important;
+            box-shadow: none !important;
+        }
+
+        .home-quick-actions-scope {
+            width: 1px;
+            height: 1px;
+        }
+
+        div[data-testid="stVerticalBlock"] > div:has(.home-quick-actions-scope) {
+            display: none;
+        }
+
+        div[data-testid="stVerticalBlock"] > div:has(.home-quick-actions-scope) + div {
+            max-width: 58rem;
+            margin: 0 auto 14px;
+        }
+
+        div[data-testid="stVerticalBlock"] > div:has(.home-quick-actions-scope) + div div.stButton > button {
+            min-height: 0 !important;
+            padding: 17px 18px !important;
+            border-radius: 10px !important;
+            background: rgba(30, 41, 59, 0.5) !important;
+            border: 1px solid rgba(148, 163, 184, 0.18) !important;
+            box-shadow: 0 8px 18px rgba(15, 23, 42, 0.16) !important;
+            color: #dbeafe !important;
+            font-size: 15px !important;
+        }
+
+        div[data-testid="stVerticalBlock"] > div:has(.home-quick-actions-scope) + div div.stButton > button:hover {
+            transform: translateY(-2px) !important;
+            background: rgba(37, 99, 235, 0.14) !important;
+            border-color: rgba(96, 165, 250, 0.42) !important;
+            box-shadow: 0 12px 24px rgba(37, 99, 235, 0.16) !important;
+        }
+
         @media (max-width: 1100px) {
             div[data-testid="stVerticalBlock"]:has(.home-hero-copy) {
                 max-width: 52rem;
@@ -3762,6 +4142,26 @@ def show_welcome_screen():
                 text-align: center !important;
                 padding: 10px 14px !important;
             }
+
+            div[data-testid="stVerticalBlock"] > div:has(.home-intel-panel-scope) + div {
+                margin-top: 10px;
+                padding: 16px !important;
+            }
+
+            .home-intel-row {
+                grid-template-columns: 1fr;
+                gap: 6px;
+                align-items: start;
+            }
+
+            .home-intel-row-text {
+                white-space: normal;
+            }
+
+            div[data-testid="stColumn"]:has(.home-intel-action-scope) div.stButton > button {
+                justify-content: flex-start !important;
+                text-align: left !important;
+            }
         }
         </style>
     """, unsafe_allow_html=True)
@@ -3780,15 +4180,13 @@ def show_welcome_screen():
                 <div class="hero-title">
                     ⚡ 嗨，我是爱波塔
                 </div>
-                <div class="hero-subtitle">
-                    <div class="typewriter-text">
-                        陪你在金融市场奋斗
-                    </div>
-                </div>
             </div>
         """, unsafe_allow_html=True)
 
+    _render_home_intel_promo()
+
     # --- 快捷指令卡片 ---
+    st.markdown('<div class="home-quick-actions-scope"></div>', unsafe_allow_html=True)
     col1, col2, col3 = st.columns(3)
 
     # 定义点击回调
