@@ -3,7 +3,9 @@ from __future__ import annotations
 import datetime as dt
 import json
 import math
+import os
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
 import pandas as pd
@@ -74,6 +76,348 @@ UNDERLYING_DISPLAY_NAMES = {
     "TSM": "台积电",
     "UBER": "优步",
     "WMT": "沃尔玛",
+}
+
+ETF_EARNINGS_NOTE = "ETF无公司财报"
+STOCK_EARNINGS_NOTE = "待日历确认"
+
+UNDERLYING_PROFILE_CARDS = {
+    "SPY": {
+        "asset_type": "etf",
+        "business": "追踪标普500指数，是美股大盘核心 beta，覆盖美国大型龙头公司。",
+        "strength": "行业分散、流动性深，常用来观察美股整体风险偏好和机构仓位。",
+        "risk": "权重集中在大型科技与消费龙头，估值和利率变化会明显影响表现。",
+        "next_earnings_date": ETF_EARNINGS_NOTE,
+    },
+    "QQQ": {
+        "asset_type": "etf",
+        "business": "追踪纳斯达克100，偏科技、互联网、半导体和高成长龙头。",
+        "strength": "成长属性强，AI、云计算、软件和平台经济权重高。",
+        "risk": "对高估值、长久期资产和科技监管更敏感，波动通常高于大盘。",
+        "next_earnings_date": ETF_EARNINGS_NOTE,
+    },
+    "DIA": {
+        "asset_type": "etf",
+        "business": "追踪道琼斯工业平均指数，偏成熟蓝筹和传统经济龙头。",
+        "strength": "成分股盈利相对成熟，适合观察价值蓝筹和工业周期情绪。",
+        "risk": "价格加权指数代表性有限，对新经济成长股覆盖不如 SPY/QQQ。",
+        "next_earnings_date": ETF_EARNINGS_NOTE,
+    },
+    "IWM": {
+        "asset_type": "etf",
+        "business": "追踪罗素2000小盘股，代表美国本土小市值公司风险偏好。",
+        "strength": "对降息、信用环境改善和美国内需修复反应更灵敏。",
+        "risk": "成分股盈利质量分化大，对融资成本、经济放缓和信用压力敏感。",
+        "next_earnings_date": ETF_EARNINGS_NOTE,
+    },
+    "AAPL": {
+        "asset_type": "stock",
+        "business": "苹果以 iPhone、Mac、iPad、可穿戴设备和服务生态为核心。",
+        "strength": "品牌、硬件生态和服务订阅粘性强，现金流质量高。",
+        "risk": "硬件换机周期、供应链集中、监管和中国市场竞争会影响估值。",
+        "next_earnings_date": STOCK_EARNINGS_NOTE,
+    },
+    "AMD": {
+        "asset_type": "stock",
+        "business": "AMD 提供 CPU、GPU、数据中心加速卡和嵌入式芯片。",
+        "strength": "服务器 CPU 份额和 AI 加速卡带来增长弹性，产品线覆盖广。",
+        "risk": "AI GPU 生态弱于龙头，半导体周期和客户资本开支波动较大。",
+        "next_earnings_date": STOCK_EARNINGS_NOTE,
+    },
+    "AMZN": {
+        "asset_type": "stock",
+        "business": "亚马逊覆盖电商、AWS 云、广告、会员和物流基础设施。",
+        "strength": "云计算和广告利润率高，零售规模与物流网络形成壁垒。",
+        "risk": "零售利润率、云增长放缓、监管和大规模资本开支会压制预期。",
+        "next_earnings_date": STOCK_EARNINGS_NOTE,
+    },
+    "ARM": {
+        "asset_type": "stock",
+        "business": "Arm 授权芯片架构和 IP，覆盖手机、边缘设备、汽车和服务器。",
+        "strength": "授权模式轻资产，生态渗透广，AI 终端和服务器带来增量想象。",
+        "risk": "估值弹性大，客户自研、授权费率和终端需求周期会影响增长。",
+        "next_earnings_date": STOCK_EARNINGS_NOTE,
+    },
+    "ASML": {
+        "asset_type": "stock",
+        "business": "ASML 是先进光刻设备核心供应商，EUV 是先进制程关键环节。",
+        "strength": "技术壁垒极高，受益先进制程、AI 芯片和晶圆厂长期投资。",
+        "risk": "出口管制、晶圆厂资本开支周期和客户集中度会影响订单节奏。",
+        "next_earnings_date": STOCK_EARNINGS_NOTE,
+    },
+    "AVGO": {
+        "asset_type": "stock",
+        "business": "博通覆盖网络芯片、定制 ASIC、无线连接和基础设施软件。",
+        "strength": "AI 网络和定制芯片需求强，软件业务提高现金流稳定性。",
+        "risk": "大客户集中、半导体周期和并购整合节奏是主要观察点。",
+        "next_earnings_date": STOCK_EARNINGS_NOTE,
+    },
+    "BABA": {
+        "asset_type": "stock",
+        "business": "阿里巴巴覆盖中国电商、云计算、本地生活、物流和国际电商。",
+        "strength": "用户和商家生态庞大，云和国际业务仍有结构性机会。",
+        "risk": "国内电商竞争、消费复苏斜率、监管和中概股情绪影响较大。",
+        "next_earnings_date": STOCK_EARNINGS_NOTE,
+    },
+    "BAC": {
+        "asset_type": "stock",
+        "business": "美国银行提供零售银行、财富管理、投行和企业金融服务。",
+        "strength": "存款基础深，利率环境改善时净息差弹性明显。",
+        "risk": "信用周期、商业地产敞口、收益率曲线和监管资本要求需关注。",
+        "next_earnings_date": STOCK_EARNINGS_NOTE,
+    },
+    "COIN": {
+        "asset_type": "stock",
+        "business": "Coinbase 是加密资产交易、托管和机构服务平台。",
+        "strength": "合规品牌和美国市场入口优势强，交易活跃度提升时业绩弹性大。",
+        "risk": "高度受加密资产价格、交易量、监管政策和费用率竞争影响。",
+        "next_earnings_date": STOCK_EARNINGS_NOTE,
+    },
+    "CRWD": {
+        "asset_type": "stock",
+        "business": "CrowdStrike 提供云原生终端安全、威胁情报和安全运营平台。",
+        "strength": "Falcon 平台模块化强，订阅收入和客户扩展能力突出。",
+        "risk": "网络安全竞争激烈，重大服务事故或客户预算收缩会冲击估值。",
+        "next_earnings_date": STOCK_EARNINGS_NOTE,
+    },
+    "DELL": {
+        "asset_type": "stock",
+        "business": "戴尔提供 PC、服务器、存储和企业基础设施解决方案。",
+        "strength": "企业渠道强，AI 服务器需求带来收入弹性。",
+        "risk": "硬件利润率偏薄，PC 周期、服务器供应链和订单可持续性需跟踪。",
+        "next_earnings_date": STOCK_EARNINGS_NOTE,
+    },
+    "DIS": {
+        "asset_type": "stock",
+        "business": "迪士尼覆盖影视 IP、主题乐园、体育媒体和流媒体。",
+        "strength": "IP 资产和乐园体验稀缺，消费复苏时经营杠杆明显。",
+        "risk": "流媒体盈利、内容成本、体育版权和可选消费疲弱是主要压力。",
+        "next_earnings_date": STOCK_EARNINGS_NOTE,
+    },
+    "DRAM": {
+        "asset_type": "etf",
+        "business": "存储芯片主题标的，主要跟踪 DRAM、NAND、HBM 相关产业链情绪。",
+        "strength": "对 AI 服务器、HBM 供需和存储涨价周期敏感，弹性较高。",
+        "risk": "存储是强周期行业，价格下行、库存和资本开支扩张会放大波动。",
+        "next_earnings_date": ETF_EARNINGS_NOTE,
+    },
+    "GLD": {
+        "asset_type": "etf",
+        "business": "黄金 ETF，跟踪黄金现货价格，是贵金属避险和实际利率交易工具。",
+        "strength": "适合观察美元、实际利率、央行购金和避险需求变化。",
+        "risk": "不产生现金流，对实际利率上行、美元走强和风险偏好修复敏感。",
+        "next_earnings_date": ETF_EARNINGS_NOTE,
+    },
+    "GOOGL": {
+        "asset_type": "stock",
+        "business": "Alphabet 以搜索广告、YouTube、Google Cloud 和 AI 技术为核心。",
+        "strength": "搜索入口、广告数据和云业务规模优势明显，AI 基础能力强。",
+        "risk": "AI 搜索替代、反垄断监管、广告周期和云竞争需持续跟踪。",
+        "next_earnings_date": STOCK_EARNINGS_NOTE,
+    },
+    "HOOD": {
+        "asset_type": "stock",
+        "business": "Robinhood 提供零佣金券商、期权、加密和现金管理服务。",
+        "strength": "年轻用户渗透强，交易活跃和利息收入提升时弹性大。",
+        "risk": "交易量周期、支付订单流监管、加密波动和信用产品扩张风险较高。",
+        "next_earnings_date": STOCK_EARNINGS_NOTE,
+    },
+    "HYG": {
+        "asset_type": "etf",
+        "business": "高收益债 ETF，代表美国信用风险偏好和企业融资环境。",
+        "strength": "可观察信用利差、违约预期和风险资产流动性。",
+        "risk": "经济放缓、利差走阔和降级周期会压制表现。",
+        "next_earnings_date": ETF_EARNINGS_NOTE,
+    },
+    "INTC": {
+        "asset_type": "stock",
+        "business": "英特尔覆盖 PC/服务器 CPU、晶圆制造和代工业务。",
+        "strength": "客户基础和制造资源深厚，政策支持与制程追赶提供反转机会。",
+        "risk": "制程执行、代工亏损、AI 竞争和服务器份额压力仍是核心风险。",
+        "next_earnings_date": STOCK_EARNINGS_NOTE,
+    },
+    "JPM": {
+        "asset_type": "stock",
+        "business": "摩根大通覆盖零售银行、投行、交易、资管和企业金融。",
+        "strength": "资产质量和风控行业领先，规模与多元收入来源稳定。",
+        "risk": "信用成本、监管资本、利率路径和投行业务周期会影响利润。",
+        "next_earnings_date": STOCK_EARNINGS_NOTE,
+    },
+    "MARA": {
+        "asset_type": "stock",
+        "business": "Marathon Digital 是比特币矿企，收入与挖矿产量和币价相关。",
+        "strength": "比特币上涨时经营和资产负债表弹性大。",
+        "risk": "币价、算力难度、能源成本、减半周期和融资稀释风险很高。",
+        "next_earnings_date": STOCK_EARNINGS_NOTE,
+    },
+    "META": {
+        "asset_type": "stock",
+        "business": "Meta 覆盖 Facebook、Instagram、WhatsApp、广告和 AI/Reality Labs。",
+        "strength": "社交流量和广告投放能力强，AI 推荐提升变现效率。",
+        "risk": "监管、隐私政策、短视频竞争和元宇宙投入拖累利润。",
+        "next_earnings_date": STOCK_EARNINGS_NOTE,
+    },
+    "MRVL": {
+        "asset_type": "stock",
+        "business": "Marvell 提供数据中心、网络、存储、汽车和定制芯片方案。",
+        "strength": "AI 互连、光模块 DSP 和定制硅方向受益云资本开支。",
+        "risk": "订单兑现节奏、客户集中和传统业务周期会放大波动。",
+        "next_earnings_date": STOCK_EARNINGS_NOTE,
+    },
+    "MSFT": {
+        "asset_type": "stock",
+        "business": "微软覆盖企业软件、Azure 云、Office、Windows、游戏和 AI。",
+        "strength": "企业客户粘性强，云和 Copilot 带来长期增长空间。",
+        "risk": "AI 资本开支、云竞争、监管和高估值预期管理是关键变量。",
+        "next_earnings_date": STOCK_EARNINGS_NOTE,
+    },
+    "MSTR": {
+        "asset_type": "stock",
+        "business": "MicroStrategy 同时经营商业智能软件，并持有大量比特币。",
+        "strength": "提供带杠杆特征的比特币敞口，资本市场关注度高。",
+        "risk": "股价高度依赖比特币、融资结构、溢价收敛和波动率变化。",
+        "next_earnings_date": STOCK_EARNINGS_NOTE,
+    },
+    "MU": {
+        "asset_type": "stock",
+        "business": "美光生产 DRAM、NAND 和 HBM 存储芯片。",
+        "strength": "HBM 和 AI 服务器需求改善时盈利弹性大。",
+        "risk": "存储价格周期、库存、资本开支和供需错配会显著影响利润。",
+        "next_earnings_date": STOCK_EARNINGS_NOTE,
+    },
+    "NFLX": {
+        "asset_type": "stock",
+        "business": "Netflix 是全球流媒体平台，收入来自订阅和广告套餐。",
+        "strength": "全球内容分发规模大，用户付费和广告层级提供增长空间。",
+        "risk": "用户增长放缓、内容成本、汇率和竞争平台投入会影响估值。",
+        "next_earnings_date": STOCK_EARNINGS_NOTE,
+    },
+    "NKE": {
+        "asset_type": "stock",
+        "business": "耐克销售运动鞋服、装备，并经营 DTC 与批发渠道。",
+        "strength": "全球品牌力强，产品创新和渠道优化可改善利润。",
+        "risk": "库存、北美与中国需求、竞争品牌和营销投入效率需关注。",
+        "next_earnings_date": STOCK_EARNINGS_NOTE,
+    },
+    "NVDA": {
+        "asset_type": "stock",
+        "business": "英伟达提供 GPU、AI 加速平台、网络和软件生态。",
+        "strength": "CUDA 生态、数据中心 GPU 和 AI 基础设施需求形成强壁垒。",
+        "risk": "大客户集中、供给周期、出口限制和高增长预期回落会放大波动。",
+        "next_earnings_date": STOCK_EARNINGS_NOTE,
+    },
+    "ORCL": {
+        "asset_type": "stock",
+        "business": "甲骨文提供数据库、企业软件、云基础设施和 SaaS 应用。",
+        "strength": "数据库客户粘性强，OCI 和 AI 云订单提升增长预期。",
+        "risk": "云资本开支、迁移节奏、竞争和债务水平是主要观察点。",
+        "next_earnings_date": STOCK_EARNINGS_NOTE,
+    },
+    "PLTR": {
+        "asset_type": "stock",
+        "business": "Palantir 提供政府和商业数据平台、AI 应用平台与决策系统。",
+        "strength": "政府客户壁垒深，AIP 商业化带来收入加速想象。",
+        "risk": "合同节奏不均、估值高、商业客户扩张持续性需要验证。",
+        "next_earnings_date": STOCK_EARNINGS_NOTE,
+    },
+    "QCOM": {
+        "asset_type": "stock",
+        "business": "高通提供移动芯片、基带、专利授权、汽车和 IoT 芯片。",
+        "strength": "移动通信专利壁垒深，汽车和边缘 AI 扩张提供新增长点。",
+        "risk": "手机周期、客户自研、授权纠纷和苹果相关收入不确定性较高。",
+        "next_earnings_date": STOCK_EARNINGS_NOTE,
+    },
+    "RIVN": {
+        "asset_type": "stock",
+        "business": "Rivian 生产电动皮卡、SUV 和商用电动货车。",
+        "strength": "品牌定位清晰，商用车合作和新平台降本具备看点。",
+        "risk": "现金消耗、产能爬坡、毛利转正和 EV 竞争是主要风险。",
+        "next_earnings_date": STOCK_EARNINGS_NOTE,
+    },
+    "RKLB": {
+        "asset_type": "stock",
+        "business": "Rocket Lab 提供小型火箭发射、卫星部件和空间系统服务。",
+        "strength": "发射与空间系统一体化，商业航天需求增长带来弹性。",
+        "risk": "发射失败、项目延期、资本开支和商业航天订单波动较大。",
+        "next_earnings_date": STOCK_EARNINGS_NOTE,
+    },
+    "SLV": {
+        "asset_type": "etf",
+        "business": "白银 ETF，跟踪白银现货，兼具贵金属和工业金属属性。",
+        "strength": "受益避险、通胀、光伏与工业需求，弹性通常高于黄金。",
+        "risk": "白银波动大，对美元、实际利率和工业需求变化都很敏感。",
+        "next_earnings_date": ETF_EARNINGS_NOTE,
+    },
+    "SMCI": {
+        "asset_type": "stock",
+        "business": "超微电脑提供 AI 服务器、整机柜、存储和液冷解决方案。",
+        "strength": "产品迭代快，贴近 GPU 供应链，AI 服务器需求高时弹性强。",
+        "risk": "硬件利润率、客户集中、供应链和财务披露可信度是核心风险。",
+        "next_earnings_date": STOCK_EARNINGS_NOTE,
+    },
+    "SOFI": {
+        "asset_type": "stock",
+        "business": "SoFi 提供数字银行、贷款、经纪、支付和金融科技平台服务。",
+        "strength": "银行牌照、会员增长和交叉销售提升长期收入潜力。",
+        "risk": "信用周期、利率环境、获客成本和消费金融监管会影响估值。",
+        "next_earnings_date": STOCK_EARNINGS_NOTE,
+    },
+    "SPCX": {
+        "asset_type": "etf",
+        "business": "SPAC/新上市主题 ETF，偏高风险成长和事件驱动资产。",
+        "strength": "适合观察新股、SPAC、商业航天等高 beta 主题风险偏好。",
+        "risk": "不等同于 SpaceX 私募股权，成分和主题暴露需以基金文件为准。",
+        "next_earnings_date": ETF_EARNINGS_NOTE,
+    },
+    "TLT": {
+        "asset_type": "etf",
+        "business": "20年以上美国国债 ETF，是长久期利率交易和避险工具。",
+        "strength": "对降息预期、经济放缓和避险需求敏感，常用于观察利率方向。",
+        "risk": "久期很长，通胀反复或长端利率上行会带来较大回撤。",
+        "next_earnings_date": ETF_EARNINGS_NOTE,
+    },
+    "TSLA": {
+        "asset_type": "stock",
+        "business": "特斯拉覆盖电动车、储能、充电网络、自动驾驶和机器人方向。",
+        "strength": "品牌、制造规模、软件数据和能源业务形成多条成长线。",
+        "risk": "EV 价格战、毛利率、自动驾驶兑现、监管和 CEO 风险影响较大。",
+        "next_earnings_date": STOCK_EARNINGS_NOTE,
+    },
+    "TSM": {
+        "asset_type": "stock",
+        "business": "台积电是全球领先晶圆代工厂，服务 AI、手机和高性能计算客户。",
+        "strength": "先进制程和客户信任壁垒深，AI 芯片需求支撑产能利用率。",
+        "risk": "台湾地缘风险、客户集中、资本开支周期和汇率需关注。",
+        "next_earnings_date": STOCK_EARNINGS_NOTE,
+    },
+    "UBER": {
+        "asset_type": "stock",
+        "business": "Uber 经营网约车、外卖配送、货运和本地服务平台。",
+        "strength": "双边网络规模大，出行和配送协同提高变现效率。",
+        "risk": "司机监管、补贴竞争、消费放缓和保险成本会影响利润率。",
+        "next_earnings_date": STOCK_EARNINGS_NOTE,
+    },
+    "WMT": {
+        "asset_type": "stock",
+        "business": "沃尔玛经营美国和国际零售、山姆会员店、电商和广告业务。",
+        "strength": "供应链、低价心智和会员体系强，防御属性突出。",
+        "risk": "低利润率、工资成本、消费结构变化和电商投入会压缩利润。",
+        "next_earnings_date": STOCK_EARNINGS_NOTE,
+    },
+    "XLE": {
+        "asset_type": "etf",
+        "business": "能源板块 ETF，主要覆盖美国大型油气生产、炼化和能源服务公司。",
+        "strength": "与油气价格、现金分红和能源资本开支周期相关性高。",
+        "risk": "受油价、OPEC 政策、地缘事件和能源转型预期影响明显。",
+        "next_earnings_date": ETF_EARNINGS_NOTE,
+    },
+    "XLF": {
+        "asset_type": "etf",
+        "business": "金融板块 ETF，覆盖银行、保险、券商、支付和资管公司。",
+        "strength": "适合观察利率、信贷周期、资本市场活跃度和金融监管变化。",
+        "risk": "信用成本、收益率曲线倒挂、监管资本和系统性风险会压制表现。",
+        "next_earnings_date": ETF_EARNINGS_NOTE,
+    },
 }
 
 STOCK_DAILY_COLUMNS = ["date", "symbol", "open", "high", "low", "close", "volume", "adjClose"]
@@ -165,6 +509,19 @@ OI_DEFENSE_COLUMNS = [
     "put_call_oi",
 ]
 OI_DEFENSE_CACHE_TABLE = "us_option_oi_defense_daily"
+OPTION_ANOMALY_SCAN_CACHE_TABLE = "us_option_anomaly_scan_daily"
+UNDERLYING_PROFILE_CACHE_TABLE = "us_option_underlying_profile_daily"
+UNDERLYING_PROFILE_CACHE_COLUMNS = [
+    "as_of_date",
+    "underlying",
+    "earnings_date",
+    "earnings_time",
+    "earnings_source",
+    "recent_catalyst",
+    "recent_risk",
+    "dynamic_note",
+    "source_refs_json",
+]
 MARKET_METRICS_COLUMNS = [
     "trade_date",
     "underlying",
@@ -196,6 +553,44 @@ MARKET_METRICS_COLUMNS = [
     "source",
     "updated_at",
 ]
+OPTION_ANOMALY_SCAN_COLUMNS = [
+    "trade_date",
+    "underlying",
+    "option_ticker",
+    "signal_family",
+    "call_put",
+    "strike",
+    "expiration_date",
+    "dte",
+    "moneyness_pct",
+    "underlying_price",
+    "close",
+    "vwap",
+    "volume",
+    "open_interest",
+    "oi_prev",
+    "oi_change",
+    "oi_change_pct",
+    "volume_oi_ratio",
+    "premium_est",
+    "iv_pct",
+    "iv_change_1d",
+    "history_days",
+    "historical_avg_oi",
+    "historical_max_oi",
+    "historical_avg_oi_change",
+    "historical_max_oi_change",
+    "historical_positive_oi_change_days",
+    "oi_change_multiple",
+    "anomaly_score",
+    "tags_json",
+    "data_gap",
+]
+ANOMALY_SIGNAL_FAMILY_LABELS = {
+    "oi_build": "OI增仓埋伏",
+    "volume_oi": "成交/OI异动",
+    "premium": "大额权利金",
+}
 
 
 def oi_defense_y_axis_range(
@@ -333,6 +728,769 @@ def dashboard_engine():
 
 def normalize_underlying(underlying: str) -> str:
     return str(underlying or "").strip().upper()
+
+
+def get_underlying_profile(underlying: str) -> dict[str, str]:
+    code = normalize_underlying(underlying)
+    profile = dict(UNDERLYING_PROFILE_CARDS.get(code, {}))
+    asset_type = str(profile.get("asset_type") or "stock").strip().lower()
+    name = str(UNDERLYING_DISPLAY_NAMES.get(code) or code)
+    is_etf = asset_type == "etf"
+    default_business = (
+        f"{name} 的ETF特色资料暂未维护。"
+        if is_etf
+        else f"{name} 的主营业务资料暂未维护。"
+    )
+    profile.setdefault("asset_type", asset_type or "stock")
+    profile.setdefault("business", default_business)
+    profile.setdefault("strength", "可先结合价格趋势、IV位置和期权异动判断市场关注点。")
+    profile.setdefault("risk", "请以后续公告、基金文件或公司财报更新为准。")
+    profile.setdefault("next_earnings_date", ETF_EARNINGS_NOTE if is_etf else STOCK_EARNINGS_NOTE)
+    profile["symbol"] = code
+    profile["name"] = name
+    return {key: str(value or "") for key, value in profile.items()}
+
+
+def estimate_next_earnings_window(today: dt.date | None = None) -> str:
+    today = today or dt.date.today()
+    windows = (
+        (dt.date(today.year, 1, 15), dt.date(today.year, 2, 15)),
+        (dt.date(today.year, 4, 15), dt.date(today.year, 5, 15)),
+        (dt.date(today.year, 7, 15), dt.date(today.year, 8, 15)),
+        (dt.date(today.year, 10, 15), dt.date(today.year, 11, 15)),
+        (dt.date(today.year + 1, 1, 15), dt.date(today.year + 1, 2, 15)),
+    )
+    for start, end in windows:
+        if today <= end:
+            return f"估算 {start:%Y/%m/%d}-{end:%m/%d}"
+    start, end = windows[-1]
+    return f"估算 {start:%Y/%m/%d}-{end:%m/%d}"
+
+
+def _nasdaq_earnings_headers() -> dict[str, str]:
+    return {
+        "Accept": "application/json, text/plain, */*",
+        "Origin": "https://www.nasdaq.com",
+        "Referer": "https://www.nasdaq.com/",
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
+        ),
+    }
+
+
+def _nasdaq_earnings_rows_for_date(day: dt.date, timeout: float = 6.0) -> list[dict[str, Any]]:
+    try:
+        from curl_cffi import requests as curl_requests
+    except Exception:
+        return []
+
+    session = curl_requests.Session(impersonate="chrome")
+    session.trust_env = False
+    # Local Windows certificate stores are sometimes incomplete in this app runtime.
+    # The endpoint is a public read-only calendar feed; failing closed still returns no rows.
+    session.verify = False
+    url = f"https://api.nasdaq.com/api/calendar/earnings?date={day:%Y-%m-%d}"
+    try:
+        resp = session.get(url, headers=_nasdaq_earnings_headers(), timeout=timeout)
+        if int(getattr(resp, "status_code", 0) or 0) != 200:
+            return []
+        payload = resp.json()
+    except Exception:
+        return []
+    data = payload.get("data") if isinstance(payload, dict) else {}
+    rows = data.get("rows") if isinstance(data, dict) else []
+    return rows if isinstance(rows, list) else []
+
+
+def _nasdaq_time_label(value: Any) -> str:
+    raw = str(value or "").strip().lower()
+    if raw == "time-pre-market":
+        return "盘前"
+    if raw == "time-after-hours":
+        return "盘后"
+    if raw == "time-not-supplied":
+        return "时间未定"
+    return str(value or "").strip()
+
+
+def _nasdaq_earnings_payload(row: dict[str, Any], day: dt.date) -> dict[str, str]:
+    time_label = _nasdaq_time_label(row.get("time"))
+    fiscal_quarter = str(row.get("fiscalQuarterEnding") or "").strip()
+    eps_forecast = str(row.get("epsForecast") or "").strip()
+    parts = [part for part in (time_label, fiscal_quarter, f"EPS预期 {eps_forecast}" if eps_forecast else "") if part]
+    return {
+        "date": f"{day:%Y/%m/%d}",
+        "source": "Nasdaq",
+        "detail": " · ".join(parts),
+        "is_estimate": "0",
+    }
+
+
+def fetch_nasdaq_next_earnings_dates(
+    underlyings: list[str] | tuple[str, ...],
+    *,
+    today: dt.date | None = None,
+    lookahead_days: int = 90,
+    timeout: float = 6.0,
+    max_workers: int = 8,
+    batch_days: int = 12,
+) -> dict[str, dict[str, str]]:
+    targets = {
+        normalize_underlying(symbol)
+        for symbol in underlyings
+        if normalize_underlying(symbol)
+    }
+    targets = {
+        symbol
+        for symbol in targets
+        if get_underlying_profile(symbol).get("asset_type") != "etf"
+    }
+    if not targets:
+        return {}
+
+    today = today or dt.date.today()
+    max_days = max(1, int(lookahead_days or 1))
+    candidate_days = [
+        today + dt.timedelta(days=offset)
+        for offset in range(max_days + 1)
+        if (today + dt.timedelta(days=offset)).weekday() < 5
+    ]
+    results: dict[str, dict[str, str]] = {}
+    worker_count = max(1, min(int(max_workers or 1), 12))
+    batch_size = max(1, int(batch_days or 1))
+    for start in range(0, len(candidate_days), batch_size):
+        batch = candidate_days[start : start + batch_size]
+        with ThreadPoolExecutor(max_workers=min(worker_count, len(batch))) as executor:
+            futures = {
+                executor.submit(_nasdaq_earnings_rows_for_date, day, timeout): day
+                for day in batch
+            }
+            for future in as_completed(futures):
+                day = futures[future]
+                try:
+                    rows = future.result()
+                except Exception:
+                    rows = []
+                for row in rows:
+                    symbol = normalize_underlying(row.get("symbol"))
+                    if symbol in targets and symbol not in results:
+                        results[symbol] = _nasdaq_earnings_payload(row, day)
+                if targets <= set(results):
+                    break
+        if targets <= set(results):
+            break
+    return results
+
+
+def underlying_profile_cache_table(use_test_tables: bool = False) -> str:
+    suffix = "_test" if use_test_tables else ""
+    return f"{UNDERLYING_PROFILE_CACHE_TABLE}{suffix}"
+
+
+def ensure_underlying_profile_cache_table(engine, use_test_tables: bool = False) -> None:
+    if engine is None:
+        return
+    table_name = safe_table_name(underlying_profile_cache_table(use_test_tables))
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                f"""
+                CREATE TABLE IF NOT EXISTS {table_name} (
+                    as_of_date VARCHAR(8) NOT NULL,
+                    underlying VARCHAR(32) NOT NULL,
+                    earnings_date VARCHAR(32),
+                    earnings_time VARCHAR(64),
+                    earnings_source VARCHAR(64),
+                    recent_catalyst TEXT,
+                    recent_risk TEXT,
+                    dynamic_note TEXT,
+                    source_refs_json TEXT,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (as_of_date, underlying)
+                )
+                """
+            )
+        )
+    cache_key = (id(engine), table_name)
+    _TABLE_COLUMNS_CACHE.pop(cache_key, None)
+    existing_columns = table_columns(engine, table_name)
+    column_types = {
+        "as_of_date": "VARCHAR(8)",
+        "underlying": "VARCHAR(32)",
+        "earnings_date": "VARCHAR(32)",
+        "earnings_time": "VARCHAR(64)",
+        "earnings_source": "VARCHAR(64)",
+        "recent_catalyst": "TEXT",
+        "recent_risk": "TEXT",
+        "dynamic_note": "TEXT",
+        "source_refs_json": "TEXT",
+        "updated_at": "TIMESTAMP",
+    }
+    expected_columns = list(UNDERLYING_PROFILE_CACHE_COLUMNS) + ["updated_at"]
+    missing_columns = [col for col in expected_columns if col not in existing_columns]
+    if missing_columns:
+        with engine.begin() as conn:
+            for col in missing_columns:
+                conn.execute(
+                    text(
+                        f"ALTER TABLE {table_name} ADD COLUMN {safe_table_name(col)} "
+                        f"{column_types.get(col, 'TEXT')}"
+                    )
+                )
+        _TABLE_COLUMNS_CACHE.pop(cache_key, None)
+    _TABLE_EXISTS_CACHE[(id(engine), table_name)] = True
+    _TABLE_COLUMNS_CACHE[(id(engine), table_name)] = set(expected_columns)
+
+
+def _source_refs_json(refs: list[dict[str, Any]]) -> str:
+    clean_refs: list[dict[str, str]] = []
+    for ref in refs:
+        if not isinstance(ref, dict):
+            continue
+        clean: dict[str, str] = {}
+        for key in ("source", "title", "date", "url"):
+            value = str(ref.get(key) or "").strip()
+            if value:
+                clean[key] = value
+        if clean:
+            clean_refs.append(clean)
+    return json.dumps(clean_refs, ensure_ascii=False)
+
+
+def _parse_source_refs_json(value: Any) -> list[dict[str, str]]:
+    if isinstance(value, list):
+        raw_items = value
+    else:
+        try:
+            raw_items = json.loads(str(value or "[]"))
+        except Exception:
+            raw_items = []
+    out: list[dict[str, str]] = []
+    for item in raw_items if isinstance(raw_items, list) else []:
+        if not isinstance(item, dict):
+            continue
+        clean = {str(key): str(val) for key, val in item.items() if val is not None}
+        if clean:
+            out.append(clean)
+    return out
+
+
+def _first_sentence(text_value: str, max_len: int = 72) -> str:
+    text_value = re.sub(r"\s+", " ", str(text_value or "")).strip()
+    if not text_value:
+        return ""
+    match = re.search(r"[。.!?？]", text_value)
+    if match:
+        return text_value[: match.end()].strip()
+    return text_value[:max_len].strip()
+
+
+def _latest_profile_metric_snapshot(
+    underlying: str,
+    *,
+    engine=None,
+    use_test_tables: bool = False,
+) -> dict[str, Any]:
+    try:
+        df = load_market_metrics_history(
+            underlying,
+            window=2,
+            use_test_tables=use_test_tables,
+            engine=engine,
+        )
+    except Exception:
+        return {}
+    if df is None or df.empty:
+        return {}
+    row = df.sort_values("trade_date").iloc[-1].to_dict()
+    return {str(key): value for key, value in row.items()}
+
+
+def _format_metric_sentence(metrics: dict[str, Any]) -> str:
+    if not metrics:
+        return "本地期权指标暂无最新样本。"
+    parts: list[str] = []
+    atm_iv = _clean_number(metrics.get("atm_iv_pct"))
+    iv_change = _clean_number(metrics.get("iv_change_1d"))
+    put_call_oi = _clean_number(metrics.get("put_call_oi"))
+    zero_dte = _clean_number(metrics.get("zero_dte_volume_share_pct"))
+    if atm_iv is not None:
+        parts.append(f"ATM IV约{atm_iv:.1f}%")
+    if iv_change is not None:
+        if abs(iv_change) < 0.05:
+            parts.append("隐波日变动不大")
+        else:
+            direction = "抬升" if iv_change > 0 else "回落"
+            parts.append(f"隐波较前日{direction}{abs(iv_change):.1f}点")
+    if put_call_oi is not None:
+        if put_call_oi >= 1.2:
+            parts.append(f"Put/Call OI {put_call_oi:.2f}，保护需求偏高")
+        elif put_call_oi <= 0.8:
+            parts.append(f"Put/Call OI {put_call_oi:.2f}，上行动能关注度更高")
+        else:
+            parts.append(f"Put/Call OI {put_call_oi:.2f}，仓位相对均衡")
+    if zero_dte is not None and zero_dte > 0:
+        parts.append(f"0DTE成交占比约{zero_dte:.1f}%")
+    return "；".join(parts[:3]) + "。" if parts else "本地期权指标暂无最新样本。"
+
+
+def _fetch_recent_profile_news_refs(
+    underlying: str,
+    *,
+    lookback_days: int = 30,
+    timeout: float = 4.0,
+    max_items: int = 3,
+) -> list[dict[str, str]]:
+    if str(os.getenv("US_OPTIONS_PROFILE_NEWS_ENABLED", "1")).strip() != "1":
+        return []
+    code = normalize_underlying(underlying)
+    if not code:
+        return []
+    try:
+        from email.utils import parsedate_to_datetime
+        from urllib.parse import quote
+        from urllib.request import Request, urlopen
+        import xml.etree.ElementTree as ET
+    except Exception:
+        return []
+
+    url = f"https://feeds.finance.yahoo.com/rss/2.0/headline?s={quote(code)}&region=US&lang=en-US"
+    req = Request(url, headers={"User-Agent": _nasdaq_earnings_headers()["User-Agent"]})
+    try:
+        with urlopen(req, timeout=timeout) as resp:
+            raw = resp.read(400_000)
+        root = ET.fromstring(raw)
+    except Exception:
+        return []
+
+    since = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=max(int(lookback_days or 30), 1))
+    refs: list[dict[str, str]] = []
+    for item in root.findall(".//item"):
+        title = "".join(item.findtext("title") or "").strip()
+        link = "".join(item.findtext("link") or "").strip()
+        pub_raw = "".join(item.findtext("pubDate") or "").strip()
+        pub_dt: dt.datetime | None = None
+        if pub_raw:
+            try:
+                pub_dt = parsedate_to_datetime(pub_raw)
+                if pub_dt.tzinfo is None:
+                    pub_dt = pub_dt.replace(tzinfo=dt.timezone.utc)
+            except Exception:
+                pub_dt = None
+        if pub_dt is not None and pub_dt < since:
+            continue
+        if title:
+            refs.append(
+                {
+                    "source": "Yahoo Finance News",
+                    "title": title[:180],
+                    "date": pub_dt.strftime("%Y/%m/%d") if pub_dt else "",
+                    "url": link,
+                }
+            )
+        if len(refs) >= max(int(max_items or 3), 1):
+            break
+    return refs
+
+
+def _build_profile_llm_note(
+    *,
+    profile: dict[str, str],
+    earnings_date: str,
+    earnings_time: str,
+    metric_sentence: str,
+    news_refs: list[dict[str, str]],
+) -> str:
+    if str(os.getenv("US_OPTIONS_PROFILE_LLM_ENABLED", "1")).strip() != "1":
+        return ""
+    if not os.getenv("DASHSCOPE_API_KEY"):
+        return ""
+    try:
+        from llm_compat import build_report_tongyi_llm
+
+        news_titles = "；".join(str(item.get("title") or "") for item in news_refs[:3] if item.get("title"))
+        prompt = (
+            "请为美股期权标的资料卡写一句中文近期变化摘要，60字以内。"
+            "只基于输入资料，不给买卖建议。\n"
+            f"标的：{profile.get('symbol')} {profile.get('name')}，类型：{profile.get('asset_type')}\n"
+            f"财报：{earnings_date} {earnings_time}\n"
+            f"期权指标：{metric_sentence}\n"
+            f"新闻标题：{news_titles or '无'}"
+        )
+        llm = build_report_tongyi_llm(
+            env_prefix="US_OPTIONS_PROFILE",
+            default_model=os.getenv("US_OPTIONS_PROFILE_LLM_MODEL") or "qwen-plus",
+            temperature=0.1,
+            request_timeout=20,
+            max_retries=0,
+        )
+        msg = llm.invoke(prompt)
+        content = getattr(msg, "content", msg)
+        text_value = re.sub(r"\s+", " ", str(content or "")).strip()
+        return text_value[:120]
+    except Exception:
+        return ""
+
+
+def _fallback_underlying_profile_dynamic(
+    profile: dict[str, str],
+    as_of_date: str | dt.date | dt.datetime | None = None,
+) -> dict[str, str]:
+    is_etf = str(profile.get("asset_type") or "").lower() == "etf"
+    code = str(profile.get("symbol") or "")
+    name = str(profile.get("name") or code)
+    as_of_date_text = normalize_trade_date(as_of_date) if as_of_date else dt.date.today().strftime("%Y%m%d")
+    try:
+        today = dt.datetime.strptime(as_of_date_text, "%Y%m%d").date()
+    except Exception:
+        today = dt.date.today()
+        as_of_date_text = today.strftime("%Y%m%d")
+    business_hint = _first_sentence(str(profile.get("business") or ""))
+    risk_hint = _first_sentence(str(profile.get("risk") or ""))
+    if is_etf:
+        earnings_date = ETF_EARNINGS_NOTE
+        earnings_time = ""
+        earnings_source = "ETF"
+        recent_catalyst = (
+            f"近期关注{name}的成分板块轮动、利率环境和风险偏好变化；"
+            "可结合价格趋势、IV位置和资金风险偏好观察。"
+        )
+        recent_risk = (
+            f"{risk_hint or 'ETF短线风险主要来自指数权重行业和市场 beta 的同步波动'}"
+            " 没有单一公司财报催化。"
+        )
+        refs = [{"source": "固定资料", "title": "ETF无公司财报", "date": as_of_date_text}]
+    else:
+        earnings_date = estimate_next_earnings_window(today)
+        earnings_time = "待日历确认"
+        earnings_source = "估算"
+        recent_catalyst = (
+            f"近期关注{name}的财报窗口、业务主线和期权定价变化；"
+            f"{business_hint or '可结合价格趋势和IV位置观察市场关注点'}"
+        )
+        recent_risk = (
+            f"{risk_hint or '需关注业绩预期、估值和行业竞争变化'}"
+            " 财报前后留意隐含波动率抬升和事件后回落。"
+        )
+        refs = [{"source": "估算", "title": "季度财报窗口估算 + 固定资料", "date": earnings_date}]
+    return {
+        "as_of_date": as_of_date_text,
+        "underlying": code,
+        "earnings_date": earnings_date,
+        "earnings_time": earnings_time,
+        "earnings_source": earnings_source,
+        "recent_catalyst": recent_catalyst,
+        "recent_risk": recent_risk,
+        "dynamic_note": "日更缓存尚未生成，当前使用固定资料和规则兜底。",
+        "source_refs_json": _source_refs_json(refs),
+        "updated_at": "",
+    }
+
+
+def _build_underlying_profile_dynamic_row(
+    underlying: str,
+    *,
+    as_of_date: str,
+    lookback_days: int,
+    earnings_payload: dict[str, str] | None,
+    metrics: dict[str, Any] | None,
+    news_refs: list[dict[str, str]] | None,
+) -> dict[str, Any]:
+    profile = get_underlying_profile(underlying)
+    code = str(profile.get("symbol") or underlying).upper()
+    is_etf = str(profile.get("asset_type") or "").lower() == "etf"
+    metric_sentence = _format_metric_sentence(metrics or {})
+    refs: list[dict[str, Any]] = [
+        {
+            "source": "本地期权指标",
+            "title": metric_sentence,
+            "date": as_of_date,
+        }
+    ]
+    refs.extend(news_refs or [])
+
+    if is_etf:
+        earnings_date = ETF_EARNINGS_NOTE
+        earnings_time = ""
+        earnings_source = "ETF"
+        recent_catalyst = (
+            f"近期关注{profile.get('name') or code}的成分板块轮动、宏观利率和风险偏好变化；"
+            f"{metric_sentence}"
+        )
+        recent_risk = "ETF没有单一公司财报，短线风险主要来自利率、指数权重行业和市场 beta 的同步波动。"
+        refs.append({"source": "基金/指数属性", "title": "ETF无公司财报", "date": as_of_date})
+    else:
+        payload = earnings_payload or {}
+        earnings_date = str(payload.get("date") or estimate_next_earnings_window()).strip()
+        earnings_time = str(payload.get("detail") or "").strip()
+        earnings_source = str(payload.get("source") or "估算").strip()
+        source_title = "Nasdaq earnings calendar" if earnings_source == "Nasdaq" else "季度财报窗口估算"
+        refs.append({"source": earnings_source or "估算", "title": source_title, "date": earnings_date})
+        business_hint = _first_sentence(str(profile.get("business") or ""))
+        recent_catalyst = (
+            f"近期看点围绕{profile.get('name') or code}的财报窗口、业务主线和期权定价；"
+            f"{metric_sentence}"
+        )
+        if business_hint:
+            recent_catalyst = f"{recent_catalyst} 核心业务：{business_hint}"
+        risk_hint = _first_sentence(str(profile.get("risk") or ""))
+        recent_risk = (
+            f"{risk_hint or '需关注业绩预期、估值和行业竞争变化'}"
+            " 财报前若隐含波动率快速抬升，事件后需留意波动率回落。"
+        )
+
+    dynamic_note = _build_profile_llm_note(
+        profile=profile,
+        earnings_date=earnings_date,
+        earnings_time=earnings_time,
+        metric_sentence=metric_sentence,
+        news_refs=news_refs or [],
+    )
+    if not dynamic_note:
+        if news_refs:
+            dynamic_note = f"近{lookback_days}天新闻标题与本地期权指标共同更新；长期介绍仍以人工维护为准。"
+        else:
+            dynamic_note = f"近{lookback_days}天未取到可用新闻标题，已使用财报日历和本地期权指标生成规则摘要。"
+
+    return {
+        "as_of_date": as_of_date,
+        "underlying": code,
+        "earnings_date": earnings_date,
+        "earnings_time": earnings_time,
+        "earnings_source": earnings_source,
+        "recent_catalyst": recent_catalyst,
+        "recent_risk": recent_risk,
+        "dynamic_note": dynamic_note,
+        "source_refs_json": _source_refs_json(refs),
+    }
+
+
+def replace_underlying_profile_cache(
+    rows: list[dict[str, Any]],
+    *,
+    as_of_date: str | dt.date | dt.datetime,
+    underlyings: list[str] | tuple[str, ...],
+    use_test_tables: bool = False,
+    engine=None,
+) -> int:
+    engine = engine or dashboard_engine()
+    if engine is None:
+        return 0
+    ensure_underlying_profile_cache_table(engine, use_test_tables)
+    table_name = safe_table_name(underlying_profile_cache_table(use_test_tables))
+    target_underlyings = _scan_underlyings(list(underlyings))
+    if not target_underlyings:
+        return 0
+    placeholders, params = _named_in_clause("underlying", target_underlyings)
+    params["as_of_date"] = normalize_trade_date(as_of_date)
+    clean_rows = []
+    for row in rows:
+        item = {col: row.get(col) for col in UNDERLYING_PROFILE_CACHE_COLUMNS}
+        item["as_of_date"] = normalize_trade_date(item.get("as_of_date")) or params["as_of_date"]
+        item["underlying"] = normalize_underlying(item.get("underlying"))
+        if item["underlying"]:
+            clean_rows.append(item)
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                f"""
+                DELETE FROM {table_name}
+                WHERE as_of_date = :as_of_date
+                  AND underlying IN ({placeholders})
+                """
+            ),
+            params,
+        )
+        if clean_rows:
+            column_sql = ", ".join(safe_table_name(col) for col in UNDERLYING_PROFILE_CACHE_COLUMNS)
+            value_sql = ", ".join(f":{col}" for col in UNDERLYING_PROFILE_CACHE_COLUMNS)
+            conn.execute(
+                text(
+                    f"""
+                    INSERT INTO {table_name} ({column_sql})
+                    VALUES ({value_sql})
+                    """
+                ),
+                clean_rows,
+            )
+    return len(clean_rows)
+
+
+def rebuild_underlying_profile_cache(
+    underlyings: list[str] | tuple[str, ...] | None = None,
+    *,
+    as_of_date: str | dt.date | dt.datetime | None = None,
+    lookback_days: int = 30,
+    apply: bool = False,
+    use_test_tables: bool = False,
+    engine=None,
+) -> dict[str, Any]:
+    engine = engine or dashboard_engine()
+    if engine is None:
+        return {"status": "missing_engine", "as_of_date": None, "rows": 0}
+    as_of_date_text = normalize_trade_date(as_of_date) if as_of_date else dt.date.today().strftime("%Y%m%d")
+    try:
+        today = dt.datetime.strptime(as_of_date_text, "%Y%m%d").date()
+    except Exception:
+        today = dt.date.today()
+        as_of_date_text = today.strftime("%Y%m%d")
+    target_underlyings = _scan_underlyings(underlyings)
+    if not target_underlyings:
+        return {"status": "no_underlyings", "as_of_date": as_of_date_text, "rows": 0}
+
+    stock_underlyings = [
+        symbol
+        for symbol in target_underlyings
+        if get_underlying_profile(symbol).get("asset_type") != "etf"
+    ]
+    try:
+        earnings_by_symbol = fetch_nasdaq_next_earnings_dates(
+            stock_underlyings,
+            today=today,
+            lookahead_days=90,
+            timeout=3.0,
+            max_workers=12,
+            batch_days=28,
+        )
+    except Exception:
+        earnings_by_symbol = {}
+
+    rows: list[dict[str, Any]] = []
+    live_earnings = 0
+    for symbol in target_underlyings:
+        profile = get_underlying_profile(symbol)
+        is_etf = profile.get("asset_type") == "etf"
+        earnings_payload = None
+        if not is_etf:
+            earnings_payload = earnings_by_symbol.get(symbol)
+            if earnings_payload:
+                live_earnings += 1
+            else:
+                earnings_payload = {
+                    "date": estimate_next_earnings_window(today),
+                    "source": "估算",
+                    "detail": "日历未确认",
+                    "is_estimate": "1",
+                }
+        metrics = _latest_profile_metric_snapshot(
+            symbol,
+            engine=engine,
+            use_test_tables=use_test_tables,
+        )
+        news_refs = _fetch_recent_profile_news_refs(symbol, lookback_days=lookback_days)
+        rows.append(
+            _build_underlying_profile_dynamic_row(
+                symbol,
+                as_of_date=as_of_date_text,
+                lookback_days=max(int(lookback_days or 30), 1),
+                earnings_payload=earnings_payload,
+                metrics=metrics,
+                news_refs=news_refs,
+            )
+        )
+
+    written = 0
+    if apply:
+        written = replace_underlying_profile_cache(
+            rows,
+            as_of_date=as_of_date_text,
+            underlyings=target_underlyings,
+            use_test_tables=use_test_tables,
+            engine=engine,
+        )
+    return {
+        "status": "updated" if apply else "dry_run",
+        "as_of_date": as_of_date_text,
+        "underlyings": target_underlyings,
+        "rows": len(rows),
+        "written": written,
+        "live_earnings": live_earnings,
+    }
+
+
+def load_underlying_profile_dynamic(
+    underlying: str,
+    engine=None,
+    *,
+    as_of_date: str | dt.date | dt.datetime | None = None,
+    use_test_tables: bool = False,
+) -> dict[str, str]:
+    profile = get_underlying_profile(underlying)
+    fallback = _fallback_underlying_profile_dynamic(profile, as_of_date)
+    engine = engine or dashboard_engine()
+    if engine is None:
+        return fallback
+    table_name = safe_table_name(underlying_profile_cache_table(use_test_tables))
+    if not table_exists(engine, table_name):
+        return fallback
+    columns = table_columns(engine, table_name)
+    if not {"as_of_date", "underlying"}.issubset(columns):
+        return fallback
+    selected = [_select_expr(columns, col) for col in UNDERLYING_PROFILE_CACHE_COLUMNS]
+    selected.append(_select_expr(columns, "updated_at"))
+    code = normalize_underlying(underlying)
+    target_date = normalize_trade_date(as_of_date) if as_of_date else "99991231"
+    sql = text(
+        f"""
+        SELECT {", ".join(selected)}
+        FROM {table_name}
+        WHERE underlying = :underlying
+          AND as_of_date <= :as_of_date
+        ORDER BY as_of_date DESC
+        LIMIT 1
+        """
+    )
+    try:
+        df = pd.read_sql(sql, engine, params={"underlying": code, "as_of_date": target_date})
+    except Exception:
+        return fallback
+    if df.empty:
+        return fallback
+    row = df.iloc[0].to_dict()
+    out = dict(fallback)
+    for key in list(UNDERLYING_PROFILE_CACHE_COLUMNS) + ["updated_at"]:
+        value = row.get(key)
+        if value is None:
+            continue
+        try:
+            if pd.isna(value):
+                continue
+        except Exception:
+            pass
+        out[key] = str(value)
+    return out
+
+
+def build_underlying_profile_card(
+    underlying: str,
+    engine=None,
+    *,
+    as_of_date: str | dt.date | dt.datetime | None = None,
+    use_test_tables: bool = False,
+) -> dict[str, Any]:
+    profile = get_underlying_profile(underlying)
+    dynamic = load_underlying_profile_dynamic(
+        profile.get("symbol", underlying),
+        engine=engine,
+        as_of_date=as_of_date,
+        use_test_tables=use_test_tables,
+    )
+    card: dict[str, Any] = dict(profile)
+    card.update(
+        {
+            "earnings_date": dynamic.get("earnings_date") or profile.get("next_earnings_date") or "",
+            "earnings_time": dynamic.get("earnings_time") or "",
+            "earnings_source": dynamic.get("earnings_source") or "",
+            "recent_catalyst": dynamic.get("recent_catalyst") or "近期变化待更新",
+            "recent_risk": dynamic.get("recent_risk") or "近期变化待更新",
+            "dynamic_note": dynamic.get("dynamic_note") or "",
+            "dynamic_as_of_date": dynamic.get("as_of_date") or "",
+            "dynamic_updated_at": dynamic.get("updated_at") or "",
+            "dynamic_source_refs": _parse_source_refs_json(dynamic.get("source_refs_json")),
+        }
+    )
+    return card
 
 
 def normalize_trade_date(value: str | dt.date | dt.datetime | None) -> str:
@@ -2720,6 +3878,807 @@ def load_market_metrics_history(
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
     return df[MARKET_METRICS_COLUMNS].sort_values("trade_date").reset_index(drop=True)
+
+
+def option_anomaly_scan_cache_table(use_test_tables: bool = False) -> str:
+    suffix = "_test" if use_test_tables else ""
+    return f"{OPTION_ANOMALY_SCAN_CACHE_TABLE}{suffix}"
+
+
+def ensure_option_anomaly_scan_cache_table(engine, use_test_tables: bool = False) -> None:
+    if engine is None:
+        return
+    table_name = safe_table_name(option_anomaly_scan_cache_table(use_test_tables))
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                f"""
+                CREATE TABLE IF NOT EXISTS {table_name} (
+                    trade_date VARCHAR(8) NOT NULL,
+                    underlying VARCHAR(32) NOT NULL,
+                    option_ticker VARCHAR(64) NOT NULL,
+                    signal_family VARCHAR(32) NOT NULL,
+                    call_put VARCHAR(1),
+                    strike DOUBLE,
+                    expiration_date VARCHAR(10),
+                    dte INT,
+                    moneyness_pct DOUBLE,
+                    underlying_price DOUBLE,
+                    close DOUBLE,
+                    vwap DOUBLE,
+                    volume DOUBLE,
+                    open_interest DOUBLE,
+                    oi_prev DOUBLE,
+                    oi_change DOUBLE,
+                    oi_change_pct DOUBLE,
+                    volume_oi_ratio DOUBLE,
+                    premium_est DOUBLE,
+                    iv_pct DOUBLE,
+                    iv_change_1d DOUBLE,
+                    history_days INT,
+                    historical_avg_oi DOUBLE,
+                    historical_max_oi DOUBLE,
+                    historical_avg_oi_change DOUBLE,
+                    historical_max_oi_change DOUBLE,
+                    historical_positive_oi_change_days INT,
+                    oi_change_multiple DOUBLE,
+                    anomaly_score DOUBLE,
+                    tags_json TEXT,
+                    data_gap TEXT,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (trade_date, option_ticker, signal_family)
+                )
+                """
+            )
+        )
+    cache_key = (id(engine), table_name)
+    _TABLE_COLUMNS_CACHE.pop(cache_key, None)
+    existing_columns = table_columns(engine, table_name)
+    column_types = {
+        "trade_date": "VARCHAR(8)",
+        "underlying": "VARCHAR(32)",
+        "option_ticker": "VARCHAR(64)",
+        "signal_family": "VARCHAR(32)",
+        "call_put": "VARCHAR(1)",
+        "expiration_date": "VARCHAR(10)",
+        "dte": "INT",
+        "history_days": "INT",
+        "historical_positive_oi_change_days": "INT",
+        "tags_json": "TEXT",
+        "data_gap": "TEXT",
+    }
+    missing_columns = [col for col in OPTION_ANOMALY_SCAN_COLUMNS if col not in existing_columns]
+    if missing_columns:
+        with engine.begin() as conn:
+            for col in missing_columns:
+                conn.execute(
+                    text(
+                        f"ALTER TABLE {table_name} ADD COLUMN {safe_table_name(col)} "
+                        f"{column_types.get(col, 'DOUBLE')}"
+                    )
+                )
+        _TABLE_COLUMNS_CACHE.pop(cache_key, None)
+    _TABLE_EXISTS_CACHE[(id(engine), table_name)] = True
+    _TABLE_COLUMNS_CACHE[(id(engine), table_name)] = set(OPTION_ANOMALY_SCAN_COLUMNS) | {"updated_at"}
+
+
+def _latest_option_trade_date_for_scan(engine, use_test_tables: bool) -> str | None:
+    names = option_table_names(use_test_tables)
+    daily = safe_table_name(names["daily"])
+    if not table_exists(engine, daily):
+        return None
+    value = _scalar(engine, text(f"SELECT MAX(trade_date) FROM {daily}"))
+    date_text = normalize_trade_date(value)
+    return date_text if date_text else None
+
+
+def _scan_underlyings(underlyings: list[str] | tuple[str, ...] | None) -> list[str]:
+    if underlyings:
+        values = [normalize_underlying(item) for item in underlyings if normalize_underlying(item)]
+    else:
+        values = list(DEFAULT_DASHBOARD_UNDERLYINGS)
+    return sorted(dict.fromkeys(values))
+
+
+def _iv_pct_from_values(provider_iv: Any, computed_iv: Any) -> float | None:
+    iv = normalize_iv_value(provider_iv) or normalize_iv_value(computed_iv)
+    return float(iv) * 100.0 if iv is not None else None
+
+
+def _option_is_otm(call_put: Any, moneyness_pct: Any) -> bool:
+    mny = _clean_number(moneyness_pct)
+    side = str(call_put or "").upper()
+    if mny is None:
+        return False
+    if side == "C":
+        return mny > 0
+    if side == "P":
+        return mny < 0
+    return False
+
+
+def _safe_ratio(numerator: Any, denominator: Any) -> float | None:
+    num = _clean_number(numerator)
+    den = _clean_number(denominator)
+    if num is None or den is None or den <= 0:
+        return None
+    return float(num) / float(den)
+
+
+def _is_oi_change_anomaly(
+    row: pd.Series,
+    *,
+    min_oi_change: float,
+    min_history_days: int,
+    min_change_multiple: float = 3.0,
+    max_breakout_multiple: float = 1.5,
+) -> bool:
+    oi_change = _clean_number(row.get("oi_change")) or 0.0
+    history_days = int(_clean_number(row.get("history_days")) or 0)
+    oi_prev = _clean_number(row.get("oi_prev"))
+    if oi_change < float(min_oi_change or 0):
+        return False
+    if history_days < int(min_history_days or 1):
+        return oi_prev is not None and oi_prev <= 0
+    change_multiple = _clean_number(row.get("oi_change_multiple"))
+    historical_max_change = _clean_number(row.get("historical_max_oi_change"))
+    if change_multiple is not None and change_multiple >= min_change_multiple:
+        return True
+    if historical_max_change is None:
+        return False
+    if historical_max_change <= 0:
+        return True
+    return oi_change >= max(float(min_oi_change or 0), historical_max_change * max_breakout_multiple)
+
+
+def _option_anomaly_tags(
+    row: pd.Series,
+    *,
+    min_oi_change: float,
+    min_premium: float,
+    min_history_days: int,
+) -> tuple[list[str], list[str]]:
+    tags: list[str] = []
+    gaps: list[str] = []
+    volume = _clean_number(row.get("volume")) or 0.0
+    oi_now = _clean_number(row.get("open_interest"))
+    oi_prev = _clean_number(row.get("oi_prev"))
+    oi_change = _clean_number(row.get("oi_change")) or 0.0
+    oi_change_pct = _clean_number(row.get("oi_change_pct"))
+    premium = _clean_number(row.get("premium_est")) or 0.0
+    volume_oi_ratio = _clean_number(row.get("volume_oi_ratio"))
+    dte = _clean_number(row.get("dte"))
+    history_days = int(_clean_number(row.get("history_days")) or 0)
+    historical_max = _clean_number(row.get("historical_max_oi"))
+    historical_max_change = _clean_number(row.get("historical_max_oi_change"))
+    oi_change_multiple = _clean_number(row.get("oi_change_multiple"))
+    is_oi_anomaly = _is_oi_change_anomaly(
+        row,
+        min_oi_change=min_oi_change,
+        min_history_days=min_history_days,
+    )
+
+    if oi_now is None:
+        gaps.append("missing_oi")
+    if oi_prev is None:
+        gaps.append("missing_prev_oi")
+    if _clean_number(row.get("iv_pct")) is None:
+        gaps.append("missing_iv")
+    if history_days < min_history_days:
+        tags.append("历史样本不足")
+        gaps.append("insufficient_oi_history")
+
+    if oi_change > 0 and (oi_change >= min_oi_change or (oi_change_pct is not None and oi_change_pct >= 0.5)):
+        tags.append("OI大幅净增")
+    if is_oi_anomaly:
+        tags.append("OI增量异常")
+        if history_days < min_history_days and oi_prev is not None and oi_prev <= 0:
+            tags.append("新仓突增")
+        if oi_change_multiple is not None and oi_change_multiple >= 3.0:
+            tags.append("高于历史均值")
+        if historical_max_change is None or historical_max_change <= 0 or oi_change >= historical_max_change * 1.5:
+            tags.append("突破历史增量")
+    if volume > 0 and oi_now is not None and volume > max(float(oi_now), 0.0):
+        tags.append("Volume>OI")
+    elif volume_oi_ratio is not None and volume_oi_ratio >= 1.0:
+        tags.append("Volume>OI")
+    if premium >= min_premium:
+        tags.append("大额权利金")
+    if oi_change > 0 and _option_is_otm(row.get("call_put"), row.get("moneyness_pct")):
+        tags.append("OTM埋伏")
+    if oi_change > 0 and dte is not None and dte <= 45:
+        tags.append("近月增仓")
+    if history_days >= min_history_days and historical_max is not None and oi_now is not None and oi_now > historical_max:
+        tags.append("历史新高OI")
+
+    return list(dict.fromkeys(tags)), list(dict.fromkeys(gaps))
+
+
+def _option_anomaly_score(row: pd.Series, tags: list[str], *, min_premium: float) -> float:
+    oi_change = max(_clean_number(row.get("oi_change")) or 0.0, 0.0)
+    oi_change_pct = max(_clean_number(row.get("oi_change_pct")) or 0.0, 0.0)
+    volume_oi_ratio = max(_clean_number(row.get("volume_oi_ratio")) or 0.0, 0.0)
+    premium = max(_clean_number(row.get("premium_est")) or 0.0, 0.0)
+    oi_change_multiple = max(_clean_number(row.get("oi_change_multiple")) or 0.0, 0.0)
+    score = 0.0
+    if oi_change > 0:
+        score += min(28.0, math.log1p(oi_change) * 4.2)
+        score += min(18.0, oi_change_pct * 12.0)
+    if "OI增量异常" in tags:
+        score += 18.0
+    if oi_change_multiple > 0:
+        score += min(14.0, math.log1p(oi_change_multiple) * 4.0)
+    score += min(16.0, volume_oi_ratio * 5.0)
+    if premium > 0 and min_premium > 0:
+        score += min(20.0, premium / min_premium * 6.0)
+    if "历史新高OI" in tags:
+        score += 16.0
+    if "突破历史增量" in tags:
+        score += 10.0
+    if "OTM埋伏" in tags:
+        score += 10.0
+    if "近月增仓" in tags:
+        score += 8.0
+    if "历史样本不足" in tags:
+        score -= 4.0
+    return round(max(score, 0.0), 3)
+
+
+def _select_option_anomaly_source_rows(
+    *,
+    engine,
+    trade_date: str,
+    underlyings: list[str],
+    lookback_days: int,
+    use_test_tables: bool,
+) -> pd.DataFrame:
+    names = option_table_names(use_test_tables)
+    contracts = safe_table_name(names["contracts"])
+    daily = safe_table_name(names["daily"])
+    iv = safe_table_name(names["iv"])
+    if not table_exists(engine, contracts) or not table_exists(engine, daily):
+        return _empty_df(OPTION_ANOMALY_SCAN_COLUMNS)
+
+    placeholders, params = _named_in_clause("underlying", underlyings)
+    params["trade_date"] = trade_date
+    trade_dt = pd.to_datetime(trade_date, format="%Y%m%d", errors="coerce")
+    if pd.isna(trade_dt):
+        return _empty_df(OPTION_ANOMALY_SCAN_COLUMNS)
+    calendar_days = max(int(lookback_days or 20) * 3, 10)
+    params["hist_start"] = (trade_dt - pd.Timedelta(days=calendar_days)).strftime("%Y%m%d")
+
+    iv_join = ""
+    iv_columns = "NULL AS provider_iv, NULL AS computed_iv, NULL AS underlying_price, NULL AS prev_provider_iv, NULL AS prev_computed_iv"
+    if table_exists(engine, iv):
+        iv_join = f"""
+        LEFT JOIN {iv} h ON d.trade_date = h.trade_date AND d.option_ticker = h.option_ticker
+        LEFT JOIN {iv} ph ON p.prev_trade_date = ph.trade_date AND p.option_ticker = ph.option_ticker
+        """
+        iv_columns = """
+            h.provider_iv AS provider_iv,
+            h.computed_iv AS computed_iv,
+            h.underlying_price AS underlying_price,
+            ph.provider_iv AS prev_provider_iv,
+            ph.computed_iv AS prev_computed_iv
+        """
+
+    sql = text(
+        f"""
+        SELECT d.trade_date,
+               d.underlying,
+               d.option_ticker,
+               c.call_put,
+               c.strike,
+               c.expiration_date,
+               d.close,
+               d.vwap,
+               d.volume,
+               d.open_interest,
+               p.prev_trade_date,
+               p.oi_prev,
+               hist.history_days,
+               hist.historical_avg_oi,
+               hist.historical_max_oi,
+               {iv_columns}
+        FROM {daily} d
+        JOIN {contracts} c ON d.option_ticker = c.option_ticker
+        LEFT JOIN (
+            SELECT d_prev.option_ticker,
+                   d_prev.trade_date AS prev_trade_date,
+                   d_prev.open_interest AS oi_prev
+            FROM {daily} d_prev
+            JOIN (
+                SELECT option_ticker, MAX(trade_date) AS prev_trade_date
+                FROM {daily}
+                WHERE trade_date < :trade_date
+                  AND underlying IN ({placeholders})
+                  AND open_interest IS NOT NULL
+                GROUP BY option_ticker
+            ) prev_key
+              ON d_prev.option_ticker = prev_key.option_ticker
+             AND d_prev.trade_date = prev_key.prev_trade_date
+        ) p ON d.option_ticker = p.option_ticker
+        LEFT JOIN (
+            SELECT option_ticker,
+                   COUNT(*) AS history_days,
+                   AVG(open_interest) AS historical_avg_oi,
+                   MAX(open_interest) AS historical_max_oi
+            FROM {daily}
+            WHERE trade_date < :trade_date
+              AND trade_date >= :hist_start
+              AND underlying IN ({placeholders})
+              AND open_interest IS NOT NULL
+            GROUP BY option_ticker
+        ) hist ON d.option_ticker = hist.option_ticker
+        {iv_join}
+        WHERE d.trade_date = :trade_date
+          AND d.underlying IN ({placeholders})
+        """
+    )
+    try:
+        return pd.read_sql(sql, engine, params=params)
+    except Exception:
+        return pd.DataFrame()
+
+
+def _attach_option_oi_change_history(
+    df: pd.DataFrame,
+    *,
+    engine,
+    trade_date: str,
+    underlyings: list[str],
+    lookback_days: int,
+    use_test_tables: bool,
+) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df
+    names = option_table_names(use_test_tables)
+    daily = safe_table_name(names["daily"])
+    if not table_exists(engine, daily):
+        return df
+    trade_dt = pd.to_datetime(trade_date, format="%Y%m%d", errors="coerce")
+    if pd.isna(trade_dt):
+        return df
+    placeholders, params = _named_in_clause("underlying", underlyings)
+    params["trade_date"] = trade_date
+    calendar_days = max(int(lookback_days or 20) * 3, 10)
+    params["hist_start"] = (trade_dt - pd.Timedelta(days=calendar_days)).strftime("%Y%m%d")
+    sql = text(
+        f"""
+        SELECT trade_date, option_ticker, open_interest
+        FROM {daily}
+        WHERE trade_date < :trade_date
+          AND trade_date >= :hist_start
+          AND underlying IN ({placeholders})
+          AND open_interest IS NOT NULL
+        """
+    )
+    try:
+        hist = pd.read_sql(sql, engine, params=params)
+    except Exception:
+        return df
+    out = df.copy()
+    stat_cols = [
+        "historical_avg_oi_change",
+        "historical_max_oi_change",
+        "historical_positive_oi_change_days",
+    ]
+    if hist.empty:
+        for col in stat_cols:
+            out[col] = None
+        return out
+    hist["open_interest"] = pd.to_numeric(hist["open_interest"], errors="coerce")
+    hist = hist.dropna(subset=["open_interest"]).sort_values(["option_ticker", "trade_date"])
+    hist["oi_delta"] = hist.groupby("option_ticker")["open_interest"].diff()
+    hist["positive_oi_delta"] = hist["oi_delta"].where(hist["oi_delta"] > 0)
+    grouped = hist.groupby("option_ticker", as_index=False)
+    stats = grouped.agg(
+        historical_avg_oi_change=("positive_oi_delta", "mean"),
+        historical_max_oi_change=("oi_delta", "max"),
+        historical_positive_oi_change_days=("oi_delta", lambda series: int((series > 0).sum())),
+    )
+    out = out.drop(columns=stat_cols, errors="ignore")
+    return out.merge(stats, on="option_ticker", how="left")
+
+
+def compute_option_anomaly_scan(
+    *,
+    trade_date: str | dt.date | dt.datetime | None = None,
+    underlyings: list[str] | tuple[str, ...] | None = None,
+    lookback_days: int = 20,
+    max_dte: int = 90,
+    min_volume: float = 100,
+    min_premium: float = 250_000,
+    min_oi_change: float = 100,
+    min_history_days: int = 5,
+    use_test_tables: bool = False,
+    engine=None,
+) -> pd.DataFrame:
+    engine = engine or dashboard_engine()
+    if engine is None:
+        return _empty_df(OPTION_ANOMALY_SCAN_COLUMNS)
+    trade_date_text = normalize_trade_date(trade_date) if trade_date else _latest_option_trade_date_for_scan(engine, use_test_tables)
+    if not trade_date_text:
+        return _empty_df(OPTION_ANOMALY_SCAN_COLUMNS)
+    target_underlyings = _scan_underlyings(underlyings)
+    if not target_underlyings:
+        return _empty_df(OPTION_ANOMALY_SCAN_COLUMNS)
+
+    source = _select_option_anomaly_source_rows(
+        engine=engine,
+        trade_date=trade_date_text,
+        underlyings=target_underlyings,
+        lookback_days=lookback_days,
+        use_test_tables=use_test_tables,
+    )
+    if source is None or source.empty:
+        return _empty_df(OPTION_ANOMALY_SCAN_COLUMNS)
+
+    df = _attach_option_oi_change_history(
+        source.copy(),
+        engine=engine,
+        trade_date=trade_date_text,
+        underlyings=target_underlyings,
+        lookback_days=lookback_days,
+        use_test_tables=use_test_tables,
+    )
+    for col in (
+        "strike",
+        "close",
+        "vwap",
+        "volume",
+        "open_interest",
+        "oi_prev",
+        "history_days",
+        "historical_avg_oi",
+        "historical_max_oi",
+        "historical_avg_oi_change",
+        "historical_max_oi_change",
+        "historical_positive_oi_change_days",
+        "underlying_price",
+    ):
+        if col not in df.columns:
+            df[col] = None
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+    df["trade_date"] = df["trade_date"].apply(normalize_trade_date)
+    df["dte"] = df.apply(lambda row: dte_for_trade_date(row.get("expiration_date"), row.get("trade_date")), axis=1)
+    df["dte"] = pd.to_numeric(df["dte"], errors="coerce")
+    df = df[df["dte"].notna() & (df["dte"] >= 0) & (df["dte"] <= max(int(max_dte or 90), 0))].copy()
+    if df.empty:
+        return _empty_df(OPTION_ANOMALY_SCAN_COLUMNS)
+
+    price = pd.to_numeric(df["underlying_price"], errors="coerce")
+    strike = pd.to_numeric(df["strike"], errors="coerce")
+    df["moneyness_pct"] = ((strike - price) / price * 100.0).where(price > 0)
+    df["iv_pct"] = df.apply(lambda row: _iv_pct_from_values(row.get("provider_iv"), row.get("computed_iv")), axis=1)
+    df["prev_iv_pct"] = df.apply(
+        lambda row: _iv_pct_from_values(row.get("prev_provider_iv"), row.get("prev_computed_iv")),
+        axis=1,
+    )
+    df["iv_change_1d"] = pd.to_numeric(df["iv_pct"], errors="coerce") - pd.to_numeric(
+        df["prev_iv_pct"], errors="coerce"
+    )
+    df["oi_change"] = pd.to_numeric(df["open_interest"], errors="coerce") - pd.to_numeric(
+        df["oi_prev"], errors="coerce"
+    )
+    df["oi_change_pct"] = df.apply(lambda row: _safe_ratio(row.get("oi_change"), max(row.get("oi_prev") or 0, 1)), axis=1)
+    df["oi_change_multiple"] = df.apply(
+        lambda row: _safe_ratio(row.get("oi_change"), row.get("historical_avg_oi_change")),
+        axis=1,
+    )
+    df["volume_oi_ratio"] = df.apply(
+        lambda row: _safe_ratio(row.get("volume"), max(row.get("open_interest") or 0, 1)),
+        axis=1,
+    )
+    price_for_premium = pd.to_numeric(df["vwap"], errors="coerce").fillna(pd.to_numeric(df["close"], errors="coerce"))
+    df["premium_est"] = price_for_premium * pd.to_numeric(df["volume"], errors="coerce") * 100.0
+
+    rows: list[dict[str, Any]] = []
+    for _, row in df.iterrows():
+        volume = _clean_number(row.get("volume")) or 0.0
+        premium = _clean_number(row.get("premium_est")) or 0.0
+        oi_change = _clean_number(row.get("oi_change")) or 0.0
+        oi_change_pct = _clean_number(row.get("oi_change_pct"))
+        volume_oi_ratio = _clean_number(row.get("volume_oi_ratio"))
+        if volume < float(min_volume or 0) and premium < float(min_premium or 0) and oi_change <= 0:
+            continue
+        tags, gaps = _option_anomaly_tags(
+            row,
+            min_oi_change=float(min_oi_change or 0),
+            min_premium=float(min_premium or 0),
+            min_history_days=int(min_history_days or 1),
+        )
+        families: list[str] = []
+        if _is_oi_change_anomaly(
+            row,
+            min_oi_change=float(min_oi_change or 0),
+            min_history_days=int(min_history_days or 1),
+        ):
+            families.append("oi_build")
+        if volume_oi_ratio is not None and volume_oi_ratio >= 1.0:
+            families.append("volume_oi")
+        if premium >= float(min_premium or 0):
+            families.append("premium")
+        if not families:
+            continue
+        score = _option_anomaly_score(row, tags, min_premium=float(min_premium or 1))
+        base = {col: row.get(col) for col in OPTION_ANOMALY_SCAN_COLUMNS if col not in {"signal_family", "tags_json", "data_gap", "anomaly_score"}}
+        base["trade_date"] = trade_date_text
+        base["underlying"] = normalize_underlying(base.get("underlying"))
+        base["dte"] = int(_clean_number(base.get("dte")) or 0)
+        base["history_days"] = int(_clean_number(base.get("history_days")) or 0)
+        for family in families:
+            item = dict(base)
+            item["signal_family"] = family
+            item["tags_json"] = json.dumps(tags, ensure_ascii=False)
+            item["data_gap"] = ",".join(gaps)
+            item["anomaly_score"] = score
+            rows.append(item)
+
+    if not rows:
+        return _empty_df(OPTION_ANOMALY_SCAN_COLUMNS)
+    out = pd.DataFrame(rows)
+    for col in OPTION_ANOMALY_SCAN_COLUMNS:
+        if col not in out.columns:
+            out[col] = None
+    numeric_cols = [
+        "strike",
+        "dte",
+        "moneyness_pct",
+        "underlying_price",
+        "close",
+        "vwap",
+        "volume",
+        "open_interest",
+        "oi_prev",
+        "oi_change",
+        "oi_change_pct",
+        "volume_oi_ratio",
+        "premium_est",
+        "iv_pct",
+        "iv_change_1d",
+        "history_days",
+        "historical_avg_oi",
+        "historical_max_oi",
+        "historical_avg_oi_change",
+        "historical_max_oi_change",
+        "historical_positive_oi_change_days",
+        "oi_change_multiple",
+        "anomaly_score",
+    ]
+    for col in numeric_cols:
+        out[col] = pd.to_numeric(out[col], errors="coerce")
+    return out[OPTION_ANOMALY_SCAN_COLUMNS].sort_values(
+        ["anomaly_score", "premium_est", "oi_change"], ascending=[False, False, False]
+    ).reset_index(drop=True)
+
+
+def _normalize_scan_cache_frame(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return _empty_df(OPTION_ANOMALY_SCAN_COLUMNS)
+    out = df.copy()
+    for col in OPTION_ANOMALY_SCAN_COLUMNS:
+        if col not in out.columns:
+            out[col] = None
+    for col in (
+        "strike",
+        "dte",
+        "moneyness_pct",
+        "underlying_price",
+        "close",
+        "vwap",
+        "volume",
+        "open_interest",
+        "oi_prev",
+        "oi_change",
+        "oi_change_pct",
+        "volume_oi_ratio",
+        "premium_est",
+        "iv_pct",
+        "iv_change_1d",
+        "history_days",
+        "historical_avg_oi",
+        "historical_max_oi",
+        "historical_avg_oi_change",
+        "historical_max_oi_change",
+        "historical_positive_oi_change_days",
+        "oi_change_multiple",
+        "anomaly_score",
+    ):
+        out[col] = pd.to_numeric(out[col], errors="coerce")
+    return out[OPTION_ANOMALY_SCAN_COLUMNS].sort_values(
+        ["anomaly_score", "premium_est", "oi_change"], ascending=[False, False, False]
+    ).reset_index(drop=True)
+
+
+def load_option_anomaly_scan_cache(
+    trade_date: str | dt.date | dt.datetime,
+    *,
+    underlyings: list[str] | tuple[str, ...] | None = None,
+    use_test_tables: bool = False,
+    engine=None,
+) -> pd.DataFrame:
+    engine = engine or dashboard_engine()
+    if engine is None:
+        return _empty_df(OPTION_ANOMALY_SCAN_COLUMNS)
+    table_name = safe_table_name(option_anomaly_scan_cache_table(use_test_tables))
+    if not table_exists(engine, table_name):
+        return _empty_df(OPTION_ANOMALY_SCAN_COLUMNS)
+    target_underlyings = _scan_underlyings(underlyings)
+    placeholders, params = _named_in_clause("underlying", target_underlyings)
+    params["trade_date"] = normalize_trade_date(trade_date)
+    sql = text(
+        f"""
+        SELECT {", ".join(safe_table_name(col) for col in OPTION_ANOMALY_SCAN_COLUMNS)}
+        FROM {table_name}
+        WHERE trade_date = :trade_date
+          AND underlying IN ({placeholders})
+        ORDER BY anomaly_score DESC, premium_est DESC, oi_change DESC
+        """
+    )
+    try:
+        df = pd.read_sql(sql, engine, params=params)
+    except Exception:
+        return _empty_df(OPTION_ANOMALY_SCAN_COLUMNS)
+    return _normalize_scan_cache_frame(df)
+
+
+def _clean_scan_record(value: Any) -> Any:
+    if value is None:
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except Exception:
+        pass
+    if isinstance(value, float) and (math.isnan(value) or math.isinf(value)):
+        return None
+    if hasattr(value, "item"):
+        try:
+            return value.item()
+        except Exception:
+            return value
+    return value
+
+
+def replace_option_anomaly_scan_cache(
+    scan_df: pd.DataFrame,
+    *,
+    trade_date: str | dt.date | dt.datetime,
+    underlyings: list[str] | tuple[str, ...],
+    use_test_tables: bool = False,
+    engine=None,
+) -> int:
+    engine = engine or dashboard_engine()
+    if engine is None:
+        return 0
+    ensure_option_anomaly_scan_cache_table(engine, use_test_tables)
+    table_name = safe_table_name(option_anomaly_scan_cache_table(use_test_tables))
+    target_underlyings = _scan_underlyings(list(underlyings))
+    if not target_underlyings:
+        return 0
+    placeholders, params = _named_in_clause("underlying", target_underlyings)
+    params["trade_date"] = normalize_trade_date(trade_date)
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                f"""
+                DELETE FROM {table_name}
+                WHERE trade_date = :trade_date
+                  AND underlying IN ({placeholders})
+                """
+            ),
+            params,
+        )
+        if scan_df is None or scan_df.empty:
+            return 0
+        rows = []
+        for row in scan_df[OPTION_ANOMALY_SCAN_COLUMNS].to_dict(orient="records"):
+            rows.append({col: _clean_scan_record(row.get(col)) for col in OPTION_ANOMALY_SCAN_COLUMNS})
+        column_sql = ", ".join(safe_table_name(col) for col in OPTION_ANOMALY_SCAN_COLUMNS)
+        value_sql = ", ".join(f":{col}" for col in OPTION_ANOMALY_SCAN_COLUMNS)
+        conn.execute(
+            text(
+                f"""
+                INSERT INTO {table_name} ({column_sql})
+                VALUES ({value_sql})
+                """
+            ),
+            rows,
+        )
+    return int(len(scan_df))
+
+
+def rebuild_option_anomaly_scan_cache(
+    *,
+    trade_date: str | dt.date | dt.datetime | None = None,
+    underlyings: list[str] | tuple[str, ...] | None = None,
+    lookback_days: int = 20,
+    max_dte: int = 90,
+    min_volume: float = 100,
+    min_premium: float = 250_000,
+    min_oi_change: float = 100,
+    min_history_days: int = 5,
+    use_test_tables: bool = False,
+    engine=None,
+) -> dict[str, Any]:
+    engine = engine or dashboard_engine()
+    if engine is None:
+        return {"status": "missing_engine", "trade_date": None, "rows": 0}
+    trade_date_text = normalize_trade_date(trade_date) if trade_date else _latest_option_trade_date_for_scan(engine, use_test_tables)
+    if not trade_date_text:
+        return {"status": "missing_trade_date", "trade_date": None, "rows": 0}
+    target_underlyings = _scan_underlyings(underlyings)
+    scan = compute_option_anomaly_scan(
+        trade_date=trade_date_text,
+        underlyings=target_underlyings,
+        lookback_days=lookback_days,
+        max_dte=max_dte,
+        min_volume=min_volume,
+        min_premium=min_premium,
+        min_oi_change=min_oi_change,
+        min_history_days=min_history_days,
+        use_test_tables=use_test_tables,
+        engine=engine,
+    )
+    rows = replace_option_anomaly_scan_cache(
+        scan,
+        trade_date=trade_date_text,
+        underlyings=target_underlyings,
+        use_test_tables=use_test_tables,
+        engine=engine,
+    )
+    return {
+        "status": "updated",
+        "trade_date": trade_date_text,
+        "underlyings": target_underlyings,
+        "rows": rows,
+        "contracts": int(scan["option_ticker"].nunique()) if not scan.empty else 0,
+    }
+
+
+def load_option_anomaly_scan(
+    *,
+    trade_date: str | dt.date | dt.datetime | None = None,
+    underlyings: list[str] | tuple[str, ...] | None = None,
+    lookback_days: int = 20,
+    max_dte: int = 90,
+    min_volume: float = 100,
+    min_premium: float = 250_000,
+    min_oi_change: float = 100,
+    min_history_days: int = 5,
+    prefer_cache: bool = True,
+    use_test_tables: bool = False,
+    engine=None,
+) -> pd.DataFrame:
+    engine = engine or dashboard_engine()
+    if engine is None:
+        return _empty_df(OPTION_ANOMALY_SCAN_COLUMNS)
+    trade_date_text = normalize_trade_date(trade_date) if trade_date else _latest_option_trade_date_for_scan(engine, use_test_tables)
+    if not trade_date_text:
+        return _empty_df(OPTION_ANOMALY_SCAN_COLUMNS)
+    target_underlyings = _scan_underlyings(underlyings)
+    if prefer_cache:
+        cached = load_option_anomaly_scan_cache(
+            trade_date_text,
+            underlyings=target_underlyings,
+            use_test_tables=use_test_tables,
+            engine=engine,
+        )
+        if not cached.empty:
+            return cached
+    return compute_option_anomaly_scan(
+        trade_date=trade_date_text,
+        underlyings=target_underlyings,
+        lookback_days=lookback_days,
+        max_dte=max_dte,
+        min_volume=min_volume,
+        min_premium=min_premium,
+        min_oi_change=min_oi_change,
+        min_history_days=min_history_days,
+        use_test_tables=use_test_tables,
+        engine=engine,
+    )
 
 
 def _weighted_average(values: pd.Series, weights: pd.Series | None = None) -> float | None:

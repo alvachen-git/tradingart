@@ -32,8 +32,10 @@ from ui_components import inject_sidebar_toggle_style, render_option_sidebar_foo
 dashboard_data = importlib.reload(dashboard_data)
 
 from us_market_dashboard_data import (
+    ANOMALY_SIGNAL_FAMILY_LABELS,
     DEFAULT_DASHBOARD_UNDERLYINGS,
     UNDERLYING_DISPLAY_NAMES,
+    build_underlying_profile_card,
     calculate_atm_iv_pct,
     calculate_overview_metrics_from_market_history,
     calculate_volatility_positioning_metrics,
@@ -45,6 +47,7 @@ from us_market_dashboard_data import (
     load_latest_option_trade_date,
     load_market_climate_strip,
     load_market_metrics_history,
+    load_option_anomaly_scan,
     load_option_chain_daily,
     load_option_chain_summary,
     load_stock_daily,
@@ -691,6 +694,368 @@ def _inject_page_style() -> None:
             font-size: 13px;
             line-height: 1.5;
         }
+        .us-underlying-brief {
+            border: 1px solid #e2e8f0;
+            border-radius: 8px;
+            background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%);
+            box-shadow: 0 8px 24px rgba(15, 23, 42, .045);
+            padding: 13px 15px 14px;
+            margin: 10px 0 0;
+        }
+        .us-underlying-brief-head {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            margin-bottom: 10px;
+        }
+        .us-underlying-brief-title {
+            display: flex;
+            align-items: baseline;
+            gap: 8px;
+            min-width: 0;
+        }
+        .us-underlying-brief-title strong {
+            color: #0f172a;
+            font-size: 17px;
+            line-height: 1.1;
+            font-weight: 850;
+        }
+        .us-underlying-brief-title span {
+            color: #64748b;
+            font-size: 12px;
+            font-weight: 700;
+            white-space: nowrap;
+        }
+        .us-underlying-brief-earnings {
+            display: inline-flex;
+            align-items: center;
+            gap: 7px;
+            min-height: 30px;
+            padding: 6px 10px;
+            border-radius: 999px;
+            border: 1px solid #dbeafe;
+            background: #eff6ff;
+            color: #1d4ed8;
+            font-size: 12px;
+            font-weight: 800;
+            text-align: right;
+        }
+        .us-underlying-brief-grid {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 12px;
+        }
+        .us-underlying-brief-item {
+            min-width: 0;
+            padding-top: 9px;
+            border-top: 1px solid #e5edf7;
+        }
+        .us-underlying-brief-label {
+            color: #2563eb;
+            font-size: 12px;
+            line-height: 1.2;
+            font-weight: 850;
+            margin-bottom: 5px;
+        }
+        .us-underlying-brief-text {
+            color: #334155;
+            font-size: 13px;
+            line-height: 1.48;
+        }
+        .us-underlying-dynamic {
+            margin-top: 12px;
+            padding-top: 11px;
+            border-top: 1px solid #e5edf7;
+        }
+        .us-underlying-dynamic-grid {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 12px;
+            align-items: start;
+        }
+        .us-underlying-dynamic-item {
+            min-width: 0;
+        }
+        .us-underlying-dynamic-label {
+            display: block;
+            color: #2563eb;
+            font-size: 12px;
+            line-height: 1.2;
+            font-weight: 850;
+            margin-bottom: 4px;
+        }
+        .us-underlying-dynamic-text {
+            color: #334155;
+            font-size: 13px;
+            line-height: 1.45;
+        }
+        .us-underlying-dynamic-source {
+            margin-top: 8px;
+            color: #64748b;
+            font-size: 12px;
+            line-height: 1.35;
+        }
+        .us-option-anomaly-shell {
+            border: 1px solid #e5edf7;
+            border-radius: 8px;
+            background: rgba(255,255,255,.72);
+            box-shadow: 0 8px 26px rgba(37, 99, 235, .045);
+            padding: 12px 14px;
+            margin: 0 0 12px;
+        }
+        .us-option-anomaly-head {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 18px;
+            margin-bottom: 10px;
+        }
+        .us-option-anomaly-title {
+            margin: 0;
+            color: #0f172a;
+            font-size: 25px;
+            line-height: 1.15;
+            font-weight: 800;
+            letter-spacing: 0;
+        }
+        .us-option-anomaly-subtitle {
+            margin-top: 5px;
+            color: #64748b;
+            font-size: 13px;
+            line-height: 1.35;
+        }
+        .us-option-anomaly-actions {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            flex-wrap: wrap;
+            justify-content: flex-end;
+        }
+        .us-option-anomaly-chip {
+            display: inline-flex;
+            align-items: center;
+            gap: 7px;
+            min-height: 34px;
+            padding: 7px 10px;
+            border: 1px solid #dbe8f7;
+            border-radius: 8px;
+            background: rgba(255,255,255,.82);
+            color: #334155;
+            font-size: 12px;
+            font-weight: 700;
+            white-space: nowrap;
+        }
+        .us-option-anomaly-chip.sync {
+            color: #15803d;
+            border-color: #bbf7d0;
+            background: #f0fdf4;
+        }
+        .us-option-update-line {
+            display: flex;
+            justify-content: flex-end;
+            align-items: center;
+            margin: -2px 0 10px;
+        }
+        .us-option-update-pill {
+            display: inline-flex;
+            align-items: center;
+            min-height: 32px;
+            padding: 7px 11px;
+            border: 1px solid #dbe8f7;
+            border-radius: 8px;
+            background: rgba(255,255,255,.82);
+            color: #334155;
+            font-size: 12px;
+            font-weight: 750;
+            white-space: nowrap;
+        }
+        .us-option-anomaly-metrics {
+            display: grid;
+            grid-template-columns: repeat(4, minmax(0, 1fr));
+            border: 1px solid #dbe8f7;
+            border-radius: 8px;
+            background: rgba(255,255,255,.9);
+            overflow: hidden;
+            margin-bottom: 10px;
+        }
+        .us-option-anomaly-metric {
+            min-width: 0;
+            padding: 12px 14px;
+            border-right: 1px solid #dbe8f7;
+        }
+        .us-option-anomaly-metric:last-child {
+            border-right: 0;
+        }
+        .us-option-anomaly-metric-label {
+            color: #64748b;
+            font-size: 12px;
+            line-height: 1.25;
+            font-weight: 700;
+            margin-bottom: 8px;
+        }
+        .us-option-anomaly-metric-value {
+            color: #2563eb;
+            font-size: 22px;
+            line-height: 1;
+            font-weight: 850;
+            letter-spacing: 0;
+        }
+        .us-option-anomaly-metric-detail {
+            color: #64748b;
+            font-size: 11px;
+            line-height: 1.35;
+            margin-top: 7px;
+            white-space: nowrap;
+        }
+        .us-option-anomaly-metric.red .us-option-anomaly-metric-value {
+            color: #dc2626;
+        }
+        .us-option-anomaly-metric.orange .us-option-anomaly-metric-value {
+            color: #ea580c;
+        }
+        .us-option-anomaly-metric.green .us-option-anomaly-metric-value {
+            color: #16a34a;
+        }
+        .us-option-anomaly-rule {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            border: 1px solid #dbe8f7;
+            border-radius: 8px;
+            background: #f8fbff;
+            color: #334155;
+            padding: 8px 10px;
+            font-size: 12px;
+            line-height: 1.45;
+            margin-bottom: 0;
+        }
+        .us-option-anomaly-rule strong {
+            color: #2563eb;
+            font-weight: 800;
+        }
+        .us-option-filter-head {
+            display: flex;
+            align-items: baseline;
+            justify-content: space-between;
+            gap: 12px;
+            color: #0f172a;
+            font-size: 13px;
+            font-weight: 780;
+            margin: 6px 0 8px;
+        }
+        .us-option-filter-head span:last-child {
+            color: #64748b;
+            font-size: 12px;
+            font-weight: 650;
+        }
+        .us-option-filter-copy {
+            display: inline-flex;
+            align-items: center;
+            min-height: 30px;
+            padding: 6px 10px;
+            margin: 0 0 8px;
+            border: 1px solid #dbe8f7;
+            border-radius: 8px;
+            background: linear-gradient(90deg, #f8fbff 0%, #ffffff 100%);
+            color: #64748b;
+            font-size: 12px;
+            line-height: 1.35;
+        }
+        .us-option-filter-card {
+            border: 1px solid #e5edf7;
+            border-radius: 8px;
+            background: rgba(255,255,255,.76);
+            padding: 12px 12px 4px;
+            margin-bottom: 12px;
+        }
+        .us-option-filter-card div[data-testid="stSegmentedControl"] > div {
+            background: #f8fbff;
+            border-color: #dbe8f7;
+            box-shadow: none;
+        }
+        .us-option-filter-card div[data-testid="stSegmentedControl"] button {
+            min-height: 36px;
+            font-size: 13px !important;
+        }
+        .us-option-filter-card div[data-testid="stMultiSelect"] [data-baseweb="select"],
+        .us-option-filter-card div[data-testid="stSelectbox"] [data-baseweb="select"] {
+            min-height: 38px;
+            background: #f8fbff;
+            border-color: #dbe8f7;
+            box-shadow: none;
+        }
+        .us-option-filter-card div[data-testid="stCheckbox"] {
+            padding-top: 2px;
+        }
+        .us-option-active-chips {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin: 10px 0 16px;
+        }
+        .us-option-active-chip {
+            display: inline-flex;
+            align-items: center;
+            border: 1px solid #dbe8f7;
+            border-radius: 8px;
+            background: #eff6ff;
+            color: #2563eb;
+            padding: 7px 10px;
+            font-size: 12px;
+            line-height: 1;
+            font-weight: 750;
+        }
+        .us-option-coverage-note {
+            border: 1px solid #bfdbfe;
+            border-radius: 8px;
+            background: #eff6ff;
+            color: #1e3a8a;
+            padding: 10px 12px;
+            margin: 2px 0 14px;
+            font-size: 13px;
+            line-height: 1.5;
+        }
+        .us-option-coverage-note.soft {
+            border-color: #e5edf7;
+            background: #f8fbff;
+            color: #475569;
+        }
+        .us-option-coverage-note strong {
+            color: #1d4ed8;
+            font-weight: 820;
+        }
+        .us-option-anomaly-table-title {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            margin: 0 0 10px;
+        }
+        .us-option-anomaly-table-title strong {
+            color: #0f172a;
+            font-size: 18px;
+            line-height: 1.2;
+            font-weight: 820;
+        }
+        .us-option-anomaly-table-title span {
+            color: #64748b;
+            font-size: 12px;
+            line-height: 1.35;
+        }
+        .us-option-anomaly-table-foot {
+            margin-top: 8px;
+            color: #64748b;
+            font-size: 12px;
+            line-height: 1.35;
+        }
+        .us-option-thesis-note {
+            color: #64748b;
+            font-size: 12px;
+            line-height: 1.45;
+            margin: -4px 0 10px;
+        }
         .us-lab-warning {
             border-left-color: #f59e0b;
             background: #fffbeb;
@@ -718,6 +1083,27 @@ def _inject_page_style() -> None:
             color: #1d4ed8;
         }
         @media (max-width: 1200px) {
+            .us-underlying-brief-grid {
+                grid-template-columns: 1fr;
+                gap: 9px;
+            }
+            .us-underlying-brief-head {
+                align-items: flex-start;
+                flex-direction: column;
+            }
+            .us-underlying-dynamic-grid {
+                grid-template-columns: 1fr;
+                gap: 9px;
+            }
+            .us-option-anomaly-metrics {
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+            }
+            .us-option-anomaly-metric:nth-child(2) {
+                border-right: 0;
+            }
+            .us-option-anomaly-metric:nth-child(-n+2) {
+                border-bottom: 1px solid #dbe8f7;
+            }
             .us-lab-kpi-strip {
                 grid-template-columns: repeat(3, minmax(0, 1fr));
             }
@@ -988,6 +1374,95 @@ def _underlying_option_label(symbol: str) -> str:
     code = str(symbol or "").upper()
     name = UNDERLYING_DISPLAY_NAMES.get(code)
     return f"{code}  {name}" if name else code
+
+
+def _profile_source_summary(refs: Any) -> str:
+    sources: list[str] = []
+    for ref in refs if isinstance(refs, list) else []:
+        if not isinstance(ref, dict):
+            continue
+        source = str(ref.get("source") or "").strip()
+        if source and source not in sources:
+            sources.append(source)
+    return " + ".join(sources[:3]) if sources else "待更新"
+
+
+def _profile_updated_label(value: Any, as_of_date: Any) -> str:
+    raw = str(value or "").strip()
+    if raw:
+        parsed = pd.to_datetime(raw, errors="coerce")
+        if not pd.isna(parsed):
+            return parsed.strftime("%m/%d %H:%M")
+        return raw[:16]
+    date_text = _format_trade_date(str(as_of_date or ""))
+    return date_text or "待更新"
+
+
+def _render_underlying_profile_card(symbol: str) -> None:
+    profile = _cached_underlying_profile_card(symbol, dt.date.today().strftime("%Y%m%d"))
+    code = str(profile.get("symbol") or symbol or "").upper()
+    name = str(profile.get("name") or code)
+    asset_type = str(profile.get("asset_type") or "stock").lower()
+    type_label = "ETF" if asset_type == "etf" else "个股"
+    if asset_type == "etf":
+        labels = ("ETF特色", "板块风格", "观察重点")
+    else:
+        labels = ("主营业务", "优势", "短板/风险")
+    earnings_date = str(profile.get("earnings_date") or profile.get("next_earnings_date") or "").strip()
+    earnings_time = str(profile.get("earnings_time") or "").strip()
+    earnings_source = str(profile.get("earnings_source") or "").strip()
+    compact_time = earnings_time.split(" · ")[0] if earnings_time else ""
+    earnings = " · ".join(part for part in (earnings_date, compact_time, earnings_source) if part) or "待更新"
+    items = (
+        (labels[0], str(profile.get("business") or "")),
+        (labels[1], str(profile.get("strength") or "")),
+        (labels[2], str(profile.get("risk") or "")),
+    )
+    item_html = "".join(
+        (
+            '<div class="us-underlying-brief-item">'
+            f'<div class="us-underlying-brief-label">{escape(label)}</div>'
+            f'<div class="us-underlying-brief-text">{escape(text)}</div>'
+            "</div>"
+        )
+        for label, text in items
+    )
+    source_summary = _profile_source_summary(profile.get("dynamic_source_refs"))
+    updated_label = _profile_updated_label(profile.get("dynamic_updated_at"), profile.get("dynamic_as_of_date"))
+    recent_catalyst = str(profile.get("recent_catalyst") or "近期变化待更新")
+    recent_risk = str(profile.get("recent_risk") or "近期变化待更新")
+    st.markdown(
+        f"""
+        <div class="us-underlying-brief">
+            <div class="us-underlying-brief-head">
+                <div class="us-underlying-brief-title">
+                    <strong>{escape(code)} · {escape(name)}</strong>
+                    <span>{escape(type_label)}</span>
+                </div>
+                <div class="us-underlying-brief-earnings">
+                    下次财报：{escape(earnings)}
+                </div>
+            </div>
+            <div class="us-underlying-brief-grid">{item_html}</div>
+            <div class="us-underlying-dynamic">
+                <div class="us-underlying-dynamic-grid">
+                    <div class="us-underlying-dynamic-item">
+                        <span class="us-underlying-dynamic-label">近期催化</span>
+                        <div class="us-underlying-dynamic-text">{escape(recent_catalyst)}</div>
+                    </div>
+                    <div class="us-underlying-dynamic-item">
+                        <span class="us-underlying-dynamic-label">近期风险</span>
+                        <div class="us-underlying-dynamic-text">{escape(recent_risk)}</div>
+                    </div>
+                </div>
+                <div class="us-underlying-dynamic-source">
+                    更新于 {escape(updated_label)} / 来源：{escape(source_summary)}
+                </div>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 def _clean_float(value: Any) -> float | None:
@@ -3079,6 +3554,444 @@ def _style_option_table(df: pd.DataFrame):
     return df.style.apply(style_row, axis=1).format(numeric_format, na_rep="-")
 
 
+def _anomaly_tags(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [str(item) for item in value if str(item)]
+    text_value = str(value or "").strip()
+    if not text_value:
+        return []
+    try:
+        loaded = json.loads(text_value)
+    except Exception:
+        return [item.strip() for item in text_value.split(",") if item.strip()]
+    if isinstance(loaded, list):
+        return [str(item) for item in loaded if str(item)]
+    return []
+
+
+def _anomaly_tag_text(value: Any) -> str:
+    tags = _anomaly_tags(value)
+    return " / ".join(tags) if tags else "-"
+
+
+def _anomaly_reason_text(row: pd.Series) -> str:
+    oi_change = pd.to_numeric(pd.Series([row.get("oi_change")]), errors="coerce").iloc[0]
+    oi_prev = pd.to_numeric(pd.Series([row.get("oi_prev")]), errors="coerce").iloc[0]
+    oi_now = pd.to_numeric(pd.Series([row.get("open_interest")]), errors="coerce").iloc[0]
+    oi_multiple = pd.to_numeric(pd.Series([row.get("oi_change_multiple")]), errors="coerce").iloc[0]
+    hist_avg = pd.to_numeric(pd.Series([row.get("historical_avg_oi_change")]), errors="coerce").iloc[0]
+    hist_max = pd.to_numeric(pd.Series([row.get("historical_max_oi_change")]), errors="coerce").iloc[0]
+    tags = set(_anomaly_tags(row.get("tags_json")))
+    parts: list[str] = []
+    if pd.notna(oi_prev) and pd.notna(oi_now) and pd.notna(oi_change):
+        parts.append(f"昨日OI {_fmt_int(oi_prev)} -> 当前 {_fmt_int(oi_now)}，净增 +{_fmt_int(oi_change)}")
+    elif pd.notna(oi_change):
+        parts.append(f"OI净增 +{_fmt_int(oi_change)}")
+    if "新仓突增" in tags:
+        parts.append("昨日基数为0，按新仓突增候选观察")
+    elif pd.notna(oi_multiple) and oi_multiple > 0:
+        parts.append(f"约为历史均增 {oi_multiple:.1f}x")
+    if pd.notna(hist_max) and pd.notna(oi_change) and hist_max >= 0 and oi_change > hist_max:
+        parts.append(f"超过历史最大增 +{_fmt_int(hist_max)}")
+    elif pd.notna(hist_avg) and hist_avg > 0:
+        parts.append(f"历史均增约 +{_fmt_int(hist_avg)}")
+    if "历史样本不足" in tags:
+        parts.append("历史样本不足，需结合后续OI确认")
+    return "；".join(parts) if parts else "-"
+
+
+def _anomaly_display(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame()
+    out = df.copy()
+    out["标签"] = out.get("tags_json", pd.Series([""] * len(out))).apply(_anomaly_tag_text)
+    out["异动原因"] = out.apply(_anomaly_reason_text, axis=1)
+    out["方向"] = out.get("call_put", pd.Series([""] * len(out))).map({"C": "Call", "P": "Put"}).fillna(
+        out.get("call_put", pd.Series([""] * len(out)))
+    )
+    if "display_signal" in out.columns:
+        out["信号"] = out["display_signal"].fillna("").astype(str)
+    else:
+        out["信号"] = out.get("signal_family", pd.Series([""] * len(out))).map(ANOMALY_SIGNAL_FAMILY_LABELS).fillna(
+            out.get("signal_family", pd.Series([""] * len(out)))
+        )
+    out["到期"] = out.get("expiration_date", pd.Series([""] * len(out))).astype(str)
+    out["合约"] = out.get("option_ticker", pd.Series([""] * len(out))).astype(str)
+    out["标的"] = out.get("underlying", pd.Series([""] * len(out))).astype(str)
+    out = out.rename(
+        columns={
+            "anomaly_score": "异常分",
+            "strike": "行权价",
+            "dte": "DTE",
+            "moneyness_pct": "OTM/ITM%",
+            "volume": "成交量",
+            "open_interest": "当前OI",
+            "oi_prev": "昨日OI",
+            "oi_change": "OI净增",
+            "oi_change_pct": "OI净增%",
+            "oi_change_multiple": "OI增量倍数",
+            "historical_avg_oi_change": "历史均增",
+            "historical_max_oi_change": "历史最大增",
+            "volume_oi_ratio": "Volume/OI",
+            "premium_est": "估算权利金",
+            "iv_pct": "IV%",
+            "iv_change_1d": "IV日变",
+            "history_days": "历史天数",
+            "data_gap": "数据缺口",
+        }
+    )
+    columns = [
+        "信号",
+        "标的",
+        "合约",
+        "异动原因",
+        "方向",
+        "行权价",
+        "到期",
+        "DTE",
+        "OTM/ITM%",
+        "成交量",
+        "当前OI",
+        "昨日OI",
+        "OI净增",
+        "OI净增%",
+        "OI增量倍数",
+        "历史均增",
+        "历史最大增",
+        "Volume/OI",
+        "估算权利金",
+        "IV%",
+        "IV日变",
+        "异常分",
+        "历史天数",
+        "标签",
+        "数据缺口",
+    ]
+    return out[[col for col in columns if col in out.columns]]
+
+
+def _style_anomaly_table(df: pd.DataFrame):
+    return df.style.format(
+        {
+            "异常分": "{:,.1f}",
+            "行权价": "{:,.2f}",
+            "DTE": "{:,.0f}",
+            "OTM/ITM%": "{:+.2f}%",
+            "成交量": "{:,.0f}",
+            "当前OI": "{:,.0f}",
+            "昨日OI": "{:,.0f}",
+            "OI净增": "{:+,.0f}",
+            "OI净增%": "{:+.1%}",
+            "OI增量倍数": "{:,.1f}x",
+            "历史均增": "{:,.0f}",
+            "历史最大增": "{:,.0f}",
+            "Volume/OI": "{:,.2f}",
+            "估算权利金": "${:,.0f}",
+            "IV%": "{:,.2f}",
+            "IV日变": "{:+.2f}",
+            "历史天数": "{:,.0f}",
+        },
+        na_rep="-",
+    )
+
+
+def _filter_anomaly_scan(
+    df: pd.DataFrame,
+    *,
+    selected_underlyings: list[str] | tuple[str, ...] | None = None,
+    side_filter: str = "全部",
+    dte_bucket: str = "全部",
+    otm_only: bool = False,
+    selected_tags: list[str] | tuple[str, ...] | None = None,
+    query: str = "",
+) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame()
+    filtered = df.copy()
+    if selected_underlyings:
+        filtered = filtered[filtered["underlying"].isin(selected_underlyings)]
+    side = str(side_filter or "全部")
+    if side in {"Call", "看涨 Call"}:
+        filtered = filtered[filtered["call_put"] == "C"]
+    elif side in {"Put", "看跌 Put"}:
+        filtered = filtered[filtered["call_put"] == "P"]
+    if dte_bucket != "全部":
+        low, high = {"0-7": (0, 7), "8-30": (8, 30), "31-60": (31, 60), "60+": (61, 999), "61-90": (61, 90)}[
+            dte_bucket
+        ]
+        filtered = filtered[pd.to_numeric(filtered["dte"], errors="coerce").between(low, high)]
+    if otm_only:
+        mny = pd.to_numeric(filtered["moneyness_pct"], errors="coerce")
+        filtered = filtered[
+            ((filtered["call_put"] == "C") & (mny > 0))
+            | ((filtered["call_put"] == "P") & (mny < 0))
+        ]
+    clean_query = str(query or "").strip().upper()
+    if clean_query:
+        haystack = (
+            filtered.get("underlying", pd.Series("", index=filtered.index)).fillna("").astype(str).str.upper()
+            + " "
+            + filtered.get("option_ticker", pd.Series("", index=filtered.index)).fillna("").astype(str).str.upper()
+        )
+        filtered = filtered[haystack.str.contains(clean_query, regex=False)]
+    if selected_tags:
+        selected = set(str(tag) for tag in selected_tags)
+        filtered = filtered[filtered["tags_json"].apply(lambda value: bool(set(_anomaly_tags(value)) & selected))]
+    return filtered
+
+
+def _apply_anomaly_thresholds(
+    df: pd.DataFrame,
+    *,
+    min_oi_filter: float,
+) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame()
+    oi = pd.to_numeric(df["oi_change"], errors="coerce").fillna(0)
+    return df[oi >= float(min_oi_filter or 0)].copy()
+
+
+def _anomaly_family_frame(df: pd.DataFrame, family: str, limit: int = 80) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame()
+    scoped = df[df.get("signal_family", "") == family].copy()
+    if scoped.empty:
+        return scoped
+    return scoped.sort_values(["anomaly_score", "premium_est", "oi_change"], ascending=[False, False, False]).head(limit)
+
+
+def _anomaly_oi_candidate_frame(df: pd.DataFrame, limit: int = 80) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame()
+    scoped = df[df.get("signal_family", "") == "oi_build"].copy()
+    if scoped.empty:
+        return scoped
+    scoped = scoped.sort_values(
+        ["anomaly_score", "oi_change_multiple", "oi_change", "premium_est"],
+        ascending=[False, False, False, False],
+    ).drop_duplicates("option_ticker")
+    scoped["display_signal"] = "OI异常增仓"
+    return scoped.head(limit)
+
+
+def _anomaly_underlying_opportunity_frame(df: pd.DataFrame, limit: int = 30) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame()
+    work = df.copy()
+    for col in ("premium_est", "oi_change", "volume_oi_ratio", "anomaly_score", "iv_change_1d"):
+        work[col] = pd.to_numeric(work.get(col), errors="coerce").fillna(0)
+    contract_rows = (
+        work.sort_values(["anomaly_score", "premium_est", "oi_change"], ascending=[False, False, False])
+        .drop_duplicates("option_ticker")
+        .copy()
+    )
+    rows: list[dict[str, Any]] = []
+    for underlying, contracts in contract_rows.groupby("underlying", sort=False):
+        signal_rows = work[work["underlying"] == underlying]
+        call_contracts = contracts[contracts["call_put"] == "C"]
+        put_contracts = contracts[contracts["call_put"] == "P"]
+        call_premium = float(call_contracts["premium_est"].sum())
+        put_premium = float(put_contracts["premium_est"].sum())
+        total_premium = call_premium + put_premium
+        contract_count = int(contracts["option_ticker"].nunique())
+        oi_anomaly = int(signal_rows.loc[signal_rows["signal_family"] == "oi_build", "option_ticker"].nunique())
+        oi_positive = int((contracts["oi_change"] > 0).sum())
+        volume_oi = int(signal_rows.loc[signal_rows["signal_family"] == "volume_oi", "option_ticker"].nunique())
+        premium_hits = int(signal_rows.loc[signal_rows["signal_family"] == "premium", "option_ticker"].nunique())
+        max_oi_multiple = float(pd.to_numeric(signal_rows.get("oi_change_multiple"), errors="coerce").fillna(0).max())
+        iv_move = float(pd.to_numeric(signal_rows.get("iv_change_1d"), errors="coerce").abs().fillna(0).max())
+        if total_premium <= 0:
+            direction = "中性观察"
+            direction_score = 0.0
+        else:
+            direction_score = (call_premium - put_premium) / total_premium
+            if direction_score >= 0.18:
+                direction = "偏多观察"
+            elif direction_score <= -0.18:
+                direction = "偏空观察"
+            else:
+                direction = "双向波动"
+        clues = []
+        if abs(direction_score) >= 0.18:
+            clues.append("Call占优" if direction_score > 0 else "Put占优")
+        if oi_anomaly:
+            clues.append("OI异常增仓")
+        elif oi_positive:
+            clues.append("OI正增")
+        auxiliary_parts = []
+        if volume_oi:
+            auxiliary_parts.append("成交确认")
+        if premium_hits:
+            auxiliary_parts.append("权利金活跃")
+        if iv_move >= 2:
+            auxiliary_parts.append("IV波动")
+        anomaly_score = (
+            min(42.0, oi_anomaly * 10.0)
+            + min(24.0, max_oi_multiple * 2.6)
+            + min(14.0, oi_positive * 0.8)
+            + min(8.0, volume_oi * 0.3)
+            + min(7.0, premium_hits * 0.25)
+            + min(5.0, iv_move * 0.5)
+        )
+        if oi_anomaly <= 0:
+            anomaly_score *= 0.55
+        rows.append(
+            {
+                "标的": underlying,
+                "方向线索": direction,
+                "标的异常分": round(anomaly_score, 1),
+                "OI异常合约": oi_anomaly,
+                "OI净增合约": oi_positive,
+                "最大OI倍数": max_oi_multiple,
+                "辅助信号": " / ".join(auxiliary_parts) if auxiliary_parts else "-",
+                "观察重点": " / ".join(clues) if clues else "无 OI 主信号",
+                "_权利金合计": total_premium,
+                "_异动合约": contract_count,
+            }
+        )
+    if not rows:
+        return pd.DataFrame()
+    return (
+        pd.DataFrame(rows)
+        .sort_values(["标的异常分", "OI异常合约", "最大OI倍数", "_权利金合计"], ascending=[False, False, False, False])
+        .drop(columns=["_权利金合计", "_异动合约"], errors="ignore")
+        .head(limit)
+        .reset_index(drop=True)
+    )
+
+
+def _style_opportunity_table(df: pd.DataFrame):
+    return df.style.format(
+        {
+            "标的异常分": "{:,.1f}",
+            "OI异常合约": "{:,.0f}",
+            "OI净增合约": "{:,.0f}",
+            "最大OI倍数": "{:,.1f}x",
+        },
+        na_rep="-",
+    )
+
+
+def _render_opportunity_board(df: pd.DataFrame) -> None:
+    st.markdown(
+        (
+            '<div class="us-lab-panel">'
+            '<div class="us-option-anomaly-table-title"><strong>标的异常分排行</strong>'
+            "<span>先找股票，再下钻合约证据</span></div>"
+            '<div class="us-option-thesis-note">异常分优先看历史异常 OI 增仓；OI异常合约为 0 的行只是波动率、持仓量、成交量等辅助异常分。方向线索按 Call/Put 权利金倾斜区分，不构成交易建议。</div>'
+        ),
+        unsafe_allow_html=True,
+    )
+    if df is None or df.empty:
+        st.info("当前筛选条件下没有可汇总的标的异常分。")
+    else:
+        st.dataframe(_style_opportunity_table(df), width="stretch", hide_index=True)
+    st.markdown("</div>", unsafe_allow_html=True)
+
+
+def _render_anomaly_board(title: str, df: pd.DataFrame, empty_text: str) -> None:
+    st.markdown(
+        (
+            '<div class="us-lab-panel">'
+            f'<div class="us-option-anomaly-table-title"><strong>{escape(title)}</strong>'
+            "<span>EOD 扫描，不代表主动买入/卖出</span></div>"
+        ),
+        unsafe_allow_html=True,
+    )
+    if df is None or df.empty:
+        st.info(empty_text)
+    else:
+        st.dataframe(
+            _style_anomaly_table(_anomaly_display(df)),
+            width="stretch",
+            hide_index=True,
+        )
+        st.markdown(
+            '<div class="us-option-anomaly-table-foot">合约证据只展示历史样本充足、且今日 OI 增量明显高于平常的合约；EOD OI 只能说明仓位留下，不代表主动买入或卖出。</div>',
+            unsafe_allow_html=True,
+        )
+    st.markdown("</div>", unsafe_allow_html=True)
+
+
+def _anomaly_metric_html(label: str, value: str, detail: str, tone: str = "") -> str:
+    tone_class = f" {tone}" if tone else ""
+    return (
+        f'<div class="us-option-anomaly-metric{tone_class}">'
+        f'<div class="us-option-anomaly-metric-label">{escape(label)}</div>'
+        f'<div class="us-option-anomaly-metric-value">{escape(value)}</div>'
+        f'<div class="us-option-anomaly-metric-detail">{escape(detail)}</div>'
+        "</div>"
+    )
+
+
+def _render_anomaly_update_stamp(*, trade_date: str) -> None:
+    html = f"""
+    <div class="us-option-update-line">
+        <span class="us-option-update-pill">数据更新：{escape(_format_trade_date(trade_date))} EOD</span>
+    </div>
+    """
+    st.markdown(_compact_html_fragment(html), unsafe_allow_html=True)
+
+
+def _anomaly_active_filter_chips(
+    *,
+    selected_underlyings: list[str] | tuple[str, ...] | None,
+    side_filter: str,
+    dte_bucket: str,
+    otm_only: bool,
+    min_oi_filter: float,
+    selected_tags: list[str] | tuple[str, ...] | None,
+    query: str,
+) -> list[str]:
+    chips: list[str] = []
+    if selected_underlyings:
+        chips.append("标的：" + "、".join(selected_underlyings[:4]) + ("…" if len(selected_underlyings) > 4 else ""))
+    if side_filter and side_filter != "全部":
+        chips.append(f"方向：{side_filter}")
+    if dte_bucket and dte_bucket != "全部":
+        chips.append(f"DTE：{dte_bucket}")
+    if otm_only:
+        chips.append("仅 OTM")
+    if min_oi_filter and float(min_oi_filter) != 100:
+        chips.append(f"合约证据 OI：≥ {_fmt_int(min_oi_filter)}")
+    if selected_tags:
+        chips.extend([f"标签：{tag}" for tag in selected_tags[:3]])
+    return chips
+
+
+def _render_anomaly_active_chips(chips: list[str]) -> None:
+    if not chips:
+        return
+    st.markdown(
+        '<div class="us-option-active-chips">'
+        + "".join(f'<span class="us-option-active-chip">{escape(chip)}</span>' for chip in chips)
+        + "</div>",
+        unsafe_allow_html=True,
+    )
+
+
+def _render_oi_coverage_note(oi_candidates: pd.DataFrame, base_filtered: pd.DataFrame) -> None:
+    if base_filtered is None or base_filtered.empty:
+        return
+    if oi_candidates is None or oi_candidates.empty:
+        st.markdown(
+            '<div class="us-option-coverage-note soft"><strong>OI 异常逻辑：</strong>用今日 OI - 昨日 OI 计算增仓，再和该合约最近历史增仓均值/最大值比较；当前筛选下没有达到“明显高于平常”的合约。</div>',
+            unsafe_allow_html=True,
+        )
+        return
+    underlyings = sorted(set(oi_candidates["underlying"].dropna().astype(str)))
+    if len(underlyings) == 1:
+        st.markdown(
+            (
+                '<div class="us-option-coverage-note soft">'
+                f'<strong>OI 异常逻辑：</strong>当前筛选下历史异常增仓合约集中在 {escape(underlyings[0])}。'
+                "这通常是数据口径结果，不是前端漏筛；可放宽标的/期限/OTM 条件观察是否出现其他股票。"
+                "</div>"
+            ),
+            unsafe_allow_html=True,
+        )
+
+
 def _atm_chain_preview(chain_df: pd.DataFrame, selected_expiration: str, underlying_price: float | None) -> pd.DataFrame:
     if chain_df is None or chain_df.empty:
         return pd.DataFrame()
@@ -3211,6 +4124,11 @@ def _cached_engine():
 
 
 @st.cache_data(show_spinner=False, ttl=600)
+def _cached_underlying_profile_card(symbol: str, today_key: str) -> dict[str, Any]:
+    return build_underlying_profile_card(symbol, engine=_cached_engine(), as_of_date=today_key)
+
+
+@st.cache_data(show_spinner=False, ttl=600)
 def _cached_auto_option_source(symbol: str) -> tuple[bool, str | None, str]:
     return _auto_option_source(symbol, _cached_engine())
 
@@ -3292,6 +4210,22 @@ def _cached_market_metrics_history(symbol: str, window: int, use_test_tables: bo
     return load_market_metrics_history(
         symbol,
         window=window,
+        use_test_tables=use_test_tables,
+        engine=_cached_engine(),
+    )
+
+
+@st.cache_data(show_spinner=False, ttl=600)
+def _cached_option_anomaly_scan(
+    trade_date: str,
+    underlyings_key: str,
+    use_test_tables: bool,
+) -> pd.DataFrame:
+    underlyings = [item.strip().upper() for item in str(underlyings_key or "").split(",") if item.strip()]
+    return load_option_anomaly_scan(
+        trade_date=trade_date,
+        underlyings=underlyings,
+        prefer_cache=True,
         use_test_tables=use_test_tables,
         engine=_cached_engine(),
     )
@@ -3412,7 +4346,7 @@ if current_symbol not in symbol_options:
     st.session_state.pop("us_lab_symbol", None)
     current_symbol = symbol_options[0]
 
-view_options = ["总览", "波动率曲面", "持仓防线"]
+view_options = ["总览", "异动雷达", "波动率曲面", "持仓防线"]
 if st.session_state.get("us_lab_active_view") not in view_options:
     st.session_state["us_lab_active_view"] = "总览"
 
@@ -3537,8 +4471,108 @@ if active_view == "总览":
     main_col, rail_col = st.columns([2.55, 1.05], gap="small")
     with main_col:
         _render_lightweight_chart(stock_df, iv_history, symbol, trade_date, current_iv_pct, height=650)
+        _render_underlying_profile_card(symbol)
     with rail_col:
         _render_rail(vol_position_metrics, trade_date)
+
+elif active_view == "异动雷达":
+    scan_df = _cached_option_anomaly_scan(
+        trade_date,
+        ",".join(symbol_options),
+        use_test_tables,
+    )
+    if scan_df.empty:
+        st.info("暂无可展示的期权异动扫描结果。若刚完成日更，可先重建 us_option_anomaly_scan_daily 缓存。")
+    else:
+        selected_underlyings_state = st.session_state.get("us_option_anomaly_underlyings", [])
+        side_filter_state = st.session_state.get("us_option_anomaly_side", "全部")
+        dte_bucket_state = st.session_state.get("us_option_anomaly_dte", "全部")
+        otm_only_state = bool(st.session_state.get("us_option_anomaly_otm", False))
+        min_oi_state = float(st.session_state.get("us_option_anomaly_min_oi", 100) or 0)
+        _render_anomaly_update_stamp(trade_date=trade_date)
+
+        side_options = ["全部", "看涨 Call", "看跌 Put"]
+        side_alias = {"Call": "看涨 Call", "Put": "看跌 Put"}
+        if "us_option_anomaly_side" not in st.session_state:
+            st.session_state["us_option_anomaly_side"] = "全部"
+        if "us_option_anomaly_side" in st.session_state and st.session_state.get("us_option_anomaly_side") in side_alias:
+            st.session_state["us_option_anomaly_side"] = side_alias[st.session_state["us_option_anomaly_side"]]
+        if "us_option_anomaly_side" in st.session_state and st.session_state.get("us_option_anomaly_side") not in side_options:
+            st.session_state["us_option_anomaly_side"] = "全部"
+        dte_options = ["全部", "0-7", "8-30", "31-60", "60+"]
+        if "us_option_anomaly_dte" not in st.session_state:
+            st.session_state["us_option_anomaly_dte"] = "全部"
+        if "us_option_anomaly_dte" in st.session_state and st.session_state.get("us_option_anomaly_dte") == "61-90":
+            st.session_state["us_option_anomaly_dte"] = "60+"
+        if "us_option_anomaly_dte" in st.session_state and st.session_state.get("us_option_anomaly_dte") not in dte_options:
+            st.session_state["us_option_anomaly_dte"] = "全部"
+        with st.expander("筛选", expanded=False):
+            st.markdown('<div class="us-option-filter-copy">默认扫描全部观察池；只在想缩小股票/方向/期限时使用。</div>', unsafe_allow_html=True)
+            f1, f2, f3, f4 = st.columns([1.45, 1.0, 1.2, 0.48], gap="small")
+            with f1:
+                selected_underlyings = st.multiselect(
+                    "股票池",
+                    symbol_options,
+                    default=[],
+                    format_func=_underlying_option_label,
+                    help="留空表示全部观察池。",
+                    key="us_option_anomaly_underlyings",
+                    placeholder="全部观察池",
+                )
+            with f2:
+                side_filter = st.segmented_control(
+                    "方向",
+                    side_options,
+                    key="us_option_anomaly_side",
+                ) or "全部"
+            with f3:
+                st.segmented_control(
+                    "期限",
+                    dte_options,
+                    key="us_option_anomaly_dte",
+                )
+            with f4:
+                st.checkbox("OTM", value=otm_only_state, key="us_option_anomaly_otm")
+            st.number_input("合约证据最小 OI 增量", min_value=0, value=int(min_oi_state), step=50, key="us_option_anomaly_min_oi")
+        selected_underlyings = st.session_state.get("us_option_anomaly_underlyings", [])
+        side_filter = st.session_state.get("us_option_anomaly_side", "全部")
+
+        min_oi_filter = float(st.session_state.get("us_option_anomaly_min_oi", 0) or 0)
+        selected_tags = []
+        base_filtered = _filter_anomaly_scan(
+            scan_df,
+            selected_underlyings=selected_underlyings,
+            side_filter=side_filter,
+            dte_bucket=st.session_state.get("us_option_anomaly_dte", "全部"),
+            otm_only=bool(st.session_state.get("us_option_anomaly_otm", False)),
+            selected_tags=selected_tags,
+            query="",
+        )
+        evidence_filtered = _apply_anomaly_thresholds(
+            base_filtered,
+            min_oi_filter=min_oi_filter,
+        )
+        oi_candidates = _anomaly_oi_candidate_frame(evidence_filtered)
+        opportunity_df = _anomaly_underlying_opportunity_frame(base_filtered)
+        _render_anomaly_active_chips(
+            _anomaly_active_filter_chips(
+                selected_underlyings=selected_underlyings,
+                side_filter=side_filter,
+                dte_bucket=st.session_state.get("us_option_anomaly_dte", "全部"),
+                otm_only=bool(st.session_state.get("us_option_anomaly_otm", False)),
+                min_oi_filter=min_oi_filter,
+                selected_tags=selected_tags,
+                query="",
+            )
+        )
+
+        _render_opportunity_board(opportunity_df)
+        _render_oi_coverage_note(oi_candidates, evidence_filtered)
+        _render_anomaly_board(
+            "OI异常合约证据",
+            oi_candidates,
+            "当前筛选条件下没有持仓量相对历史显著异常增加的合约。",
+        )
 
 elif active_view == "波动率曲面":
     available_dates = _cached_available_option_trade_dates(symbol, use_test_tables, 8)

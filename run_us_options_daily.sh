@@ -19,6 +19,9 @@ US_OPTIONS_CONE_CACHE_TIMEOUT_SECONDS="${US_OPTIONS_CONE_CACHE_TIMEOUT_SECONDS:-
 US_OPTIONS_OI_DEFENSE_CACHE_ENABLED="${US_OPTIONS_OI_DEFENSE_CACHE_ENABLED:-1}"
 US_OPTIONS_OI_DEFENSE_CACHE_WINDOW="${US_OPTIONS_OI_DEFENSE_CACHE_WINDOW:-20}"
 US_OPTIONS_OI_DEFENSE_CACHE_TIMEOUT_SECONDS="${US_OPTIONS_OI_DEFENSE_CACHE_TIMEOUT_SECONDS:-900}"
+US_OPTIONS_PROFILE_CACHE_ENABLED="${US_OPTIONS_PROFILE_CACHE_ENABLED:-1}"
+US_OPTIONS_PROFILE_CACHE_LOOKBACK_DAYS="${US_OPTIONS_PROFILE_CACHE_LOOKBACK_DAYS:-30}"
+US_OPTIONS_PROFILE_CACHE_TIMEOUT_SECONDS="${US_OPTIONS_PROFILE_CACHE_TIMEOUT_SECONDS:-600}"
 
 cd "${APP_DIR}" || exit 1
 
@@ -196,6 +199,37 @@ if [ "${US_OPTIONS_OI_DEFENSE_CACHE_ENABLED}" = "1" ]; then
   rm -f "${TMP_OI_DEFENSE_LOG}"
 else
   echo "US_OPTIONS_OI_DEFENSE_CACHE SKIP: disabled" >> "${LOG_FILE}"
+fi
+
+if [ "${US_OPTIONS_PROFILE_CACHE_ENABLED}" = "1" ]; then
+  TMP_PROFILE_LOG="$(mktemp /tmp/us_options_profile_cache.XXXXXX.log)"
+  PROFILE_RC=0
+  echo "US_OPTIONS_PROFILE_CACHE START: $(date)" >> "${LOG_FILE}"
+  if command -v timeout >/dev/null 2>&1; then
+    timeout --signal=TERM --kill-after=15 "${US_OPTIONS_PROFILE_CACHE_TIMEOUT_SECONDS}" \
+      "${PYTHON_BIN}" -u "scripts/rebuild_us_option_underlying_profile_cache.py" \
+      --underlyings "${US_OPTIONS_UNDERLYINGS}" \
+      --lookback-days "${US_OPTIONS_PROFILE_CACHE_LOOKBACK_DAYS}" \
+      --apply > "${TMP_PROFILE_LOG}" 2>&1
+    PROFILE_RC=$?
+  else
+    "${PYTHON_BIN}" -u "scripts/rebuild_us_option_underlying_profile_cache.py" \
+      --underlyings "${US_OPTIONS_UNDERLYINGS}" \
+      --lookback-days "${US_OPTIONS_PROFILE_CACHE_LOOKBACK_DAYS}" \
+      --apply > "${TMP_PROFILE_LOG}" 2>&1
+    PROFILE_RC=$?
+  fi
+  cat "${TMP_PROFILE_LOG}" >> "${LOG_FILE}"
+  if [ "${PROFILE_RC}" -eq 124 ]; then
+    echo "US_OPTIONS_PROFILE_CACHE WARN: timeout(${US_OPTIONS_PROFILE_CACHE_TIMEOUT_SECONDS}s)" >> "${LOG_FILE}"
+  elif [ "${PROFILE_RC}" -ne 0 ]; then
+    echo "US_OPTIONS_PROFILE_CACHE WARN: rc=${PROFILE_RC}" >> "${LOG_FILE}"
+  else
+    echo "US_OPTIONS_PROFILE_CACHE OK: rc=0" >> "${LOG_FILE}"
+  fi
+  rm -f "${TMP_PROFILE_LOG}"
+else
+  echo "US_OPTIONS_PROFILE_CACHE SKIP: disabled" >> "${LOG_FILE}"
 fi
 
 echo "US_OPTIONS_DAILY END: $(date)" >> "${LOG_FILE}"

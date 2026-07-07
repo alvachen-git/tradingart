@@ -1,6 +1,8 @@
 import json
+import inspect
 import math
 import unittest
+from unittest.mock import patch
 
 import pandas as pd
 from sqlalchemy import create_engine, text
@@ -188,6 +190,261 @@ class UsMarketDashboardDataTests(unittest.TestCase):
                      'provider_snapshot', NULL, 600)
                     """
                 )
+            )
+
+    def _insert_option_anomaly_rows(self):
+        self._create_option_tables(use_test_tables=True)
+        names = dash.option_table_names(True)
+        contracts = [
+            {
+                "option_ticker": "O:SPY260130C00630000",
+                "underlying": "SPY",
+                "call_put": "C",
+                "strike": 630,
+                "expiration_date": "2026-01-30",
+            },
+            {
+                "option_ticker": "O:SPY260130P00570000",
+                "underlying": "SPY",
+                "call_put": "P",
+                "strike": 570,
+                "expiration_date": "2026-01-30",
+            },
+            {
+                "option_ticker": "O:SPY260130C00650000",
+                "underlying": "SPY",
+                "call_put": "C",
+                "strike": 650,
+                "expiration_date": "2026-01-30",
+            },
+            {
+                "option_ticker": "O:SPY260130P00550000",
+                "underlying": "SPY",
+                "call_put": "P",
+                "strike": 550,
+                "expiration_date": "2026-01-30",
+            },
+            {
+                "option_ticker": "O:SPY260130C00610000",
+                "underlying": "SPY",
+                "call_put": "C",
+                "strike": 610,
+                "expiration_date": "2026-01-30",
+            },
+            {
+                "option_ticker": "O:SPY260130P00530000",
+                "underlying": "SPY",
+                "call_put": "P",
+                "strike": 530,
+                "expiration_date": "2026-01-30",
+            },
+        ]
+        history_dates = ["20260108", "20260109", "20260112", "20260113", "20260114"]
+        history_oi = {
+            "O:SPY260130C00630000": [90, 100, 110, 115, 120],
+            "O:SPY260130P00570000": [400, 420, 440, 460, 500],
+            "O:SPY260130C00650000": [0, 0, 0, 0, 0],
+            "O:SPY260130C00610000": [110, 120, 130, 140, 150],
+        }
+        current_rows = [
+            {
+                "trade_date": "20260115",
+                "option_ticker": "O:SPY260130C00630000",
+                "underlying": "SPY",
+                "open": 3.8,
+                "high": 4.8,
+                "low": 3.5,
+                "close": 4.2,
+                "volume": 700,
+                "vwap": 4.5,
+                "transactions": 100,
+                "open_interest": 450,
+                "source": "test",
+                "updated_at": "",
+            },
+            {
+                "trade_date": "20260115",
+                "option_ticker": "O:SPY260130P00570000",
+                "underlying": "SPY",
+                "open": 2.8,
+                "high": 3.4,
+                "low": 2.5,
+                "close": 3.1,
+                "volume": 1500,
+                "vwap": 3.0,
+                "transactions": 80,
+                "open_interest": 100,
+                "source": "test",
+                "updated_at": "",
+            },
+            {
+                "trade_date": "20260115",
+                "option_ticker": "O:SPY260130C00650000",
+                "underlying": "SPY",
+                "open": 4.0,
+                "high": 5.2,
+                "low": 3.9,
+                "close": 5.0,
+                "volume": 200,
+                "vwap": None,
+                "transactions": 20,
+                "open_interest": 0,
+                "source": "test",
+                "updated_at": "",
+            },
+            {
+                "trade_date": "20260115",
+                "option_ticker": "O:SPY260130P00550000",
+                "underlying": "SPY",
+                "open": 1.8,
+                "high": 2.4,
+                "low": 1.6,
+                "close": 2.1,
+                "volume": 120,
+                "vwap": 2.0,
+                "transactions": 12,
+                "open_interest": 80,
+                "source": "test",
+                "updated_at": "",
+            },
+            {
+                "trade_date": "20260115",
+                "option_ticker": "O:SPY260130C00610000",
+                "underlying": "SPY",
+                "open": 1.8,
+                "high": 2.2,
+                "low": 1.7,
+                "close": 2.0,
+                "volume": 20,
+                "vwap": 2.0,
+                "transactions": 5,
+                "open_interest": 160,
+                "source": "test",
+                "updated_at": "",
+            },
+            {
+                "trade_date": "20260115",
+                "option_ticker": "O:SPY260130P00530000",
+                "underlying": "SPY",
+                "open": 1.4,
+                "high": 1.7,
+                "low": 1.3,
+                "close": 1.5,
+                "volume": 20,
+                "vwap": 1.5,
+                "transactions": 4,
+                "open_interest": 180,
+                "source": "test",
+                "updated_at": "",
+            },
+        ]
+        history_rows = []
+        for ticker, oi_values in history_oi.items():
+            for trade_date, open_interest in zip(history_dates, oi_values):
+                history_rows.append(
+                    {
+                        "trade_date": trade_date,
+                        "option_ticker": ticker,
+                        "underlying": "SPY",
+                        "open": 1,
+                        "high": 1,
+                        "low": 1,
+                        "close": 1,
+                        "volume": 10,
+                        "vwap": 1,
+                        "transactions": 1,
+                        "open_interest": open_interest,
+                        "source": "test",
+                        "updated_at": "",
+                    }
+                )
+        history_rows.append(
+            {
+                "trade_date": "20260114",
+                "option_ticker": "O:SPY260130P00550000",
+                "underlying": "SPY",
+                "open": 1,
+                "high": 1,
+                "low": 1,
+                "close": 1,
+                "volume": 10,
+                "vwap": 1,
+                "transactions": 1,
+                "open_interest": 10,
+                "source": "test",
+                "updated_at": "",
+            }
+        )
+        history_rows.append(
+            {
+                "trade_date": "20260114",
+                "option_ticker": "O:SPY260130P00530000",
+                "underlying": "SPY",
+                "open": 1,
+                "high": 1,
+                "low": 1,
+                "close": 1,
+                "volume": 10,
+                "vwap": 1,
+                "transactions": 1,
+                "open_interest": 0,
+                "source": "test",
+                "updated_at": "",
+            }
+        )
+        iv_rows = []
+        for row in [*history_rows, *current_rows]:
+            if row["trade_date"] not in {"20260114", "20260115"}:
+                continue
+            iv_rows.append(
+                {
+                    "trade_date": row["trade_date"],
+                    "option_ticker": row["option_ticker"],
+                    "underlying": "SPY",
+                    "provider_iv": 0.20 if row["trade_date"] == "20260114" else 0.25,
+                    "computed_iv": None,
+                    "iv_source": "provider_snapshot",
+                    "open_interest": row["open_interest"],
+                    "underlying_price": 600,
+                }
+            )
+
+        with self.engine.begin() as conn:
+            conn.execute(
+                text(
+                    f"""
+                    INSERT INTO {names['contracts']}
+                    (option_ticker, underlying, call_put, strike, expiration_date, contract_root,
+                     expiration_type, settlement_type, exercise_style, shares_per_contract, source, updated_at)
+                    VALUES (:option_ticker, :underlying, :call_put, :strike, :expiration_date, 'SPY',
+                            'monthly', 'physical', '', 100, 'test', '')
+                    """
+                ),
+                contracts,
+            )
+            conn.execute(
+                text(
+                    f"""
+                    INSERT INTO {names['daily']}
+                    (trade_date, option_ticker, underlying, open, high, low, close, volume,
+                     vwap, transactions, open_interest, source, updated_at)
+                    VALUES (:trade_date, :option_ticker, :underlying, :open, :high, :low, :close, :volume,
+                            :vwap, :transactions, :open_interest, :source, :updated_at)
+                    """
+                ),
+                [*history_rows, *current_rows],
+            )
+            conn.execute(
+                text(
+                    f"""
+                    INSERT INTO {names['iv']}
+                    (trade_date, option_ticker, underlying, provider_iv, computed_iv,
+                     iv_source, open_interest, underlying_price)
+                    VALUES (:trade_date, :option_ticker, :underlying, :provider_iv, :computed_iv,
+                            :iv_source, :open_interest, :underlying_price)
+                    """
+                ),
+                iv_rows,
             )
 
     def _create_market_climate_tables(self):
@@ -408,6 +665,149 @@ class UsMarketDashboardDataTests(unittest.TestCase):
 
         self.assertEqual(symbols[:4], ["SPY", "QQQ", "DIA", "IWM"])
         self.assertEqual(symbols[4:], sorted(symbols[4:]))
+
+    def test_underlying_profiles_cover_default_dashboard_symbols(self):
+        for symbol in dash.DEFAULT_DASHBOARD_UNDERLYINGS:
+            profile = dash.get_underlying_profile(symbol)
+
+            self.assertEqual(profile["symbol"], symbol)
+            self.assertTrue(profile["name"])
+            self.assertIn(profile["asset_type"], {"stock", "etf"})
+            self.assertTrue(profile["business"])
+            self.assertTrue(profile["strength"])
+            self.assertTrue(profile["risk"])
+            self.assertTrue(profile["next_earnings_date"])
+
+        self.assertEqual(dash.get_underlying_profile("SPY")["next_earnings_date"], dash.ETF_EARNINGS_NOTE)
+        self.assertEqual(dash.get_underlying_profile("AAPL")["next_earnings_date"], dash.STOCK_EARNINGS_NOTE)
+
+    def test_estimate_next_earnings_window_uses_next_quarter_window(self):
+        self.assertEqual(
+            dash.estimate_next_earnings_window(pd.Timestamp("2026-07-07").date()),
+            "估算 2026/07/15-08/15",
+        )
+        self.assertEqual(
+            dash.estimate_next_earnings_window(pd.Timestamp("2026-08-20").date()),
+            "估算 2026/10/15-11/15",
+        )
+
+    def test_nasdaq_earnings_payload_formats_calendar_row(self):
+        payload = dash._nasdaq_earnings_payload(
+            {"time": "time-after-hours", "fiscalQuarterEnding": "Jun/2026", "epsForecast": "$1.35"},
+            pd.Timestamp("2026-08-04").date(),
+        )
+
+        self.assertEqual(payload["date"], "2026/08/04")
+        self.assertEqual(payload["source"], "Nasdaq")
+        self.assertIn("盘后", payload["detail"])
+        self.assertIn("EPS预期 $1.35", payload["detail"])
+        self.assertEqual(payload["is_estimate"], "0")
+
+    def test_underlying_profile_cache_table_creates_and_backfills_columns(self):
+        table = dash.underlying_profile_cache_table(use_test_tables=True)
+        with self.engine.begin() as conn:
+            conn.execute(
+                text(
+                    f"""
+                    CREATE TABLE {table} (
+                        as_of_date TEXT NOT NULL,
+                        underlying TEXT NOT NULL,
+                        PRIMARY KEY (as_of_date, underlying)
+                    )
+                    """
+                )
+            )
+
+        dash.ensure_underlying_profile_cache_table(self.engine, use_test_tables=True)
+
+        columns = dash.table_columns(self.engine, table)
+        for column in [*dash.UNDERLYING_PROFILE_CACHE_COLUMNS, "updated_at"]:
+            self.assertIn(column, columns)
+
+    def test_build_underlying_profile_card_prefers_cached_dynamic_payload(self):
+        dash.replace_underlying_profile_cache(
+            [
+                {
+                    "as_of_date": "20260707",
+                    "underlying": "AAPL",
+                    "earnings_date": "2026/08/04",
+                    "earnings_time": "盘后",
+                    "earnings_source": "Nasdaq",
+                    "recent_catalyst": "测试催化",
+                    "recent_risk": "测试风险",
+                    "dynamic_note": "测试动态",
+                    "source_refs_json": json.dumps([{"source": "Nasdaq", "title": "calendar"}]),
+                }
+            ],
+            as_of_date="20260707",
+            underlyings=["AAPL"],
+            use_test_tables=True,
+            engine=self.engine,
+        )
+
+        with patch.object(dash, "fetch_nasdaq_next_earnings_dates", side_effect=AssertionError("no live fetch")):
+            card = dash.build_underlying_profile_card("AAPL", use_test_tables=True, engine=self.engine)
+
+        self.assertEqual(card["symbol"], "AAPL")
+        self.assertEqual(card["earnings_date"], "2026/08/04")
+        self.assertEqual(card["recent_catalyst"], "测试催化")
+        self.assertEqual(card["dynamic_source_refs"][0]["source"], "Nasdaq")
+
+    def test_build_underlying_profile_card_has_readable_fallback_without_cache(self):
+        card = dash.build_underlying_profile_card(
+            "DIS",
+            as_of_date="20260707",
+            use_test_tables=True,
+            engine=self.engine,
+        )
+
+        self.assertEqual(card["symbol"], "DIS")
+        self.assertIn("估算", card["earnings_date"])
+        self.assertEqual(card["earnings_source"], "估算")
+        self.assertIn("迪士尼", card["recent_catalyst"])
+        self.assertIn("财报前后", card["recent_risk"])
+        self.assertEqual(card["dynamic_source_refs"][0]["source"], "估算")
+
+    def test_rebuild_underlying_profile_cache_falls_back_without_network_or_llm(self):
+        with patch.object(dash, "fetch_nasdaq_next_earnings_dates", return_value={}), patch.object(
+            dash, "_fetch_recent_profile_news_refs", return_value=[]
+        ), patch.dict("os.environ", {"DASHSCOPE_API_KEY": ""}, clear=False):
+            result = dash.rebuild_underlying_profile_cache(
+                underlyings=["AAPL"],
+                as_of_date="20260707",
+                lookback_days=30,
+                apply=True,
+                use_test_tables=True,
+                engine=self.engine,
+            )
+
+        card = dash.build_underlying_profile_card("AAPL", use_test_tables=True, engine=self.engine)
+
+        self.assertEqual(result["status"], "updated")
+        self.assertEqual(result["written"], 1)
+        self.assertIn("估算", card["earnings_date"])
+        self.assertIn("规则摘要", card["dynamic_note"])
+        self.assertTrue(card["recent_catalyst"])
+        self.assertTrue(card["recent_risk"])
+
+    def test_rebuild_underlying_profile_cache_marks_etf_without_company_earnings(self):
+        with patch.object(dash, "fetch_nasdaq_next_earnings_dates", return_value={}), patch.object(
+            dash, "_fetch_recent_profile_news_refs", return_value=[]
+        ), patch.dict("os.environ", {"DASHSCOPE_API_KEY": ""}, clear=False):
+            result = dash.rebuild_underlying_profile_cache(
+                underlyings=["SPY"],
+                as_of_date="20260707",
+                apply=True,
+                use_test_tables=True,
+                engine=self.engine,
+            )
+
+        card = dash.build_underlying_profile_card("SPY", use_test_tables=True, engine=self.engine)
+
+        self.assertEqual(result["written"], 1)
+        self.assertEqual(card["earnings_date"], dash.ETF_EARNINGS_NOTE)
+        self.assertIn("ETF", card["earnings_source"])
+        self.assertIn("ETF没有单一公司财报", card["recent_risk"])
 
     def test_load_market_climate_strip_missing_tables_returns_placeholders(self):
         cards = dash.load_market_climate_strip(engine=self.engine, today=pd.Timestamp("2026-07-01").date())
@@ -828,6 +1228,167 @@ class UsMarketDashboardDataTests(unittest.TestCase):
 
         self.assertTrue(result.empty)
         self.assertIn("call_strike", result.columns)
+
+    def test_compute_option_anomaly_scan_flags_oi_build_volume_premium_and_gaps(self):
+        self._insert_option_anomaly_rows()
+
+        scan = dash.compute_option_anomaly_scan(
+            trade_date="20260115",
+            underlyings=["SPY"],
+            lookback_days=10,
+            max_dte=30,
+            min_volume=0,
+            min_premium=250_000,
+            min_oi_change=50,
+            min_history_days=5,
+            use_test_tables=True,
+            engine=self.engine,
+        )
+
+        self.assertFalse(scan.empty)
+        build_rows = scan[scan["option_ticker"] == "O:SPY260130C00630000"]
+        self.assertEqual(set(build_rows["signal_family"]), {"oi_build", "volume_oi", "premium"})
+        build = build_rows[build_rows["signal_family"] == "oi_build"].iloc[0]
+        self.assertAlmostEqual(float(build["oi_change"]), 330.0)
+        self.assertAlmostEqual(float(build["oi_change_pct"]), 330 / 120)
+        self.assertAlmostEqual(float(build["premium_est"]), 4.5 * 700 * 100)
+        self.assertAlmostEqual(float(build["volume_oi_ratio"]), 700 / 450)
+        self.assertAlmostEqual(float(build["iv_change_1d"]), 5.0)
+        self.assertEqual(int(build["history_days"]), 5)
+        self.assertAlmostEqual(float(build["historical_avg_oi_change"]), 7.5)
+        self.assertAlmostEqual(float(build["historical_max_oi_change"]), 10.0)
+        self.assertAlmostEqual(float(build["oi_change_multiple"]), 44.0)
+        tags = set(json.loads(build["tags_json"]))
+        self.assertTrue(
+            {
+                "OI大幅净增",
+                "OI增量异常",
+                "高于历史均值",
+                "突破历史增量",
+                "Volume>OI",
+                "大额权利金",
+                "OTM埋伏",
+                "近月增仓",
+                "历史新高OI",
+            }
+            <= tags
+        )
+        self.assertNotIn("历史样本不足", tags)
+        self.assertEqual(build["data_gap"], "")
+
+    def test_compute_option_anomaly_scan_handles_decrease_zero_oi_and_short_history(self):
+        self._insert_option_anomaly_rows()
+
+        scan = dash.compute_option_anomaly_scan(
+            trade_date="20260115",
+            underlyings=["SPY"],
+            lookback_days=10,
+            max_dte=30,
+            min_volume=0,
+            min_premium=250_000,
+            min_oi_change=50,
+            min_history_days=5,
+            use_test_tables=True,
+            engine=self.engine,
+        )
+
+        decrease_rows = scan[scan["option_ticker"] == "O:SPY260130P00570000"]
+        self.assertEqual(set(decrease_rows["signal_family"]), {"volume_oi", "premium"})
+        self.assertNotIn("oi_build", set(decrease_rows["signal_family"]))
+        self.assertLess(float(decrease_rows["oi_change"].iloc[0]), 0)
+
+        zero_oi = scan[scan["option_ticker"] == "O:SPY260130C00650000"]
+        self.assertEqual(set(zero_oi["signal_family"]), {"volume_oi"})
+        self.assertAlmostEqual(float(zero_oi["open_interest"].iloc[0]), 0.0)
+        self.assertAlmostEqual(float(zero_oi["volume_oi_ratio"].iloc[0]), 200.0)
+        self.assertAlmostEqual(float(zero_oi["premium_est"].iloc[0]), 5.0 * 200 * 100)
+
+        sparse_rows = scan[scan["option_ticker"] == "O:SPY260130P00550000"]
+        self.assertEqual(set(sparse_rows["signal_family"]), {"volume_oi"})
+        self.assertNotIn("oi_build", set(sparse_rows["signal_family"]))
+        sparse = sparse_rows.iloc[0]
+        sparse_tags = set(json.loads(sparse["tags_json"]))
+        self.assertIn("历史样本不足", sparse_tags)
+        self.assertIn("insufficient_oi_history", sparse["data_gap"])
+        self.assertIn("OTM埋伏", sparse_tags)
+        self.assertEqual(int(sparse["history_days"]), 1)
+
+        normal_positive = scan[scan["option_ticker"] == "O:SPY260130C00610000"]
+        self.assertTrue(normal_positive.empty)
+
+        new_position = scan[
+            (scan["option_ticker"] == "O:SPY260130P00530000")
+            & (scan["signal_family"] == "oi_build")
+        ].iloc[0]
+        new_position_tags = set(json.loads(new_position["tags_json"]))
+        self.assertAlmostEqual(float(new_position["oi_change"]), 180.0)
+        self.assertIn("新仓突增", new_position_tags)
+        self.assertIn("历史样本不足", new_position_tags)
+        self.assertIn("OI增量异常", new_position_tags)
+
+    def test_option_anomaly_cache_rebuild_is_idempotent_for_same_day(self):
+        self._insert_option_anomaly_rows()
+
+        first = dash.rebuild_option_anomaly_scan_cache(
+            trade_date="20260115",
+            underlyings=["SPY"],
+            lookback_days=10,
+            max_dte=30,
+            min_volume=0,
+            min_premium=250_000,
+            min_oi_change=50,
+            min_history_days=5,
+            use_test_tables=True,
+            engine=self.engine,
+        )
+        second = dash.rebuild_option_anomaly_scan_cache(
+            trade_date="20260115",
+            underlyings=["SPY"],
+            lookback_days=10,
+            max_dte=30,
+            min_volume=0,
+            min_premium=250_000,
+            min_oi_change=50,
+            min_history_days=5,
+            use_test_tables=True,
+            engine=self.engine,
+        )
+        table = dash.option_anomaly_scan_cache_table(use_test_tables=True)
+        with self.engine.connect() as conn:
+            row_count = conn.execute(text(f"SELECT COUNT(*) FROM {table}")).scalar()
+            dupes = conn.execute(
+                text(
+                    f"""
+                    SELECT COUNT(*) FROM (
+                        SELECT trade_date, option_ticker, signal_family, COUNT(*) AS n
+                        FROM {table}
+                        GROUP BY trade_date, option_ticker, signal_family
+                        HAVING n > 1
+                    ) d
+                    """
+                )
+            ).scalar()
+
+        cached = dash.load_option_anomaly_scan(
+            trade_date="20260115",
+            underlyings=["SPY"],
+            prefer_cache=True,
+            use_test_tables=True,
+            engine=self.engine,
+        )
+
+        self.assertEqual(first["status"], "updated")
+        self.assertEqual(first["rows"], second["rows"])
+        self.assertEqual(row_count, first["rows"])
+        self.assertEqual(dupes, 0)
+        self.assertEqual(len(cached), first["rows"])
+
+    def test_option_anomaly_source_query_has_no_raw_limit_before_filtering(self):
+        source = inspect.getsource(dash._select_option_anomaly_source_rows)
+
+        self.assertNotIn("LIMIT", source.upper())
+        self.assertIn("WHERE d.trade_date = :trade_date", source)
+        self.assertIn("d.underlying IN", source)
 
     def test_load_option_chain_daily_normalizes_iv_and_cycle(self):
         self._create_option_tables(use_test_tables=True)
