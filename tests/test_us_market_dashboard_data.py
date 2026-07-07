@@ -681,6 +681,11 @@ class UsMarketDashboardDataTests(unittest.TestCase):
         self.assertEqual(dash.get_underlying_profile("SPY")["next_earnings_date"], dash.ETF_EARNINGS_NOTE)
         self.assertEqual(dash.get_underlying_profile("AAPL")["next_earnings_date"], dash.STOCK_EARNINGS_NOTE)
 
+    def test_format_profile_updated_at_uses_beijing_time(self):
+        self.assertEqual(dash.format_profile_updated_at_beijing("2026-07-07 15:05:00"), "07/07 23:05")
+        self.assertEqual(dash.format_profile_updated_at_beijing("2026-07-07T15:05:00Z"), "07/07 23:05")
+        self.assertEqual(dash.format_profile_updated_at_beijing("", "20260707"), "2026/07/07")
+
     def test_estimate_next_earnings_window_uses_next_quarter_window(self):
         self.assertEqual(
             dash.estimate_next_earnings_window(pd.Timestamp("2026-07-07").date()),
@@ -702,6 +707,73 @@ class UsMarketDashboardDataTests(unittest.TestCase):
         self.assertIn("盘后", payload["detail"])
         self.assertIn("EPS预期 $1.35", payload["detail"])
         self.assertEqual(payload["is_estimate"], "0")
+
+    def test_profile_source_ref_classifies_analyst_catalyst_and_risk(self):
+        catalyst = dash._classify_profile_source_ref(
+            {"source": "Web Search", "title": "Analyst upgrades Disney and raises price target on streaming profit"}
+        )
+        risk = dash._classify_profile_source_ref(
+            {"source": "Web Search", "title": "Analyst cuts target as regulatory probe pressures shares"}
+        )
+
+        self.assertEqual(catalyst["kind"], "analyst")
+        self.assertEqual(catalyst["side"], "catalyst")
+        self.assertEqual(risk["kind"], "analyst")
+        self.assertEqual(risk["side"], "risk")
+
+    def test_profile_dynamic_v2_fallback_uses_analyst_news_and_options_context(self):
+        profile = dash.get_underlying_profile("DIS")
+        refs = [
+            dash._classify_profile_source_ref(
+                {
+                    "source": "Web Search",
+                    "title": "Analyst upgrades Disney on streaming profit and theme park demand",
+                    "summary": "Public report says analyst view improved after streaming margins recovered.",
+                }
+            )
+        ]
+        options_context = {
+            "summary": "ATM IV 31.0%；Put/Call OI 1.35，保护需求偏高。",
+            "refs": [{"source": "本地期权指标", "title": "ATM IV 31.0%"}],
+        }
+
+        out = dash._fallback_profile_dynamic_v2(
+            profile=profile,
+            earnings_date="2026/08/06",
+            earnings_time="盘后",
+            options_context=options_context,
+            refs=refs,
+            lookback_days=30,
+        )
+
+        self.assertIn("公开报道/分析师", out["recent_catalyst"])
+        self.assertIn("Put/Call OI", out["recent_catalyst"])
+        self.assertTrue(out["recent_risk"])
+        self.assertEqual(out["confidence"], "medium")
+
+    def test_profile_dynamic_v2_uses_llm_json_when_valid(self):
+        profile = dash.get_underlying_profile("AMD")
+        with patch.object(
+            dash,
+            "_build_profile_llm_json",
+            return_value={
+                "recent_catalyst": "分析师关注AI GPU出货与财报指引，Call端追涨溢价同步抬升。",
+                "recent_risk": "若AI订单兑现不及预期，当前较高IV可能在财报后快速回落。",
+                "confidence": "high",
+            },
+        ):
+            out = dash._summarize_profile_dynamic_v2(
+                profile=profile,
+                earnings_date="2026/08/04",
+                earnings_time="盘后",
+                options_context={"summary": "ATM IV 78.0%；Call Skew +2.0。"},
+                refs=[{"source": "Web Search", "title": "Analyst raises AMD target"}],
+                lookback_days=30,
+            )
+
+        self.assertIn("AI GPU", out["recent_catalyst"])
+        self.assertIn("IV", out["recent_risk"])
+        self.assertEqual(out["confidence"], "high")
 
     def test_underlying_profile_cache_table_creates_and_backfills_columns(self):
         table = dash.underlying_profile_cache_table(use_test_tables=True)
@@ -771,6 +843,8 @@ class UsMarketDashboardDataTests(unittest.TestCase):
     def test_rebuild_underlying_profile_cache_falls_back_without_network_or_llm(self):
         with patch.object(dash, "fetch_nasdaq_next_earnings_dates", return_value={}), patch.object(
             dash, "_fetch_recent_profile_news_refs", return_value=[]
+        ), patch.object(
+            dash, "_collect_profile_web_search_context", return_value=[]
         ), patch.dict("os.environ", {"DASHSCOPE_API_KEY": ""}, clear=False):
             result = dash.rebuild_underlying_profile_cache(
                 underlyings=["AAPL"],
@@ -786,13 +860,15 @@ class UsMarketDashboardDataTests(unittest.TestCase):
         self.assertEqual(result["status"], "updated")
         self.assertEqual(result["written"], 1)
         self.assertIn("估算", card["earnings_date"])
-        self.assertIn("规则摘要", card["dynamic_note"])
+        self.assertIn("V2", card["dynamic_note"])
         self.assertTrue(card["recent_catalyst"])
         self.assertTrue(card["recent_risk"])
 
     def test_rebuild_underlying_profile_cache_marks_etf_without_company_earnings(self):
         with patch.object(dash, "fetch_nasdaq_next_earnings_dates", return_value={}), patch.object(
             dash, "_fetch_recent_profile_news_refs", return_value=[]
+        ), patch.object(
+            dash, "_collect_profile_web_search_context", return_value=[]
         ), patch.dict("os.environ", {"DASHSCOPE_API_KEY": ""}, clear=False):
             result = dash.rebuild_underlying_profile_cache(
                 underlyings=["SPY"],
@@ -808,6 +884,44 @@ class UsMarketDashboardDataTests(unittest.TestCase):
         self.assertEqual(card["earnings_date"], dash.ETF_EARNINGS_NOTE)
         self.assertIn("ETF", card["earnings_source"])
         self.assertIn("ETF没有单一公司财报", card["recent_risk"])
+
+    def test_rebuild_underlying_profile_cache_combines_news_web_and_llm_summary(self):
+        analyst_ref = dash._classify_profile_source_ref(
+            {"source": "Web Search", "title": "Analyst upgrades Disney after streaming profit improves"}
+        )
+        news_ref = dash._classify_profile_source_ref(
+            {"source": "Yahoo Finance News", "title": "Disney parks demand remains resilient"}
+        )
+        with patch.object(dash, "fetch_nasdaq_next_earnings_dates", return_value={}), patch.object(
+            dash, "_collect_profile_news_context", return_value=[news_ref]
+        ), patch.object(
+            dash, "_collect_profile_web_search_context", return_value=[analyst_ref]
+        ), patch.object(
+            dash,
+            "_build_profile_llm_json",
+            return_value={
+                "recent_catalyst": "分析师上调叠加乐园需求韧性，期权端关注财报前IV升温。",
+                "recent_risk": "若流媒体利润或乐园客流低于预期，事件后IV回落风险较高。",
+                "confidence": "high",
+            },
+        ):
+            result = dash.rebuild_underlying_profile_cache(
+                underlyings=["DIS"],
+                as_of_date="20260707",
+                apply=True,
+                use_test_tables=True,
+                engine=self.engine,
+            )
+
+        card = dash.build_underlying_profile_card("DIS", use_test_tables=True, engine=self.engine)
+        source_kinds = {ref.get("kind") for ref in card["dynamic_source_refs"]}
+
+        self.assertEqual(result["written"], 1)
+        self.assertEqual(result["news_refs"], 1)
+        self.assertEqual(result["web_refs"], 1)
+        self.assertIn("分析师上调", card["recent_catalyst"])
+        self.assertIn("IV回落", card["recent_risk"])
+        self.assertIn("analyst", source_kinds)
 
     def test_load_market_climate_strip_missing_tables_returns_placeholders(self):
         cards = dash.load_market_climate_strip(engine=self.engine, today=pd.Timestamp("2026-07-01").date())

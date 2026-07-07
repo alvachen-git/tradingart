@@ -522,6 +522,9 @@ UNDERLYING_PROFILE_CACHE_COLUMNS = [
     "dynamic_note",
     "source_refs_json",
 ]
+PROFILE_NEWS_MAX_ITEMS_DEFAULT = 6
+PROFILE_WEB_SEARCH_MAX_QUERIES_DEFAULT = 2
+PROFILE_DISPLAY_TZ = dt.timezone(dt.timedelta(hours=8), "Asia/Shanghai")
 MARKET_METRICS_COLUMNS = [
     "trade_date",
     "underlying",
@@ -949,7 +952,7 @@ def _source_refs_json(refs: list[dict[str, Any]]) -> str:
         if not isinstance(ref, dict):
             continue
         clean: dict[str, str] = {}
-        for key in ("source", "title", "date", "url"):
+        for key in ("source", "title", "date", "url", "kind", "side", "summary", "confidence"):
             value = str(ref.get(key) or "").strip()
             if value:
                 clean[key] = value
@@ -976,6 +979,49 @@ def _parse_source_refs_json(value: Any) -> list[dict[str, str]]:
     return out
 
 
+def _profile_env_int(name: str, default: int, *, min_value: int = 0, max_value: int = 100) -> int:
+    raw = str(os.getenv(name, "") or "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return min(max(value, min_value), max_value)
+
+
+def _profile_env_enabled(name: str, default: str = "1") -> bool:
+    return str(os.getenv(name, default) or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _source_ref_key(ref: dict[str, Any]) -> str:
+    title = re.sub(r"\s+", " ", str(ref.get("title") or "").strip().lower())
+    url = str(ref.get("url") or "").strip().lower()
+    return url or title
+
+
+def _dedupe_source_refs(refs: list[dict[str, Any]], limit: int | None = None) -> list[dict[str, str]]:
+    out: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for ref in refs:
+        if not isinstance(ref, dict):
+            continue
+        key = _source_ref_key(ref)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        clean: dict[str, str] = {}
+        for field in ("source", "title", "date", "url", "kind", "side", "summary", "confidence"):
+            value = str(ref.get(field) or "").strip()
+            if value:
+                clean[field] = value[:500]
+        if clean.get("title") or clean.get("summary"):
+            out.append(clean)
+        if limit is not None and len(out) >= limit:
+            break
+    return out
+
+
 def _first_sentence(text_value: str, max_len: int = 72) -> str:
     text_value = re.sub(r"\s+", " ", str(text_value or "")).strip()
     if not text_value:
@@ -984,6 +1030,107 @@ def _first_sentence(text_value: str, max_len: int = 72) -> str:
     if match:
         return text_value[: match.end()].strip()
     return text_value[:max_len].strip()
+
+
+_PROFILE_ANALYST_PATTERNS = (
+    "analyst",
+    "upgrade",
+    "downgrade",
+    "price target",
+    "target price",
+    "initiates",
+    "reiterates",
+    "maintains",
+    "raises target",
+    "cuts target",
+    "评级",
+    "目标价",
+    "上调",
+    "下调",
+    "买入",
+    "增持",
+    "中性",
+    "跑赢",
+    "跑输",
+)
+_PROFILE_RISK_PATTERNS = (
+    "downgrade",
+    "cuts target",
+    "lawsuit",
+    "probe",
+    "investigation",
+    "regulatory",
+    "antitrust",
+    "delay",
+    "weak",
+    "miss",
+    "pressure",
+    "competition",
+    "tariff",
+    "recall",
+    "ban",
+    "decline",
+    "下调",
+    "降级",
+    "诉讼",
+    "调查",
+    "监管",
+    "反垄断",
+    "延迟",
+    "疲软",
+    "竞争",
+    "成本",
+    "关税",
+    "召回",
+    "下滑",
+    "风险",
+)
+_PROFILE_CATALYST_PATTERNS = (
+    "upgrade",
+    "raises target",
+    "beat",
+    "beats",
+    "raises guidance",
+    "launch",
+    "partnership",
+    "approval",
+    "demand",
+    "record",
+    "buyback",
+    "dividend",
+    "ai",
+    "上调",
+    "获批",
+    "发布",
+    "合作",
+    "需求",
+    "增长",
+    "盈利",
+    "回购",
+    "分红",
+    "超预期",
+)
+
+
+def _classify_profile_source_ref(ref: dict[str, Any]) -> dict[str, str]:
+    title = str(ref.get("title") or "")
+    summary = str(ref.get("summary") or "")
+    text_value = f"{title} {summary}".lower()
+    kind = "analyst" if any(token in text_value for token in _PROFILE_ANALYST_PATTERNS) else str(ref.get("kind") or "news")
+    has_risk = any(token in text_value for token in _PROFILE_RISK_PATTERNS)
+    has_catalyst = any(token in text_value for token in _PROFILE_CATALYST_PATTERNS)
+    if has_risk and not has_catalyst:
+        side = "risk"
+    elif has_catalyst and not has_risk:
+        side = "catalyst"
+    elif has_catalyst and has_risk:
+        side = "mixed"
+    else:
+        side = str(ref.get("side") or "neutral")
+    out = dict(ref)
+    out["kind"] = kind
+    out["side"] = side
+    return {str(key): str(value) for key, value in out.items() if value is not None}
 
 
 def _latest_profile_metric_snapshot(
@@ -1094,6 +1241,164 @@ def _fetch_recent_profile_news_refs(
     return refs
 
 
+def _load_local_profile_news_refs(
+    underlying: str,
+    profile: dict[str, str],
+    *,
+    engine=None,
+    max_items: int = PROFILE_NEWS_MAX_ITEMS_DEFAULT,
+) -> list[dict[str, str]]:
+    engine = engine or dashboard_engine()
+    if engine is None or not table_exists(engine, "stock_news"):
+        return []
+    columns = table_columns(engine, "stock_news")
+    if not {"title"}.issubset(columns):
+        return []
+    selected = [
+        _select_expr(columns, "title"),
+        _select_expr(columns, "description", "summary"),
+        _select_expr(columns, "publishedDate", "date"),
+        _select_expr(columns, "source"),
+        _select_expr(columns, "url"),
+        _select_expr(columns, "tickers"),
+    ]
+    code = normalize_underlying(underlying)
+    name = str(profile.get("name") or code)
+    params = {
+        "code": code,
+        "name": name,
+        "like_code": f"%{code}%",
+        "like_name": f"%{name}%",
+        "limit": max(1, min(int(max_items or PROFILE_NEWS_MAX_ITEMS_DEFAULT), 20)),
+    }
+    where_parts = ["title LIKE :like_code", "title LIKE :like_name"]
+    if "tickers" in columns:
+        where_parts.extend(["tickers = :code", "tickers = :name"])
+    sql = text(
+        f"""
+        SELECT {", ".join(selected)}
+        FROM stock_news
+        WHERE {" OR ".join(where_parts)}
+        ORDER BY date DESC
+        LIMIT :limit
+        """
+    )
+    try:
+        df = pd.read_sql(sql, engine, params=params)
+    except Exception:
+        return []
+    refs: list[dict[str, str]] = []
+    for row in df.to_dict(orient="records"):
+        title = str(row.get("title") or "").strip()
+        summary = str(row.get("summary") or "").strip()
+        if not title and not summary:
+            continue
+        refs.append(
+            _classify_profile_source_ref(
+                {
+                    "source": str(row.get("source") or "本地新闻库"),
+                    "title": title[:180],
+                    "summary": summary[:260],
+                    "date": str(row.get("date") or "")[:16],
+                    "url": str(row.get("url") or ""),
+                    "kind": "news",
+                }
+            )
+        )
+    return refs
+
+
+def _collect_profile_news_context(
+    underlying: str,
+    profile: dict[str, str],
+    *,
+    lookback_days: int,
+    engine=None,
+) -> list[dict[str, str]]:
+    max_items = _profile_env_int(
+        "US_OPTIONS_PROFILE_NEWS_MAX_ITEMS",
+        PROFILE_NEWS_MAX_ITEMS_DEFAULT,
+        min_value=1,
+        max_value=20,
+    )
+    refs = []
+    refs.extend(
+        _fetch_recent_profile_news_refs(
+            underlying,
+            lookback_days=lookback_days,
+            max_items=max_items,
+        )
+    )
+    refs.extend(
+        _load_local_profile_news_refs(
+            underlying,
+            profile,
+            engine=engine,
+            max_items=max_items,
+        )
+    )
+    return [_classify_profile_source_ref(ref) for ref in _dedupe_source_refs(refs, limit=max_items)]
+
+
+def _profile_web_search_queries(profile: dict[str, str], *, lookback_days: int) -> list[str]:
+    code = str(profile.get("symbol") or "").upper()
+    name = str(profile.get("name") or code)
+    is_etf = str(profile.get("asset_type") or "").lower() == "etf"
+    if is_etf:
+        return [
+            f"{code} {name} ETF latest sector macro flow volatility news last {lookback_days} days",
+            f"{code} {name} ETF holdings sector risk latest news",
+        ]
+    return [
+        f"{code} {name} latest news analyst upgrade downgrade price target earnings guidance last {lookback_days} days",
+        f"{code} {name} recent catalyst risk earnings analyst says",
+    ]
+
+
+def _collect_profile_web_search_context(
+    profile: dict[str, str],
+    *,
+    lookback_days: int,
+) -> list[dict[str, str]]:
+    if not _profile_env_enabled("US_OPTIONS_PROFILE_WEB_SEARCH_ENABLED", "1"):
+        return []
+    if not os.getenv("ZHIPUAI_API_KEY"):
+        return []
+    max_queries = _profile_env_int(
+        "US_OPTIONS_PROFILE_WEB_SEARCH_MAX_QUERIES",
+        PROFILE_WEB_SEARCH_MAX_QUERIES_DEFAULT,
+        min_value=0,
+        max_value=5,
+    )
+    if max_queries <= 0:
+        return []
+    try:
+        import search_tools
+    except Exception:
+        return []
+    refs: list[dict[str, str]] = []
+    for query in _profile_web_search_queries(profile, lookback_days=lookback_days)[:max_queries]:
+        try:
+            answer = search_tools._search_web_impl(query)  # type: ignore[attr-defined]
+        except Exception:
+            answer = ""
+        answer = re.sub(r"\s+", " ", str(answer or "")).strip()
+        if not answer or answer.startswith("❌") or "未搜索到相关内容" in answer:
+            continue
+        refs.append(
+            _classify_profile_source_ref(
+                {
+                    "source": "Web Search",
+                    "title": query,
+                    "summary": answer[:420],
+                    "date": dt.date.today().strftime("%Y/%m/%d"),
+                    "kind": "search",
+                }
+            )
+        )
+    return _dedupe_source_refs(refs, limit=max_queries)
+
+
 def _build_profile_llm_note(
     *,
     profile: dict[str, str],
@@ -1131,6 +1436,269 @@ def _build_profile_llm_note(
         return text_value[:120]
     except Exception:
         return ""
+
+
+def _profile_options_context(
+    underlying: str,
+    *,
+    metrics: dict[str, Any] | None,
+    as_of_date: str,
+    engine=None,
+    use_test_tables: bool = False,
+) -> dict[str, Any]:
+    metric_parts: list[str] = []
+    metrics = metrics or {}
+    atm_iv = _clean_number(metrics.get("atm_iv_pct"))
+    iv_change = _clean_number(metrics.get("iv_change_1d"))
+    iv_rv = _clean_number(metrics.get("iv_rv20_spread"))
+    put_call_oi = _clean_number(metrics.get("put_call_oi"))
+    put_call_volume = _clean_number(metrics.get("put_call_volume"))
+    zero_dte = _clean_number(metrics.get("zero_dte_volume_share_pct"))
+    put_skew = _clean_number(metrics.get("put_skew_5pct"))
+    call_skew = _clean_number(metrics.get("call_skew_5pct"))
+    if atm_iv is not None:
+        metric_parts.append(f"ATM IV {atm_iv:.1f}%")
+    if iv_change is not None and abs(iv_change) >= 0.05:
+        metric_parts.append(f"IV较前日{'升' if iv_change > 0 else '降'}{abs(iv_change):.1f}点")
+    if iv_rv is not None:
+        metric_parts.append(f"IV-RV20 {iv_rv:+.1f}点")
+    if put_call_oi is not None:
+        if put_call_oi >= 1.2:
+            metric_parts.append(f"Put/Call OI {put_call_oi:.2f}，保护需求偏高")
+        elif put_call_oi <= 0.8:
+            metric_parts.append(f"Put/Call OI {put_call_oi:.2f}，看涨仓位更活跃")
+        else:
+            metric_parts.append(f"Put/Call OI {put_call_oi:.2f}，仓位相对均衡")
+    if put_call_volume is not None and put_call_volume >= 1.2:
+        metric_parts.append(f"Put/Call成交 {put_call_volume:.2f}，短线避险成交增加")
+    if call_skew is not None and call_skew > 0:
+        metric_parts.append(f"Call Skew {call_skew:+.1f}，上方追涨溢价抬升")
+    if put_skew is not None and put_skew > 0:
+        metric_parts.append(f"Put Skew {put_skew:+.1f}，下方保护溢价抬升")
+    if zero_dte is not None and zero_dte >= 15:
+        metric_parts.append(f"0DTE占比约{zero_dte:.1f}%，盘中波动放大")
+
+    anomaly_parts: list[str] = []
+    trade_date = normalize_trade_date(metrics.get("trade_date")) or normalize_trade_date(as_of_date)
+    if engine is not None and trade_date:
+        try:
+            scan = load_option_anomaly_scan_cache(
+                trade_date,
+                underlyings=[underlying],
+                use_test_tables=use_test_tables,
+                engine=engine,
+            )
+        except Exception:
+            scan = _empty_df(OPTION_ANOMALY_SCAN_COLUMNS)
+        if scan is not None and not scan.empty:
+            for row in scan.head(3).to_dict(orient="records"):
+                side = "Call" if str(row.get("call_put") or "").upper() == "C" else "Put"
+                tags = []
+                try:
+                    tags = json.loads(str(row.get("tags_json") or "[]"))
+                except Exception:
+                    tags = []
+                tag_text = "、".join(str(tag) for tag in tags[:2]) if isinstance(tags, list) else ""
+                strike = _clean_number(row.get("strike"))
+                score = _clean_number(row.get("anomaly_score"))
+                label = f"{side} {strike:g}" if strike is not None else side
+                if tag_text:
+                    label = f"{label} {tag_text}"
+                if score is not None:
+                    label = f"{label} score {score:.0f}"
+                anomaly_parts.append(label)
+
+    summary_parts = [*metric_parts[:4]]
+    if anomaly_parts:
+        summary_parts.append("异动：" + "；".join(anomaly_parts[:2]))
+    summary = "；".join(summary_parts) + "。" if summary_parts else "本地期权指标暂无最新样本。"
+    return {
+        "summary": summary,
+        "metrics": metrics,
+        "anomalies": anomaly_parts,
+        "refs": [
+            {
+                "source": "本地期权指标",
+                "title": summary,
+                "date": trade_date or as_of_date,
+                "kind": "options",
+                "side": "mixed" if anomaly_parts else "neutral",
+            }
+        ],
+    }
+
+
+def _json_from_llm_text(value: Any) -> dict[str, Any]:
+    text_value = str(value or "").strip()
+    if not text_value:
+        return {}
+    text_value = re.sub(r"^```(?:json)?|```$", "", text_value, flags=re.I | re.M).strip()
+    match = re.search(r"\{.*\}", text_value, flags=re.S)
+    if match:
+        text_value = match.group(0)
+    try:
+        data = json.loads(text_value)
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _build_profile_llm_json(
+    *,
+    profile: dict[str, str],
+    earnings_date: str,
+    earnings_time: str,
+    options_context: dict[str, Any],
+    refs: list[dict[str, str]],
+) -> dict[str, Any]:
+    if not _profile_env_enabled("US_OPTIONS_PROFILE_LLM_ENABLED", "1"):
+        return {}
+    if not os.getenv("DASHSCOPE_API_KEY"):
+        return {}
+    try:
+        from llm_compat import build_report_tongyi_llm
+
+        source_lines = []
+        for idx, ref in enumerate(refs[:8], start=1):
+            title = str(ref.get("title") or "").strip()
+            summary = str(ref.get("summary") or "").strip()
+            source = str(ref.get("source") or "").strip()
+            date_text = str(ref.get("date") or "").strip()
+            side = str(ref.get("side") or "").strip()
+            kind = str(ref.get("kind") or "").strip()
+            line = f"{idx}. [{source} {date_text} {kind} {side}] {title}"
+            if summary and summary != title:
+                line = f"{line} - {summary[:260]}"
+            source_lines.append(line)
+        prompt = f"""
+请为美股期权标的资料卡生成两句中文摘要，必须只基于输入资料，不给买卖建议，不编造机构名、评级或目标价。
+
+标的：{profile.get('symbol')} {profile.get('name')}，类型：{profile.get('asset_type')}
+固定业务：{profile.get('business')}
+长期优势：{profile.get('strength')}
+长期风险：{profile.get('risk')}
+下次财报：{earnings_date} {earnings_time}
+期权数据：{options_context.get('summary')}
+近期来源：
+{chr(10).join(source_lines) if source_lines else '无'}
+
+输出严格 JSON，不要 Markdown：
+{{
+  "recent_catalyst": "一句，30-75个中文字符，结合近期事件/分析师观点/财报或期权数据，说明市场在交易什么正向催化",
+  "recent_risk": "一句，30-75个中文字符，结合近期事件/分析师观点/财报或期权数据，说明主要风险或反向验证点",
+  "used_refs": ["最多3个来源编号"],
+  "confidence": "high|medium|low"
+}}
+""".strip()
+        llm = build_report_tongyi_llm(
+            env_prefix="US_OPTIONS_PROFILE",
+            default_model=os.getenv("US_OPTIONS_PROFILE_LLM_MODEL") or "qwen-plus",
+            temperature=0.1,
+            request_timeout=30,
+            max_retries=0,
+        )
+        msg = llm.invoke(prompt)
+        data = _json_from_llm_text(getattr(msg, "content", msg))
+    except Exception:
+        return {}
+    catalyst = re.sub(r"\s+", " ", str(data.get("recent_catalyst") or "")).strip()
+    risk = re.sub(r"\s+", " ", str(data.get("recent_risk") or "")).strip()
+    if not catalyst or not risk:
+        return {}
+    return {
+        "recent_catalyst": catalyst[:140],
+        "recent_risk": risk[:140],
+        "used_refs": data.get("used_refs") if isinstance(data.get("used_refs"), list) else [],
+        "confidence": str(data.get("confidence") or "medium"),
+    }
+
+
+def _fallback_profile_dynamic_v2(
+    *,
+    profile: dict[str, str],
+    earnings_date: str,
+    earnings_time: str,
+    options_context: dict[str, Any],
+    refs: list[dict[str, str]],
+    lookback_days: int,
+) -> dict[str, str]:
+    name = str(profile.get("name") or profile.get("symbol") or "")
+    is_etf = str(profile.get("asset_type") or "").lower() == "etf"
+    analyst_refs = [ref for ref in refs if ref.get("kind") == "analyst"]
+    catalyst_refs = [ref for ref in refs if ref.get("side") in {"catalyst", "mixed"}]
+    risk_refs = [ref for ref in refs if ref.get("side") in {"risk", "mixed"}]
+    option_summary = str(options_context.get("summary") or _format_metric_sentence({}))
+    business_hint = _first_sentence(str(profile.get("business") or ""), max_len=60)
+    risk_hint = _first_sentence(str(profile.get("risk") or ""), max_len=60)
+
+    if is_etf:
+        catalyst_base = catalyst_refs[0].get("title") if catalyst_refs else ""
+        risk_base = risk_refs[0].get("title") if risk_refs else ""
+        recent_catalyst = (
+            f"近{lookback_days}天关注{catalyst_base[:38]}；{option_summary}"
+            if catalyst_base
+            else f"近期看{name}成分板块轮动和宏观利率变化；{option_summary}"
+        )
+        recent_risk = (
+            f"风险看{risk_base[:40]}；ETF无单一财报催化。"
+            if risk_base
+            else f"{risk_hint or 'ETF风险主要来自权重行业回撤和市场beta变化'}；ETF没有单一公司财报。"
+        )
+    else:
+        headline = ""
+        if analyst_refs:
+            headline = analyst_refs[0].get("title", "")
+        elif catalyst_refs:
+            headline = catalyst_refs[0].get("title", "")
+        risk_headline = risk_refs[0].get("title", "") if risk_refs else ""
+        earnings_hint = "财报日历已确认" if "估算" not in earnings_date and earnings_date else "财报窗口待确认"
+        recent_catalyst = (
+            f"公开报道/分析师线索显示{headline[:42]}；{option_summary}"
+            if headline
+            else f"近期看{name}的{earnings_hint}、{business_hint or '业务主线'}；{option_summary}"
+        )
+        recent_risk = (
+            f"反向风险看{risk_headline[:42]}；需观察期权定价是否回落。"
+            if risk_headline
+            else f"{risk_hint or '风险在业绩预期、估值和行业竞争'}；财报前后留意IV事件后回落。"
+        )
+    return {
+        "recent_catalyst": recent_catalyst[:160],
+        "recent_risk": recent_risk[:160],
+        "confidence": "medium" if refs else "low",
+    }
+
+
+def _summarize_profile_dynamic_v2(
+    *,
+    profile: dict[str, str],
+    earnings_date: str,
+    earnings_time: str,
+    options_context: dict[str, Any],
+    refs: list[dict[str, str]],
+    lookback_days: int,
+) -> dict[str, str]:
+    llm_data = _build_profile_llm_json(
+        profile=profile,
+        earnings_date=earnings_date,
+        earnings_time=earnings_time,
+        options_context=options_context,
+        refs=refs,
+    )
+    if llm_data:
+        return {
+            "recent_catalyst": str(llm_data.get("recent_catalyst") or ""),
+            "recent_risk": str(llm_data.get("recent_risk") or ""),
+            "confidence": str(llm_data.get("confidence") or "medium"),
+        }
+    return _fallback_profile_dynamic_v2(
+        profile=profile,
+        earnings_date=earnings_date,
+        earnings_time=earnings_time,
+        options_context=options_context,
+        refs=refs,
+        lookback_days=lookback_days,
+    )
 
 
 def _fallback_underlying_profile_dynamic(
@@ -1196,62 +1764,59 @@ def _build_underlying_profile_dynamic_row(
     earnings_payload: dict[str, str] | None,
     metrics: dict[str, Any] | None,
     news_refs: list[dict[str, str]] | None,
+    options_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     profile = get_underlying_profile(underlying)
     code = str(profile.get("symbol") or underlying).upper()
     is_etf = str(profile.get("asset_type") or "").lower() == "etf"
-    metric_sentence = _format_metric_sentence(metrics or {})
-    refs: list[dict[str, Any]] = [
-        {
-            "source": "本地期权指标",
-            "title": metric_sentence,
-            "date": as_of_date,
-        }
-    ]
+    options_context = options_context or {"summary": _format_metric_sentence(metrics or {}), "refs": []}
+    refs: list[dict[str, Any]] = []
+    refs.extend(options_context.get("refs") or [])
     refs.extend(news_refs or [])
 
     if is_etf:
         earnings_date = ETF_EARNINGS_NOTE
         earnings_time = ""
         earnings_source = "ETF"
-        recent_catalyst = (
-            f"近期关注{profile.get('name') or code}的成分板块轮动、宏观利率和风险偏好变化；"
-            f"{metric_sentence}"
+        refs.append(
+            {
+                "source": "基金/指数属性",
+                "title": "ETF无公司财报",
+                "date": as_of_date,
+                "kind": "fund_profile",
+                "side": "neutral",
+            }
         )
-        recent_risk = "ETF没有单一公司财报，短线风险主要来自利率、指数权重行业和市场 beta 的同步波动。"
-        refs.append({"source": "基金/指数属性", "title": "ETF无公司财报", "date": as_of_date})
     else:
         payload = earnings_payload or {}
         earnings_date = str(payload.get("date") or estimate_next_earnings_window()).strip()
         earnings_time = str(payload.get("detail") or "").strip()
         earnings_source = str(payload.get("source") or "估算").strip()
         source_title = "Nasdaq earnings calendar" if earnings_source == "Nasdaq" else "季度财报窗口估算"
-        refs.append({"source": earnings_source or "估算", "title": source_title, "date": earnings_date})
-        business_hint = _first_sentence(str(profile.get("business") or ""))
-        recent_catalyst = (
-            f"近期看点围绕{profile.get('name') or code}的财报窗口、业务主线和期权定价；"
-            f"{metric_sentence}"
-        )
-        if business_hint:
-            recent_catalyst = f"{recent_catalyst} 核心业务：{business_hint}"
-        risk_hint = _first_sentence(str(profile.get("risk") or ""))
-        recent_risk = (
-            f"{risk_hint or '需关注业绩预期、估值和行业竞争变化'}"
-            " 财报前若隐含波动率快速抬升，事件后需留意波动率回落。"
+        refs.append(
+            {
+                "source": earnings_source or "估算",
+                "title": source_title,
+                "date": earnings_date,
+                "kind": "earnings",
+                "side": "neutral",
+            }
         )
 
-    dynamic_note = _build_profile_llm_note(
+    refs = _dedupe_source_refs(refs, limit=12)
+    summary = _summarize_profile_dynamic_v2(
         profile=profile,
         earnings_date=earnings_date,
         earnings_time=earnings_time,
-        metric_sentence=metric_sentence,
-        news_refs=news_refs or [],
+        options_context=options_context,
+        refs=refs,
+        lookback_days=lookback_days,
     )
-    if not dynamic_note:
-        if news_refs:
-            dynamic_note = f"近{lookback_days}天新闻标题与本地期权指标共同更新；长期介绍仍以人工维护为准。"
-        else:
-            dynamic_note = f"近{lookback_days}天未取到可用新闻标题，已使用财报日历和本地期权指标生成规则摘要。"
+    recent_catalyst = summary.get("recent_catalyst") or "近期变化待更新"
+    recent_risk = summary.get("recent_risk") or "近期变化待更新"
+    confidence = summary.get("confidence") or "medium"
+    source_names = sorted({str(ref.get("source") or "") for ref in refs if ref.get("source")})
+    dynamic_note = f"V2 {confidence}：近{lookback_days}天公开来源 + 本地期权指标；来源 {' + '.join(source_names[:4]) or '规则兜底'}。"
 
     return {
         "as_of_date": as_of_date,
@@ -1358,6 +1923,8 @@ def rebuild_underlying_profile_cache(
 
     rows: list[dict[str, Any]] = []
     live_earnings = 0
+    news_ref_count = 0
+    web_ref_count = 0
     for symbol in target_underlyings:
         profile = get_underlying_profile(symbol)
         is_etf = profile.get("asset_type") == "etf"
@@ -1378,7 +1945,25 @@ def rebuild_underlying_profile_cache(
             engine=engine,
             use_test_tables=use_test_tables,
         )
-        news_refs = _fetch_recent_profile_news_refs(symbol, lookback_days=lookback_days)
+        news_refs = _collect_profile_news_context(
+            symbol,
+            profile,
+            lookback_days=max(int(lookback_days or 30), 1),
+            engine=engine,
+        )
+        web_refs = _collect_profile_web_search_context(
+            profile,
+            lookback_days=max(int(lookback_days or 30), 1),
+        )
+        news_ref_count += len(news_refs)
+        web_ref_count += len(web_refs)
+        options_context = _profile_options_context(
+            symbol,
+            metrics=metrics,
+            as_of_date=as_of_date_text,
+            engine=engine,
+            use_test_tables=use_test_tables,
+        )
         rows.append(
             _build_underlying_profile_dynamic_row(
                 symbol,
@@ -1386,7 +1971,8 @@ def rebuild_underlying_profile_cache(
                 lookback_days=max(int(lookback_days or 30), 1),
                 earnings_payload=earnings_payload,
                 metrics=metrics,
-                news_refs=news_refs,
+                news_refs=[*news_refs, *web_refs],
+                options_context=options_context,
             )
         )
 
@@ -1406,6 +1992,8 @@ def rebuild_underlying_profile_cache(
         "rows": len(rows),
         "written": written,
         "live_earnings": live_earnings,
+        "news_refs": news_ref_count,
+        "web_refs": web_ref_count,
     }
 
 
@@ -1491,6 +2079,31 @@ def build_underlying_profile_card(
         }
     )
     return card
+
+
+def format_profile_updated_at_beijing(
+    value: str | dt.date | dt.datetime | pd.Timestamp | None,
+    as_of_date: str | dt.date | dt.datetime | None = None,
+) -> str:
+    raw = str(value or "").strip()
+    if raw:
+        parsed = pd.to_datetime(raw, errors="coerce")
+        if not pd.isna(parsed):
+            try:
+                timestamp = pd.Timestamp(parsed)
+                if timestamp.tzinfo is None:
+                    timestamp = timestamp.tz_localize(dt.timezone.utc)
+                else:
+                    timestamp = timestamp.tz_convert(dt.timezone.utc)
+                return timestamp.tz_convert(PROFILE_DISPLAY_TZ).strftime("%m/%d %H:%M")
+            except Exception:
+                return raw[:16]
+        return raw[:16]
+
+    compact = compact_date(as_of_date)
+    if len(compact) == 8:
+        return f"{compact[:4]}/{compact[4:6]}/{compact[6:8]}"
+    return "待更新"
 
 
 def normalize_trade_date(value: str | dt.date | dt.datetime | None) -> str:

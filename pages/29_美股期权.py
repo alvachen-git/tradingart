@@ -40,6 +40,7 @@ from us_market_dashboard_data import (
     calculate_overview_metrics_from_market_history,
     calculate_volatility_positioning_metrics,
     dashboard_engine,
+    format_profile_updated_at_beijing,
     load_available_option_trade_dates,
     load_iv_history,
     load_oi_defense_history,
@@ -1388,14 +1389,7 @@ def _profile_source_summary(refs: Any) -> str:
 
 
 def _profile_updated_label(value: Any, as_of_date: Any) -> str:
-    raw = str(value or "").strip()
-    if raw:
-        parsed = pd.to_datetime(raw, errors="coerce")
-        if not pd.isna(parsed):
-            return parsed.strftime("%m/%d %H:%M")
-        return raw[:16]
-    date_text = _format_trade_date(str(as_of_date or ""))
-    return date_text or "待更新"
+    return format_profile_updated_at_beijing(value, as_of_date)
 
 
 def _render_underlying_profile_card(symbol: str) -> None:
@@ -1429,6 +1423,7 @@ def _render_underlying_profile_card(symbol: str) -> None:
     )
     source_summary = _profile_source_summary(profile.get("dynamic_source_refs"))
     updated_label = _profile_updated_label(profile.get("dynamic_updated_at"), profile.get("dynamic_as_of_date"))
+    updated_display = f"{updated_label} 北京时间" if ":" in updated_label else updated_label
     recent_catalyst = str(profile.get("recent_catalyst") or "近期变化待更新")
     recent_risk = str(profile.get("recent_risk") or "近期变化待更新")
     st.markdown(
@@ -1456,7 +1451,7 @@ def _render_underlying_profile_card(symbol: str) -> None:
                     </div>
                 </div>
                 <div class="us-underlying-dynamic-source">
-                    更新于 {escape(updated_label)} / 来源：{escape(source_summary)}
+                    更新于 {escape(updated_display)} / 来源：{escape(source_summary)}
                 </div>
             </div>
         </div>

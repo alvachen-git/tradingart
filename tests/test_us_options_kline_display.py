@@ -10,7 +10,7 @@ from us_market_dashboard_data import selected_underlying_price
 
 
 def _load_page_chart_helpers():
-    source = Path("pages/29_美股数据实验台.py").read_text(encoding="utf-8")
+    source = Path("pages/29_美股期权.py").read_text(encoding="utf-8")
     module = ast.parse(source)
     wanted = {
         "_clean_float",
