@@ -694,19 +694,19 @@ ANNOUNCEMENT_CONTENT = {
     "title": "📡 今日晚报别错过",
     "sections": [
         {
-            "title": "盘后 10 分钟抓住重点",
+            "title": "爱波塔实战复盘报告内容",
             "items": [
-                "复盘晚报：提炼当日主线、关键异动与次日观察点。",
-                "资金流晚报：跟踪主力流向与板块强弱，辅助判断市场节奏。",
-                "持仓密报 / 末日期权晚报：面向实盘决策场景，提示重点风险与机会。",
+                "复盘晚报：把市场头条、资金暗流、商品期货全景、期权波动率、牛股风险和明日策略浓缩成一份盘后作战地图。",
+                "末日期权晚报：扫描 7 天内到期的 ETF 与商品期权，结合 K 线、IV Rank、剩余天数和合约持仓，给出策略方向与具体合约参考。",
+                "持仓密报：跟踪机构、外资与反指标席位的当日和 5 日持仓变化，抓正反分歧、拥挤交易和资金技术共振。",
             ]
         },
         {
-            "title": "适合这样用",
+            "title": "权限说明",
             "items": [
-                "盘后先看晚报，快速更新明天的观察清单。",
-                "不想翻太多行情时，先看摘要判断当天主线。",
-                "订阅后可以查看完整内容和历史记录。",
+                "新注册客户默认获得 10 天体验权限，可查看复盘晚报、末日期权晚报、持仓密报等报告内容。",
+                "如果之前没看过，或 10 天体验权限已经过期，可以联系客服重新开通几天试看。",
+                "开通后可在「情报站」查看完整内容和历史记录。",
             ],
         },
         {
@@ -733,13 +733,13 @@ def get_shanghai_today_str():
 
 
 def _is_intel_popup_day(now: Optional[datetime] = None) -> bool:
-    """Only show the paid intel reminder on Monday and Friday in Shanghai time."""
+    """Show the home intel reminder on Monday and Thursday in Shanghai time."""
     current = now or datetime.now(ASIA_SHANGHAI_TZ)
     if current.tzinfo is None:
         current = current.replace(tzinfo=ASIA_SHANGHAI_TZ)
     else:
         current = current.astimezone(ASIA_SHANGHAI_TZ)
-    return current.weekday() in {0, 4}
+    return current.weekday() in {0, 3}
 
 
 def _normalize_intel_preview_text(value: Any, fallback: str = "") -> str:
@@ -919,11 +919,7 @@ def _should_show_intel_announcement() -> bool:
     if not current_user or current_user == "访客":
         return False
 
-    paid_channel_ids = _get_paid_intel_channel_ids()
-    if not paid_channel_ids:
-        return False
-
-    return not _user_has_paid_intel_subscription(current_user, paid_channel_ids)
+    return True
 
 
 def _open_intel_channel(channel_code: str = INTEL_DEFAULT_CHANNEL_CODE):
@@ -1028,15 +1024,9 @@ def show_announcement():
 
     preview = _get_latest_intel_preview()
     target_channel = str(preview.get("channel_code") or INTEL_DEFAULT_CHANNEL_CODE).strip()
-    col1, col2 = st.columns([1.2, 1])
-    with col1:
-        if st.button("查看今日晚报", type="primary", use_container_width=True):
-            mark_announcement_shown_today()
-            _open_intel_channel(target_channel)
-    with col2:
-        if st.button("我知道了", type="secondary", use_container_width=True):
-            mark_announcement_shown_today()
-            st.rerun()
+    if st.button("查看今日晚报", type="primary", use_container_width=True):
+        mark_announcement_shown_today()
+        _open_intel_channel(target_channel)
 
 
 def check_and_show_announcement():
