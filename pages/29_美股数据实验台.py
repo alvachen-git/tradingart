@@ -1206,6 +1206,67 @@ def _summary_from_market_metrics(market_metrics_history: pd.DataFrame, trade_dat
     return summary
 
 
+def _empty_chart_ohlc_frame() -> pd.DataFrame:
+    return pd.DataFrame(
+        columns=[
+            "date",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "raw_open",
+            "raw_high",
+            "raw_low",
+            "raw_close",
+            "is_adjusted",
+        ]
+    )
+
+
+def _chart_adjusted_ohlc_frame(stock_df: pd.DataFrame) -> pd.DataFrame:
+    """Build display-only adjusted OHLC while preserving raw price columns."""
+    if stock_df is None or stock_df.empty:
+        return _empty_chart_ohlc_frame()
+
+    df = stock_df.copy()
+    df["date"] = pd.to_datetime(df.get("date"), errors="coerce").dt.strftime("%Y-%m-%d")
+    for col in ("open", "high", "low", "close", "volume", "adjClose"):
+        df[col] = pd.to_numeric(df.get(col), errors="coerce")
+    df = df.dropna(subset=["date", "open", "high", "low", "close"]).sort_values("date").reset_index(drop=True)
+    if df.empty:
+        return _empty_chart_ohlc_frame()
+
+    ratio = df["adjClose"] / df["close"]
+    ratio = ratio.replace([math.inf, -math.inf], math.nan)
+    valid_ratio = (
+        df["adjClose"].notna()
+        & df["close"].notna()
+        & (df["adjClose"] > 0)
+        & (df["close"] > 0)
+        & ratio.notna()
+        & (ratio >= 0.001)
+        & (ratio <= 1000)
+    )
+    ratio = ratio.where(valid_ratio, 1.0)
+
+    return pd.DataFrame(
+        {
+            "date": df["date"],
+            "open": df["open"] * ratio,
+            "high": df["high"] * ratio,
+            "low": df["low"] * ratio,
+            "close": df["adjClose"].where(valid_ratio, df["close"]),
+            "volume": df["volume"],
+            "raw_open": df["open"],
+            "raw_high": df["high"],
+            "raw_low": df["low"],
+            "raw_close": df["close"],
+            "is_adjusted": valid_ratio & ((ratio - 1.0).abs() > 1e-8),
+        }
+    )
+
+
 def _lightweight_chart_data(
     stock_df: pd.DataFrame,
     render_window: int | None = None,
@@ -1219,11 +1280,7 @@ def _lightweight_chart_data(
         empty = pd.DataFrame(columns=["date", "open", "high", "low", "close", "volume"])
         return empty, empty_lines
 
-    df = stock_df.copy()
-    df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.strftime("%Y-%m-%d")
-    for col in ("open", "high", "low", "close", "volume"):
-        df[col] = pd.to_numeric(df.get(col), errors="coerce")
-    df = df.dropna(subset=["date", "open", "high", "low", "close"]).sort_values("date").reset_index(drop=True)
+    df = _chart_adjusted_ohlc_frame(stock_df)
     if df.empty:
         empty = pd.DataFrame(columns=["date", "open", "high", "low", "close", "volume"])
         return empty, empty_lines
@@ -1232,7 +1289,9 @@ def _lightweight_chart_data(
     df["MA20"] = df["close"].rolling(20).mean()
     df["MA60"] = df["close"].rolling(60).mean()
 
-    candle_df = df[["date", "open", "high", "low", "close", "volume"]].copy()
+    candle_df = df[
+        ["date", "open", "high", "low", "close", "volume", "raw_open", "raw_high", "raw_low", "raw_close", "is_adjusted"]
+    ].copy()
     line_dfs = {
         "ma5": df[["date", "MA5"]].dropna().copy(),
         "ma20": df[["date", "MA20"]].dropna().copy(),
@@ -1332,11 +1391,23 @@ def _chart_payload(
 
     latest: dict[str, Any] = {}
     if candles:
-        latest = candles[-1].copy()
-        if len(candles) >= 2:
-            previous_close = _clean_float(candles[-2].get("close"))
+        latest_idx = candle_df.index[-1]
+        latest_row = candle_df.loc[latest_idx]
+        latest_close = _clean_float(latest_row.get("raw_close"))
+        if latest_close is None:
+            latest_close = _clean_float(candles[-1].get("close"))
+        latest = {
+            "time": candles[-1].get("time"),
+            "open": _clean_float(latest_row.get("raw_open")) or candles[-1].get("open"),
+            "high": _clean_float(latest_row.get("raw_high")) or candles[-1].get("high"),
+            "low": _clean_float(latest_row.get("raw_low")) or candles[-1].get("low"),
+            "close": latest_close,
+        }
+        if len(candle_df) >= 2:
+            previous_raw_close = _clean_float(candle_df.iloc[-2].get("raw_close"))
+            previous_close = previous_raw_close or _clean_float(candles[-2].get("close"))
             if previous_close:
-                change = float(candles[-1]["close"]) - previous_close
+                change = float(latest_close) - previous_close
                 latest["change"] = change
                 latest["change_pct"] = change / previous_close * 100
 
@@ -1652,7 +1723,7 @@ def _render_lightweight_chart(
           <div class="lwc-shell">
             <div class="lwc-head">
               <div class="lwc-left-head">
-                <div class="lwc-title"><strong id="lwc-symbol"></strong><span>日线 · 本地数据库</span></div>
+                <div class="lwc-title"><strong id="lwc-symbol"></strong><span>日线 · 本地数据库 · 复权K线</span></div>
                 <div class="lwc-controls" aria-label="图表指标开关">
                   <button class="lwc-toggle" style="--line-color:#f59e0b" data-series="ma5" type="button">MA5</button>
                   <button class="lwc-toggle active" style="--line-color:#2563eb" data-series="ma20" type="button">MA20</button>
@@ -2316,7 +2387,7 @@ def _build_composite_figure(
         vertical_spacing=0.035,
         row_heights=[0.65, 0.22, 0.13],
     )
-    df = stock_df.copy()
+    df = _chart_adjusted_ohlc_frame(stock_df)
     if not df.empty:
         df["ma5"] = pd.to_numeric(df["close"], errors="coerce").rolling(5).mean()
         df["ma20"] = pd.to_numeric(df["close"], errors="coerce").rolling(20).mean()
@@ -2412,7 +2483,7 @@ def _build_composite_figure(
         )
 
     chip_text = (
-        f"{symbol} · 1D · IV {_fmt_pct(current_iv_pct, 2)} · "
+        f"{symbol} · 1D · 复权K线 · IV {_fmt_pct(current_iv_pct, 2)} · "
         f"IV Rank {_fmt_rank_pct((iv_rank or {}).get('iv_rank'), 1)} · Put/Call {_fmt_number(put_call_ratio, 2)}"
     )
     fig.add_annotation(
