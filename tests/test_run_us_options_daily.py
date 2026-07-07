@@ -10,41 +10,53 @@ import us_options_polygon as uop
 
 
 NEW_OPTION_UNDERLYINGS = {
+    "ARM",
+    "ASML",
     "AVGO",
     "BABA",
     "BAC",
     "COIN",
+    "CRWD",
+    "DELL",
     "DIS",
+    "DRAM",
     "GOOGL",
     "HOOD",
     "INTC",
     "JPM",
     "MARA",
     "META",
+    "MRVL",
     "MSFT",
     "MSTR",
     "MU",
     "NFLX",
+    "NKE",
+    "ORCL",
     "PLTR",
+    "QCOM",
     "RIVN",
+    "RKLB",
     "SMCI",
     "SOFI",
+    "SPCX",
     "TSM",
     "UBER",
     "WMT",
 }
 
 LATEST_BACKFILL_UNDERLYINGS = {
-    "BABA",
-    "BAC",
-    "DIS",
-    "JPM",
-    "MARA",
-    "MU",
-    "RIVN",
-    "SOFI",
-    "UBER",
-    "WMT",
+    "ARM",
+    "ASML",
+    "CRWD",
+    "DELL",
+    "DRAM",
+    "MRVL",
+    "NKE",
+    "ORCL",
+    "QCOM",
+    "RKLB",
+    "SPCX",
 }
 
 
@@ -153,7 +165,7 @@ class RunUSOptionsDailyTests(unittest.TestCase):
 
     def test_backfill_script_defaults_to_new_batch(self):
         script_text = Path("scripts/backfill_us_options_new_underlyings_1y.sh").read_text(encoding="utf-8")
-        expected = "BABA,BAC,DIS,JPM,MARA,MU,RIVN,SOFI,UBER,WMT"
+        expected = "DRAM,MRVL,RKLB,SPCX,ARM,ASML,CRWD,DELL,ORCL,QCOM,NKE"
 
         self.assertIn(f"US_OPTIONS_BACKFILL_UNDERLYINGS=\"${{US_OPTIONS_BACKFILL_UNDERLYINGS:-{expected}}}\"", script_text)
         self.assertEqual(set(expected.split(",")), LATEST_BACKFILL_UNDERLYINGS)

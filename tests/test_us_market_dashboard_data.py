@@ -349,25 +349,36 @@ class UsMarketDashboardDataTests(unittest.TestCase):
     def test_dashboard_underlyings_include_labels_and_exclude_index_symbols(self):
         symbols = set(dash.DEFAULT_DASHBOARD_UNDERLYINGS)
         new_symbols = {
+            "ARM",
+            "ASML",
             "AVGO",
             "BABA",
             "BAC",
             "COIN",
+            "CRWD",
+            "DELL",
             "DIS",
+            "DRAM",
             "GOOGL",
             "HOOD",
             "INTC",
             "JPM",
             "MARA",
             "META",
+            "MRVL",
             "MSFT",
             "MSTR",
             "MU",
             "NFLX",
+            "NKE",
+            "ORCL",
             "PLTR",
+            "QCOM",
             "RIVN",
+            "RKLB",
             "SMCI",
             "SOFI",
+            "SPCX",
             "TSM",
             "UBER",
             "WMT",
@@ -390,7 +401,7 @@ class UsMarketDashboardDataTests(unittest.TestCase):
             self.assertIn(symbol, symbols)
             self.assertTrue(dash.UNDERLYING_DISPLAY_NAMES.get(symbol))
         self.assertTrue(new_symbols <= symbols)
-        self.assertEqual(len(dash.DEFAULT_DASHBOARD_UNDERLYINGS), 37)
+        self.assertEqual(len(dash.DEFAULT_DASHBOARD_UNDERLYINGS), 48)
 
     def test_dashboard_underlyings_prioritize_core_etfs_then_sort_symbols(self):
         symbols = list(dash.DEFAULT_DASHBOARD_UNDERLYINGS)

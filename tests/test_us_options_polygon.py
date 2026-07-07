@@ -22,25 +22,36 @@ class TestUSOptionsPolygon(unittest.TestCase):
     def test_default_underlyings_cover_dashboard_symbols_without_index_options(self):
         symbols = set(uop.DEFAULT_UNDERLYINGS)
         new_symbols = {
+            "ARM",
+            "ASML",
             "AVGO",
             "BABA",
             "BAC",
             "COIN",
+            "CRWD",
+            "DELL",
             "DIS",
+            "DRAM",
             "GOOGL",
             "HOOD",
             "INTC",
             "JPM",
             "MARA",
             "META",
+            "MRVL",
             "MSFT",
             "MSTR",
             "MU",
             "NFLX",
+            "NKE",
+            "ORCL",
             "PLTR",
+            "QCOM",
             "RIVN",
+            "RKLB",
             "SMCI",
             "SOFI",
+            "SPCX",
             "TSM",
             "UBER",
             "WMT",
@@ -50,7 +61,7 @@ class TestUSOptionsPolygon(unittest.TestCase):
         for symbol in ("SPY", "QQQ", "IWM", "GLD", "TLT", "TSLA", "NVDA", "AMD", "AAPL", "AMZN"):
             self.assertIn(symbol, symbols)
         self.assertTrue(new_symbols <= symbols)
-        self.assertEqual(len(uop.DEFAULT_UNDERLYINGS), 37)
+        self.assertEqual(len(uop.DEFAULT_UNDERLYINGS), 48)
 
     def test_parse_option_ticker_extracts_root_expiration_type_and_strike(self):
         parsed = uop.parse_option_ticker("O:SPY260619C00600000")

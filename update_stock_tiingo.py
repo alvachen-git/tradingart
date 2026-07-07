@@ -131,7 +131,7 @@ SECTOR_SYMBOLS = {
     ],
     # 太空与军工航天
     "space": [
-        "RKLB", "LUNR", "ASTS", "PL", "SPCE", "NOC", "LMT",
+        "SPCX", "RKLB", "LUNR", "ASTS", "PL", "SPCE", "NOC", "LMT",
     ],
     # 稳定币/支付与交易基础设施（不含高波动矿股）
     "stablecoin_infra": [
@@ -139,7 +139,7 @@ SECTOR_SYMBOLS = {
     ],
     # 期权高活跃补充池（配合美股期权页面新增标的，避免回补 IV 时临时补价）
     "option_active": [
-        "BABA", "UBER", "SOFI", "RIVN", "MARA",
+        "BABA", "UBER", "SOFI", "RIVN", "MARA", "DRAM",
     ],
     # 石油与油服炼化
     "oil_energy": [
