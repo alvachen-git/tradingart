@@ -4,7 +4,7 @@ import os
 from dotenv import load_dotenv
 from functools import lru_cache
 import re
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, text, bindparam
 from unified_stock_view import ensure_unified_stock_view
 
 # 1. 初始化
@@ -2263,6 +2263,39 @@ def get_all_market_map():
             except Exception:
                 pass
 
+            # 4. A股强制补充映射 (stock_price 表)
+            # 新股可能已完成行情回补，但 stock_basic 尚未同步；AI 技术分析必须能按已入库行情解析名称。
+            try:
+                from astock_target_supplements import MANDATORY_A_SHARE_SUPPLEMENTS
+
+                supplement_codes = [
+                    str(code or "").strip().upper()
+                    for code in MANDATORY_A_SHARE_SUPPLEMENTS
+                    if str(code or "").strip()
+                ]
+                if supplement_codes:
+                    sql_cn = text(
+                        """
+                        SELECT ts_code, MAX(name) AS name
+                        FROM stock_price
+                        WHERE ts_code IN :codes
+                          AND name IS NOT NULL
+                          AND name <> ''
+                        GROUP BY ts_code
+                        """
+                    ).bindparams(bindparam("codes", expanding=True))
+                    df_cn = pd.read_sql(sql_cn, engine, params={"codes": supplement_codes})
+                    for _, row in df_cn.iterrows():
+                        name = str(row.get('name') or "").strip()
+                        ts_code = str(row.get('ts_code') or "").strip().upper()
+                        if not name or not ts_code:
+                            continue
+                        market_map[name] = ts_code
+                        market_map[ts_code] = ts_code
+                        market_map[ts_code.split('.')[0]] = ts_code
+            except Exception:
+                pass
+
             print(f"市场映射加载完成，共 {len(market_map)} 个品种")
 
         except Exception as e:
@@ -2496,6 +2529,10 @@ def resolve_symbol(query):
     if re.fullmatch(r"[A-Z][A-Z0-9]{0,9}\.US", query):
         return query, 'stock'
 
+    # --- 0.1.1 直接输入 A股/ETF 代码 ---
+    if re.fullmatch(r"\d{6}\.(?:SH|SZ|BJ)", query):
+        return query, 'stock'
+
     hk_code = _normalize_hk_stock_code_input(query)
     if hk_code:
         return hk_code, 'stock'
@@ -2553,9 +2590,13 @@ def resolve_symbol(query):
         # 全市场字典里大概率没有指数，主要是股票和ETF
         return market_map[query], 'stock'
 
-    # 模糊匹配 (名称包含)
-    for name, code in market_map.items():
-        if query in name.upper():  # 添加 .upper() 确保大小写不敏感
+    # 模糊匹配 (名称包含)：支持“强一股份的技术面分析下”这类整句。
+    for name, code in sorted(market_map.items(), key=lambda item: len(str(item[0])), reverse=True):
+        name_text = str(name or "").strip()
+        if len(name_text) < 2:
+            continue
+        name_upper = name_text.upper()
+        if query in name_upper or name_upper in query:
             return code, 'stock'
 
     # 4. 匹配纯数字代码 (股票/ETF)
