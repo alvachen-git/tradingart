@@ -1270,10 +1270,16 @@ def _clamp_percentile(value: Any) -> float | None:
     return max(0.0, min(100.0, numeric))
 
 
-def _percentile_color(value: Any) -> str:
+def _percentile_color(value: Any, tone: str = "heat") -> str:
     pct = _clamp_percentile(value)
     if pct is None:
         return "#94a3b8"
+    if tone == "cool":
+        if pct >= 70:
+            return "#2563eb"
+        if pct <= 30:
+            return "#94a3b8"
+        return "#0f172a"
     if pct >= 70:
         return "#dc2626"
     if pct <= 30:
@@ -1281,14 +1287,14 @@ def _percentile_color(value: Any) -> str:
     return "#0f172a"
 
 
-def _thermo_html(value: Any) -> str:
+def _thermo_html(value: Any, tone: str = "heat") -> str:
     pct = _clamp_percentile(value)
     if pct is None:
         fill = 0.0
         color = "#cbd5e1"
     else:
         fill = pct
-        color = _percentile_color(pct)
+        color = _percentile_color(pct, tone)
     return (
         '<div class="us-lab-thermo-wrap">'
         '<div class="us-lab-thermo">'
@@ -1321,6 +1327,7 @@ def _rail_card_html(
     history_count: Any = None,
     min_samples: Any = None,
     extra_html: str = "",
+    percentile_tone: str = "heat",
 ) -> str:
     row_class = f"us-lab-ledger-row {tone}".strip()
     sample_count = None
@@ -1345,7 +1352,7 @@ def _rail_card_html(
     pct_detail = f"<em>{sample_count}/{sample_floor}</em>" if insufficient else ""
     pct_class = "us-lab-ledger-pct insufficient" if insufficient else "us-lab-ledger-pct"
     thermo_value = None if insufficient else pct_value
-    pct_color = "#64748b" if insufficient else _percentile_color(pct_value)
+    pct_color = "#64748b" if insufficient else _percentile_color(pct_value, percentile_tone)
     return f"""
         <div class="{escape(row_class)}">
             <div class="us-lab-ledger-main">
@@ -1355,7 +1362,7 @@ def _rail_card_html(
             </div>
             <div class="us-lab-ledger-value" style="color:{escape(color)}">{escape(value)}</div>
             <div class="{escape(pct_class)}">{escape(pct_label)}<strong style="color:{escape(pct_color)}">{escape(pct_display)}</strong>{pct_detail}</div>
-            {_thermo_html(thermo_value)}
+            {_thermo_html(thermo_value, percentile_tone)}
         </div>
     """
 
@@ -4049,6 +4056,9 @@ def _render_rail(
     metrics: dict[str, Any],
     trade_date: str,
 ) -> None:
+    def min_samples_for(field: str) -> Any:
+        return metrics.get(f"{field}_min_samples", metrics.get("historical_percentile_min_samples"))
+
     term_state = str(metrics.get("term_state") or "样本不足")
     if term_state == "Backwardation":
         term_detail = "近月风险溢价偏强"
@@ -4091,6 +4101,22 @@ def _render_rail(
     positioning_sub = (
         f"0DTE成交 {_fmt_pct(metrics.get('zero_dte_volume_share_pct'), 1)} · Top OI {_fmt_strike(metrics.get('top_oi_strike'))}"
     )
+    iv_change_value = _clean_float(metrics.get("iv_change_1d"))
+    if iv_change_value is None:
+        iv_change_color = "#64748b"
+        iv_change_percentile_tone = "heat"
+    elif iv_change_value > 0:
+        iv_change_color = "#dc2626"
+        iv_change_percentile_tone = "heat"
+    elif iv_change_value < 0:
+        iv_change_color = "#2563eb"
+        iv_change_percentile_tone = "cool"
+    else:
+        iv_change_color = "#475569"
+        iv_change_percentile_tone = "heat"
+    iv_change_pct_label = str(metrics.get("iv_change_1d_direction_label") or "变化分位")
+    iv_change_pct_value = metrics.get("iv_change_1d_directional_percentile")
+    iv_change_history_count = metrics.get("iv_change_1d_directional_history_count")
     html = f"""
     <div class="us-lab-rail">
         <div class="us-lab-panel-title">
@@ -4099,14 +4125,14 @@ def _render_rail(
         </div>
 
         <div class="us-lab-ledger">
-            {_rail_card_html(title="今日 IV 变化", sub="较前一交易日", value=_fmt_signed_pct(metrics.get("iv_change_1d"), 1), pct_label="历史分位", pct_value=metrics.get("iv_change_1d_percentile"), color="#2563eb", history_count=metrics.get("iv_change_1d_history_count"), min_samples=metrics.get("historical_percentile_min_samples"))}
-            {_rail_card_html(title="IV - RV20", sub="隐含波动率 - 实际波动率", value=_fmt_signed_pct(metrics.get("iv_rv20_spread"), 1), pct_label="历史分位", pct_value=metrics.get("iv_rv20_percentile"), color="#ea580c", tone="hot", history_count=metrics.get("iv_rv20_spread_history_count"), min_samples=metrics.get("historical_percentile_min_samples"))}
+            {_rail_card_html(title="今日 IV 变化", sub="较前一交易日", value=_fmt_signed_pct(metrics.get("iv_change_1d"), 1), pct_label=iv_change_pct_label, pct_value=iv_change_pct_value, color=iv_change_color, history_count=iv_change_history_count, min_samples=min_samples_for("iv_change_1d"), percentile_tone=iv_change_percentile_tone)}
+            {_rail_card_html(title="IV - RV20", sub="隐含波动率 - 实际波动率", value=_fmt_signed_pct(metrics.get("iv_rv20_spread"), 1), pct_label="历史分位", pct_value=metrics.get("iv_rv20_percentile"), color="#ea580c", tone="hot", history_count=metrics.get("iv_rv20_spread_history_count"), min_samples=min_samples_for("iv_rv20_spread"))}
             {_rail_card_html(title="IV Rank", sub="月结算 IV 排名", value=_fmt_rank_pct(metrics.get("iv_rank"), 1), pct_label="历史分位", pct_value=metrics.get("iv_rank"), color="#2563eb", tone="compact", history_count=metrics.get("iv_history_days"), min_samples=metrics.get("historical_percentile_min_samples"))}
-            {_rail_card_html(title="期限结构", sub=term_sub, value=_fmt_signed_pct(metrics.get("term_slope_30_60"), 1), pct_label="历史分位", pct_value=metrics.get("term_slope_percentile"), color=term_color, tone="compact wide", history_count=metrics.get("term_slope_30_60_history_count"), min_samples=metrics.get("historical_percentile_min_samples"), extra_html=term_extra)}
-            {_rail_card_html(title="Put Skew", sub="下方保护相对 ATM", value=_fmt_signed_pct(put_skew, 1), pct_label="历史分位", pct_value=metrics.get("put_skew_5pct_percentile"), color="#dc2626", tone="compact", history_count=metrics.get("put_skew_5pct_history_count"), min_samples=metrics.get("historical_percentile_min_samples"), extra_html=skew_expiry_chip)}
-            {_rail_card_html(title="Call Skew", sub="上方追涨相对 ATM", value=_fmt_signed_pct(call_skew, 1), pct_label="历史分位", pct_value=metrics.get("call_skew_5pct_percentile"), color="#2563eb", tone="compact", history_count=metrics.get("call_skew_5pct_history_count"), min_samples=metrics.get("historical_percentile_min_samples"), extra_html=skew_expiry_chip)}
-            {_rail_card_html(title="Put-Call Skew", sub="保护需求减追涨需求", value=_fmt_signed_pct(skew_gap, 1), pct_label="历史分位", pct_value=metrics.get("put_call_skew_5pct_percentile"), color="#ea580c", tone="compact wide hot", history_count=metrics.get("put_call_skew_5pct_history_count"), min_samples=metrics.get("historical_percentile_min_samples"), extra_html=skew_gap_extra)}
-            {_rail_card_html(title="Put/Call OI", sub=positioning_sub, value=_fmt_number(metrics.get("put_call_oi"), 2), pct_label="历史分位", pct_value=metrics.get("put_call_oi_percentile"), color="#ea580c", tone="compact hot", history_count=metrics.get("put_call_oi_history_count"), min_samples=metrics.get("historical_percentile_min_samples"))}
+            {_rail_card_html(title="期限结构", sub=term_sub, value=_fmt_signed_pct(metrics.get("term_slope_30_60"), 1), pct_label="历史分位", pct_value=metrics.get("term_slope_percentile"), color=term_color, tone="compact wide", history_count=metrics.get("term_slope_30_60_history_count"), min_samples=min_samples_for("term_slope_30_60"), extra_html=term_extra)}
+            {_rail_card_html(title="Put Skew", sub="下方保护相对 ATM", value=_fmt_signed_pct(put_skew, 1), pct_label="历史分位", pct_value=metrics.get("put_skew_5pct_percentile"), color="#dc2626", tone="compact", history_count=metrics.get("put_skew_5pct_history_count"), min_samples=min_samples_for("put_skew_5pct"), extra_html=skew_expiry_chip)}
+            {_rail_card_html(title="Call Skew", sub="上方追涨相对 ATM", value=_fmt_signed_pct(call_skew, 1), pct_label="历史分位", pct_value=metrics.get("call_skew_5pct_percentile"), color="#2563eb", tone="compact", history_count=metrics.get("call_skew_5pct_history_count"), min_samples=min_samples_for("call_skew_5pct"), extra_html=skew_expiry_chip)}
+            {_rail_card_html(title="Put-Call Skew", sub="保护需求减追涨需求", value=_fmt_signed_pct(skew_gap, 1), pct_label="历史分位", pct_value=metrics.get("put_call_skew_5pct_percentile"), color="#ea580c", tone="compact wide hot", history_count=metrics.get("put_call_skew_5pct_history_count"), min_samples=min_samples_for("put_call_skew_5pct"), extra_html=skew_gap_extra)}
+            {_rail_card_html(title="Put/Call OI", sub=positioning_sub, value=_fmt_number(metrics.get("put_call_oi"), 2), pct_label="历史分位", pct_value=metrics.get("put_call_oi_percentile"), color="#ea580c", tone="compact hot", history_count=metrics.get("put_call_oi_history_count"), min_samples=min_samples_for("put_call_oi"))}
         </div>
     </div>
     """
@@ -4341,7 +4367,7 @@ if current_symbol not in symbol_options:
     st.session_state.pop("us_lab_symbol", None)
     current_symbol = symbol_options[0]
 
-view_options = ["总览", "异动雷达", "波动率曲面", "持仓防线"]
+view_options = ["总览", "波动率曲面", "持仓防线"]
 if st.session_state.get("us_lab_active_view") not in view_options:
     st.session_state["us_lab_active_view"] = "总览"
 
@@ -4402,6 +4428,9 @@ vol_position_metrics = calculate_overview_metrics_from_market_history(
     stock_df=stock_df,
     market_metrics_history=market_metrics_history,
     trade_date=trade_date,
+    underlying=symbol,
+    use_test_tables=use_test_tables,
+    engine=_cached_engine(),
 )
 current_iv_pct = vol_position_metrics.get("atm_iv_pct")
 if current_iv_pct is None or pd.isna(current_iv_pct):

@@ -2287,6 +2287,96 @@ class UsMarketDashboardDataTests(unittest.TestCase):
         self.assertEqual(result["iv_rv20_spread_history_count"], 10)
         self.assertTrue(result["iv_rv20_spread_insufficient_history"])
 
+    def test_apply_historical_percentiles_calculates_iv_up_directional_percentile(self):
+        history = pd.DataFrame(
+            {
+                "trade_date": pd.date_range("2025-10-01", periods=70, freq="D").strftime("%Y%m%d"),
+                "underlying": ["SPY"] * 70,
+                "iv_change_1d": [float(idx + 1) for idx in range(70)],
+            }
+        )
+
+        result = dash.apply_historical_percentiles(
+            {"iv_change_1d": 68.0},
+            history,
+            trade_date="20251231",
+            window=252,
+            min_samples=60,
+        )
+
+        self.assertAlmostEqual(result["iv_change_1d_percentile"], 68 / 70 * 100)
+        self.assertEqual(result["iv_change_1d_direction_label"], "升波分位")
+        self.assertEqual(result["iv_change_1d_directional_history_count"], 70)
+        self.assertAlmostEqual(result["iv_change_1d_directional_percentile"], 68 / 70 * 100)
+
+    def test_apply_historical_percentiles_calculates_iv_down_directional_percentile(self):
+        history = pd.DataFrame(
+            {
+                "trade_date": pd.date_range("2025-10-01", periods=70, freq="D").strftime("%Y%m%d"),
+                "underlying": ["SPY"] * 70,
+                "iv_change_1d": [-float(idx + 1) for idx in range(70)],
+            }
+        )
+
+        result = dash.apply_historical_percentiles(
+            {"iv_change_1d": -68.0},
+            history,
+            trade_date="20251231",
+            window=252,
+            min_samples=60,
+        )
+
+        self.assertAlmostEqual(result["iv_change_1d_percentile"], 3 / 70 * 100)
+        self.assertEqual(result["iv_change_1d_direction_label"], "降波分位")
+        self.assertEqual(result["iv_change_1d_directional_history_count"], 70)
+        self.assertAlmostEqual(result["iv_change_1d_directional_percentile"], 68 / 70 * 100)
+
+    def test_apply_historical_percentiles_requires_direction_samples_for_iv_change(self):
+        history = pd.DataFrame(
+            {
+                "trade_date": pd.date_range("2025-10-01", periods=70, freq="D").strftime("%Y%m%d"),
+                "underlying": ["SPY"] * 70,
+                "iv_change_1d": [-float(idx + 1) if idx < 20 else float(idx + 1) for idx in range(70)],
+            }
+        )
+
+        result = dash.apply_historical_percentiles(
+            {"iv_change_1d": -18.0},
+            history,
+            trade_date="20251231",
+            window=252,
+            min_samples=60,
+        )
+
+        self.assertIsNone(result["iv_change_1d_directional_percentile"])
+        self.assertEqual(result["iv_change_1d_direction_label"], "降波分位")
+        self.assertEqual(result["iv_change_1d_directional_history_count"], 20)
+        self.assertTrue(result["iv_change_1d_directional_insufficient_history"])
+
+    def test_apply_historical_percentiles_uses_skew_specific_sample_floor(self):
+        history = pd.DataFrame(
+            {
+                "trade_date": pd.date_range("2025-12-01", periods=25, freq="D").strftime("%Y%m%d"),
+                "underlying": ["SPY"] * 25,
+                "call_skew_5pct": [float(i) / 10 for i in range(25)],
+                "iv_rv20_spread": [float(i) for i in range(25)],
+            }
+        )
+
+        result = dash.apply_historical_percentiles(
+            {"call_skew_5pct": 2.4, "iv_rv20_spread": 24.0},
+            history,
+            trade_date="20251225",
+            window=252,
+            min_samples=60,
+        )
+
+        self.assertEqual(result["call_skew_5pct_min_samples"], 20)
+        self.assertFalse(result["call_skew_5pct_insufficient_history"])
+        self.assertIsNotNone(result["call_skew_5pct_percentile"])
+        self.assertEqual(result["iv_rv20_spread_min_samples"], 60)
+        self.assertTrue(result["iv_rv20_spread_insufficient_history"])
+
     def test_calculate_realized_volatility_uses_selected_trade_date(self):
         returns = [0.01, -0.004, 0.006, -0.002, 0.008] * 14
         close = 100.0
@@ -2359,6 +2449,88 @@ class UsMarketDashboardDataTests(unittest.TestCase):
         self.assertEqual(metrics["provider_iv_rows"], 1200)
         self.assertEqual(metrics["open_interest_rows"], 8500)
 
+    def test_calculate_overview_metrics_backfills_sparse_put_call_oi_history(self):
+        self._create_option_tables(use_test_tables=True)
+        trade_dates = pd.date_range("2025-10-01", periods=70, freq="D").strftime("%Y%m%d")
+        stock_df = pd.DataFrame(
+            {
+                "date": pd.date_range("2025-10-01", periods=70, freq="D"),
+                "close": [600 + idx * 0.5 for idx in range(70)],
+            }
+        )
+        metrics_history = pd.DataFrame(
+            {
+                "trade_date": trade_dates,
+                "underlying": ["SPY"] * 70,
+                "atm_iv_pct": [20.0] * 70,
+                "put_call_oi": [None] * 70,
+            }
+        )
+        names = dash.option_table_names(True)
+        daily_rows = []
+        for idx, trade_date in enumerate(trade_dates):
+            daily_rows.extend(
+                [
+                    {
+                        "trade_date": trade_date,
+                        "option_ticker": "O:SPY260220C00600000",
+                        "underlying": "SPY",
+                        "open": 20,
+                        "high": 22,
+                        "low": 18,
+                        "close": 21,
+                        "volume": 100,
+                        "vwap": 20.5,
+                        "transactions": 30,
+                        "open_interest": 1000,
+                        "source": "test",
+                        "updated_at": "",
+                    },
+                    {
+                        "trade_date": trade_date,
+                        "option_ticker": "O:SPY260220P00600000",
+                        "underlying": "SPY",
+                        "open": 19,
+                        "high": 21,
+                        "low": 17,
+                        "close": 18,
+                        "volume": 90,
+                        "vwap": 18.5,
+                        "transactions": 25,
+                        "open_interest": 700 + idx,
+                        "source": "test",
+                        "updated_at": "",
+                    },
+                ]
+            )
+        with self.engine.begin() as conn:
+            conn.execute(
+                text(
+                    f"""
+                    INSERT INTO {names['daily']}
+                    (trade_date, option_ticker, underlying, open, high, low, close, volume,
+                     vwap, transactions, open_interest, source, updated_at)
+                    VALUES
+                    (:trade_date, :option_ticker, :underlying, :open, :high, :low, :close, :volume,
+                     :vwap, :transactions, :open_interest, :source, :updated_at)
+                    """
+                ),
+                daily_rows,
+            )
+
+        metrics = dash.calculate_overview_metrics_from_market_history(
+            stock_df=stock_df,
+            market_metrics_history=metrics_history,
+            trade_date=trade_dates[-1],
+            underlying="SPY",
+            use_test_tables=True,
+            engine=self.engine,
+        )
+
+        self.assertEqual(metrics["put_call_oi_history_count"], 70)
+        self.assertAlmostEqual(metrics["put_call_oi"], (700 + 69) / 1000)
+        self.assertIsNotNone(metrics["put_call_oi_percentile"])
+
     def test_calculate_overview_metrics_from_market_history_degrades_without_rows(self):
         metrics = dash.calculate_overview_metrics_from_market_history(
             stock_df=pd.DataFrame(),
@@ -2371,6 +2543,35 @@ class UsMarketDashboardDataTests(unittest.TestCase):
         self.assertEqual(metrics["iv_history_days"], 0)
         self.assertEqual(metrics["term_state"], "样本不足")
         self.assertIsNone(metrics["put_call_oi"])
+
+    def test_calculate_volatility_positioning_metrics_ignores_low_oi_skew_outlier(self):
+        stock_df = pd.DataFrame(
+            {
+                "date": pd.date_range("2026-01-01", periods=40, freq="D"),
+                "close": [80.0] * 40,
+            }
+        )
+        chain_df = pd.DataFrame(
+            [
+                {"call_put": "C", "strike": 80, "expiration_date": "2026-02-20", "expiration_type": "monthly", "open_interest": 140000, "volume": 100, "iv_pct": 3.8, "moneyness_pct": 0.3, "dte": 30},
+                {"call_put": "P", "strike": 80, "expiration_date": "2026-02-20", "expiration_type": "monthly", "open_interest": 90000, "volume": 100, "iv_pct": 2.2, "moneyness_pct": 0.3, "dte": 30},
+                {"call_put": "P", "strike": 76, "expiration_date": "2026-02-20", "expiration_type": "monthly", "open_interest": 120000, "volume": 100, "iv_pct": 8.7, "moneyness_pct": -4.85, "dte": 30},
+                {"call_put": "C", "strike": 83, "expiration_date": "2026-02-20", "expiration_type": "monthly", "open_interest": 24000, "volume": 100, "iv_pct": 8.6, "moneyness_pct": 3.92, "dte": 30},
+                {"call_put": "C", "strike": 84, "expiration_date": "2026-02-20", "expiration_type": "monthly", "open_interest": 24, "volume": 100, "iv_pct": 101.4, "moneyness_pct": 5.17, "dte": 30},
+            ]
+        )
+
+        metrics = dash.calculate_volatility_positioning_metrics(
+            stock_df=stock_df,
+            chain_df=chain_df,
+            iv_history=pd.DataFrame(),
+            trade_date="20260130",
+            current_iv_pct=3.1,
+        )
+
+        self.assertIsNotNone(metrics["call_skew_5pct"])
+        self.assertLess(metrics["call_skew_5pct"], 20)
+        self.assertGreater(metrics["put_skew_5pct"], 3)
 
     def test_calculate_volatility_positioning_metrics_builds_investor_panel_values(self):
         stock_df = pd.DataFrame(

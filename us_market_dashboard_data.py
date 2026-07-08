@@ -723,6 +723,14 @@ HISTORICAL_PERCENTILE_FIELDS = {
     "total_open_interest": "total_open_interest_percentile",
     "total_volume": "total_volume_percentile",
 }
+HISTORICAL_PERCENTILE_MIN_SAMPLE_OVERRIDES = {
+    # Skew series are naturally sparser for wide-strike single names. Once there
+    # are at least a month of observations, showing a reference percentile is
+    # more useful than hiding the value as "sample insufficient".
+    "put_skew_5pct": 20,
+    "call_skew_5pct": 20,
+    "put_call_skew_5pct": 20,
+}
 
 
 def dashboard_engine():
@@ -4640,6 +4648,81 @@ def load_market_metrics_history(
     return df[MARKET_METRICS_COLUMNS].sort_values("trade_date").reset_index(drop=True)
 
 
+def load_put_call_oi_history(
+    underlying: str,
+    *,
+    end_date: str | dt.date | dt.datetime,
+    window: int = 252,
+    use_test_tables: bool = True,
+    engine=None,
+) -> pd.DataFrame:
+    engine = engine or dashboard_engine()
+    if engine is None:
+        return pd.DataFrame(columns=["trade_date", "put_call_oi", "put_oi", "call_oi"])
+
+    names = option_table_names(use_test_tables)
+    daily_table = safe_table_name(names.get("daily", ""))
+    contracts_table = safe_table_name(names.get("contracts", ""))
+    if not daily_table or not contracts_table:
+        return pd.DataFrame(columns=["trade_date", "put_call_oi", "put_oi", "call_oi"])
+    if not table_exists(engine, daily_table) or not table_exists(engine, contracts_table):
+        return pd.DataFrame(columns=["trade_date", "put_call_oi", "put_oi", "call_oi"])
+
+    daily_columns = table_columns(engine, daily_table)
+    contract_columns = table_columns(engine, contracts_table)
+    required_daily = {"trade_date", "underlying", "option_ticker", "open_interest"}
+    required_contracts = {"option_ticker", "call_put"}
+    if not required_daily.issubset(daily_columns) or not required_contracts.issubset(contract_columns):
+        return pd.DataFrame(columns=["trade_date", "put_call_oi", "put_oi", "call_oi"])
+
+    limit = min(max(int(window or 252) * 4, 600), 5000)
+    sql = text(
+        f"""
+        SELECT
+            d.trade_date,
+            c.call_put,
+            SUM(CASE WHEN d.open_interest IS NULL THEN 0 ELSE d.open_interest END) AS open_interest
+        FROM {daily_table} d{_mysql_force_index(engine, "idx_underlying_date")}
+        JOIN {contracts_table} c ON c.option_ticker = d.option_ticker
+        WHERE d.underlying = :underlying
+          AND d.trade_date <= :end_date
+          AND d.open_interest IS NOT NULL
+        GROUP BY d.trade_date, c.call_put
+        ORDER BY d.trade_date DESC
+        LIMIT {limit}
+        """
+    )
+    try:
+        df = pd.read_sql(
+            sql,
+            engine,
+            params={
+                "underlying": normalize_underlying(underlying),
+                "end_date": normalize_trade_date(end_date),
+            },
+        )
+    except Exception:
+        return pd.DataFrame(columns=["trade_date", "put_call_oi", "put_oi", "call_oi"])
+    if df.empty:
+        return pd.DataFrame(columns=["trade_date", "put_call_oi", "put_oi", "call_oi"])
+
+    df["trade_date"] = df["trade_date"].apply(normalize_trade_date)
+    df["call_put"] = df["call_put"].astype(str).str.upper().str[:1]
+    df["open_interest"] = pd.to_numeric(df["open_interest"], errors="coerce").fillna(0.0)
+    pivot = (
+        df.pivot_table(index="trade_date", columns="call_put", values="open_interest", aggfunc="sum")
+        .rename(columns={"P": "put_oi", "C": "call_oi"})
+        .reset_index()
+    )
+    for col in ["put_oi", "call_oi"]:
+        if col not in pivot.columns:
+            pivot[col] = 0.0
+        pivot[col] = pd.to_numeric(pivot[col], errors="coerce").fillna(0.0)
+    pivot["put_call_oi"] = pivot["put_oi"] / pivot["call_oi"].where(pivot["call_oi"] > 0)
+    pivot = pivot[pivot["put_call_oi"].notna()]
+    return pivot.sort_values("trade_date").tail(int(window or 252)).reset_index(drop=True)
+
+
 def option_anomaly_scan_cache_table(use_test_tables: bool = False) -> str:
     suffix = "_test" if use_test_tables else ""
     return f"{OPTION_ANOMALY_SCAN_CACHE_TABLE}{suffix}"
@@ -5506,6 +5589,43 @@ def _percentile_rank(values: pd.Series, current_value: float | None) -> float | 
     return float((series <= float(current_value)).sum() / len(series) * 100)
 
 
+def _iv_change_directional_percentile(
+    values: pd.Series,
+    current_value: float | None,
+    *,
+    min_samples: int = 60,
+) -> dict[str, Any]:
+    current = _clean_metric_value(current_value)
+    min_count = max(int(min_samples or 1), 1)
+    label = "变化分位"
+    comparable = pd.Series(dtype=float)
+    rank_value = None
+    if current is not None:
+        series = pd.to_numeric(values, errors="coerce").dropna()
+        if current > 0:
+            label = "升波分位"
+            comparable = series[series > 0]
+            rank_value = current
+        elif current < 0:
+            label = "降波分位"
+            comparable = series[series < 0].abs()
+            rank_value = abs(current)
+        else:
+            comparable = series.abs()
+            rank_value = 0.0
+
+    sample_count = int(len(comparable))
+    percentile = None
+    if rank_value is not None and sample_count >= min_count:
+        percentile = _percentile_rank(comparable, rank_value)
+    return {
+        "iv_change_1d_directional_percentile": percentile,
+        "iv_change_1d_direction_label": label,
+        "iv_change_1d_directional_history_count": sample_count,
+        "iv_change_1d_directional_insufficient_history": sample_count < min_count,
+    }
+
+
 def _iv_rank_from_history(
     iv_history: pd.DataFrame,
     *,
@@ -5533,6 +5653,10 @@ def _iv_rank_from_history(
             "current_monthly_iv_pct": current_value,
             "iv_change_1d": None,
             "iv_change_1d_percentile": None,
+            "iv_change_1d_directional_percentile": None,
+            "iv_change_1d_direction_label": "变化分位",
+            "iv_change_1d_directional_history_count": 0,
+            "iv_change_1d_directional_insufficient_history": True,
             "iv_change_5d": None,
             "iv_change_20d": None,
             "iv_history_days": int((fallback or {}).get("days") or 0),
@@ -5555,6 +5679,7 @@ def _iv_rank_from_history(
         "current_monthly_iv_pct": current_value,
         "iv_change_1d": current_change_1d,
         "iv_change_1d_percentile": _percentile_rank(history["iv_change_1d"], current_change_1d),
+        **_iv_change_directional_percentile(history["iv_change_1d"], current_change_1d),
         "iv_change_5d": current_value - float(series.iloc[-6]) if len(series) >= 6 else None,
         "iv_change_20d": current_value - float(series.iloc[-21]) if len(series) >= 21 else None,
         "iv_history_days": int(len(series)),
@@ -5684,14 +5809,53 @@ def _term_iv_metrics(chain_df: pd.DataFrame) -> dict[str, Any]:
     }
 
 
-def _fixed_moneyness_iv(group: pd.DataFrame, *, call_put: str | None, center: float, band: float = 1.0) -> float | None:
-    side = group
+def _fixed_moneyness_iv(
+    group: pd.DataFrame,
+    *,
+    call_put: str | None,
+    center: float,
+    band: float = 1.25,
+    fallback_band: float = 4.5,
+    max_points: int = 4,
+    min_open_interest: float = 50.0,
+) -> float | None:
+    side = group.copy()
     if call_put:
+        call_put = str(call_put).upper()[:1]
         side = side[side["call_put"] == call_put]
-    side = side[side["moneyness_pct"].between(center - band, center + band)]
+        if call_put == "P":
+            side = side[side["moneyness_pct"] < 0]
+        elif call_put == "C":
+            side = side[side["moneyness_pct"] > 0]
+
+    side["iv_pct"] = pd.to_numeric(side.get("iv_pct"), errors="coerce")
+    side["moneyness_pct"] = pd.to_numeric(side.get("moneyness_pct"), errors="coerce")
+    if "open_interest" not in side.columns:
+        side["open_interest"] = 0.0
+    side["open_interest"] = pd.to_numeric(side["open_interest"], errors="coerce").fillna(0.0)
+    side = side.dropna(subset=["iv_pct", "moneyness_pct"])
     if side.empty:
         return None
-    return _weighted_average(side["iv_pct"], side["open_interest"])
+
+    side["_distance"] = (side["moneyness_pct"] - float(center)).abs()
+    candidates = side[side["_distance"] <= float(band)].copy()
+    if candidates.empty:
+        candidates = side[side["_distance"] <= float(fallback_band)].copy()
+    if candidates.empty:
+        candidates = side.sort_values(["_distance", "open_interest"], ascending=[True, False]).head(max_points).copy()
+        if candidates.empty or float(candidates["_distance"].min()) > float(fallback_band):
+            return None
+    else:
+        candidates = candidates.sort_values(["_distance", "open_interest"], ascending=[True, False]).head(max_points)
+        if call_put and candidates[candidates["open_interest"] >= float(min_open_interest)].empty:
+            expanded = side[side["_distance"] <= float(fallback_band)].copy()
+            if not expanded.empty:
+                candidates = expanded.sort_values(["_distance", "open_interest"], ascending=[True, False]).head(max_points)
+
+    liquid = candidates[candidates["open_interest"] >= float(min_open_interest)]
+    if not liquid.empty:
+        candidates = liquid
+    return _weighted_average(candidates["iv_pct"], candidates["open_interest"])
 
 
 def _skew_metrics(chain_df: pd.DataFrame) -> dict[str, Any]:
@@ -5910,6 +6074,82 @@ def _derive_put_call_skew(put_skew: Any, call_skew: Any) -> float | None:
     return put_value - call_value
 
 
+def _historical_min_samples_for_field(field: str, default_min_samples: int) -> int:
+    return max(int(HISTORICAL_PERCENTILE_MIN_SAMPLE_OVERRIDES.get(field, default_min_samples) or 1), 1)
+
+
+def _merge_metric_history_field(
+    metrics_history: pd.DataFrame,
+    fallback_history: pd.DataFrame,
+    field: str,
+) -> pd.DataFrame:
+    if fallback_history is None or fallback_history.empty or "trade_date" not in fallback_history.columns:
+        return metrics_history
+    history = metrics_history.copy() if metrics_history is not None else pd.DataFrame(columns=MARKET_METRICS_COLUMNS)
+    if "trade_date" not in history.columns:
+        history["trade_date"] = pd.Series(dtype=str)
+    history["trade_date"] = history["trade_date"].apply(normalize_trade_date)
+
+    fallback = fallback_history[["trade_date", field]].copy()
+    fallback["trade_date"] = fallback["trade_date"].apply(normalize_trade_date)
+    fallback[field] = pd.to_numeric(fallback[field], errors="coerce")
+    merged = history.merge(fallback, on="trade_date", how="outer", suffixes=("", "_fallback"))
+    if field not in merged.columns:
+        merged[field] = pd.NA
+    fallback_col = f"{field}_fallback"
+    if fallback_col in merged.columns:
+        merged[field] = pd.to_numeric(merged[field], errors="coerce").combine_first(
+            pd.to_numeric(merged[fallback_col], errors="coerce")
+        )
+        merged = merged.drop(columns=[fallback_col])
+    if "underlying" not in merged.columns and "underlying" in history.columns:
+        merged["underlying"] = history["underlying"]
+    return merged.sort_values("trade_date").reset_index(drop=True)
+
+
+def _needs_current_skew_repair(metrics: dict[str, Any]) -> bool:
+    put_skew = _clean_metric_value(metrics.get("put_skew_5pct"))
+    call_skew = _clean_metric_value(metrics.get("call_skew_5pct"))
+    if put_skew is None or call_skew is None:
+        return True
+    return max(abs(put_skew), abs(call_skew)) > 50.0
+
+
+def _repair_current_skew_from_chain(
+    *,
+    underlying: str | None,
+    trade_date: str,
+    stock_df: pd.DataFrame,
+    use_test_tables: bool,
+    engine=None,
+) -> dict[str, Any]:
+    if not underlying:
+        return {}
+    try:
+        underlying_price = selected_underlying_price(stock_df, trade_date)
+        chain_df = load_option_surface_snapshot(
+            underlying,
+            trade_date,
+            include_short_cycle=False,
+            moneyness_range=15.0,
+            max_dte=90,
+            underlying_price=underlying_price,
+            use_test_tables=use_test_tables,
+            engine=engine,
+        )
+    except Exception:
+        return {}
+    if chain_df.empty:
+        return {}
+    repaired = _skew_metrics(chain_df)
+    return {
+        key: value
+        for key, value in repaired.items()
+        if key in {"skew_expiration", "put_skew_5pct", "call_skew_5pct", "put_call_skew_5pct"}
+        and value is not None
+    }
+
+
 def apply_historical_percentiles(
     metrics: dict[str, Any],
     metrics_history: pd.DataFrame,
@@ -5926,9 +6166,13 @@ def apply_historical_percentiles(
     for percentile_key in HISTORICAL_PERCENTILE_FIELDS.values():
         out[percentile_key] = None
 
+    min_count = max(int(min_samples or 1), 1)
     if history.empty:
         out["put_call_skew_5pct"] = _derive_put_call_skew(out.get("put_skew_5pct"), out.get("call_skew_5pct"))
+        out.update(_iv_change_directional_percentile(pd.Series(dtype=float), _clean_metric_value(out.get("iv_change_1d")), min_samples=min_count))
         for field in HISTORICAL_PERCENTILE_FIELDS:
+            field_min_count = _historical_min_samples_for_field(field, min_count)
+            out[f"{field}_min_samples"] = field_min_count
             out[f"{field}_history_count"] = 0
             out[f"{field}_insufficient_history"] = True
         return out
@@ -5950,17 +6194,26 @@ def apply_historical_percentiles(
         )
 
     history_window = max(int(window or 252), 1)
-    min_count = max(int(min_samples or 1), 1)
     for field, percentile_key in HISTORICAL_PERCENTILE_FIELDS.items():
         series = pd.to_numeric(history.get(field, pd.Series(dtype=float)), errors="coerce").dropna().tail(history_window)
         current_value = _clean_metric_value(out.get(field))
         sample_count = int(len(series))
+        field_min_count = _historical_min_samples_for_field(field, min_count)
+        out[f"{field}_min_samples"] = field_min_count
         out[f"{field}_history_count"] = sample_count
-        out[f"{field}_insufficient_history"] = sample_count < min_count
-        if current_value is None or sample_count < min_count:
+        out[f"{field}_insufficient_history"] = sample_count < field_min_count
+        if current_value is None or sample_count < field_min_count:
             out[percentile_key] = None
         else:
             out[percentile_key] = _percentile_rank(series, current_value)
+    iv_change_series = pd.to_numeric(history.get("iv_change_1d", pd.Series(dtype=float)), errors="coerce").dropna().tail(history_window)
+    out.update(
+        _iv_change_directional_percentile(
+            iv_change_series,
+            _clean_metric_value(out.get("iv_change_1d")),
+            min_samples=_historical_min_samples_for_field("iv_change_1d", min_count),
+        )
+    )
     return out
 
 
@@ -5969,6 +6222,9 @@ def calculate_overview_metrics_from_market_history(
     stock_df: pd.DataFrame,
     market_metrics_history: pd.DataFrame,
     trade_date: str | dt.date | dt.datetime,
+    underlying: str | None = None,
+    use_test_tables: bool = True,
+    engine=None,
 ) -> dict[str, Any]:
     trade_date_text = normalize_trade_date(trade_date)
     history = _metric_history_until(market_metrics_history, trade_date_text)
@@ -5982,6 +6238,24 @@ def calculate_overview_metrics_from_market_history(
             iv_rank=None,
             market_metrics_history=market_metrics_history,
         )
+
+    if underlying:
+        put_call_oi_count = int(pd.to_numeric(history.get("put_call_oi", pd.Series(dtype=float)), errors="coerce").notna().sum())
+        put_call_oi_min = _historical_min_samples_for_field("put_call_oi", 60)
+        if "open_interest_rows" in history.columns:
+            oi_history_count = int((pd.to_numeric(history["open_interest_rows"], errors="coerce").fillna(0) > 0).sum())
+        else:
+            oi_history_count = put_call_oi_min
+        if put_call_oi_count < put_call_oi_min and oi_history_count >= put_call_oi_min:
+            put_call_history = load_put_call_oi_history(
+                underlying,
+                end_date=trade_date_text,
+                window=252,
+                use_test_tables=use_test_tables,
+                engine=engine,
+            )
+            if not put_call_history.empty:
+                history = _merge_metric_history_field(history, put_call_history, "put_call_oi")
 
     exact = history[history["trade_date"] == trade_date_text]
     current_row = exact.iloc[-1] if not exact.empty else history.iloc[-1]
@@ -6023,6 +6297,32 @@ def calculate_overview_metrics_from_market_history(
 
     if _clean_metric_value(metrics.get("iv_rv20_spread")) is None and current_iv is not None and rv20 is not None:
         metrics["iv_rv20_spread"] = current_iv - rv20
+
+    if _needs_current_skew_repair(metrics):
+        repaired_skew = _repair_current_skew_from_chain(
+            underlying=underlying,
+            trade_date=trade_date_text,
+            stock_df=stock_df,
+            use_test_tables=use_test_tables,
+            engine=engine,
+        )
+        for key, value in repaired_skew.items():
+            if key in {"put_skew_5pct", "call_skew_5pct"}:
+                old_value = _clean_metric_value(metrics.get(key))
+                if old_value is None or abs(old_value) > 50.0:
+                    metrics[key] = value
+            elif key == "skew_expiration" and not metrics.get("skew_expiration"):
+                metrics[key] = value
+        metrics["put_call_skew_5pct"] = _derive_put_call_skew(metrics.get("put_skew_5pct"), metrics.get("call_skew_5pct"))
+        exact_mask = history["trade_date"] == trade_date_text
+        if exact_mask.any():
+            for key in ["skew_expiration", "put_skew_5pct", "call_skew_5pct", "put_call_skew_5pct"]:
+                value = metrics.get(key)
+                if value is None:
+                    continue
+                if key not in history.columns:
+                    history[key] = pd.NA
+                history.loc[exact_mask, key] = value
 
     return apply_historical_percentiles(
         metrics,
