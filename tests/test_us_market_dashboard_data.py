@@ -681,6 +681,14 @@ class UsMarketDashboardDataTests(unittest.TestCase):
         self.assertEqual(dash.get_underlying_profile("SPY")["next_earnings_date"], dash.ETF_EARNINGS_NOTE)
         self.assertEqual(dash.get_underlying_profile("AAPL")["next_earnings_date"], dash.STOCK_EARNINGS_NOTE)
 
+    def test_spcx_profile_is_spacex_stock_not_etf(self):
+        profile = dash.get_underlying_profile("SPCX")
+
+        self.assertEqual(profile["name"], "SpaceX")
+        self.assertEqual(profile["asset_type"], "stock")
+        self.assertIn("商业航天", profile["business"])
+        self.assertEqual(profile["next_earnings_date"], dash.STOCK_EARNINGS_NOTE)
+
     def test_format_profile_updated_at_uses_beijing_time(self):
         self.assertEqual(dash.format_profile_updated_at_beijing("2026-07-07 15:05:00"), "07/07 23:05")
         self.assertEqual(dash.format_profile_updated_at_beijing("2026-07-07T15:05:00Z"), "07/07 23:05")
@@ -746,8 +754,10 @@ class UsMarketDashboardDataTests(unittest.TestCase):
             lookback_days=30,
         )
 
-        self.assertIn("公开报道/分析师", out["recent_catalyst"])
-        self.assertIn("Put/Call OI", out["recent_catalyst"])
+        self.assertIn("公开报道/分析师", out["recent_hotspot"])
+        self.assertNotIn("Put/Call OI", out["recent_hotspot"])
+        self.assertIn("Put/Call OI", out["option_data"])
+        self.assertIn("偏空", out["option_data"])
         self.assertTrue(out["recent_risk"])
         self.assertEqual(out["confidence"], "medium")
 
@@ -757,8 +767,8 @@ class UsMarketDashboardDataTests(unittest.TestCase):
             dash,
             "_build_profile_llm_json",
             return_value={
-                "recent_catalyst": "分析师关注AI GPU出货与财报指引，Call端追涨溢价同步抬升。",
-                "recent_risk": "若AI订单兑现不及预期，当前较高IV可能在财报后快速回落。",
+                "recent_hotspot": "分析师关注AI GPU出货与财报指引。",
+                "option_data": "期权数据看Call端追涨溢价和较高IV定价，信号偏多。",
                 "confidence": "high",
             },
         ):
@@ -771,7 +781,8 @@ class UsMarketDashboardDataTests(unittest.TestCase):
                 lookback_days=30,
             )
 
-        self.assertIn("AI GPU", out["recent_catalyst"])
+        self.assertIn("AI GPU", out["recent_hotspot"])
+        self.assertIn("Call", out["option_data"])
         self.assertIn("IV", out["recent_risk"])
         self.assertEqual(out["confidence"], "high")
 
@@ -806,7 +817,7 @@ class UsMarketDashboardDataTests(unittest.TestCase):
                     "earnings_time": "盘后",
                     "earnings_source": "Nasdaq",
                     "recent_catalyst": "测试催化",
-                    "recent_risk": "测试风险",
+                    "recent_risk": "期权数据测试：ATM IV 20.0%，期权信号中性。",
                     "dynamic_note": "测试动态",
                     "source_refs_json": json.dumps([{"source": "Nasdaq", "title": "calendar"}]),
                 }
@@ -822,8 +833,72 @@ class UsMarketDashboardDataTests(unittest.TestCase):
 
         self.assertEqual(card["symbol"], "AAPL")
         self.assertEqual(card["earnings_date"], "2026/08/04")
-        self.assertEqual(card["recent_catalyst"], "测试催化")
+        self.assertEqual(card["recent_hotspot"], "测试催化")
+        self.assertEqual(card["option_data"], "期权数据测试：ATM IV 20.0%，期权信号中性。")
         self.assertEqual(card["dynamic_source_refs"][0]["source"], "Nasdaq")
+
+    def test_build_underlying_profile_card_strips_legacy_static_text_from_dynamic_payload(self):
+        profile = dash.get_underlying_profile("AAPL")
+        dash.replace_underlying_profile_cache(
+            [
+                {
+                    "as_of_date": "20260707",
+                    "underlying": "AAPL",
+                    "earnings_date": "2026/08/04",
+                    "earnings_time": "盘后",
+                    "earnings_source": "Nasdaq",
+                    "recent_catalyst": f"近期看点围绕苹果财报窗口和期权定价。 核心业务：{profile['business']}",
+                    "recent_risk": f"{profile['risk']} 财报前后留意IV事件后回落。",
+                    "dynamic_note": "旧缓存",
+                    "source_refs_json": json.dumps(
+                        [
+                            {"source": "本地期权指标", "title": "ATM IV 28.0%；Put/Call OI 0.78，看涨仓位更活跃。"},
+                            {"source": "估算", "title": "legacy"},
+                        ]
+                    ),
+                }
+            ],
+            as_of_date="20260707",
+            underlyings=["AAPL"],
+            use_test_tables=True,
+            engine=self.engine,
+        )
+
+        card = dash.build_underlying_profile_card("AAPL", use_test_tables=True, engine=self.engine)
+
+        self.assertNotIn("核心业务", card["recent_hotspot"])
+        self.assertNotIn(profile["business"], card["recent_hotspot"])
+        self.assertNotIn(profile["risk"], card["recent_risk"])
+        self.assertIn("ATM IV", card["option_data"])
+        self.assertEqual(card["option_data"], card["recent_risk"])
+
+    def test_build_underlying_profile_card_ignores_stale_etf_cache_for_stock(self):
+        dash.replace_underlying_profile_cache(
+            [
+                {
+                    "as_of_date": "20260707",
+                    "underlying": "SPCX",
+                    "earnings_date": dash.ETF_EARNINGS_NOTE,
+                    "earnings_time": "",
+                    "earnings_source": "ETF",
+                    "recent_catalyst": "近期关注SpaceX的成分板块轮动。",
+                    "recent_risk": "ETF没有单一公司财报。",
+                    "dynamic_note": "旧ETF缓存",
+                    "source_refs_json": json.dumps([{"source": "ETF", "title": "legacy"}]),
+                }
+            ],
+            as_of_date="20260707",
+            underlyings=["SPCX"],
+            use_test_tables=True,
+            engine=self.engine,
+        )
+
+        card = dash.build_underlying_profile_card("SPCX", use_test_tables=True, engine=self.engine)
+
+        self.assertEqual(card["asset_type"], "stock")
+        self.assertNotEqual(card["earnings_date"], dash.ETF_EARNINGS_NOTE)
+        self.assertNotEqual(card["earnings_source"], "ETF")
+        self.assertNotIn("ETF没有单一公司财报", card["recent_risk"])
 
     def test_build_underlying_profile_card_has_readable_fallback_without_cache(self):
         card = dash.build_underlying_profile_card(
@@ -836,8 +911,8 @@ class UsMarketDashboardDataTests(unittest.TestCase):
         self.assertEqual(card["symbol"], "DIS")
         self.assertIn("估算", card["earnings_date"])
         self.assertEqual(card["earnings_source"], "估算")
-        self.assertIn("迪士尼", card["recent_catalyst"])
-        self.assertIn("财报前后", card["recent_risk"])
+        self.assertIn("迪士尼", card["recent_hotspot"])
+        self.assertIn("期权数据", card["option_data"])
         self.assertEqual(card["dynamic_source_refs"][0]["source"], "估算")
 
     def test_rebuild_underlying_profile_cache_falls_back_without_network_or_llm(self):
@@ -861,7 +936,8 @@ class UsMarketDashboardDataTests(unittest.TestCase):
         self.assertEqual(result["written"], 1)
         self.assertIn("估算", card["earnings_date"])
         self.assertIn("V2", card["dynamic_note"])
-        self.assertTrue(card["recent_catalyst"])
+        self.assertTrue(card["recent_hotspot"])
+        self.assertTrue(card["option_data"])
         self.assertTrue(card["recent_risk"])
 
     def test_rebuild_underlying_profile_cache_marks_etf_without_company_earnings(self):
@@ -883,7 +959,8 @@ class UsMarketDashboardDataTests(unittest.TestCase):
         self.assertEqual(result["written"], 1)
         self.assertEqual(card["earnings_date"], dash.ETF_EARNINGS_NOTE)
         self.assertIn("ETF", card["earnings_source"])
-        self.assertIn("ETF没有单一公司财报", card["recent_risk"])
+        self.assertIn("成分板块轮动", card["recent_hotspot"])
+        self.assertIn("期权数据", card["option_data"])
 
     def test_rebuild_underlying_profile_cache_combines_news_web_and_llm_summary(self):
         analyst_ref = dash._classify_profile_source_ref(
@@ -900,8 +977,8 @@ class UsMarketDashboardDataTests(unittest.TestCase):
             dash,
             "_build_profile_llm_json",
             return_value={
-                "recent_catalyst": "分析师上调叠加乐园需求韧性，期权端关注财报前IV升温。",
-                "recent_risk": "若流媒体利润或乐园客流低于预期，事件后IV回落风险较高。",
+                "recent_hotspot": "分析师上调叠加乐园需求韧性，市场关注流媒体利润修复。",
+                "option_data": "期权数据看财报前IV升温和Call端追涨溢价，信号偏多。",
                 "confidence": "high",
             },
         ):
@@ -919,8 +996,8 @@ class UsMarketDashboardDataTests(unittest.TestCase):
         self.assertEqual(result["written"], 1)
         self.assertEqual(result["news_refs"], 1)
         self.assertEqual(result["web_refs"], 1)
-        self.assertIn("分析师上调", card["recent_catalyst"])
-        self.assertIn("IV回落", card["recent_risk"])
+        self.assertIn("分析师上调", card["recent_hotspot"])
+        self.assertIn("IV", card["option_data"])
         self.assertIn("analyst", source_kinds)
 
     def test_load_market_climate_strip_missing_tables_returns_placeholders(self):

@@ -363,11 +363,11 @@ UNDERLYING_PROFILE_CARDS = {
         "next_earnings_date": STOCK_EARNINGS_NOTE,
     },
     "SPCX": {
-        "asset_type": "etf",
-        "business": "SPAC/新上市主题 ETF，偏高风险成长和事件驱动资产。",
-        "strength": "适合观察新股、SPAC、商业航天等高 beta 主题风险偏好。",
-        "risk": "不等同于 SpaceX 私募股权，成分和主题暴露需以基金文件为准。",
-        "next_earnings_date": ETF_EARNINGS_NOTE,
+        "asset_type": "stock",
+        "business": "SpaceX 是商业航天和卫星互联网公司，覆盖火箭发射、Dragon 飞船、Starship、Starlink 和政府航天服务。",
+        "strength": "可重复使用火箭、发射频率、Starlink 用户规模和政府合同构成核心壁垒。",
+        "risk": "Starship 研发、发射监管、资本开支、星链竞争和估值预期波动较大。",
+        "next_earnings_date": STOCK_EARNINGS_NOTE,
     },
     "TLT": {
         "asset_type": "etf",
@@ -1511,9 +1511,39 @@ def _profile_options_context(
     summary_parts = [*metric_parts[:4]]
     if anomaly_parts:
         summary_parts.append("异动：" + "；".join(anomaly_parts[:2]))
-    summary = "；".join(summary_parts) + "。" if summary_parts else "本地期权指标暂无最新样本。"
+    direction_score = 0.0
+    if put_call_oi is not None:
+        if put_call_oi <= 0.8:
+            direction_score += 1.0
+        elif put_call_oi >= 1.2:
+            direction_score -= 1.0
+    if put_call_volume is not None:
+        if put_call_volume <= 0.8:
+            direction_score += 0.8
+        elif put_call_volume >= 1.2:
+            direction_score -= 0.8
+    if call_skew is not None and call_skew > 0:
+        direction_score += 0.8
+    if put_skew is not None and put_skew > 0:
+        direction_score -= 0.8
+    for item in anomaly_parts:
+        if item.startswith("Call"):
+            direction_score += 0.4
+        elif item.startswith("Put"):
+            direction_score -= 0.4
+    if direction_score >= 1.0:
+        direction = "偏多"
+    elif direction_score <= -1.0:
+        direction = "偏空"
+    else:
+        direction = "中性"
+    if summary_parts:
+        summary = "；".join(summary_parts) + f"。期权信号{direction}。"
+    else:
+        summary = "本地期权指标暂无最新样本，方向倾向暂不判断。"
     return {
         "summary": summary,
+        "direction": direction,
         "metrics": metrics,
         "anomalies": anomaly_parts,
         "refs": [
@@ -1584,8 +1614,8 @@ def _build_profile_llm_json(
 
 输出严格 JSON，不要 Markdown：
 {{
-  "recent_catalyst": "一句，30-75个中文字符，结合近期事件/分析师观点/财报或期权数据，说明市场在交易什么正向催化",
-  "recent_risk": "一句，30-75个中文字符，结合近期事件/分析师观点/财报或期权数据，说明主要风险或反向验证点",
+  "recent_hotspot": "一句，30-75个中文字符，只写近期事件、新闻、分析师观点、财报窗口或业务进展，不写IV/Put-Call/Skew",
+  "option_data": "一句，30-75个中文字符，只写IV/Put-Call/Skew/成交仓位，并给出期权信号偏多、偏空或中性，不重复热点和长期风险",
   "used_refs": ["最多3个来源编号"],
   "confidence": "high|medium|low"
 }}
@@ -1601,16 +1631,39 @@ def _build_profile_llm_json(
         data = _json_from_llm_text(getattr(msg, "content", msg))
     except Exception:
         return {}
-    catalyst = re.sub(r"\s+", " ", str(data.get("recent_catalyst") or "")).strip()
-    risk = re.sub(r"\s+", " ", str(data.get("recent_risk") or "")).strip()
-    if not catalyst or not risk:
+    hotspot = re.sub(r"\s+", " ", str(data.get("recent_hotspot") or data.get("recent_catalyst") or "")).strip()
+    option_data = re.sub(
+        r"\s+",
+        " ",
+        str(data.get("option_data") or data.get("recent_risk") or ""),
+    ).strip()
+    if not hotspot or not option_data:
         return {}
     return {
-        "recent_catalyst": catalyst[:140],
-        "recent_risk": risk[:140],
+        "recent_catalyst": hotspot[:140],
+        "recent_hotspot": hotspot[:140],
+        "option_data": option_data[:140],
+        "recent_risk": option_data[:140],
         "used_refs": data.get("used_refs") if isinstance(data.get("used_refs"), list) else [],
         "confidence": str(data.get("confidence") or "medium"),
     }
+
+
+def _ensure_option_direction(summary: str, direction: str | None = None) -> str:
+    text_value = re.sub(r"\s+", " ", str(summary or "")).strip()
+    if not text_value or "暂无最新样本" in text_value:
+        return ""
+    if "期权信号" in text_value or "方向倾向" in text_value:
+        return text_value
+    signal = str(direction or "").strip()
+    if signal not in {"偏多", "偏空", "中性"}:
+        if any(token in text_value for token in ("保护需求偏高", "短线避险", "Put Skew", "下方保护")):
+            signal = "偏空"
+        elif any(token in text_value for token in ("看涨仓位", "Call Skew", "追涨溢价", "上行动能")):
+            signal = "偏多"
+        else:
+            signal = "中性"
+    return f"{text_value.rstrip('。')}。期权信号{signal}。"
 
 
 def _fallback_profile_dynamic_v2(
@@ -1626,45 +1679,37 @@ def _fallback_profile_dynamic_v2(
     is_etf = str(profile.get("asset_type") or "").lower() == "etf"
     analyst_refs = [ref for ref in refs if ref.get("kind") == "analyst"]
     catalyst_refs = [ref for ref in refs if ref.get("side") in {"catalyst", "mixed"}]
-    risk_refs = [ref for ref in refs if ref.get("side") in {"risk", "mixed"}]
     option_summary = str(options_context.get("summary") or _format_metric_sentence({}))
-    business_hint = _first_sentence(str(profile.get("business") or ""), max_len=60)
-    risk_hint = _first_sentence(str(profile.get("risk") or ""), max_len=60)
+    if "暂无最新样本" in option_summary:
+        option_summary = ""
+    option_summary = _ensure_option_direction(option_summary, str(options_context.get("direction") or ""))
 
     if is_etf:
         catalyst_base = catalyst_refs[0].get("title") if catalyst_refs else ""
-        risk_base = risk_refs[0].get("title") if risk_refs else ""
-        recent_catalyst = (
-            f"近{lookback_days}天关注{catalyst_base[:38]}；{option_summary}"
+        recent_hotspot = (
+            f"近{lookback_days}天关注{catalyst_base[:44]}"
             if catalyst_base
-            else f"近期看{name}成分板块轮动和宏观利率变化；{option_summary}"
+            else f"近期看{name}成分板块轮动、宏观利率和风险偏好变化。"
         )
-        recent_risk = (
-            f"风险看{risk_base[:40]}；ETF无单一财报催化。"
-            if risk_base
-            else f"{risk_hint or 'ETF风险主要来自权重行业回撤和市场beta变化'}；ETF没有单一公司财报。"
-        )
+        option_data = f"期权数据：{option_summary}" if option_summary else "期权数据暂无最新样本，方向倾向暂不判断。"
     else:
         headline = ""
         if analyst_refs:
             headline = analyst_refs[0].get("title", "")
         elif catalyst_refs:
             headline = catalyst_refs[0].get("title", "")
-        risk_headline = risk_refs[0].get("title", "") if risk_refs else ""
         earnings_hint = "财报日历已确认" if "估算" not in earnings_date and earnings_date else "财报窗口待确认"
-        recent_catalyst = (
-            f"公开报道/分析师线索显示{headline[:42]}；{option_summary}"
+        recent_hotspot = (
+            f"公开报道/分析师线索显示{headline[:48]}"
             if headline
-            else f"近期看{name}的{earnings_hint}、{business_hint or '业务主线'}；{option_summary}"
+            else f"近期看{name}的{earnings_hint}、财报预期和业务进展。"
         )
-        recent_risk = (
-            f"反向风险看{risk_headline[:42]}；需观察期权定价是否回落。"
-            if risk_headline
-            else f"{risk_hint or '风险在业绩预期、估值和行业竞争'}；财报前后留意IV事件后回落。"
-        )
+        option_data = f"期权数据：{option_summary}" if option_summary else "期权数据暂无最新样本，方向倾向暂不判断。"
     return {
-        "recent_catalyst": recent_catalyst[:160],
-        "recent_risk": recent_risk[:160],
+        "recent_catalyst": recent_hotspot[:160],
+        "recent_hotspot": recent_hotspot[:160],
+        "option_data": option_data[:160],
+        "recent_risk": option_data[:160],
         "confidence": "medium" if refs else "low",
     }
 
@@ -1686,9 +1731,13 @@ def _summarize_profile_dynamic_v2(
         refs=refs,
     )
     if llm_data:
+        hotspot = str(llm_data.get("recent_hotspot") or llm_data.get("recent_catalyst") or "")
+        option_data = str(llm_data.get("option_data") or llm_data.get("recent_risk") or "")
         return {
-            "recent_catalyst": str(llm_data.get("recent_catalyst") or ""),
-            "recent_risk": str(llm_data.get("recent_risk") or ""),
+            "recent_catalyst": hotspot,
+            "recent_hotspot": hotspot,
+            "option_data": option_data,
+            "recent_risk": option_data,
             "confidence": str(llm_data.get("confidence") or "medium"),
         }
     return _fallback_profile_dynamic_v2(
@@ -1714,19 +1763,16 @@ def _fallback_underlying_profile_dynamic(
     except Exception:
         today = dt.date.today()
         as_of_date_text = today.strftime("%Y%m%d")
-    business_hint = _first_sentence(str(profile.get("business") or ""))
-    risk_hint = _first_sentence(str(profile.get("risk") or ""))
     if is_etf:
         earnings_date = ETF_EARNINGS_NOTE
         earnings_time = ""
         earnings_source = "ETF"
         recent_catalyst = (
             f"近期关注{name}的成分板块轮动、利率环境和风险偏好变化；"
-            "可结合价格趋势、IV位置和资金风险偏好观察。"
+            "可结合宏观数据和权重行业表现观察。"
         )
         recent_risk = (
-            f"{risk_hint or 'ETF短线风险主要来自指数权重行业和市场 beta 的同步波动'}"
-            " 没有单一公司财报催化。"
+            "期权数据暂无最新样本，方向倾向暂不判断。"
         )
         refs = [{"source": "固定资料", "title": "ETF无公司财报", "date": as_of_date_text}]
     else:
@@ -1734,12 +1780,10 @@ def _fallback_underlying_profile_dynamic(
         earnings_time = "待日历确认"
         earnings_source = "估算"
         recent_catalyst = (
-            f"近期关注{name}的财报窗口、业务主线和期权定价变化；"
-            f"{business_hint or '可结合价格趋势和IV位置观察市场关注点'}"
+            f"近期关注{name}的财报窗口、预期变化和业务进展。"
         )
         recent_risk = (
-            f"{risk_hint or '需关注业绩预期、估值和行业竞争变化'}"
-            " 财报前后留意隐含波动率抬升和事件后回落。"
+            "期权数据暂无最新样本，方向倾向暂不判断。"
         )
         refs = [{"source": "估算", "title": "季度财报窗口估算 + 固定资料", "date": earnings_date}]
     return {
@@ -1812,8 +1856,8 @@ def _build_underlying_profile_dynamic_row(
         refs=refs,
         lookback_days=lookback_days,
     )
-    recent_catalyst = summary.get("recent_catalyst") or "近期变化待更新"
-    recent_risk = summary.get("recent_risk") or "近期变化待更新"
+    recent_hotspot = summary.get("recent_hotspot") or summary.get("recent_catalyst") or "近期热点待更新"
+    option_data = summary.get("option_data") or summary.get("recent_risk") or "期权数据待更新"
     confidence = summary.get("confidence") or "medium"
     source_names = sorted({str(ref.get("source") or "") for ref in refs if ref.get("source")})
     dynamic_note = f"V2 {confidence}：近{lookback_days}天公开来源 + 本地期权指标；来源 {' + '.join(source_names[:4]) or '规则兜底'}。"
@@ -1824,8 +1868,8 @@ def _build_underlying_profile_dynamic_row(
         "earnings_date": earnings_date,
         "earnings_time": earnings_time,
         "earnings_source": earnings_source,
-        "recent_catalyst": recent_catalyst,
-        "recent_risk": recent_risk,
+        "recent_catalyst": recent_hotspot,
+        "recent_risk": option_data,
         "dynamic_note": dynamic_note,
         "source_refs_json": _source_refs_json(refs),
     }
@@ -2050,6 +2094,99 @@ def load_underlying_profile_dynamic(
     return out
 
 
+def _strip_repeated_profile_text(text_value: Any, profile: dict[str, Any], fields: tuple[str, ...]) -> str:
+    cleaned = re.sub(r"\s+", " ", str(text_value or "")).strip()
+    if not cleaned:
+        return ""
+    if "business" in fields:
+        cleaned = re.sub(r"\s*(?:核心业务|主营业务)\s*[:：]\s*[^。；\n]*(?:[。；]|$)", " ", cleaned)
+    for field in fields:
+        raw = str(profile.get(field) or "").strip()
+        snippets = [
+            raw,
+            raw.rstrip("。；"),
+            _first_sentence(raw, max_len=100),
+            _first_sentence(raw, max_len=100).rstrip("。；"),
+        ]
+        for snippet in snippets:
+            snippet = re.sub(r"\s+", " ", snippet).strip()
+            if len(snippet) >= 12 and snippet in cleaned:
+                cleaned = cleaned.replace(snippet, " ")
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    cleaned = re.sub(r"^[，、；。\s]+", "", cleaned)
+    cleaned = re.sub(r"\s+([，、；。])", r"\1", cleaned)
+    cleaned = re.sub(r"([，、；])\s*([；。])", r"\2", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" ，、；")
+    return cleaned
+
+
+def _profile_option_data_from_refs(refs: list[dict[str, str]]) -> str:
+    for ref in refs:
+        if str(ref.get("source") or "").strip() != "本地期权指标":
+            continue
+        title = re.sub(r"\s+", " ", str(ref.get("title") or "")).strip()
+        if title and "暂无最新样本" not in title:
+            return _ensure_option_direction(title)
+    return ""
+
+
+def _is_low_value_option_data(text_value: str) -> bool:
+    text_value = str(text_value or "").strip()
+    if len(text_value) < 12:
+        return True
+    low_value_tokens = (
+        "财报前后关注预期差",
+        "财报前后留意",
+        "财报前若",
+        "事件后需留意",
+        "需观察期权定价是否回落",
+        "短线风险主要来自",
+        "ETF没有单一公司财报",
+        "风险在业绩预期",
+        "暂无最新样本",
+    )
+    return any(token in text_value for token in low_value_tokens)
+
+
+def _profile_hotspot_text(
+    dynamic: dict[str, str],
+    profile: dict[str, Any],
+) -> str:
+    raw = str(dynamic.get("recent_hotspot") or dynamic.get("recent_catalyst") or "")
+    cleaned = _strip_repeated_profile_text(raw, profile, ("business", "risk"))
+    cleaned = re.sub(r"[、，和及]*(?:期权定价|期权数据|IV位置)(?:变化)?", "", cleaned).strip(" ，、；")
+    if cleaned:
+        return cleaned
+    if str(profile.get("asset_type") or "").lower() == "etf":
+        return "近期热点集中在成分板块轮动、宏观利率和风险偏好变化。"
+    return "近期热点集中在财报窗口、预期修正和业务进展。"
+
+
+def _profile_option_data_text(
+    dynamic: dict[str, str],
+    refs: list[dict[str, str]],
+) -> str:
+    option_data = _profile_option_data_from_refs(refs)
+    if option_data:
+        return option_data
+    raw = str(dynamic.get("option_data") or dynamic.get("recent_risk") or "")
+    cleaned = re.sub(r"\s+", " ", raw).strip()
+    if cleaned and not _is_low_value_option_data(cleaned):
+        return cleaned
+    return "期权数据暂无最新样本，方向倾向暂不判断。"
+
+
+def _dynamic_profile_cache_looks_stale(dynamic: dict[str, str], profile: dict[str, Any]) -> bool:
+    asset_type = str(profile.get("asset_type") or "").lower()
+    earnings_date = str(dynamic.get("earnings_date") or "").strip()
+    earnings_source = str(dynamic.get("earnings_source") or "").strip()
+    if asset_type != "etf" and (earnings_date == ETF_EARNINGS_NOTE or earnings_source == "ETF"):
+        return True
+    if asset_type == "etf" and earnings_source not in {"", "ETF"} and earnings_date not in {"", ETF_EARNINGS_NOTE}:
+        return True
+    return False
+
+
 def build_underlying_profile_card(
     underlying: str,
     engine=None,
@@ -2064,18 +2201,28 @@ def build_underlying_profile_card(
         as_of_date=as_of_date,
         use_test_tables=use_test_tables,
     )
+    if _dynamic_profile_cache_looks_stale(dynamic, profile):
+        dynamic = _fallback_underlying_profile_dynamic(
+            profile,
+            dynamic.get("as_of_date") or as_of_date,
+        )
+    source_refs = _parse_source_refs_json(dynamic.get("source_refs_json"))
+    recent_hotspot = _profile_hotspot_text(dynamic, profile)
+    option_data = _profile_option_data_text(dynamic, source_refs)
     card: dict[str, Any] = dict(profile)
     card.update(
         {
             "earnings_date": dynamic.get("earnings_date") or profile.get("next_earnings_date") or "",
             "earnings_time": dynamic.get("earnings_time") or "",
             "earnings_source": dynamic.get("earnings_source") or "",
-            "recent_catalyst": dynamic.get("recent_catalyst") or "近期变化待更新",
-            "recent_risk": dynamic.get("recent_risk") or "近期变化待更新",
+            "recent_catalyst": recent_hotspot or "近期热点待更新",
+            "recent_hotspot": recent_hotspot or "近期热点待更新",
+            "option_data": option_data or "期权数据待更新",
+            "recent_risk": option_data or "期权数据待更新",
             "dynamic_note": dynamic.get("dynamic_note") or "",
             "dynamic_as_of_date": dynamic.get("as_of_date") or "",
             "dynamic_updated_at": dynamic.get("updated_at") or "",
-            "dynamic_source_refs": _parse_source_refs_json(dynamic.get("source_refs_json")),
+            "dynamic_source_refs": source_refs,
         }
     )
     return card

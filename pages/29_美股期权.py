@@ -1424,8 +1424,8 @@ def _render_underlying_profile_card(symbol: str) -> None:
     source_summary = _profile_source_summary(profile.get("dynamic_source_refs"))
     updated_label = _profile_updated_label(profile.get("dynamic_updated_at"), profile.get("dynamic_as_of_date"))
     updated_display = f"{updated_label} 北京时间" if ":" in updated_label else updated_label
-    recent_catalyst = str(profile.get("recent_catalyst") or "近期变化待更新")
-    recent_risk = str(profile.get("recent_risk") or "近期变化待更新")
+    recent_hotspot = str(profile.get("recent_hotspot") or profile.get("recent_catalyst") or "近期热点待更新")
+    option_data = str(profile.get("option_data") or profile.get("recent_risk") or "期权数据待更新")
     st.markdown(
         f"""
         <div class="us-underlying-brief">
@@ -1442,12 +1442,12 @@ def _render_underlying_profile_card(symbol: str) -> None:
             <div class="us-underlying-dynamic">
                 <div class="us-underlying-dynamic-grid">
                     <div class="us-underlying-dynamic-item">
-                        <span class="us-underlying-dynamic-label">近期催化</span>
-                        <div class="us-underlying-dynamic-text">{escape(recent_catalyst)}</div>
+                        <span class="us-underlying-dynamic-label">近期热点</span>
+                        <div class="us-underlying-dynamic-text">{escape(recent_hotspot)}</div>
                     </div>
                     <div class="us-underlying-dynamic-item">
-                        <span class="us-underlying-dynamic-label">近期风险</span>
-                        <div class="us-underlying-dynamic-text">{escape(recent_risk)}</div>
+                        <span class="us-underlying-dynamic-label">期权数据</span>
+                        <div class="us-underlying-dynamic-text">{escape(option_data)}</div>
                     </div>
                 </div>
                 <div class="us-underlying-dynamic-source">
