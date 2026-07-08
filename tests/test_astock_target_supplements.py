@@ -15,13 +15,16 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class AStockTargetSupplementTests(unittest.TestCase):
-    def test_supplement_targets_are_unique_and_include_zhongtian(self):
+    def test_supplement_targets_are_unique_and_include_mandatory_additions(self):
         targets = a_share_supplement_targets()
 
         self.assertEqual(len(targets), len(set(targets)))
         self.assertEqual(len(CSI2000_MISSING_20260430), 1699)
         self.assertIn("600522.SH", MANDATORY_A_SHARE_SUPPLEMENTS)
         self.assertIn("600522.SH", targets)
+        for code in ("688635.SH", "688809.SH", "001248.SZ", "001399.SZ"):
+            self.assertIn(code, MANDATORY_A_SHARE_SUPPLEMENTS)
+            self.assertIn(code, targets)
 
     def test_merge_keeps_existing_order_then_appends_supplements(self):
         merged = merge_a_share_targets(["000001.SZ", "600522.SH", "000001.SZ"])
@@ -56,7 +59,7 @@ class AStockTargetSupplementTests(unittest.TestCase):
 
         self.assertIn("[DRY-RUN] target_set=supplement", result.stdout)
         self.assertIn("[DRY-RUN] ETF targets=0", result.stdout)
-        self.assertIn("[DRY-RUN] stock targets=1700", result.stdout)
+        self.assertIn("[DRY-RUN] stock targets=1704", result.stdout)
         self.assertIn("[DRY-RUN] includes_600522=True", result.stdout)
 
 

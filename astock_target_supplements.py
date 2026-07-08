@@ -1710,6 +1710,10 @@ CSI2000_MISSING_20260430 = (
 
 MANDATORY_A_SHARE_SUPPLEMENTS = (
     "600522.SH",
+    "688635.SH",
+    "688809.SH",
+    "001248.SZ",
+    "001399.SZ",
 )
 
 def unique_targets(codes):
