@@ -4341,7 +4341,7 @@ if current_symbol not in symbol_options:
     st.session_state.pop("us_lab_symbol", None)
     current_symbol = symbol_options[0]
 
-view_options = ["总览", "异动雷达", "波动率曲面", "持仓防线"]
+view_options = ["总览", "波动率曲面", "持仓防线"]
 if st.session_state.get("us_lab_active_view") not in view_options:
     st.session_state["us_lab_active_view"] = "总览"
 
