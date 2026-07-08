@@ -53,7 +53,7 @@ if str(os.getenv("ENABLE_LANGSMITH_TRACING", "")).strip().lower() not in {"1", "
     os.environ["LANGCHAIN_CALLBACKS_BACKGROUND"] = "false"
 
 ZHIPU_API_KEY = os.getenv("ZHIPUAI_API_KEY")
-_SEARCH_WEB_TIMEOUT_SECONDS = float(str(os.getenv("SEARCH_WEB_TIMEOUT_SECONDS", "12")).strip() or 12)
+_SEARCH_WEB_TIMEOUT_SECONDS = float(str(os.getenv("SEARCH_WEB_TIMEOUT_SECONDS", "120")).strip() or 120)
 _DEFAULT_ZHIPU_SEARCH_MODEL = "glm-4-air"
 _DEFAULT_ZHIPU_SEARCH_ENGINE = "search_std"
 _DEFAULT_ZHIPU_SEARCH_MAX_ATTEMPTS = 2
