@@ -51,6 +51,30 @@ type MiniChart = {
   yLabels: Array<{ top: number; label: string }>
 }
 
+type CandleShape = {
+  x: number
+  highTop: number
+  lowTop: number
+  bodyTop: number
+  bodyHeight: number
+  width: number
+  color: string
+}
+
+type PriceIvChart = {
+  hasData: boolean
+  width: number
+  height: number
+  candles: CandleShape[]
+  ivSegments: ChartSegment[]
+  ivNodes: ChartNode[]
+  xLabels: Array<{ left: number; label: string }>
+  priceLabels: Array<{ top: number; label: string }>
+  ivLabels: Array<{ top: number; label: string }>
+  latestClose: string
+  latestIv: string
+}
+
 const auth = useAuthStore()
 const activeTab = ref<TabKey>('overview')
 const products = ref<UsOptionProduct[]>([])
@@ -71,7 +95,6 @@ const tabs: Array<{ key: TabKey; label: string }> = [
   { key: 'overview', label: '概览' },
   { key: 'surface', label: '波动率' },
   { key: 'defense', label: '持仓防线' },
-  { key: 'anomalies', label: '异动观察' },
 ]
 
 onShareAppMessage(() => ({
@@ -243,6 +266,22 @@ const kpiCards = computed(() => {
   ]
 })
 
+const profileCard = computed(() => overview.value?.profile_card || {})
+
+const profileItems = computed(() => {
+  const p = profileCard.value
+  return [
+    { label: p.intro_label || '标的介绍', text: p.business || '暂无标的介绍' },
+    { label: p.style_label || '板块风格', text: p.style || '暂无板块风格' },
+    { label: '近期热点', text: p.recent_hotspot || '近期热点待更新' },
+  ]
+})
+
+const priceIvChart = computed(() => buildPriceIvChart(
+  overview.value?.price_history || [],
+  overview.value?.iv_history || [],
+))
+
 const ivHistoryChart = computed(() => {
   const rows = overview.value?.iv_history || []
   return buildMiniChart([
@@ -343,6 +382,134 @@ function rankTone(v: any): string {
   return 'gold'
 }
 
+function buildPriceIvChart(priceRowsRaw: Array<Record<string, any>>, ivRowsRaw: Array<Record<string, any>>): PriceIvChart {
+  const width = 620
+  const height = 430
+  const padL = 42
+  const padR = 46
+  const padT = 20
+  const padB = 34
+  const priceH = 252
+  const ivTop = 306
+  const ivH = 82
+  const plotW = width - padL - padR
+  const empty: PriceIvChart = {
+    hasData: false,
+    width,
+    height,
+    candles: [],
+    ivSegments: [],
+    ivNodes: [],
+    xLabels: [],
+    priceLabels: [],
+    ivLabels: [],
+    latestClose: '--',
+    latestIv: '--',
+  }
+
+  const ivMap = new Map<string, number>()
+  for (const row of ivRowsRaw || []) {
+    const td = String(row.trade_date || '').replace(/-/g, '').slice(0, 8)
+    const iv = asNum(row.iv_pct)
+    if (td && iv !== null) ivMap.set(td, iv)
+  }
+
+  const rows = (priceRowsRaw || [])
+    .map(row => {
+      const tradeDate = String(row.trade_date || '').replace(/-/g, '').slice(0, 8)
+      return {
+        tradeDate,
+        label: compactDate(row.display_date || tradeDate),
+        open: asNum(row.open),
+        high: asNum(row.high),
+        low: asNum(row.low),
+        close: asNum(row.close),
+        iv: ivMap.get(tradeDate) ?? null,
+      }
+    })
+    .filter(row => row.tradeDate && row.open !== null && row.high !== null && row.low !== null && row.close !== null)
+    .slice(-90)
+
+  if (rows.length < 2) return empty
+
+  const priceValues = rows.flatMap(row => [row.high as number, row.low as number])
+  const ivValues = rows.map(row => row.iv).filter((v): v is number => v !== null)
+  if (!priceValues.length) return empty
+
+  let minP = Math.min(...priceValues)
+  let maxP = Math.max(...priceValues)
+  const spanP = maxP - minP
+  const padP = spanP > 0 ? spanP * 0.1 : Math.max(Math.abs(maxP || 1) * 0.05, 1)
+  minP -= padP
+  maxP += padP
+
+  let minIv = ivValues.length ? Math.min(...ivValues) : 0
+  let maxIv = ivValues.length ? Math.max(...ivValues) : 1
+  const spanIv = maxIv - minIv
+  const padIv = spanIv > 0 ? spanIv * 0.14 : Math.max(Math.abs(maxIv || 1) * 0.08, 1)
+  minIv -= padIv
+  maxIv += padIv
+
+  const candleW = Math.max(4, Math.min(12, plotW / Math.max(rows.length * 1.65, 1)))
+  const xAt = (idx: number) => padL + (idx / Math.max(rows.length - 1, 1)) * plotW
+  const yPrice = (value: number) => padT + ((maxP - value) / Math.max(maxP - minP, 1)) * priceH
+  const yIv = (value: number) => ivTop + ((maxIv - value) / Math.max(maxIv - minIv, 1)) * ivH
+
+  const candles: CandleShape[] = rows.map((row, idx) => {
+    const open = row.open as number
+    const close = row.close as number
+    const color = close >= open ? '#ef4444' : '#22c55e'
+    const top = Math.min(yPrice(open), yPrice(close))
+    return {
+      x: xAt(idx),
+      highTop: yPrice(row.high as number),
+      lowTop: yPrice(row.low as number),
+      bodyTop: top,
+      bodyHeight: Math.max(Math.abs(yPrice(open) - yPrice(close)), 3),
+      width: candleW,
+      color,
+    }
+  })
+
+  const ivPts = rows
+    .map((row, idx) => row.iv === null ? null : ({ x: xAt(idx), y: yIv(row.iv), value: row.iv }))
+    .filter((pt): pt is { x: number; y: number; value: number } => !!pt)
+  const ivSegments: ChartSegment[] = []
+  for (let i = 1; i < ivPts.length; i++) {
+    const a = ivPts[i - 1]
+    const b = ivPts[i]
+    const dx = b.x - a.x
+    const dy = b.y - a.y
+    ivSegments.push({
+      left: a.x,
+      top: a.y,
+      width: Math.sqrt(dx * dx + dy * dy),
+      angle: Math.atan2(dy, dx) * 180 / Math.PI,
+      color: '#38bdf8',
+    })
+  }
+
+  const labelStep = Math.max(1, Math.ceil(rows.length / 4))
+  const xLabels = rows
+    .map((row, idx) => ({ label: row.label, left: xAt(idx), idx }))
+    .filter(item => item.idx === 0 || item.idx === rows.length - 1 || item.idx % labelStep === 0)
+    .map(({ label, left }) => ({ label, left }))
+
+  return {
+    hasData: true,
+    width,
+    height,
+    candles,
+    ivSegments,
+    ivNodes: ivPts.map(pt => ({ left: pt.x, top: pt.y, color: '#38bdf8' })),
+    xLabels,
+    priceLabels: [maxP, (maxP + minP) / 2, minP].map(v => ({ top: yPrice(v), label: fmtNum(v, 1) })),
+    ivLabels: ivValues.length ? [maxIv, minIv].map(v => ({ top: yIv(v), label: fmtNum(v, 1) })) : [],
+    latestClose: fmtMoney(rows[rows.length - 1]?.close),
+    latestIv: ivPts.length ? fmtPctPlain(ivPts[ivPts.length - 1].value) : '--',
+  }
+}
+
 function buildMiniChart(inputLines: ChartLineInput[]): MiniChart {
   const width = 620
   const height = 240
@@ -432,6 +599,25 @@ function nodeStyle(node: ChartNode) {
   }
 }
 
+function candleWickStyle(candle: CandleShape) {
+  return {
+    left: `${candle.x}rpx`,
+    top: `${candle.highTop}rpx`,
+    height: `${Math.max(candle.lowTop - candle.highTop, 1)}rpx`,
+    background: candle.color,
+  }
+}
+
+function candleBodyStyle(candle: CandleShape) {
+  return {
+    left: `${candle.x}rpx`,
+    top: `${candle.bodyTop}rpx`,
+    width: `${candle.width}rpx`,
+    height: `${candle.bodyHeight}rpx`,
+    background: candle.color,
+  }
+}
+
 function axisXStyle(label: { left: number }) {
   return { left: `${label.left}rpx` }
 }
@@ -480,48 +666,52 @@ function axisYStyle(label: { top: number }) {
     <view v-if="activeTab === 'overview'" class="content">
       <view v-if="loading" class="center-tip">加载美股期权总览...</view>
       <view v-else>
-        <view class="kpi-grid">
-          <view v-for="card in kpiCards" :key="card.label" class="kpi-card">
-            <text class="kpi-label">{{ card.label }}</text>
-            <text class="kpi-value" :class="`tone-${card.tone}`">{{ card.value }}</text>
+        <view class="panel chart-panel-main">
+          <view class="panel-head">
+            <text class="panel-title">价格与 IV</text>
+            <text class="panel-sub">收盘 {{ priceIvChart.latestClose }} · IV {{ priceIvChart.latestIv }}</text>
+          </view>
+          <view v-if="priceIvChart.hasData" class="price-iv-chart">
+            <view v-for="(c, idx) in priceIvChart.candles" :key="`wick-${idx}`" class="candle-wick" :style="candleWickStyle(c)" />
+            <view v-for="(c, idx) in priceIvChart.candles" :key="`body-${idx}`" class="candle-body" :style="candleBodyStyle(c)" />
+            <view v-for="seg in priceIvChart.ivSegments" :key="`iv-${seg.left}-${seg.top}-${seg.width}`" class="chart-seg iv-seg" :style="segmentStyle(seg)" />
+            <view v-for="node in priceIvChart.ivNodes" :key="`ivn-${node.left}-${node.top}`" class="chart-node iv-node" :style="nodeStyle(node)" />
+            <text v-for="y in priceIvChart.priceLabels" :key="`py-${y.label}`" class="axis-y" :style="axisYStyle(y)">{{ y.label }}</text>
+            <text v-for="y in priceIvChart.ivLabels" :key="`iy-${y.label}`" class="axis-y iv-axis-y" :style="axisYStyle(y)">{{ y.label }}</text>
+            <text v-for="x in priceIvChart.xLabels" :key="`px-${x.label}`" class="axis-x" :style="axisXStyle(x)">{{ x.label }}</text>
+            <view class="chart-band-label price-label">K线</view>
+            <view class="chart-band-label iv-label">ATM IV</view>
+          </view>
+          <view v-else class="empty-chart empty-chart-large">暂无价格与 IV 图表</view>
+        </view>
+
+        <view class="panel profile-panel">
+          <view class="panel-head">
+            <text class="panel-title">{{ profileCard.symbol || selectedProduct.symbol }} · {{ profileCard.name || selectedProduct.name }}</text>
+            <text class="panel-sub">{{ profileCard.type_label || (overview?.asset_type === 'etf' ? 'ETF' : '股票') }}</text>
+          </view>
+          <view class="profile-grid">
+            <view v-for="item in profileItems" :key="item.label" class="profile-item">
+              <text class="profile-label">{{ item.label }}</text>
+              <text class="profile-text">{{ item.text }}</text>
+            </view>
+          </view>
+          <view class="profile-hotline">
+            <text>期权数据</text>
+            <text>{{ profileCard.option_data || overview?.status_brief || '期权数据待更新' }}</text>
           </view>
         </view>
 
-        <view class="panel">
+        <view class="panel metrics-panel">
           <view class="panel-head">
-            <text class="panel-title">IV历史</text>
-            <text class="panel-sub">最近样本</text>
+            <text class="panel-title">指标快照</text>
+            <text class="panel-sub">{{ overview?.display_date || overview?.trade_date || '--' }}</text>
           </view>
-          <view v-if="ivHistoryChart.hasData" class="chart-box">
-            <view v-for="seg in ivHistoryChart.segments" :key="`${seg.left}-${seg.top}-${seg.width}`" class="chart-seg" :style="segmentStyle(seg)" />
-            <view v-for="node in ivHistoryChart.nodes" :key="`${node.left}-${node.top}-${node.color}`" class="chart-node" :style="nodeStyle(node)" />
-            <text v-for="y in ivHistoryChart.yLabels" :key="`y-${y.label}`" class="axis-y" :style="axisYStyle(y)">{{ y.label }}</text>
-            <text v-for="x in ivHistoryChart.xLabels" :key="`x-${x.label}`" class="axis-x" :style="axisXStyle(x)">{{ x.label }}</text>
-          </view>
-          <view v-else class="empty-chart">暂无 IV 历史曲线</view>
-        </view>
-
-        <view class="panel">
-          <view class="panel-head">
-            <text class="panel-title">数据覆盖</text>
-            <text class="panel-sub">{{ overview?.asset_type === 'etf' ? 'ETF' : '股票' }}</text>
-          </view>
-          <view class="coverage-grid">
-            <view class="coverage-row">
-              <text>链行数</text>
-              <text>{{ overview?.chain_summary?.rows ?? '--' }}</text>
+          <view class="kpi-grid">
+            <view v-for="card in kpiCards" :key="card.label" class="kpi-card">
+              <text class="kpi-label">{{ card.label }}</text>
+              <text class="kpi-value" :class="`tone-${card.tone}`">{{ card.value }}</text>
             </view>
-            <view class="coverage-row">
-              <text>IV行</text>
-              <text>{{ (overview?.chain_summary?.provider_iv_rows || 0) + (overview?.chain_summary?.computed_iv_rows || 0) }}</text>
-            </view>
-            <view class="coverage-row">
-              <text>OI行</text>
-              <text>{{ overview?.chain_summary?.open_interest_rows ?? '--' }}</text>
-            </view>
-          </view>
-          <view v-if="overview?.gaps?.length" class="gap-list">
-            <text v-for="gap in overview.gaps" :key="gap">{{ gap }}</text>
           </view>
         </view>
       </view>
@@ -839,6 +1029,11 @@ function axisYStyle(label: { top: number }) {
   padding: 20rpx;
 }
 
+.chart-panel-main {
+  margin-top: 0;
+  padding: 18rpx;
+}
+
 .panel-head {
   display: flex;
   justify-content: space-between;
@@ -888,6 +1083,78 @@ function axisYStyle(label: { top: number }) {
   box-shadow: -1px -184rpx 0 -0.5px rgba(203, 213, 225, 0.35);
 }
 
+.price-iv-chart {
+  position: relative;
+  width: 620rpx;
+  height: 430rpx;
+  max-width: 100%;
+  overflow: hidden;
+  border-radius: 16rpx;
+  background:
+    linear-gradient(rgba(148, 163, 184, 0.075) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(148, 163, 184, 0.075) 1px, transparent 1px),
+    linear-gradient(180deg, rgba(19, 32, 54, 0.94), rgba(8, 16, 30, 0.96));
+  background-size: 62rpx 46rpx, 62rpx 46rpx, auto;
+  border: 1px solid #223653;
+}
+
+.price-iv-chart::before {
+  content: "";
+  position: absolute;
+  left: 42rpx;
+  right: 46rpx;
+  top: 292rpx;
+  border-top: 1px solid rgba(245, 197, 24, 0.18);
+}
+
+.price-iv-chart::after {
+  content: "";
+  position: absolute;
+  left: 42rpx;
+  right: 46rpx;
+  bottom: 34rpx;
+  border-bottom: 1px solid rgba(203, 213, 225, 0.36);
+  box-shadow: 0 -376rpx 0 -0.5px rgba(203, 213, 225, 0.28);
+}
+
+.candle-wick {
+  position: absolute;
+  width: 2rpx;
+  margin-left: -1rpx;
+  border-radius: 2rpx;
+  z-index: 3;
+}
+
+.candle-body {
+  position: absolute;
+  transform: translateX(-50%);
+  border-radius: 3rpx;
+  z-index: 4;
+}
+
+.iv-seg {
+  z-index: 5;
+  height: 4rpx;
+}
+
+.iv-node {
+  z-index: 6;
+  width: 8rpx;
+  height: 8rpx;
+}
+
+.chart-band-label {
+  position: absolute;
+  left: 52rpx;
+  color: #7890b3;
+  font-size: 20rpx;
+  font-weight: 800;
+  letter-spacing: 1rpx;
+}
+
+.price-label { top: 22rpx; }
+.iv-label { top: 308rpx; color: #38bdf8; }
+
 .chart-seg {
   position: absolute;
   height: 4rpx;
@@ -912,7 +1179,10 @@ function axisYStyle(label: { top: number }) {
   color: #dce5f5;
   font-size: 18rpx;
   font-weight: 700;
+  z-index: 8;
 }
+
+.iv-axis-y { color: #7dd3fc; }
 
 .axis-x {
   position: absolute;
@@ -921,6 +1191,7 @@ function axisYStyle(label: { top: number }) {
   color: #dce5f5;
   font-size: 18rpx;
   font-weight: 700;
+  z-index: 8;
 }
 
 .legend {
@@ -951,6 +1222,70 @@ function axisYStyle(label: { top: number }) {
   justify-content: center;
   color: #7f8da5;
   font-size: 24rpx;
+}
+
+.empty-chart-large {
+  height: 430rpx;
+}
+
+.profile-panel {
+  background:
+    radial-gradient(circle at 0% 0%, rgba(56, 189, 248, 0.09), transparent 40%),
+    #131c2e;
+}
+
+.profile-grid {
+  display: grid;
+  gap: 14rpx;
+}
+
+.profile-item {
+  padding: 16rpx;
+  border: 1px solid #223653;
+  border-radius: 14rpx;
+  background: #0f192b;
+}
+
+.profile-label {
+  display: block;
+  color: #f5c518;
+  font-size: 22rpx;
+  font-weight: 900;
+}
+
+.profile-text {
+  display: block;
+  margin-top: 8rpx;
+  color: #d8e2f3;
+  font-size: 24rpx;
+  line-height: 1.55;
+}
+
+.profile-hotline {
+  margin-top: 14rpx;
+  padding: 16rpx;
+  border-radius: 14rpx;
+  background: rgba(56, 189, 248, 0.08);
+  border: 1px solid rgba(56, 189, 248, 0.22);
+}
+
+.profile-hotline text:first-child {
+  display: block;
+  color: #38bdf8;
+  font-size: 22rpx;
+  font-weight: 900;
+}
+
+.profile-hotline text:last-child {
+  display: block;
+  margin-top: 8rpx;
+  color: #cfe2ff;
+  font-size: 23rpx;
+  line-height: 1.5;
+}
+
+.metrics-panel .kpi-grid {
+  margin-top: 0;
 }
 
 .coverage-grid {

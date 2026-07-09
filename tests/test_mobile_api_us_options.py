@@ -22,6 +22,29 @@ def _metrics_history():
     )
 
 
+def _stock_history():
+    return pd.DataFrame(
+        [
+            {"date": "2026-04-01", "symbol": "SPY", "open": 510.0, "high": 515.0, "low": 508.0, "close": 512.3, "volume": 1000, "adjClose": 512.3},
+            {"date": "2026-04-02", "symbol": "SPY", "open": 513.0, "high": 518.0, "low": 511.0, "close": 516.0, "volume": 1200, "adjClose": 516.0},
+        ]
+    )
+
+
+def _profile_card():
+    return {
+        "symbol": "SPY",
+        "name": "标普500ETF",
+        "asset_type": "etf",
+        "business": "追踪标普500指数。",
+        "strength": "行业分散，流动性深。",
+        "risk": "受大型科技权重影响。",
+        "recent_hotspot": "近期关注利率变化和大型科技轮动。",
+        "option_data": "IV处于偏低区，OI数据完整。",
+        "dynamic_source_refs": [{"source": "local"}],
+    }
+
+
 @unittest.skipIf(mobile_api is None, f"mobile_api import failed: {_IMPORT_ERROR}")
 class TestMobileApiUsOptions(unittest.TestCase):
     def test_products_returns_default_spy_and_data_flags(self):
@@ -42,9 +65,10 @@ class TestMobileApiUsOptions(unittest.TestCase):
     def test_overview_returns_mobile_payload_with_data(self):
         with (
             patch.object(mobile_api, "us_load_latest_option_trade_date", return_value="20260402"),
-            patch.object(mobile_api, "us_load_stock_daily", return_value=pd.DataFrame()),
+            patch.object(mobile_api, "us_load_stock_daily", return_value=_stock_history()),
             patch.object(mobile_api, "us_selected_underlying_price", return_value=512.3),
             patch.object(mobile_api, "us_load_market_metrics_history", return_value=_metrics_history()),
+            patch.object(mobile_api, "us_build_underlying_profile_card", return_value=_profile_card()),
             patch.object(
                 mobile_api,
                 "us_load_option_chain_summary",
@@ -78,6 +102,10 @@ class TestMobileApiUsOptions(unittest.TestCase):
         self.assertEqual(out["trade_date"], "20260402")
         self.assertEqual(out["underlying_price"], 512.3)
         self.assertEqual(out["metrics"]["atm_iv_pct"], 19.5)
+        self.assertEqual(out["profile_card"]["style_label"], "板块风格")
+        self.assertIn("大型科技", out["profile_card"]["recent_hotspot"])
+        self.assertEqual(len(out["price_history"]), 2)
+        self.assertEqual(out["price_history"][0]["close"], 512.3)
         self.assertEqual(len(out["iv_history"]), 2)
         self.assertIn("IV 处于历史偏低区", out["status_brief"])
 
@@ -88,6 +116,7 @@ class TestMobileApiUsOptions(unittest.TestCase):
         self.assertFalse(out["has_data"])
         self.assertEqual(out["symbol"], "SPY")
         self.assertIn("暂无", out["message"])
+        self.assertEqual(out["price_history"], [])
         self.assertEqual(out["iv_history"], [])
 
     def test_surface_returns_all_blocks(self):

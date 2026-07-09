@@ -648,6 +648,17 @@ export interface UsOptionOverviewPayload {
   chain_summary: Record<string, any>
   gaps: string[]
   profile?: Record<string, string>
+  profile_card?: Record<string, any>
+  price_history: Array<{
+    trade_date: string
+    display_date: string
+    open: number | null
+    high: number | null
+    low: number | null
+    close: number | null
+    volume?: number | null
+    adj_close?: number | null
+  }>
   iv_history: Array<{ trade_date: string; display_date: string; iv_pct: number | null }>
   status_brief?: string
   message: string

@@ -169,6 +169,7 @@ from term_structure_service import (
 from us_market_dashboard_data import (
     DEFAULT_DASHBOARD_UNDERLYINGS as US_OPTION_DEFAULT_UNDERLYINGS,
     UNDERLYING_DISPLAY_NAMES as US_OPTION_DISPLAY_NAMES,
+    build_underlying_profile_card as us_build_underlying_profile_card,
     calculate_atm_iv_pct as us_calculate_atm_iv_pct,
     calculate_overview_metrics_from_market_history as us_calculate_overview_metrics_from_market_history,
     calculate_volatility_positioning_metrics as us_calculate_volatility_positioning_metrics,
@@ -8404,6 +8405,93 @@ def _us_option_iv_history_records(history: Any) -> List[Dict[str, Any]]:
     return rows
 
 
+def _us_option_price_history_records(stock_daily: Any, *, limit: int = 180) -> List[Dict[str, Any]]:
+    if stock_daily is None or getattr(stock_daily, "empty", True):
+        return []
+    source = stock_daily.copy()
+    if "date" not in source.columns:
+        return []
+    for col in ("open", "high", "low", "close", "volume", "adjClose"):
+        if col not in source.columns:
+            source[col] = None
+    try:
+        source = source.sort_values("date").tail(max(min(int(limit or 180), 500), 1))
+    except Exception:
+        pass
+    rows: List[Dict[str, Any]] = []
+    for row in _us_option_records(source[["date", "open", "high", "low", "close", "volume", "adjClose"]]):
+        raw_date = row.get("date")
+        if isinstance(raw_date, str):
+            trade_date = raw_date[:10].replace("-", "")
+        else:
+            try:
+                trade_date = raw_date.strftime("%Y%m%d")
+            except Exception:
+                trade_date = str(raw_date or "").replace("-", "")[:8]
+        rows.append({
+            "trade_date": trade_date,
+            "display_date": _us_option_display_date(trade_date),
+            "open": row.get("open"),
+            "high": row.get("high"),
+            "low": row.get("low"),
+            "close": row.get("close"),
+            "volume": row.get("volume"),
+            "adj_close": row.get("adjClose"),
+        })
+    return rows
+
+
+def _us_option_profile_card(symbol: str, profile: Mapping[str, Any], engine=None) -> Dict[str, Any]:
+    try:
+        card = us_build_underlying_profile_card(
+            symbol,
+            engine=engine or _us_option_engine(),
+            as_of_date=date.today().strftime("%Y%m%d"),
+            use_test_tables=False,
+        )
+    except Exception:
+        card = dict(profile or {})
+
+    asset_type = str(card.get("asset_type") or profile.get("asset_type") or "stock").lower()
+    if asset_type == "etf":
+        intro_label, style_label, risk_label, type_label = "ETF特色", "板块风格", "观察重点", "ETF"
+    else:
+        intro_label, style_label, risk_label, type_label = "主营业务", "优势", "短板/风险", "个股"
+
+    source_refs = card.get("dynamic_source_refs") if isinstance(card.get("dynamic_source_refs"), list) else []
+    sources: List[str] = []
+    for ref in source_refs:
+        if not isinstance(ref, Mapping):
+            continue
+        source = str(ref.get("source") or "").strip()
+        if source and source not in sources:
+            sources.append(source)
+
+    earnings_date = str(card.get("earnings_date") or card.get("next_earnings_date") or "").strip()
+    earnings_time = str(card.get("earnings_time") or "").strip()
+    earnings_source = str(card.get("earnings_source") or "").strip()
+    compact_time = earnings_time.split(" · ")[0] if earnings_time else ""
+    earnings = " · ".join(part for part in (earnings_date, compact_time, earnings_source) if part) or "待更新"
+
+    return {
+        "symbol": symbol,
+        "name": str(card.get("name") or profile.get("name") or _us_option_display_name(symbol)),
+        "asset_type": asset_type,
+        "type_label": type_label,
+        "intro_label": intro_label,
+        "style_label": style_label,
+        "risk_label": risk_label,
+        "business": str(card.get("business") or ""),
+        "style": str(card.get("strength") or ""),
+        "risk": str(card.get("risk") or ""),
+        "earnings": earnings,
+        "recent_hotspot": str(card.get("recent_hotspot") or card.get("recent_catalyst") or "近期热点待更新"),
+        "option_data": str(card.get("option_data") or card.get("recent_risk") or "期权数据待更新"),
+        "updated_label": str(card.get("dynamic_updated_at") or card.get("dynamic_as_of_date") or ""),
+        "source_summary": " + ".join(sources[:3]) if sources else "待更新",
+    }
+
+
 def _us_option_status_brief(metrics: Mapping[str, Any], summary: Mapping[str, Any], gaps: List[str]) -> str:
     iv_rank = _safe_floatv(metrics.get("iv_rank"), None)
     if iv_rank is None:
@@ -8439,9 +8527,11 @@ def _us_option_overview_payload(symbol: str) -> Dict[str, Any]:
         return {
             **_us_option_empty_payload(symbol, "暂无该标的的本地美股期权数据"),
             "profile": profile,
+            "profile_card": _us_option_profile_card(symbol, profile, engine=engine),
             "metrics": {},
             "chain_summary": {},
             "gaps": ["未找到期权交易日数据"],
+            "price_history": [],
             "iv_history": [],
         }
 
@@ -8512,6 +8602,8 @@ def _us_option_overview_payload(symbol: str) -> Dict[str, Any]:
         "chain_summary": safe_summary,
         "gaps": gaps,
         "profile": profile,
+        "profile_card": _us_option_profile_card(symbol, profile, engine=engine),
+        "price_history": _us_option_price_history_records(stock_df),
         "iv_history": _us_option_iv_history_records(iv_history_source),
         "status_brief": _us_option_status_brief(safe_metrics, safe_summary, gaps),
         "message": "" if rows > 0 or safe_metrics.get("atm_iv_pct") is not None else "暂无可展示的美股期权总览数据",
