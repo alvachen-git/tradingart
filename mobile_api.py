@@ -51,6 +51,11 @@ mobile_api.py — 爱波塔手机端专用 FastAPI 后端
   GET    /api/market/snapshot           综合行情快照
   GET    /api/market/term-structure/products  期限结构品种与窗口
   GET    /api/market/term-structure     期限结构数据（含股指升贴水）
+  GET    /api/us-options/products       美股期权标的池
+  GET    /api/us-options/overview       美股期权单标的总览
+  GET    /api/us-options/surface        美股期权波动率曲面
+  GET    /api/us-options/defense        美股期权持仓防线
+  GET    /api/us-options/anomalies      美股期权异动观察
 
   POST   /api/position/upload           上传持仓截图 → 自动分流(股票体检/期权分析)
   POST   /api/portfolio/upload          上传股票持仓截图 → 识别 → 提交体检
@@ -79,7 +84,7 @@ import time
 import uuid
 import wave
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
+from datetime import date, datetime
 from typing import Optional, List, Any, Dict, Tuple, Mapping
 
 import redis
@@ -161,6 +166,29 @@ from term_structure_service import (
     build_index_basis_term_structure_payload,
     build_term_structure_payload,
 )
+from us_market_dashboard_data import (
+    DEFAULT_DASHBOARD_UNDERLYINGS as US_OPTION_DEFAULT_UNDERLYINGS,
+    UNDERLYING_DISPLAY_NAMES as US_OPTION_DISPLAY_NAMES,
+    calculate_atm_iv_pct as us_calculate_atm_iv_pct,
+    calculate_overview_metrics_from_market_history as us_calculate_overview_metrics_from_market_history,
+    calculate_volatility_positioning_metrics as us_calculate_volatility_positioning_metrics,
+    get_underlying_profile as us_get_underlying_profile,
+    load_available_option_trade_dates as us_load_available_option_trade_dates,
+    load_iv_history as us_load_iv_history,
+    load_latest_option_trade_date as us_load_latest_option_trade_date,
+    load_market_metrics_history as us_load_market_metrics_history,
+    load_oi_defense_history as us_load_oi_defense_history,
+    load_option_anomaly_scan as us_load_option_anomaly_scan,
+    load_option_chain_daily as us_load_option_chain_daily,
+    load_option_chain_summary as us_load_option_chain_summary,
+    load_otm_volatility_curve_snapshot as us_load_otm_volatility_curve_snapshot,
+    load_stock_daily as us_load_stock_daily,
+    load_volatility_cone_history as us_load_volatility_cone_history,
+    load_volatility_cone_line_snapshot as us_load_volatility_cone_line_snapshot,
+    selected_underlying_price as us_selected_underlying_price,
+    summarize_option_chain as us_summarize_option_chain,
+)
+from us_options_ai_tools import normalize_us_option_underlying
 from chat_feedback_service import (
     CHAT_FEEDBACK_ALLOWED_TYPES as _CHAT_FEEDBACK_ALLOWED_TYPES,
     CHAT_FEEDBACK_REASON_CODES as _CHAT_FEEDBACK_REASON_CODES,
@@ -8261,6 +8289,466 @@ def pay_config(username: str = Depends(get_current_user)):
         "service_wechat": service_wechat,
         "service_phone": service_phone,
     }
+
+
+# ════════════════════════════════════════════════════════════
+#  US OPTIONS — 美股期权移动端数据
+# ════════════════════════════════════════════════════════════
+
+US_OPTION_DEFAULT_SYMBOL = "SPY"
+US_OPTION_MAX_ANOMALY_LIMIT = 50
+
+
+def _us_option_engine():
+    return getattr(de, "engine", None)
+
+
+def _normalize_mobile_us_option_symbol(raw: Optional[str], *, default: str = US_OPTION_DEFAULT_SYMBOL) -> str:
+    text = str(raw or default or "").strip()
+    symbol, reason = normalize_us_option_underlying(text)
+    if not symbol:
+        raise HTTPException(status_code=400, detail=reason or "不支持的美股期权标的")
+    return symbol
+
+
+def _us_option_profile(symbol: str) -> Dict[str, str]:
+    try:
+        return us_get_underlying_profile(symbol)
+    except Exception:
+        name = str(US_OPTION_DISPLAY_NAMES.get(symbol) or symbol)
+        return {"symbol": symbol, "name": name, "asset_type": "stock"}
+
+
+def _us_option_display_name(symbol: str) -> str:
+    return str(_us_option_profile(symbol).get("name") or US_OPTION_DISPLAY_NAMES.get(symbol) or symbol)
+
+
+def _us_option_safe_value(value: Any) -> Any:
+    if value is None:
+        return None
+    try:
+        import pandas as pd  # local import keeps mobile_api import tolerant in lightweight tests
+        if pd.isna(value):
+            return None
+    except Exception:
+        pass
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if hasattr(value, "item"):
+        try:
+            value = value.item()
+        except Exception:
+            pass
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, (int, str, bool)):
+        return value
+    return value
+
+
+def _us_option_safe_dict(row: Mapping[str, Any]) -> Dict[str, Any]:
+    return {str(key): _us_option_safe_value(value) for key, value in dict(row or {}).items()}
+
+
+def _us_option_records(frame: Any, *, limit: Optional[int] = None, columns: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+    if frame is None or getattr(frame, "empty", True):
+        return []
+    source = frame.copy()
+    if columns:
+        for col in columns:
+            if col not in source.columns:
+                source[col] = None
+        source = source[columns]
+    if limit is not None:
+        source = source.head(max(int(limit), 0))
+    return [_us_option_safe_dict(row) for row in source.to_dict(orient="records")]
+
+
+def _us_option_latest_trade_date(symbol: str, engine=None) -> str:
+    try:
+        value = us_load_latest_option_trade_date(symbol, use_test_tables=False, engine=engine or _us_option_engine())
+        return str(value or "").strip()
+    except Exception:
+        return ""
+
+
+def _us_option_display_date(value: Any) -> str:
+    text = str(value or "").strip()
+    if len(text) == 8 and text.isdigit():
+        return f"{text[:4]}-{text[4:6]}-{text[6:]}"
+    return text
+
+
+def _us_option_iv_history_records(history: Any) -> List[Dict[str, Any]]:
+    if history is None or getattr(history, "empty", True):
+        return []
+    source = history.copy()
+    date_col = "trade_date" if "trade_date" in source.columns else ("date" if "date" in source.columns else "")
+    value_col = "atm_iv_pct" if "atm_iv_pct" in source.columns else ("iv_pct" if "iv_pct" in source.columns else "")
+    if not date_col or not value_col:
+        return []
+    out = source[[date_col, value_col]].copy()
+    out = out.rename(columns={date_col: "trade_date", value_col: "iv_pct"})
+    try:
+        out = out.dropna(subset=["trade_date", "iv_pct"]).sort_values("trade_date").tail(252)
+    except Exception:
+        pass
+    rows = []
+    for row in _us_option_records(out):
+        trade_date = str(row.get("trade_date") or "")
+        rows.append({
+            "trade_date": trade_date,
+            "display_date": _us_option_display_date(trade_date),
+            "iv_pct": row.get("iv_pct"),
+        })
+    return rows
+
+
+def _us_option_status_brief(metrics: Mapping[str, Any], summary: Mapping[str, Any], gaps: List[str]) -> str:
+    iv_rank = _safe_floatv(metrics.get("iv_rank"), None)
+    if iv_rank is None:
+        iv_text = "IV 分位数据不足"
+    elif iv_rank >= 70:
+        iv_text = "IV 处于历史偏高区"
+    elif iv_rank <= 20:
+        iv_text = "IV 处于历史偏低区"
+    else:
+        iv_text = "IV 处于历史中性区"
+
+    oi_rows = int(_safe_floatv(summary.get("open_interest_rows"), 0) or 0)
+    oi_text = "OI 数据完整" if oi_rows > 0 else "OI 数据不足"
+    gap_text = "；".join(gaps[:2]) if gaps else ""
+    return "，".join([item for item in (iv_text, oi_text, gap_text) if item])
+
+
+def _us_option_empty_payload(symbol: str, message: str) -> Dict[str, Any]:
+    return {
+        "has_data": False,
+        "symbol": symbol,
+        "display_name": _us_option_display_name(symbol),
+        "trade_date": "",
+        "message": message,
+    }
+
+
+def _us_option_overview_payload(symbol: str) -> Dict[str, Any]:
+    engine = _us_option_engine()
+    profile = _us_option_profile(symbol)
+    trade_date = _us_option_latest_trade_date(symbol, engine=engine)
+    if not trade_date:
+        return {
+            **_us_option_empty_payload(symbol, "暂无该标的的本地美股期权数据"),
+            "profile": profile,
+            "metrics": {},
+            "chain_summary": {},
+            "gaps": ["未找到期权交易日数据"],
+            "iv_history": [],
+        }
+
+    stock_df = us_load_stock_daily(symbol, limit=420, engine=engine)
+    underlying_price = us_selected_underlying_price(stock_df, trade_date)
+    market_metrics_history = us_load_market_metrics_history(symbol, window=252, use_test_tables=False, engine=engine)
+    chain_summary = us_load_option_chain_summary(
+        symbol,
+        trade_date,
+        include_short_cycle=True,
+        include_iv_counts=True,
+        use_test_tables=False,
+        engine=engine,
+    )
+    iv_history_source = market_metrics_history
+
+    if market_metrics_history is not None and not getattr(market_metrics_history, "empty", True):
+        metrics = us_calculate_overview_metrics_from_market_history(
+            stock_df=stock_df,
+            market_metrics_history=market_metrics_history,
+            trade_date=trade_date,
+            underlying=symbol,
+            use_test_tables=False,
+            engine=engine,
+        )
+    else:
+        chain_df = us_load_option_chain_daily(
+            symbol,
+            trade_date,
+            include_short_cycle=True,
+            use_test_tables=False,
+            underlying_price=underlying_price,
+            engine=engine,
+        )
+        chain_summary = us_summarize_option_chain(chain_df)
+        iv_history_source = us_load_iv_history(symbol, window=252, use_test_tables=False, engine=engine)
+        current_iv_pct = us_calculate_atm_iv_pct(chain_df, underlying_price=underlying_price)
+        metrics = us_calculate_volatility_positioning_metrics(
+            stock_df=stock_df,
+            chain_df=chain_df,
+            iv_history=iv_history_source,
+            trade_date=trade_date,
+            current_iv_pct=current_iv_pct,
+            iv_rank=None,
+            market_metrics_history=None,
+        )
+
+    rows = int(_safe_floatv(chain_summary.get("rows"), 0) or 0)
+    gaps: List[str] = []
+    if rows <= 0:
+        gaps.append("期权链日线缺失")
+    if int(_safe_floatv(chain_summary.get("provider_iv_rows"), 0) or 0) + int(_safe_floatv(chain_summary.get("computed_iv_rows"), 0) or 0) <= 0:
+        gaps.append("IV 数据不足")
+    if int(_safe_floatv(chain_summary.get("open_interest_rows"), 0) or 0) <= 0:
+        gaps.append("OI 数据不足")
+
+    safe_metrics = _us_option_safe_dict(metrics)
+    safe_summary = _us_option_safe_dict(chain_summary)
+    return {
+        "has_data": rows > 0 or bool(safe_metrics.get("atm_iv_pct")),
+        "symbol": symbol,
+        "display_name": str(profile.get("name") or _us_option_display_name(symbol)),
+        "asset_type": str(profile.get("asset_type") or "stock"),
+        "trade_date": trade_date,
+        "display_date": _us_option_display_date(trade_date),
+        "underlying_price": _us_option_safe_value(underlying_price),
+        "metrics": safe_metrics,
+        "chain_summary": safe_summary,
+        "gaps": gaps,
+        "profile": profile,
+        "iv_history": _us_option_iv_history_records(iv_history_source),
+        "status_brief": _us_option_status_brief(safe_metrics, safe_summary, gaps),
+        "message": "" if rows > 0 or safe_metrics.get("atm_iv_pct") is not None else "暂无可展示的美股期权总览数据",
+    }
+
+
+@app.get("/api/us-options/products", tags=["美股期权"])
+def us_options_products(username: str = Depends(get_current_user)):
+    """移动端美股期权标的池。"""
+    _ = username
+    engine = _us_option_engine()
+    items: List[Dict[str, Any]] = []
+    for raw_symbol in US_OPTION_DEFAULT_UNDERLYINGS:
+        symbol = str(raw_symbol or "").strip().upper()
+        if not symbol:
+            continue
+        profile = _us_option_profile(symbol)
+        latest_trade_date = _us_option_latest_trade_date(symbol, engine=engine)
+        items.append({
+            "symbol": symbol,
+            "name": str(profile.get("name") or US_OPTION_DISPLAY_NAMES.get(symbol) or symbol),
+            "asset_type": str(profile.get("asset_type") or "stock"),
+            "has_data": bool(latest_trade_date),
+            "latest_trade_date": latest_trade_date,
+        })
+    return {
+        "items": items,
+        "default_symbol": US_OPTION_DEFAULT_SYMBOL,
+        "message": "" if items else "暂无美股期权标的池",
+    }
+
+
+@app.get("/api/us-options/overview", tags=["美股期权"])
+def us_options_overview(
+    symbol: str = Query(default=US_OPTION_DEFAULT_SYMBOL, description="美股或美股ETF代码，如 SPY / QQQ / NVDA"),
+    username: str = Depends(get_current_user),
+):
+    """移动端美股期权总览。"""
+    _ = username
+    target = _normalize_mobile_us_option_symbol(symbol)
+    try:
+        return _us_option_overview_payload(target)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        print(f"[us_options_overview] fallback_on_error symbol={target} err={exc}", flush=True)
+        return {
+            **_us_option_empty_payload(target, "美股期权总览加载失败，请稍后重试"),
+            "metrics": {},
+            "chain_summary": {},
+            "gaps": [str(exc)],
+            "iv_history": [],
+        }
+
+
+@app.get("/api/us-options/surface", tags=["美股期权"])
+def us_options_surface(
+    symbol: str = Query(default=US_OPTION_DEFAULT_SYMBOL, description="美股或美股ETF代码，如 SPY / QQQ / NVDA"),
+    username: str = Depends(get_current_user),
+):
+    """移动端美股期权波动率曲面。"""
+    _ = username
+    target = _normalize_mobile_us_option_symbol(symbol)
+    engine = _us_option_engine()
+    try:
+        trade_date = _us_option_latest_trade_date(target, engine=engine)
+        if not trade_date:
+            return {
+                **_us_option_empty_payload(target, "暂无该标的的波动率曲面数据"),
+                "volatility_cone": [],
+                "today_cone_line": [],
+                "previous_cone_line": [],
+                "today_otm_curve": [],
+                "previous_otm_curve": [],
+            }
+        stock_df = us_load_stock_daily(target, limit=420, engine=engine)
+        underlying_price = us_selected_underlying_price(stock_df, trade_date)
+        available_dates = us_load_available_option_trade_dates(target, use_test_tables=False, limit=8, engine=engine)
+        previous_trade_date = next((str(value) for value in available_dates if str(value or "") < str(trade_date)), "")
+        previous_price = us_selected_underlying_price(stock_df, previous_trade_date) if previous_trade_date else None
+        volatility_cone = us_load_volatility_cone_history(
+            target,
+            trade_date,
+            window=252,
+            use_test_tables=False,
+            engine=engine,
+        )
+        today_cone_line = us_load_volatility_cone_line_snapshot(
+            target,
+            trade_date,
+            use_test_tables=False,
+            underlying_price=underlying_price,
+            engine=engine,
+        )
+        previous_cone_line = us_load_volatility_cone_line_snapshot(
+            target,
+            previous_trade_date,
+            use_test_tables=False,
+            underlying_price=previous_price,
+            engine=engine,
+        ) if previous_trade_date else None
+        today_otm_curve = us_load_otm_volatility_curve_snapshot(
+            target,
+            trade_date,
+            use_test_tables=False,
+            underlying_price=underlying_price,
+            engine=engine,
+        )
+        previous_otm_curve = us_load_otm_volatility_curve_snapshot(
+            target,
+            previous_trade_date,
+            use_test_tables=False,
+            underlying_price=previous_price,
+            engine=engine,
+        ) if previous_trade_date else None
+        has_data = any(
+            bool(rows)
+            for rows in (
+                _us_option_records(volatility_cone),
+                _us_option_records(today_cone_line),
+                _us_option_records(today_otm_curve),
+            )
+        )
+        return {
+            "has_data": has_data,
+            "symbol": target,
+            "display_name": _us_option_display_name(target),
+            "trade_date": trade_date,
+            "display_date": _us_option_display_date(trade_date),
+            "previous_trade_date": previous_trade_date,
+            "volatility_cone": _us_option_records(volatility_cone),
+            "today_cone_line": _us_option_records(today_cone_line),
+            "previous_cone_line": _us_option_records(previous_cone_line),
+            "today_otm_curve": _us_option_records(today_otm_curve),
+            "previous_otm_curve": _us_option_records(previous_otm_curve),
+            "message": "" if has_data else "暂无可展示的波动率曲面数据",
+        }
+    except Exception as exc:
+        print(f"[us_options_surface] fallback_on_error symbol={target} err={exc}", flush=True)
+        return {
+            **_us_option_empty_payload(target, "美股期权波动率曲面加载失败，请稍后重试"),
+            "volatility_cone": [],
+            "today_cone_line": [],
+            "previous_cone_line": [],
+            "today_otm_curve": [],
+            "previous_otm_curve": [],
+        }
+
+
+@app.get("/api/us-options/defense", tags=["美股期权"])
+def us_options_defense(
+    symbol: str = Query(default=US_OPTION_DEFAULT_SYMBOL, description="美股或美股ETF代码，如 SPY / QQQ / NVDA"),
+    username: str = Depends(get_current_user),
+):
+    """移动端美股期权持仓防线。"""
+    _ = username
+    target = _normalize_mobile_us_option_symbol(symbol)
+    engine = _us_option_engine()
+    try:
+        trade_date = _us_option_latest_trade_date(target, engine=engine)
+        if not trade_date:
+            return {
+                **_us_option_empty_payload(target, "暂无该标的的持仓防线数据"),
+                "latest": None,
+                "history": [],
+            }
+        history = us_load_oi_defense_history(
+            target,
+            trade_date,
+            window=20,
+            use_test_tables=False,
+            engine=engine,
+        )
+        rows = _us_option_records(history)
+        latest = rows[-1] if rows else None
+        return {
+            "has_data": bool(rows),
+            "symbol": target,
+            "display_name": _us_option_display_name(target),
+            "trade_date": trade_date,
+            "display_date": _us_option_display_date(trade_date),
+            "latest": latest,
+            "history": rows,
+            "message": "" if rows else "暂无可展示的持仓防线数据",
+        }
+    except Exception as exc:
+        print(f"[us_options_defense] fallback_on_error symbol={target} err={exc}", flush=True)
+        return {
+            **_us_option_empty_payload(target, "美股期权持仓防线加载失败，请稍后重试"),
+            "latest": None,
+            "history": [],
+        }
+
+
+@app.get("/api/us-options/anomalies", tags=["美股期权"])
+def us_options_anomalies(
+    symbol: Optional[str] = Query(default=None, description="可选，美股或美股ETF代码；为空表示全观察池"),
+    limit: int = Query(default=20, description="返回条数，1-50"),
+    username: str = Depends(get_current_user),
+):
+    """移动端美股期权异动观察。"""
+    _ = username
+    target = _normalize_mobile_us_option_symbol(symbol) if symbol else ""
+    try:
+        limit_count = max(1, min(int(limit or 20), US_OPTION_MAX_ANOMALY_LIMIT))
+    except Exception:
+        limit_count = 20
+    try:
+        scan = us_load_option_anomaly_scan(
+            underlyings=[target] if target else None,
+            prefer_cache=True,
+            use_test_tables=False,
+            engine=_us_option_engine(),
+        )
+        rows = _us_option_records(scan, limit=limit_count)
+        trade_date = str(rows[0].get("trade_date") or "") if rows else ""
+        return {
+            "has_data": bool(rows),
+            "symbol": target,
+            "display_name": _us_option_display_name(target) if target else "全部观察池",
+            "trade_date": trade_date,
+            "display_date": _us_option_display_date(trade_date),
+            "items": rows,
+            "limit": limit_count,
+            "message": "" if rows else "暂无可展示的美股期权异动数据",
+        }
+    except Exception as exc:
+        print(f"[us_options_anomalies] fallback_on_error symbol={target or 'ALL'} err={exc}", flush=True)
+        return {
+            "has_data": False,
+            "symbol": target,
+            "display_name": _us_option_display_name(target) if target else "全部观察池",
+            "trade_date": "",
+            "items": [],
+            "limit": limit_count,
+            "message": "美股期权异动观察加载失败，请稍后重试",
+        }
 
 
 # ════════════════════════════════════════════════════════════

@@ -600,6 +600,116 @@ export const marketApi = {
     }>('GET', `/api/market/chart/${product}${contract ? `?contract=${encodeURIComponent(contract)}` : ''}`),
 }
 
+// ── US Options ───────────────────────────────────────────
+
+export interface UsOptionProduct {
+  symbol: string
+  name: string
+  asset_type: string
+  has_data: boolean
+  latest_trade_date?: string
+}
+
+export interface UsOptionProductsPayload {
+  items: UsOptionProduct[]
+  default_symbol: string
+  message: string
+}
+
+export interface UsOptionMetricMap {
+  atm_iv_pct?: number | null
+  iv_rank?: number | null
+  iv_percentile?: number | null
+  rv20_pct?: number | null
+  rv60_pct?: number | null
+  iv_rv20_spread?: number | null
+  iv_change_1d?: number | null
+  iv_30d?: number | null
+  iv_60d?: number | null
+  term_slope_30_60?: number | null
+  term_state?: string | null
+  put_skew_5pct?: number | null
+  call_skew_5pct?: number | null
+  put_call_oi?: number | null
+  put_call_volume?: number | null
+  zero_dte_volume_share_pct?: number | null
+  [key: string]: any
+}
+
+export interface UsOptionOverviewPayload {
+  has_data: boolean
+  symbol: string
+  display_name: string
+  asset_type?: string
+  trade_date: string
+  display_date?: string
+  underlying_price?: number | null
+  metrics: UsOptionMetricMap
+  chain_summary: Record<string, any>
+  gaps: string[]
+  profile?: Record<string, string>
+  iv_history: Array<{ trade_date: string; display_date: string; iv_pct: number | null }>
+  status_brief?: string
+  message: string
+}
+
+export interface UsOptionSurfacePayload {
+  has_data: boolean
+  symbol: string
+  display_name: string
+  trade_date: string
+  display_date?: string
+  previous_trade_date?: string
+  volatility_cone: Array<Record<string, any>>
+  today_cone_line: Array<Record<string, any>>
+  previous_cone_line: Array<Record<string, any>>
+  today_otm_curve: Array<Record<string, any>>
+  previous_otm_curve: Array<Record<string, any>>
+  message: string
+}
+
+export interface UsOptionDefensePayload {
+  has_data: boolean
+  symbol: string
+  display_name: string
+  trade_date: string
+  display_date?: string
+  latest: Record<string, any> | null
+  history: Array<Record<string, any>>
+  message: string
+}
+
+export interface UsOptionAnomaliesPayload {
+  has_data: boolean
+  symbol: string
+  display_name: string
+  trade_date: string
+  display_date?: string
+  items: Array<Record<string, any>>
+  limit: number
+  message: string
+}
+
+export const usOptionsApi = {
+  products: () =>
+    request<UsOptionProductsPayload>('GET', '/api/us-options/products'),
+
+  overview: (symbol?: string) =>
+    request<UsOptionOverviewPayload>('GET', `/api/us-options/overview${toQuery({ symbol })}`),
+
+  surface: (symbol?: string) =>
+    request<UsOptionSurfacePayload>('GET', `/api/us-options/surface${toQuery({ symbol })}`),
+
+  defense: (symbol?: string) =>
+    request<UsOptionDefensePayload>('GET', `/api/us-options/defense${toQuery({ symbol })}`),
+
+  anomalies: (params?: { symbol?: string; limit?: number }) =>
+    request<UsOptionAnomaliesPayload>('GET', `/api/us-options/anomalies${toQuery({
+      symbol: params?.symbol,
+      limit: params?.limit,
+    })}`),
+}
+
 // ── Portfolio ─────────────────────────────────────────────
 
 export const portfolioApi = {

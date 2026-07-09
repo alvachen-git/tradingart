@@ -75,6 +75,10 @@ function goRecharge() {
   uni.navigateTo({ url: '/pages/recharge/index' })
 }
 
+function goKlineGame() {
+  uni.navigateTo({ url: '/pages/kline/index' })
+}
+
 function confirmLogout() {
   uni.showModal({
     title: '退出登录',
@@ -150,6 +154,18 @@ function getRiskColor(risk: string) {
         >
           {{ getPermissionText(ch.code) }}
         </view>
+      </view>
+    </view>
+
+    <view class="card section-card tool-card">
+      <text class="card-title-text">工具入口</text>
+      <view class="tool-entry" @tap="goKlineGame">
+        <view class="tool-icon">◑</view>
+        <view class="tool-main">
+          <text class="tool-name">K线游戏</text>
+          <text class="tool-desc">历史数据学习与练习</text>
+        </view>
+        <text class="tool-enter">进入</text>
       </view>
     </view>
 
@@ -281,6 +297,57 @@ function getRiskColor(risk: string) {
   color: #8b93a9;
   background: #162035;
   border-color: #23314f;
+}
+
+.tool-card { padding-bottom: 24rpx; }
+
+.tool-entry {
+  display: flex;
+  align-items: center;
+  gap: 20rpx;
+  padding: 22rpx;
+  border-radius: 18rpx;
+  background: linear-gradient(135deg, #17243a 0%, #101a2d 100%);
+  border: 1px solid #263957;
+}
+
+.tool-icon {
+  width: 68rpx;
+  height: 68rpx;
+  border-radius: 20rpx;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #f5c518;
+  background: rgba(245, 197, 24, 0.12);
+  border: 1px solid rgba(245, 197, 24, 0.35);
+  font-size: 34rpx;
+  flex-shrink: 0;
+}
+
+.tool-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.tool-name {
+  display: block;
+  color: #f0f4ff;
+  font-size: 28rpx;
+  font-weight: 800;
+}
+
+.tool-desc {
+  display: block;
+  color: #8b97ad;
+  font-size: 23rpx;
+  margin-top: 8rpx;
+}
+
+.tool-enter {
+  color: #f5c518;
+  font-size: 24rpx;
+  font-weight: 700;
 }
 
 .recharge-card {
