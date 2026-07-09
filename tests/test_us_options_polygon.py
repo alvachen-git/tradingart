@@ -25,17 +25,25 @@ class TestUSOptionsPolygon(unittest.TestCase):
             "ARM",
             "ASML",
             "AVGO",
+            "BA",
             "BABA",
             "BAC",
             "COIN",
             "CRWD",
+            "CVNA",
             "DELL",
             "DIS",
             "DRAM",
+            "EEM",
+            "F",
+            "FXI",
+            "GME",
             "GOOGL",
             "HOOD",
             "INTC",
             "JPM",
+            "KRE",
+            "LLY",
             "MARA",
             "META",
             "MRVL",
@@ -45,15 +53,22 @@ class TestUSOptionsPolygon(unittest.TestCase):
             "NFLX",
             "NKE",
             "ORCL",
+            "PANW",
+            "PDD",
             "PLTR",
+            "PYPL",
             "QCOM",
             "RIVN",
             "RKLB",
+            "SHOP",
+            "SMH",
             "SMCI",
             "SOFI",
             "SPCX",
             "TSM",
             "UBER",
+            "UNH",
+            "USO",
             "WMT",
         }
 
@@ -61,7 +76,7 @@ class TestUSOptionsPolygon(unittest.TestCase):
         for symbol in ("SPY", "QQQ", "IWM", "GLD", "TLT", "TSLA", "NVDA", "AMD", "AAPL", "AMZN"):
             self.assertIn(symbol, symbols)
         self.assertTrue(new_symbols <= symbols)
-        self.assertEqual(len(uop.DEFAULT_UNDERLYINGS), 48)
+        self.assertEqual(len(uop.DEFAULT_UNDERLYINGS), 63)
 
     def test_parse_option_ticker_extracts_root_expiration_type_and_strike(self):
         parsed = uop.parse_option_ticker("O:SPY260619C00600000")
@@ -96,6 +111,8 @@ class TestUSOptionsPolygon(unittest.TestCase):
         tsm_monthly = uop.classify_contract("O:TSM260619C00200000", "TSM", "2026-06-19")
         mu_monthly = uop.classify_contract("O:MU260619C00100000", "MU", "2026-06-19")
         baba_monthly = uop.classify_contract("O:BABA260619C00100000", "BABA", "2026-06-19")
+        smh_monthly = uop.classify_contract("O:SMH260619C00250000", "SMH", "2026-06-19")
+        lly_monthly = uop.classify_contract("O:LLY260619C00800000", "LLY", "2026-06-19")
 
         self.assertEqual(tsla_monthly[:2], ("monthly", "physical"))
         self.assertEqual(tsla_weekly[:2], ("short_cycle", "physical"))
@@ -104,6 +121,8 @@ class TestUSOptionsPolygon(unittest.TestCase):
         self.assertEqual(tsm_monthly[:2], ("monthly", "physical"))
         self.assertEqual(mu_monthly[:2], ("monthly", "physical"))
         self.assertEqual(baba_monthly[:2], ("monthly", "physical"))
+        self.assertEqual(smh_monthly[:2], ("monthly", "physical"))
+        self.assertEqual(lly_monthly[:2], ("monthly", "physical"))
 
     def test_storage_filter_keeps_monthly_full_chain_but_short_cycle_only_band(self):
         monthly = uop.OptionContract(

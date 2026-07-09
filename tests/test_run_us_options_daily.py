@@ -13,17 +13,25 @@ NEW_OPTION_UNDERLYINGS = {
     "ARM",
     "ASML",
     "AVGO",
+    "BA",
     "BABA",
     "BAC",
     "COIN",
     "CRWD",
+    "CVNA",
     "DELL",
     "DIS",
     "DRAM",
+    "EEM",
+    "F",
+    "FXI",
+    "GME",
     "GOOGL",
     "HOOD",
     "INTC",
     "JPM",
+    "KRE",
+    "LLY",
     "MARA",
     "META",
     "MRVL",
@@ -33,30 +41,41 @@ NEW_OPTION_UNDERLYINGS = {
     "NFLX",
     "NKE",
     "ORCL",
+    "PANW",
+    "PDD",
     "PLTR",
+    "PYPL",
     "QCOM",
     "RIVN",
     "RKLB",
+    "SHOP",
+    "SMH",
     "SMCI",
     "SOFI",
     "SPCX",
     "TSM",
     "UBER",
+    "UNH",
+    "USO",
     "WMT",
 }
 
 LATEST_BACKFILL_UNDERLYINGS = {
-    "ARM",
-    "ASML",
-    "CRWD",
-    "DELL",
-    "DRAM",
-    "MRVL",
-    "NKE",
-    "ORCL",
-    "QCOM",
-    "RKLB",
-    "SPCX",
+    "BA",
+    "CVNA",
+    "EEM",
+    "F",
+    "FXI",
+    "GME",
+    "KRE",
+    "LLY",
+    "PANW",
+    "PDD",
+    "PYPL",
+    "SHOP",
+    "SMH",
+    "UNH",
+    "USO",
 }
 
 
@@ -165,7 +184,7 @@ class RunUSOptionsDailyTests(unittest.TestCase):
 
     def test_backfill_script_defaults_to_new_batch(self):
         script_text = Path("scripts/backfill_us_options_new_underlyings_1y.sh").read_text(encoding="utf-8")
-        expected = "DRAM,MRVL,RKLB,SPCX,ARM,ASML,CRWD,DELL,ORCL,QCOM,NKE"
+        expected = "BA,CVNA,EEM,F,FXI,GME,KRE,LLY,PANW,PDD,PYPL,SHOP,SMH,UNH,USO"
 
         self.assertIn(f"US_OPTIONS_BACKFILL_UNDERLYINGS=\"${{US_OPTIONS_BACKFILL_UNDERLYINGS:-{expected}}}\"", script_text)
         self.assertEqual(set(expected.split(",")), LATEST_BACKFILL_UNDERLYINGS)

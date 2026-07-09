@@ -609,17 +609,25 @@ class UsMarketDashboardDataTests(unittest.TestCase):
             "ARM",
             "ASML",
             "AVGO",
+            "BA",
             "BABA",
             "BAC",
             "COIN",
             "CRWD",
+            "CVNA",
             "DELL",
             "DIS",
             "DRAM",
+            "EEM",
+            "F",
+            "FXI",
+            "GME",
             "GOOGL",
             "HOOD",
             "INTC",
             "JPM",
+            "KRE",
+            "LLY",
             "MARA",
             "META",
             "MRVL",
@@ -629,15 +637,22 @@ class UsMarketDashboardDataTests(unittest.TestCase):
             "NFLX",
             "NKE",
             "ORCL",
+            "PANW",
+            "PDD",
             "PLTR",
+            "PYPL",
             "QCOM",
             "RIVN",
             "RKLB",
+            "SHOP",
             "SMCI",
+            "SMH",
             "SOFI",
             "SPCX",
             "TSM",
             "UBER",
+            "UNH",
+            "USO",
             "WMT",
         }
 
@@ -658,7 +673,7 @@ class UsMarketDashboardDataTests(unittest.TestCase):
             self.assertIn(symbol, symbols)
             self.assertTrue(dash.UNDERLYING_DISPLAY_NAMES.get(symbol))
         self.assertTrue(new_symbols <= symbols)
-        self.assertEqual(len(dash.DEFAULT_DASHBOARD_UNDERLYINGS), 48)
+        self.assertEqual(len(dash.DEFAULT_DASHBOARD_UNDERLYINGS), 63)
 
     def test_dashboard_underlyings_prioritize_core_etfs_then_sort_symbols(self):
         symbols = list(dash.DEFAULT_DASHBOARD_UNDERLYINGS)

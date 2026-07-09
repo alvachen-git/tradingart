@@ -140,6 +140,7 @@ SECTOR_SYMBOLS = {
     # 期权高活跃补充池（配合美股期权页面新增标的，避免回补 IV 时临时补价）
     "option_active": [
         "BABA", "UBER", "SOFI", "RIVN", "MARA", "DRAM",
+        "BA", "CVNA", "F", "GME", "LLY", "PANW", "PDD", "PYPL", "SHOP", "UNH",
     ],
     # 石油与油服炼化
     "oil_energy": [
@@ -151,11 +152,11 @@ SECTOR_SYMBOLS = {
     ],
     # 美股行业高流动性 ETF
     "us_etf_sector": [
-        "XLK", "XLF", "XLE", "XLV", "XLI", "XLY", "XLP", "XLU", "XLB", "XLC", "SMH", "SOXX",
+        "XLK", "XLF", "XLE", "XLV", "XLI", "XLY", "XLP", "XLU", "XLB", "XLC", "SMH", "SOXX", "KRE",
     ],
     # 资产配置/宏观高流动性 ETF
     "us_etf_macro": [
-        "GLD", "SLV", "USO", "TLT", "IEF", "HYG", "LQD",
+        "GLD", "SLV", "USO", "TLT", "IEF", "HYG", "LQD", "EEM", "FXI",
     ],
     # 主流加密现货 ETF（不含杠杆/反向）
     "crypto_spot_etf": [
