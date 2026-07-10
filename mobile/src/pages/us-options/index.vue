@@ -61,16 +61,38 @@ type CandleShape = {
   color: string
 }
 
+type PriceIvRow = {
+  tradeDate: string
+  label: string
+  open: number
+  high: number
+  low: number
+  close: number
+  iv: number | null
+}
+
+type PriceIvHoverItem = {
+  x: number
+  date: string
+  open: string
+  high: string
+  low: string
+  close: string
+  iv: string
+}
+
 type PriceIvChart = {
   hasData: boolean
   width: number
   height: number
+  plotLeft: number
+  plotWidth: number
   candles: CandleShape[]
   ivSegments: ChartSegment[]
-  ivNodes: ChartNode[]
   xLabels: Array<{ left: number; label: string }>
   priceLabels: Array<{ top: number; label: string }>
   ivLabels: Array<{ top: number; label: string }>
+  hoverItems: PriceIvHoverItem[]
   latestClose: string
   latestIv: string
 }
@@ -90,6 +112,20 @@ const defenseLoading = ref(false)
 const anomaliesLoading = ref(false)
 const showPicker = ref(false)
 const searchText = ref('')
+const showAtmIv = ref(true)
+const chartWindow = ref(90)
+const chartStart = ref(0)
+const chartHoverIndex = ref<number | null>(null)
+
+const PRICE_IV_MIN_WINDOW = 24
+const PRICE_IV_MAX_WINDOW = 180
+let touchStartX = 0
+let touchStartStart = 0
+let pinchStartDistance = 0
+let pinchStartWindow = 0
+let longPressTimer: ReturnType<typeof setTimeout> | null = null
+let chartTouchMode: 'idle' | 'pan' | 'pinch' | 'long' = 'idle'
+let chartRect: { left: number; width: number } | null = null
 
 const tabs: Array<{ key: TabKey; label: string }> = [
   { key: 'overview', label: '概览' },
@@ -151,6 +187,7 @@ async function loadOverview() {
   loading.value = true
   try {
     overview.value = await usOptionsApi.overview(selectedSymbol.value)
+    resetPriceIvWindow()
   } catch (e: any) {
     uni.showToast({ title: e.message || '总览加载失败', icon: 'none' })
   } finally {
@@ -235,6 +272,7 @@ async function selectSymbol(symbol: string) {
   surface.value = null
   defense.value = null
   anomalies.value = null
+  chartHoverIndex.value = null
   await loadOverview()
   if (activeTab.value === 'surface') loadSurface()
   if (activeTab.value === 'defense') loadDefense()
@@ -254,16 +292,81 @@ const filteredProducts = computed(() => {
   )
 })
 
-const kpiCards = computed(() => {
+const snapshotCards = computed(() => {
   const m = overview.value?.metrics || {}
-  return [
-    { label: 'ATM IV', value: fmtPctPlain(m.atm_iv_pct), tone: 'blue' },
-    { label: 'IV Rank', value: fmtPctPlain(m.iv_rank), tone: rankTone(m.iv_rank) },
-    { label: 'IV分位', value: fmtPctPlain(m.iv_percentile), tone: 'gold' },
-    { label: 'RV20', value: fmtPctPlain(m.rv20_pct), tone: 'muted' },
-    { label: 'IV-RV20', value: fmtSigned(m.iv_rv20_spread, '%'), tone: signedTone(m.iv_rv20_spread) },
-    { label: 'Put/Call OI', value: fmtNum(m.put_call_oi, 2), tone: 'muted' },
+  const putSkew = asNum(m.put_skew_5pct)
+  const callSkew = asNum(m.call_skew_5pct)
+  const skewGap = asNum(m.put_call_skew_5pct, putSkew !== null && callSkew !== null ? putSkew - callSkew : null)
+  const cards = [
+    {
+      label: '今日 IV 变化',
+      sub: String(m.iv_change_1d_direction_label || '较前一交易日'),
+      value: fmtSigned(m.iv_change_1d, '%'),
+      percentile: asNum(m.iv_change_1d_directional_percentile),
+      percentileLabel: String(m.iv_change_1d_direction_label || '变化分位'),
+      sample: sampleLabel(m.iv_change_1d_directional_history_count, m.iv_change_1d_min_samples || m.historical_percentile_min_samples),
+      tone: ivChangeTone(m.iv_change_1d),
+    },
+    {
+      label: 'IV - RV20',
+      sub: '隐波减实际波动',
+      value: fmtSigned(m.iv_rv20_spread, '%'),
+      percentile: asNum(m.iv_rv20_percentile),
+      percentileLabel: '历史分位',
+      sample: sampleLabel(m.iv_rv20_spread_history_count, m.iv_rv20_spread_min_samples || m.historical_percentile_min_samples),
+      tone: signedTone(m.iv_rv20_spread),
+    },
+    {
+      label: 'IV Rank',
+      sub: '月结算 IV 排名',
+      value: fmtPctPlain(m.iv_rank),
+      percentile: asNum(m.iv_rank),
+      percentileLabel: '历史分位',
+      sample: sampleLabel(m.iv_history_days, m.historical_percentile_min_samples),
+      tone: rankTone(m.iv_rank),
+    },
+    {
+      label: '期限结构',
+      sub: termStateLabel(m.term_state),
+      value: fmtSigned(m.term_slope_30_60, '%'),
+      percentile: asNum(m.term_slope_percentile),
+      percentileLabel: '历史分位',
+      sample: sampleLabel(m.term_slope_30_60_history_count, m.term_slope_30_60_min_samples || m.historical_percentile_min_samples),
+      tone: signedTone(m.term_slope_30_60),
+    },
+    {
+      label: 'Put Skew',
+      sub: '下方保护相对 ATM',
+      value: fmtSigned(putSkew, '%'),
+      percentile: asNum(m.put_skew_5pct_percentile),
+      percentileLabel: '历史分位',
+      sample: sampleLabel(m.put_skew_5pct_history_count, m.put_skew_5pct_min_samples || m.historical_percentile_min_samples),
+      tone: signedTone(putSkew),
+    },
+    {
+      label: 'Put/Call OI',
+      sub: `Top OI ${fmtNum(m.top_oi_strike, 0)}`,
+      value: fmtNum(m.put_call_oi, 2),
+      percentile: asNum(m.put_call_oi_percentile),
+      percentileLabel: '历史分位',
+      sample: sampleLabel(m.put_call_oi_history_count, m.put_call_oi_min_samples || m.historical_percentile_min_samples),
+      tone: 'gold',
+    },
+    {
+      label: 'Put-Call Skew',
+      sub: '保护需求减追涨需求',
+      value: fmtSigned(skewGap, '%'),
+      percentile: asNum(m.put_call_skew_5pct_percentile),
+      percentileLabel: '历史分位',
+      sample: sampleLabel(m.put_call_skew_5pct_history_count, m.put_call_skew_5pct_min_samples || m.historical_percentile_min_samples),
+      tone: signedTone(skewGap),
+    },
   ]
+  return cards.map(card => ({
+    ...card,
+    percentileText: card.percentile === null ? '--' : `${card.percentile.toFixed(0)}%`,
+    percentileClamped: clampInt(card.percentile ?? 0, 0, 100),
+  }))
 })
 
 const profileCard = computed(() => overview.value?.profile_card || {})
@@ -277,10 +380,38 @@ const profileItems = computed(() => {
   ]
 })
 
-const priceIvChart = computed(() => buildPriceIvChart(
+const priceIvRows = computed(() => normalizePriceIvRows(
   overview.value?.price_history || [],
   overview.value?.iv_history || [],
 ))
+
+const priceIvVisibleRows = computed(() => {
+  const rows = priceIvRows.value
+  const total = rows.length
+  if (!total) return []
+  const win = clampInt(chartWindow.value, PRICE_IV_MIN_WINDOW, Math.min(PRICE_IV_MAX_WINDOW, total))
+  const start = clampInt(chartStart.value, 0, Math.max(total - win, 0))
+  return rows.slice(start, start + win)
+})
+
+const priceIvChart = computed(() => buildPriceIvChart(
+  priceIvVisibleRows.value,
+  showAtmIv.value,
+))
+
+const priceIvHover = computed(() => {
+  const idx = chartHoverIndex.value
+  if (idx === null) return null
+  const item = priceIvChart.value.hoverItems[idx]
+  if (!item) return null
+  const tooltipW = 246
+  const left = clampInt(Math.round(item.x + 16), 54, priceIvChart.value.width - tooltipW - 10)
+  return {
+    ...item,
+    lineStyle: { left: `${item.x}rpx` },
+    tooltipStyle: { left: `${left}rpx` },
+  }
+})
 
 const ivHistoryChart = computed(() => {
   const rows = overview.value?.iv_history || []
@@ -382,31 +513,37 @@ function rankTone(v: any): string {
   return 'gold'
 }
 
-function buildPriceIvChart(priceRowsRaw: Array<Record<string, any>>, ivRowsRaw: Array<Record<string, any>>): PriceIvChart {
-  const width = 620
-  const height = 430
-  const padL = 42
-  const padR = 46
-  const padT = 20
-  const padB = 34
-  const priceH = 252
-  const ivTop = 306
-  const ivH = 82
-  const plotW = width - padL - padR
-  const empty: PriceIvChart = {
-    hasData: false,
-    width,
-    height,
-    candles: [],
-    ivSegments: [],
-    ivNodes: [],
-    xLabels: [],
-    priceLabels: [],
-    ivLabels: [],
-    latestClose: '--',
-    latestIv: '--',
-  }
+function ivChangeTone(v: any): string {
+  const n = asNum(v)
+  if (n === null) return 'muted'
+  if (n > 0) return 'red'
+  if (n < 0) return 'blue'
+  return 'muted'
+}
 
+function termStateLabel(v: any): string {
+  const text = String(v || '')
+  if (text === 'Backwardation') return '近月风险溢价偏强'
+  if (text === 'Contango') return '远月 IV 高于近月'
+  if (text === 'Flat') return '期限结构相对平坦'
+  return '期限样本不足'
+}
+
+function sampleLabel(count: any, minSamples: any): string {
+  const c = asNum(count)
+  const m = asNum(minSamples)
+  if (c === null && m === null) return '样本待更新'
+  if (c !== null && m !== null) return `样本 ${fmtNum(c, 0)}/${fmtNum(m, 0)}`
+  if (c !== null) return `样本 ${fmtNum(c, 0)}`
+  return `门槛 ${fmtNum(m, 0)}`
+}
+
+function clampInt(v: number, min: number, max: number): number {
+  if (max < min) return min
+  return Math.max(min, Math.min(max, Math.round(v)))
+}
+
+function normalizePriceIvRows(priceRowsRaw: Array<Record<string, any>>, ivRowsRaw: Array<Record<string, any>>): PriceIvRow[] {
   const ivMap = new Map<string, number>()
   for (const row of ivRowsRaw || []) {
     const td = String(row.trade_date || '').replace(/-/g, '').slice(0, 8)
@@ -414,7 +551,7 @@ function buildPriceIvChart(priceRowsRaw: Array<Record<string, any>>, ivRowsRaw: 
     if (td && iv !== null) ivMap.set(td, iv)
   }
 
-  const rows = (priceRowsRaw || [])
+  return (priceRowsRaw || [])
     .map(row => {
       const tradeDate = String(row.trade_date || '').replace(/-/g, '').slice(0, 8)
       return {
@@ -427,12 +564,58 @@ function buildPriceIvChart(priceRowsRaw: Array<Record<string, any>>, ivRowsRaw: 
         iv: ivMap.get(tradeDate) ?? null,
       }
     })
-    .filter(row => row.tradeDate && row.open !== null && row.high !== null && row.low !== null && row.close !== null)
-    .slice(-90)
+    .filter((row): row is PriceIvRow =>
+      Boolean(row.tradeDate)
+      && row.open !== null
+      && row.high !== null
+      && row.low !== null
+      && row.close !== null
+    )
+    .sort((a, b) => a.tradeDate.localeCompare(b.tradeDate))
+}
+
+function resetPriceIvWindow() {
+  const total = priceIvRows.value.length
+  if (!total) {
+    chartWindow.value = 90
+    chartStart.value = 0
+    chartHoverIndex.value = null
+    return
+  }
+  const nextWindow = clampInt(Math.min(90, total), Math.min(PRICE_IV_MIN_WINDOW, total), total)
+  chartWindow.value = nextWindow
+  chartStart.value = Math.max(total - nextWindow, 0)
+  chartHoverIndex.value = null
+}
+
+function buildPriceIvChart(rows: PriceIvRow[], showIv: boolean): PriceIvChart {
+  const width = 620
+  const height = 480
+  const padL = 42
+  const padR = 56
+  const padT = 24
+  const padB = 42
+  const plotW = width - padL - padR
+  const plotH = height - padT - padB
+  const empty: PriceIvChart = {
+    hasData: false,
+    width,
+    height,
+    plotLeft: padL,
+    plotWidth: plotW,
+    candles: [],
+    ivSegments: [],
+    xLabels: [],
+    priceLabels: [],
+    ivLabels: [],
+    hoverItems: [],
+    latestClose: '--',
+    latestIv: '--',
+  }
 
   if (rows.length < 2) return empty
 
-  const priceValues = rows.flatMap(row => [row.high as number, row.low as number])
+  const priceValues = rows.flatMap(row => [row.high, row.low])
   const ivValues = rows.map(row => row.iv).filter((v): v is number => v !== null)
   if (!priceValues.length) return empty
 
@@ -452,18 +635,18 @@ function buildPriceIvChart(priceRowsRaw: Array<Record<string, any>>, ivRowsRaw: 
 
   const candleW = Math.max(4, Math.min(12, plotW / Math.max(rows.length * 1.65, 1)))
   const xAt = (idx: number) => padL + (idx / Math.max(rows.length - 1, 1)) * plotW
-  const yPrice = (value: number) => padT + ((maxP - value) / Math.max(maxP - minP, 1)) * priceH
-  const yIv = (value: number) => ivTop + ((maxIv - value) / Math.max(maxIv - minIv, 1)) * ivH
+  const yPrice = (value: number) => padT + ((maxP - value) / Math.max(maxP - minP, 1)) * plotH
+  const yIv = (value: number) => padT + ((maxIv - value) / Math.max(maxIv - minIv, 1)) * plotH
 
   const candles: CandleShape[] = rows.map((row, idx) => {
-    const open = row.open as number
-    const close = row.close as number
+    const open = row.open
+    const close = row.close
     const color = close >= open ? '#ef4444' : '#22c55e'
     const top = Math.min(yPrice(open), yPrice(close))
     return {
       x: xAt(idx),
-      highTop: yPrice(row.high as number),
-      lowTop: yPrice(row.low as number),
+      highTop: yPrice(row.high),
+      lowTop: yPrice(row.low),
       bodyTop: top,
       bodyHeight: Math.max(Math.abs(yPrice(open) - yPrice(close)), 3),
       width: candleW,
@@ -475,18 +658,20 @@ function buildPriceIvChart(priceRowsRaw: Array<Record<string, any>>, ivRowsRaw: 
     .map((row, idx) => row.iv === null ? null : ({ x: xAt(idx), y: yIv(row.iv), value: row.iv }))
     .filter((pt): pt is { x: number; y: number; value: number } => !!pt)
   const ivSegments: ChartSegment[] = []
-  for (let i = 1; i < ivPts.length; i++) {
-    const a = ivPts[i - 1]
-    const b = ivPts[i]
-    const dx = b.x - a.x
-    const dy = b.y - a.y
-    ivSegments.push({
-      left: a.x,
-      top: a.y,
-      width: Math.sqrt(dx * dx + dy * dy),
-      angle: Math.atan2(dy, dx) * 180 / Math.PI,
-      color: '#38bdf8',
-    })
+  if (showIv) {
+    for (let i = 1; i < ivPts.length; i++) {
+      const a = ivPts[i - 1]
+      const b = ivPts[i]
+      const dx = b.x - a.x
+      const dy = b.y - a.y
+      ivSegments.push({
+        left: a.x,
+        top: a.y,
+        width: Math.sqrt(dx * dx + dy * dy),
+        angle: Math.atan2(dy, dx) * 180 / Math.PI,
+        color: '#38bdf8',
+      })
+    }
   }
 
   const labelStep = Math.max(1, Math.ceil(rows.length / 4))
@@ -499,15 +684,189 @@ function buildPriceIvChart(priceRowsRaw: Array<Record<string, any>>, ivRowsRaw: 
     hasData: true,
     width,
     height,
+    plotLeft: padL,
+    plotWidth: plotW,
     candles,
     ivSegments,
-    ivNodes: ivPts.map(pt => ({ left: pt.x, top: pt.y, color: '#38bdf8' })),
     xLabels,
     priceLabels: [maxP, (maxP + minP) / 2, minP].map(v => ({ top: yPrice(v), label: fmtNum(v, 1) })),
-    ivLabels: ivValues.length ? [maxIv, minIv].map(v => ({ top: yIv(v), label: fmtNum(v, 1) })) : [],
+    ivLabels: showIv && ivValues.length ? [maxIv, minIv].map(v => ({ top: yIv(v), label: fmtNum(v, 1) })) : [],
+    hoverItems: rows.map((row, idx) => ({
+      x: xAt(idx),
+      date: row.label,
+      open: fmtMoney(row.open),
+      high: fmtMoney(row.high),
+      low: fmtMoney(row.low),
+      close: fmtMoney(row.close),
+      iv: row.iv === null ? '--' : fmtPctPlain(row.iv),
+    })),
     latestClose: fmtMoney(rows[rows.length - 1]?.close),
     latestIv: ivPts.length ? fmtPctPlain(ivPts[ivPts.length - 1].value) : '--',
   }
+}
+
+function toggleAtmIv() {
+  showAtmIv.value = !showAtmIv.value
+  chartHoverIndex.value = null
+}
+
+function clearLongPressTimer() {
+  if (longPressTimer) {
+    clearTimeout(longPressTimer)
+    longPressTimer = null
+  }
+}
+
+function chartTouches(e: any): any[] {
+  const touches = e?.touches || e?.changedTouches || []
+  return Array.isArray(touches) ? touches : Array.from(touches)
+}
+
+function touchClientX(touch: any): number {
+  return Number(touch?.clientX ?? touch?.pageX ?? 0)
+}
+
+function touchDistance(touches: any[]): number {
+  if (touches.length < 2) return 0
+  const a = touches[0]
+  const b = touches[1]
+  const ax = Number(a?.clientX ?? a?.pageX ?? 0)
+  const ay = Number(a?.clientY ?? a?.pageY ?? 0)
+  const bx = Number(b?.clientX ?? b?.pageX ?? 0)
+  const by = Number(b?.clientY ?? b?.pageY ?? 0)
+  const dx = bx - ax
+  const dy = by - ay
+  return Math.sqrt(dx * dx + dy * dy)
+}
+
+function currentVisibleStart(): number {
+  const total = priceIvRows.value.length
+  if (!total) return 0
+  const win = Math.min(chartWindow.value, total)
+  return clampInt(chartStart.value, 0, Math.max(total - win, 0))
+}
+
+function setChartStart(nextStart: number) {
+  const total = priceIvRows.value.length
+  if (!total) return
+  const win = Math.min(chartWindow.value, total)
+  chartStart.value = clampInt(nextStart, 0, Math.max(total - win, 0))
+}
+
+function setChartWindow(nextWindow: number, centerIndex?: number) {
+  const total = priceIvRows.value.length
+  if (!total) return
+  const minWin = Math.min(PRICE_IV_MIN_WINDOW, total)
+  const win = clampInt(nextWindow, minWin, Math.min(PRICE_IV_MAX_WINDOW, total))
+  const center = centerIndex ?? (currentVisibleStart() + Math.min(chartWindow.value, total) / 2)
+  chartWindow.value = win
+  chartStart.value = clampInt(center - win / 2, 0, Math.max(total - win, 0))
+  chartHoverIndex.value = null
+}
+
+function updateChartRect() {
+  try {
+    uni.createSelectorQuery()
+      .select('#priceIvChart')
+      .boundingClientRect((rect: any) => {
+        if (rect && Number(rect.width) > 0) {
+          chartRect = { left: Number(rect.left || 0), width: Number(rect.width || 0) }
+        }
+      })
+      .exec()
+  } catch (_e) {
+    chartRect = null
+  }
+}
+
+function nearestHoverIndex(clientX: number): number | null {
+  const chart = priceIvChart.value
+  const count = chart.hoverItems.length
+  if (!count) return null
+  let plotLeftPx = chart.plotLeft
+  let plotWidthPx = chart.plotWidth
+  if (chartRect && chartRect.width > 0) {
+    const pxPerRpx = chartRect.width / chart.width
+    plotLeftPx = chartRect.left + chart.plotLeft * pxPerRpx
+    plotWidthPx = chart.plotWidth * pxPerRpx
+  }
+  const ratio = Math.max(0, Math.min(1, (clientX - plotLeftPx) / Math.max(plotWidthPx, 1)))
+  return clampInt(ratio * (count - 1), 0, count - 1)
+}
+
+function hoverGlobalIndexFromClientX(clientX: number): number {
+  const localIdx = nearestHoverIndex(clientX)
+  const start = currentVisibleStart()
+  return start + (localIdx ?? Math.floor(priceIvVisibleRows.value.length / 2))
+}
+
+function updateChartHover(clientX: number) {
+  const idx = nearestHoverIndex(clientX)
+  chartHoverIndex.value = idx
+}
+
+function handlePriceIvTouchStart(e: any) {
+  if (!priceIvChart.value.hasData) return
+  updateChartRect()
+  clearLongPressTimer()
+  const touches = chartTouches(e)
+  if (touches.length >= 2) {
+    chartTouchMode = 'pinch'
+    pinchStartDistance = touchDistance(touches)
+    pinchStartWindow = chartWindow.value
+    chartHoverIndex.value = null
+    return
+  }
+  if (!touches.length) return
+  chartTouchMode = 'idle'
+  touchStartX = touchClientX(touches[0])
+  touchStartStart = currentVisibleStart()
+  longPressTimer = setTimeout(() => {
+    chartTouchMode = 'long'
+    updateChartHover(touchStartX)
+  }, 420)
+}
+
+function handlePriceIvTouchMove(e: any) {
+  if (!priceIvChart.value.hasData) return
+  const touches = chartTouches(e)
+  if (touches.length >= 2) {
+    clearLongPressTimer()
+    chartTouchMode = 'pinch'
+    const distance = touchDistance(touches)
+    if (pinchStartDistance > 0 && distance > 0) {
+      const centerX = (touchClientX(touches[0]) + touchClientX(touches[1])) / 2
+      const centerIndex = hoverGlobalIndexFromClientX(centerX)
+      setChartWindow(pinchStartWindow * (pinchStartDistance / distance), centerIndex)
+    }
+    return
+  }
+  if (!touches.length) return
+  const x = touchClientX(touches[0])
+  if (chartTouchMode === 'long') {
+    updateChartHover(x)
+    return
+  }
+  const dx = x - touchStartX
+  if (Math.abs(dx) < 8) return
+  clearLongPressTimer()
+  chartTouchMode = 'pan'
+  const chart = priceIvChart.value
+  const plotPx = chartRect && chartRect.width > 0
+    ? chart.plotWidth * (chartRect.width / chart.width)
+    : chart.plotWidth
+  const visibleCount = Math.max(priceIvVisibleRows.value.length - 1, 1)
+  const pxPerRow = Math.max(plotPx / visibleCount, 2)
+  const deltaRows = Math.round(dx / pxPerRow)
+  setChartStart(touchStartStart - deltaRows)
+  chartHoverIndex.value = null
+}
+
+function handlePriceIvTouchEnd() {
+  clearLongPressTimer()
+  chartTouchMode = 'idle'
+  pinchStartDistance = 0
+  chartHoverIndex.value = null
 }
 
 function buildMiniChart(inputLines: ChartLineInput[]): MiniChart {
@@ -667,20 +1026,39 @@ function axisYStyle(label: { top: number }) {
       <view v-if="loading" class="center-tip">加载美股期权总览...</view>
       <view v-else>
         <view class="panel chart-panel-main">
-          <view class="panel-head">
-            <text class="panel-title">价格与 IV</text>
-            <text class="panel-sub">收盘 {{ priceIvChart.latestClose }} · IV {{ priceIvChart.latestIv }}</text>
+          <view class="panel-head chart-head">
+            <view>
+              <text class="panel-title">价格与 IV</text>
+              <text class="panel-sub chart-sub">收盘 {{ priceIvChart.latestClose }} · IV {{ priceIvChart.latestIv }}</text>
+            </view>
+            <view class="iv-toggle" :class="{ off: !showAtmIv }" @tap.stop="toggleAtmIv">
+              <text>ATM IV {{ showAtmIv ? '显示' : '隐藏' }}</text>
+            </view>
           </view>
-          <view v-if="priceIvChart.hasData" class="price-iv-chart">
+          <view
+            v-if="priceIvChart.hasData"
+            id="priceIvChart"
+            class="price-iv-chart"
+            @touchstart="handlePriceIvTouchStart"
+            @touchmove.stop.prevent="handlePriceIvTouchMove"
+            @touchend="handlePriceIvTouchEnd"
+            @touchcancel="handlePriceIvTouchEnd"
+          >
             <view v-for="(c, idx) in priceIvChart.candles" :key="`wick-${idx}`" class="candle-wick" :style="candleWickStyle(c)" />
             <view v-for="(c, idx) in priceIvChart.candles" :key="`body-${idx}`" class="candle-body" :style="candleBodyStyle(c)" />
             <view v-for="seg in priceIvChart.ivSegments" :key="`iv-${seg.left}-${seg.top}-${seg.width}`" class="chart-seg iv-seg" :style="segmentStyle(seg)" />
-            <view v-for="node in priceIvChart.ivNodes" :key="`ivn-${node.left}-${node.top}`" class="chart-node iv-node" :style="nodeStyle(node)" />
             <text v-for="y in priceIvChart.priceLabels" :key="`py-${y.label}`" class="axis-y" :style="axisYStyle(y)">{{ y.label }}</text>
             <text v-for="y in priceIvChart.ivLabels" :key="`iy-${y.label}`" class="axis-y iv-axis-y" :style="axisYStyle(y)">{{ y.label }}</text>
             <text v-for="x in priceIvChart.xLabels" :key="`px-${x.label}`" class="axis-x" :style="axisXStyle(x)">{{ x.label }}</text>
+            <view v-if="priceIvHover" class="crosshair-line" :style="priceIvHover.lineStyle" />
+            <view v-if="priceIvHover" class="crosshair-tip" :style="priceIvHover.tooltipStyle">
+              <text class="crosshair-date">{{ priceIvHover.date }}</text>
+              <text>收 {{ priceIvHover.close }} · IV {{ priceIvHover.iv }}</text>
+              <text>高 {{ priceIvHover.high }} / 低 {{ priceIvHover.low }}</text>
+            </view>
             <view class="chart-band-label price-label">K线</view>
-            <view class="chart-band-label iv-label">ATM IV</view>
+            <view v-if="showAtmIv" class="chart-band-label iv-label">ATM IV</view>
+            <view class="chart-hint">拖动平移 · 双指缩放 · 长按查看</view>
           </view>
           <view v-else class="empty-chart empty-chart-large">暂无价格与 IV 图表</view>
         </view>
@@ -704,13 +1082,26 @@ function axisYStyle(label: { top: number }) {
 
         <view class="panel metrics-panel">
           <view class="panel-head">
-            <text class="panel-title">指标快照</text>
+            <text class="panel-title">波动率与持仓速览</text>
             <text class="panel-sub">{{ overview?.display_date || overview?.trade_date || '--' }}</text>
           </view>
-          <view class="kpi-grid">
-            <view v-for="card in kpiCards" :key="card.label" class="kpi-card">
-              <text class="kpi-label">{{ card.label }}</text>
-              <text class="kpi-value" :class="`tone-${card.tone}`">{{ card.value }}</text>
+          <view class="snapshot-grid">
+            <view v-for="card in snapshotCards" :key="card.label" class="snapshot-card">
+              <view class="snapshot-top">
+                <view>
+                  <text class="snapshot-label">{{ card.label }}</text>
+                  <text class="snapshot-sub">{{ card.sub }}</text>
+                </view>
+                <text class="snapshot-value" :class="`tone-${card.tone}`">{{ card.value }}</text>
+              </view>
+              <view class="thermo-row">
+                <text>{{ card.percentileLabel }}</text>
+                <text>{{ card.percentileText }}</text>
+              </view>
+              <view class="thermo-track">
+                <view v-if="card.percentile !== null" class="thermo-marker" :style="{ left: `${card.percentileClamped}%` }" />
+              </view>
+              <text class="snapshot-sample">{{ card.sample }}</text>
             </view>
           </view>
         </view>
@@ -1052,6 +1443,33 @@ function axisYStyle(label: { top: number }) {
   font-size: 22rpx;
 }
 
+.chart-head {
+  align-items: flex-start;
+  gap: 16rpx;
+}
+
+.chart-sub {
+  display: block;
+  margin-top: 6rpx;
+}
+
+.iv-toggle {
+  flex-shrink: 0;
+  padding: 8rpx 14rpx;
+  border-radius: 999rpx;
+  color: #38bdf8;
+  font-size: 20rpx;
+  font-weight: 800;
+  border: 1px solid rgba(56, 189, 248, 0.42);
+  background: rgba(56, 189, 248, 0.1);
+}
+
+.iv-toggle.off {
+  color: #8fa3c1;
+  border-color: rgba(143, 163, 193, 0.28);
+  background: rgba(15, 23, 42, 0.76);
+}
+
 .chart-box {
   position: relative;
   width: 620rpx;
@@ -1086,7 +1504,7 @@ function axisYStyle(label: { top: number }) {
 .price-iv-chart {
   position: relative;
   width: 620rpx;
-  height: 430rpx;
+  height: 480rpx;
   max-width: 100%;
   overflow: hidden;
   border-radius: 16rpx;
@@ -1102,19 +1520,19 @@ function axisYStyle(label: { top: number }) {
   content: "";
   position: absolute;
   left: 42rpx;
-  right: 46rpx;
-  top: 292rpx;
-  border-top: 1px solid rgba(245, 197, 24, 0.18);
+  top: 24rpx;
+  bottom: 42rpx;
+  border-left: 1px solid rgba(203, 213, 225, 0.32);
 }
 
 .price-iv-chart::after {
   content: "";
   position: absolute;
   left: 42rpx;
-  right: 46rpx;
-  bottom: 34rpx;
+  right: 56rpx;
+  bottom: 42rpx;
   border-bottom: 1px solid rgba(203, 213, 225, 0.36);
-  box-shadow: 0 -376rpx 0 -0.5px rgba(203, 213, 225, 0.28);
+  box-shadow: 0 -414rpx 0 -0.5px rgba(203, 213, 225, 0.24);
 }
 
 .candle-wick {
@@ -1133,14 +1551,9 @@ function axisYStyle(label: { top: number }) {
 }
 
 .iv-seg {
-  z-index: 5;
+  z-index: 7;
   height: 4rpx;
-}
-
-.iv-node {
-  z-index: 6;
-  width: 8rpx;
-  height: 8rpx;
+  opacity: 0.9;
 }
 
 .chart-band-label {
@@ -1152,8 +1565,17 @@ function axisYStyle(label: { top: number }) {
   letter-spacing: 1rpx;
 }
 
-.price-label { top: 22rpx; }
-.iv-label { top: 308rpx; color: #38bdf8; }
+.price-label { top: 28rpx; }
+.iv-label { top: 58rpx; color: #38bdf8; }
+
+.chart-hint {
+  position: absolute;
+  right: 16rpx;
+  bottom: 12rpx;
+  color: #63738f;
+  font-size: 18rpx;
+  z-index: 9;
+}
 
 .chart-seg {
   position: absolute;
@@ -1182,16 +1604,51 @@ function axisYStyle(label: { top: number }) {
   z-index: 8;
 }
 
-.iv-axis-y { color: #7dd3fc; }
+.iv-axis-y {
+  right: 70rpx;
+  color: #7dd3fc;
+}
 
 .axis-x {
   position: absolute;
-  bottom: 10rpx;
+  bottom: 14rpx;
   transform: translateX(-50%);
   color: #dce5f5;
   font-size: 18rpx;
   font-weight: 700;
   z-index: 8;
+}
+
+.crosshair-line {
+  position: absolute;
+  top: 24rpx;
+  bottom: 42rpx;
+  width: 2rpx;
+  background: rgba(226, 232, 240, 0.55);
+  z-index: 10;
+}
+
+.crosshair-tip {
+  position: absolute;
+  top: 28rpx;
+  width: 246rpx;
+  padding: 10rpx 12rpx;
+  border-radius: 12rpx;
+  color: #dce7f8;
+  font-size: 20rpx;
+  line-height: 1.55;
+  background: rgba(13, 24, 42, 0.94);
+  border: 1px solid rgba(91, 132, 180, 0.58);
+  z-index: 11;
+}
+
+.crosshair-tip text {
+  display: block;
+}
+
+.crosshair-date {
+  color: #f5c518;
+  font-weight: 900;
 }
 
 .legend {
@@ -1225,7 +1682,7 @@ function axisYStyle(label: { top: number }) {
 }
 
 .empty-chart-large {
-  height: 430rpx;
+  height: 480rpx;
 }
 
 .profile-panel {
@@ -1284,8 +1741,84 @@ function axisYStyle(label: { top: number }) {
   line-height: 1.5;
 }
 
-.metrics-panel .kpi-grid {
-  margin-top: 0;
+.snapshot-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 14rpx;
+}
+
+.snapshot-card {
+  padding: 18rpx;
+  border-radius: 18rpx;
+  background:
+    radial-gradient(circle at 100% 0%, rgba(56, 189, 248, 0.08), transparent 38%),
+    rgba(15, 25, 43, 0.92);
+  border: 1px solid #213553;
+}
+
+.snapshot-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 18rpx;
+}
+
+.snapshot-label {
+  display: block;
+  color: #f0f4ff;
+  font-size: 25rpx;
+  font-weight: 900;
+}
+
+.snapshot-sub {
+  display: block;
+  margin-top: 5rpx;
+  color: #7f8fa9;
+  font-size: 20rpx;
+  line-height: 1.35;
+}
+
+.snapshot-value {
+  flex-shrink: 0;
+  color: #f0f4ff;
+  font-size: 31rpx;
+  font-weight: 950;
+}
+
+.thermo-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 16rpx;
+  color: #8ea0bb;
+  font-size: 20rpx;
+}
+
+.thermo-track {
+  position: relative;
+  height: 12rpx;
+  margin-top: 9rpx;
+  border-radius: 999rpx;
+  background: linear-gradient(90deg, #1d4ed8 0%, #22c55e 34%, #f5c518 64%, #ef4444 100%);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.12);
+}
+
+.thermo-marker {
+  position: absolute;
+  top: -8rpx;
+  width: 8rpx;
+  height: 28rpx;
+  margin-left: -4rpx;
+  border-radius: 999rpx;
+  background: #ffffff;
+  box-shadow: 0 0 0 3rpx rgba(255, 255, 255, 0.16), 0 0 14rpx rgba(245, 197, 24, 0.45);
+}
+
+.snapshot-sample {
+  display: block;
+  margin-top: 10rpx;
+  color: #657590;
+  font-size: 19rpx;
 }
 
 .coverage-grid {
