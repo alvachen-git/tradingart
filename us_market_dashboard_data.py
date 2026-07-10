@@ -540,6 +540,252 @@ UNDERLYING_PROFILE_CARDS = {
     },
 }
 
+# Map the US underlying to how A-share investors usually express its core
+# business or technology theme. Do not include customers, contract manufacturers,
+# loose theme beneficiaries, or generic adjacent value-chain companies.
+UNDERLYING_A_SHARE_BENCHMARKS: dict[str, list[dict[str, str]]] = {
+    "AAPL": [
+        {"code": "688036.SH", "name": "传音控股", "type": "stock", "relation": "核心映射", "note": "智能手机终端，对应消费电子品牌/终端主线"},
+    ],
+    "AMD": [
+        {"code": "688041.SH", "name": "海光信息", "type": "stock", "relation": "国产替代", "note": "服务器CPU，对应AMD数据中心CPU国产替代"},
+        {"code": "688795.SH", "name": "摩尔线程", "type": "stock", "relation": "国产替代", "note": "国产GPU/AI算力，对应AMD GPU与AI加速器国产替代"},
+        {"code": "688802.SH", "name": "沐曦股份-U", "type": "stock", "relation": "国产替代", "note": "国产GPU/AI加速卡，对应AMD AI算力国产替代"},
+        {"code": "688256.SH", "name": "寒武纪", "type": "stock", "relation": "国产替代", "note": "AI加速芯片，对应AMD AI加速器主线"},
+        {"code": "300474.SZ", "name": "景嘉微", "type": "stock", "relation": "国产替代", "note": "GPU芯片，对应GPU国产替代方向"},
+    ],
+    "AMZN": [
+        {"code": "688158.SH", "name": "优刻得", "type": "stock", "relation": "核心映射", "note": "公有云服务，对应AWS云计算主线"},
+    ],
+    "ARM": [
+        {"code": "688521.SH", "name": "芯原股份", "type": "stock", "relation": "核心映射", "note": "芯片IP/设计服务，对应Arm授权IP主线"},
+    ],
+    "ASML": [
+        {
+            "code": "688037.SH",
+            "name": "芯源微",
+            "type": "stock",
+            "relation": "核心映射",
+            "note": "涂胶显影/Track设备，贴近光刻工艺环节，不是光刻机整机",
+        },
+        {
+            "code": "688630.SH",
+            "name": "芯碁微装",
+            "type": "stock",
+            "relation": "核心映射",
+            "note": "直写光刻设备/泛半导体光刻，映射光刻设备国产化主线，不是EUV整机",
+        },
+    ],
+    "AVGO": [
+        {"code": "688521.SH", "name": "芯原股份", "type": "stock", "relation": "核心映射", "note": "芯片IP/定制芯片设计，对应Broadcom定制硅方向"},
+        {"code": "688702.SH", "name": "盛科通信", "type": "stock", "relation": "国产替代", "note": "以太网交换芯片，对应Broadcom网络芯片方向"},
+        {"code": "688515.SH", "name": "裕太微-U", "type": "stock", "relation": "国产替代", "note": "以太网PHY芯片，对应Broadcom有线连接芯片国产替代"},
+    ],
+    "BA": [
+        {"code": "000768.SZ", "name": "中航西飞", "type": "stock", "relation": "核心映射", "note": "大型飞机制造，对应航空制造主线"},
+        {"code": "600760.SH", "name": "中航沈飞", "type": "stock", "relation": "核心映射", "note": "航空装备制造，对应航空制造主线"},
+        {"code": "600316.SH", "name": "洪都航空", "type": "stock", "relation": "核心映射", "note": "航空装备制造，对应航空制造主线"},
+    ],
+    "BAC": [
+        {"code": "600036.SH", "name": "招商银行", "type": "stock", "relation": "核心映射", "note": "商业银行，对应美国大型银行主线"},
+        {"code": "601398.SH", "name": "工商银行", "type": "stock", "relation": "核心映射", "note": "大型商业银行，对应银行资产负债表主线"},
+    ],
+    "CRWD": [
+        {"code": "688561.SH", "name": "奇安信", "type": "stock", "relation": "国产替代", "note": "网络安全平台，对应终端/企业安全国产替代"},
+        {"code": "300454.SZ", "name": "深信服", "type": "stock", "relation": "国产替代", "note": "企业安全与云安全，对应网络安全国产替代"},
+        {"code": "688023.SH", "name": "安恒信息", "type": "stock", "relation": "国产替代", "note": "应用安全/数据安全，对应企业网络安全国产替代"},
+        {"code": "002439.SZ", "name": "启明星辰", "type": "stock", "relation": "国产替代", "note": "网络安全产品，对应企业安全国产替代"},
+    ],
+    "DELL": [
+        {"code": "000977.SZ", "name": "浪潮信息", "type": "stock", "relation": "核心映射", "note": "服务器/AI服务器，对应戴尔基础设施硬件主线"},
+        {"code": "603019.SH", "name": "中科曙光", "type": "stock", "relation": "核心映射", "note": "算力服务器，对应数据中心硬件主线"},
+    ],
+    "DIS": [
+        {"code": "300144.SZ", "name": "宋城演艺", "type": "stock", "relation": "核心映射", "note": "线下文旅演艺，对应主题娱乐/文旅主线"},
+        {"code": "300413.SZ", "name": "芒果超媒", "type": "stock", "relation": "核心映射", "note": "内容平台，对应影视流媒体内容主线"},
+        {"code": "002739.SZ", "name": "万达电影", "type": "stock", "relation": "核心映射", "note": "影视院线，对应电影娱乐主线"},
+    ],
+    "F": [
+        {"code": "002594.SZ", "name": "比亚迪", "type": "stock", "relation": "核心映射", "note": "整车制造，对应汽车整车主线"},
+        {"code": "601633.SH", "name": "长城汽车", "type": "stock", "relation": "核心映射", "note": "整车制造，对应汽车整车主线"},
+        {"code": "600104.SH", "name": "上汽集团", "type": "stock", "relation": "核心映射", "note": "整车制造，对应汽车整车主线"},
+    ],
+    "GOOGL": [
+        {"code": "002230.SZ", "name": "科大讯飞", "type": "stock", "relation": "核心映射", "note": "AI应用与大模型，对应Google AI主线"},
+        {"code": "601360.SH", "name": "三六零", "type": "stock", "relation": "核心映射", "note": "搜索/安全/AI应用，对应互联网搜索与AI应用主线"},
+    ],
+    "HOOD": [
+        {"code": "300059.SZ", "name": "东方财富", "type": "stock", "relation": "核心映射", "note": "互联网券商与财富管理，对应零售交易平台主线"},
+        {"code": "300033.SZ", "name": "同花顺", "type": "stock", "relation": "核心映射", "note": "金融信息与交易入口，对应零售交易工具主线"},
+    ],
+    "INTC": [
+        {"code": "688981.SH", "name": "中芯国际", "type": "stock", "relation": "国产替代", "note": "晶圆制造，对应Intel制造/先进制程国产替代"},
+        {"code": "688047.SH", "name": "龙芯中科", "type": "stock", "relation": "国产替代", "note": "CPU，对应处理器国产替代"},
+        {"code": "688041.SH", "name": "海光信息", "type": "stock", "relation": "国产替代", "note": "服务器CPU，对应x86服务器处理器国产替代"},
+    ],
+    "JPM": [
+        {"code": "600036.SH", "name": "招商银行", "type": "stock", "relation": "核心映射", "note": "商业银行，对应美国大型综合银行主线"},
+        {"code": "601398.SH", "name": "工商银行", "type": "stock", "relation": "核心映射", "note": "大型商业银行，对应银行资产负债表主线"},
+    ],
+    "LLY": [
+        {"code": "600276.SH", "name": "恒瑞医药", "type": "stock", "relation": "核心映射", "note": "创新药平台，对应大型创新药企主线"},
+        {"code": "000963.SZ", "name": "华东医药", "type": "stock", "relation": "核心映射", "note": "代谢疾病/GLP-1相关布局，对应减重与糖尿病药物主线"},
+        {"code": "300199.SZ", "name": "翰宇药业", "type": "stock", "relation": "核心映射", "note": "多肽药物/GLP-1相关布局，对应减重药主线"},
+        {"code": "688076.SH", "name": "诺泰生物", "type": "stock", "relation": "核心映射", "note": "多肽原料药与CDMO，对应GLP-1产业主线"},
+    ],
+    "MRVL": [
+        {
+            "code": "688702.SH",
+            "name": "盛科通信",
+            "type": "stock",
+            "relation": "国产替代",
+            "note": "以太网交换芯片，对应网络芯片国产替代方向",
+        },
+        {
+            "code": "688498.SH",
+            "name": "源杰科技",
+            "type": "stock",
+            "relation": "国产替代",
+            "note": "光通信激光器芯片，对应高速光互连芯片国产替代方向",
+        },
+        {
+            "code": "300308.SZ",
+            "name": "中际旭创",
+            "type": "stock",
+            "relation": "核心映射",
+            "note": "高速光模块/相干光通信，贴近数据中心光互连方向",
+        },
+        {
+            "code": "300502.SZ",
+            "name": "新易盛",
+            "type": "stock",
+            "relation": "核心映射",
+            "note": "高速光模块，贴近AI数据中心光互连方向",
+        },
+        {
+            "code": "300394.SZ",
+            "name": "天孚通信",
+            "type": "stock",
+            "relation": "核心映射",
+            "note": "光通信器件/高速光引擎，贴近AI光互连主线",
+        },
+    ],
+    "MSFT": [
+        {"code": "688111.SH", "name": "金山办公", "type": "stock", "relation": "国产替代", "note": "办公软件，对应Office办公套件国产替代"},
+        {"code": "600588.SH", "name": "用友网络", "type": "stock", "relation": "国产替代", "note": "企业软件/ERP，对应微软企业软件生态国产替代"},
+        {"code": "600845.SH", "name": "宝信软件", "type": "stock", "relation": "核心映射", "note": "工业软件与云服务，对应企业数字化主线"},
+    ],
+    "MU": [
+        {"code": "603986.SH", "name": "兆易创新", "type": "stock", "relation": "国产替代", "note": "存储芯片，对应存储半导体国产替代"},
+        {"code": "301308.SZ", "name": "江波龙", "type": "stock", "relation": "核心映射", "note": "存储产品，对应存储产业主线"},
+        {"code": "688525.SH", "name": "佰维存储", "type": "stock", "relation": "核心映射", "note": "存储产品，对应存储产业主线"},
+    ],
+    "NFLX": [
+        {"code": "300413.SZ", "name": "芒果超媒", "type": "stock", "relation": "核心映射", "note": "长视频内容平台，对应流媒体内容主线"},
+        {"code": "300251.SZ", "name": "光线传媒", "type": "stock", "relation": "核心映射", "note": "影视内容，对应内容制作主线"},
+    ],
+    "NVDA": [
+        {"code": "688795.SH", "name": "摩尔线程", "type": "stock", "relation": "国产替代", "note": "全功能GPU/AI算力，对应英伟达GPU国产替代主线"},
+        {"code": "688802.SH", "name": "沐曦股份-U", "type": "stock", "relation": "国产替代", "note": "国产GPU/AI加速卡，对应英伟达AI算力国产替代"},
+        {"code": "688256.SH", "name": "寒武纪", "type": "stock", "relation": "国产替代", "note": "AI芯片，对应英伟达AI加速器国产替代"},
+        {"code": "300474.SZ", "name": "景嘉微", "type": "stock", "relation": "国产替代", "note": "GPU芯片，对应GPU国产替代方向"},
+    ],
+    "ORCL": [
+        {"code": "688692.SH", "name": "达梦数据", "type": "stock", "relation": "国产替代", "note": "国产数据库，对应Oracle数据库国产替代主线"},
+        {"code": "600588.SH", "name": "用友网络", "type": "stock", "relation": "国产替代", "note": "企业软件/ERP，对应企业管理软件国产替代"},
+    ],
+    "PANW": [
+        {"code": "688561.SH", "name": "奇安信", "type": "stock", "relation": "国产替代", "note": "网络安全平台，对应企业安全国产替代"},
+        {"code": "300454.SZ", "name": "深信服", "type": "stock", "relation": "国产替代", "note": "安全网关/云安全，对应网络安全国产替代"},
+        {"code": "688023.SH", "name": "安恒信息", "type": "stock", "relation": "国产替代", "note": "应用安全/数据安全，对应企业安全国产替代"},
+        {"code": "002439.SZ", "name": "启明星辰", "type": "stock", "relation": "国产替代", "note": "网络安全产品，对应企业安全国产替代"},
+    ],
+    "PLTR": [
+        {"code": "300229.SZ", "name": "拓尔思", "type": "stock", "relation": "核心映射", "note": "数据智能/知识图谱，对应Palantir数据分析平台主线"},
+        {"code": "688327.SH", "name": "云从科技", "type": "stock", "relation": "核心映射", "note": "AI应用平台，对应AI数据应用主线"},
+    ],
+    "PYPL": [
+        {"code": "300773.SZ", "name": "拉卡拉", "type": "stock", "relation": "核心映射", "note": "第三方支付服务，对应PayPal数字支付主线"},
+    ],
+    "QCOM": [
+        {"code": "688220.SH", "name": "翱捷科技-U", "type": "stock", "relation": "国产替代", "note": "蜂窝基带/通信芯片，对应高通移动通信芯片国产替代"},
+        {"code": "300782.SZ", "name": "卓胜微", "type": "stock", "relation": "国产替代", "note": "射频前端芯片，对应手机无线芯片国产替代"},
+        {"code": "688018.SH", "name": "乐鑫科技", "type": "stock", "relation": "核心映射", "note": "无线通信芯片，对应连接芯片主线"},
+    ],
+    "RIVN": [
+        {"code": "002594.SZ", "name": "比亚迪", "type": "stock", "relation": "核心映射", "note": "新能源整车，对应电动车整车主线"},
+        {"code": "601633.SH", "name": "长城汽车", "type": "stock", "relation": "核心映射", "note": "整车制造，对应SUV/皮卡等整车主线"},
+    ],
+    "RKLB": [
+        {"code": "600118.SH", "name": "中国卫星", "type": "stock", "relation": "核心映射", "note": "航天卫星制造/应用，对应商业航天主线"},
+        {"code": "688523.SH", "name": "航天环宇", "type": "stock", "relation": "核心映射", "note": "航天产品与卫星通信配套，对应商业航天制造主线"},
+        {"code": "688066.SH", "name": "航天宏图", "type": "stock", "relation": "核心映射", "note": "卫星应用，对应商业航天数据应用主线"},
+    ],
+    "SHOP": [
+        {"code": "688365.SH", "name": "光云科技", "type": "stock", "relation": "核心映射", "note": "电商SaaS，对应Shopify商家工具主线"},
+    ],
+    "SMCI": [
+        {"code": "000977.SZ", "name": "浪潮信息", "type": "stock", "relation": "核心映射", "note": "AI服务器，对应Super Micro AI服务器主线"},
+        {"code": "603019.SH", "name": "中科曙光", "type": "stock", "relation": "核心映射", "note": "算力服务器，对应AI服务器/数据中心硬件主线"},
+    ],
+    "SPCX": [
+        {"code": "600118.SH", "name": "中国卫星", "type": "stock", "relation": "核心映射", "note": "航天卫星制造/应用，对应SpaceX商业航天与卫星主线"},
+        {"code": "688523.SH", "name": "航天环宇", "type": "stock", "relation": "核心映射", "note": "航天产品与卫星通信配套，对应商业航天制造主线"},
+        {"code": "688066.SH", "name": "航天宏图", "type": "stock", "relation": "核心映射", "note": "卫星应用，对应卫星互联网/遥感数据主线"},
+    ],
+    "TSLA": [
+        {"code": "002594.SZ", "name": "比亚迪", "type": "stock", "relation": "核心映射", "note": "新能源整车，对应特斯拉电动车整车主线"},
+        {"code": "601127.SH", "name": "赛力斯", "type": "stock", "relation": "核心映射", "note": "新能源智能车，对应智能电动车主线"},
+        {"code": "000625.SZ", "name": "长安汽车", "type": "stock", "relation": "核心映射", "note": "自主整车与智能车，对应整车智能化主线"},
+    ],
+    "TSM": [
+        {"code": "688981.SH", "name": "中芯国际", "type": "stock", "relation": "国产替代", "note": "晶圆代工，对应台积电先进制造国产替代"},
+        {"code": "688347.SH", "name": "华虹公司", "type": "stock", "relation": "国产替代", "note": "特色工艺晶圆代工，对应晶圆制造国产替代"},
+    ],
+    "WMT": [
+        {"code": "601933.SH", "name": "永辉超市", "type": "stock", "relation": "核心映射", "note": "连锁商超，对应沃尔玛零售主线"},
+        {"code": "603708.SH", "name": "家家悦", "type": "stock", "relation": "核心映射", "note": "区域连锁商超，对应线下零售主线"},
+    ],
+    "DRAM": [
+        {"code": "512760.SH", "name": "芯片ETF", "type": "etf", "relation": "ETF", "note": "A股半导体主题ETF"},
+        {"code": "159995.SZ", "name": "芯片ETF", "type": "etf", "relation": "ETF", "note": "A股半导体主题ETF"},
+    ],
+    "FXI": [
+        {"code": "510050.SH", "name": "上证50ETF", "type": "etf", "relation": "ETF", "note": "A股大盘蓝筹ETF"},
+        {"code": "000300.SH", "name": "沪深300", "type": "index", "relation": "指数", "note": "A股大盘指数"},
+    ],
+    "GLD": [
+        {"code": "518880.SH", "name": "黄金ETF", "type": "etf", "relation": "ETF", "note": "A股黄金资产ETF"},
+    ],
+    "KRE": [
+        {"code": "512800.SH", "name": "银行ETF", "type": "etf", "relation": "ETF", "note": "A股银行板块ETF"},
+    ],
+    "QQQ": [
+        {"code": "513100.SH", "name": "纳指ETF", "type": "etf", "relation": "ETF", "note": "境内上市纳斯达克100ETF"},
+        {"code": "159941.SZ", "name": "纳指ETF", "type": "etf", "relation": "ETF", "note": "境内上市纳斯达克100ETF"},
+    ],
+    "SMH": [
+        {"code": "512760.SH", "name": "芯片ETF", "type": "etf", "relation": "ETF", "note": "A股半导体主题ETF"},
+        {"code": "159995.SZ", "name": "芯片ETF", "type": "etf", "relation": "ETF", "note": "A股半导体主题ETF"},
+    ],
+    "SPY": [
+        {"code": "513500.SH", "name": "标普500ETF", "type": "etf", "relation": "ETF", "note": "境内上市标普500ETF"},
+    ],
+    "TLT": [
+        {"code": "511010.SH", "name": "国债ETF", "type": "etf", "relation": "ETF", "note": "A股利率债ETF"},
+    ],
+    "USO": [
+        {"code": "501018.SH", "name": "南方原油LOF", "type": "etf", "relation": "ETF", "note": "境内原油资产基金"},
+    ],
+    "XLE": [
+        {"code": "159930.SZ", "name": "能源ETF", "type": "etf", "relation": "ETF", "note": "A股能源板块ETF"},
+    ],
+    "XLF": [
+        {"code": "512800.SH", "name": "银行ETF", "type": "etf", "relation": "ETF", "note": "A股银行板块ETF"},
+        {"code": "512880.SH", "name": "证券ETF", "type": "etf", "relation": "ETF", "note": "A股券商板块ETF"},
+    ],
+}
+
 STOCK_DAILY_COLUMNS = ["date", "symbol", "open", "high", "low", "close", "volume", "adjClose"]
 OPTION_CHAIN_COLUMNS = [
     "trade_date",
@@ -880,6 +1126,30 @@ def get_underlying_profile(underlying: str) -> dict[str, str]:
     profile["symbol"] = code
     profile["name"] = name
     return {key: str(value or "") for key, value in profile.items()}
+
+
+def get_underlying_a_share_benchmarks(underlying: str) -> list[dict[str, str]]:
+    code = normalize_underlying(underlying)
+    asset_type = get_underlying_profile(code).get("asset_type", "stock")
+    allowed_types = {"etf", "index"} if asset_type == "etf" else {"stock"}
+    rows: list[dict[str, str]] = []
+    for raw in UNDERLYING_A_SHARE_BENCHMARKS.get(code, []):
+        item_type = str(raw.get("type") or "").strip().lower()
+        name = str(raw.get("name") or "").strip()
+        item_code = str(raw.get("code") or "").strip()
+        relation = str(raw.get("relation") or "").strip()
+        if item_type not in allowed_types or not name or not relation:
+            continue
+        rows.append(
+            {
+                "code": item_code,
+                "name": name,
+                "type": item_type,
+                "relation": relation,
+                "note": str(raw.get("note") or "").strip(),
+            }
+        )
+    return rows
 
 
 def estimate_next_earnings_window(today: dt.date | None = None) -> str:
@@ -2351,6 +2621,7 @@ def build_underlying_profile_card(
             "dynamic_as_of_date": dynamic.get("as_of_date") or "",
             "dynamic_updated_at": dynamic.get("updated_at") or "",
             "dynamic_source_refs": source_refs,
+            "a_share_benchmarks": get_underlying_a_share_benchmarks(profile.get("symbol", underlying)),
         }
     )
     return card
