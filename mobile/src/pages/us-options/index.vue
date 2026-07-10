@@ -18,6 +18,7 @@ type TabKey = 'overview' | 'surface' | 'defense' | 'anomalies'
 type ChartPointInput = {
   x: string
   y: number | null | undefined
+  xSort?: number | null | undefined
 }
 
 type ChartLineInput = {
@@ -119,6 +120,8 @@ const chartHoverIndex = ref<number | null>(null)
 
 const PRICE_IV_MIN_WINDOW = 24
 const PRICE_IV_MAX_WINDOW = 180
+const OVERVIEW_CACHE_PREFIX = 'us_options_overview_cache_v1_'
+const OVERVIEW_CACHE_TTL = 10 * 60 * 1000
 let touchStartX = 0
 let touchStartStart = 0
 let pinchStartDistance = 0
@@ -126,6 +129,11 @@ let pinchStartWindow = 0
 let longPressTimer: ReturnType<typeof setTimeout> | null = null
 let chartTouchMode: 'idle' | 'pan' | 'pinch' | 'long' = 'idle'
 let chartRect: { left: number; width: number } | null = null
+let initPromise: Promise<void> | null = null
+let overviewLoadPromise: Promise<void> | null = null
+let overviewLoadSymbol = ''
+let overviewRequestSeq = 0
+let overviewLoadedAt = 0
 
 const tabs: Array<{ key: TabKey; label: string }> = [
   { key: 'overview', label: '概览' },
@@ -148,11 +156,11 @@ onShow(() => {
     uni.reLaunch({ url: '/pages/login/index' })
     return
   }
-  if (!overview.value) init()
+  ensureInit()
 })
 
 onMounted(() => {
-  if (auth.isLoggedIn && !overview.value) init()
+  if (auth.isLoggedIn) ensureInit()
 })
 
 onPullDownRefresh(async () => {
@@ -163,9 +171,23 @@ onPullDownRefresh(async () => {
   }
 })
 
+function ensureInit() {
+  const hasFreshOverview = overview.value
+    && overview.value.symbol === selectedSymbol.value
+    && Date.now() - overviewLoadedAt < OVERVIEW_CACHE_TTL
+  if (hasFreshOverview || initPromise) return initPromise
+  initPromise = init().finally(() => {
+    initPromise = null
+  })
+  return initPromise
+}
+
 async function init() {
-  await loadProducts()
-  await loadOverview()
+  hydrateOverviewCache(selectedSymbol.value)
+  await Promise.all([
+    loadProducts(),
+    loadOverview({ silent: !!overview.value }),
+  ])
 }
 
 async function loadProducts() {
@@ -182,17 +204,62 @@ async function loadProducts() {
   }
 }
 
-async function loadOverview() {
-  if (loading.value) return
-  loading.value = true
+function overviewCacheKey(symbol: string): string {
+  return `${OVERVIEW_CACHE_PREFIX}${String(symbol || 'SPY').toUpperCase()}`
+}
+
+function hydrateOverviewCache(symbol: string): boolean {
+  if (overview.value) return true
   try {
-    overview.value = await usOptionsApi.overview(selectedSymbol.value)
+    const cached = uni.getStorageSync(overviewCacheKey(symbol)) as { ts?: number; data?: UsOptionOverviewPayload } | ''
+    if (!cached || typeof cached !== 'object') return false
+    const ts = Number(cached.ts || 0)
+    if (!cached.data || Date.now() - ts > OVERVIEW_CACHE_TTL) return false
+    overview.value = cached.data
+    overviewLoadedAt = ts
     resetPriceIvWindow()
-  } catch (e: any) {
-    uni.showToast({ title: e.message || '总览加载失败', icon: 'none' })
-  } finally {
-    loading.value = false
+    return true
+  } catch (_e) {
+    return false
   }
+}
+
+function saveOverviewCache(symbol: string, data: UsOptionOverviewPayload) {
+  try {
+    uni.setStorageSync(overviewCacheKey(symbol), { ts: Date.now(), data })
+  } catch (_e) {
+    // Storage can fail in low-space/private contexts; live data should still render.
+  }
+}
+
+async function loadOverview(options: { force?: boolean; silent?: boolean } = {}) {
+  const symbol = selectedSymbol.value
+  if (!options.force && overviewLoadPromise && overviewLoadSymbol === symbol) {
+    return overviewLoadPromise
+  }
+  if (!options.force && !overview.value) hydrateOverviewCache(symbol)
+  const requestSeq = ++overviewRequestSeq
+  loading.value = true
+  overviewLoadSymbol = symbol
+  overviewLoadPromise = (async () => {
+    try {
+      const data = await usOptionsApi.overview(symbol)
+      if (requestSeq !== overviewRequestSeq || symbol !== selectedSymbol.value) return
+      overview.value = data
+      overviewLoadedAt = Date.now()
+      saveOverviewCache(symbol, data)
+      resetPriceIvWindow()
+    } catch (e: any) {
+      if (!options.silent) uni.showToast({ title: e.message || '总览加载失败', icon: 'none' })
+    } finally {
+      if (requestSeq === overviewRequestSeq) loading.value = false
+      if (overviewLoadSymbol === symbol) {
+        overviewLoadPromise = null
+        overviewLoadSymbol = ''
+      }
+    }
+  })()
+  return overviewLoadPromise
 }
 
 async function loadSurface() {
@@ -234,7 +301,8 @@ async function loadAnomalies() {
 async function refresh() {
   if (activeTab.value === 'overview') {
     overview.value = null
-    await loadOverview()
+    overviewLoadedAt = 0
+    await loadOverview({ force: true })
   } else if (activeTab.value === 'surface') {
     surface.value = null
     await loadSurface()
@@ -269,11 +337,13 @@ async function selectSymbol(symbol: string) {
   if (!next || next === selectedSymbol.value) return
   selectedSymbol.value = next
   overview.value = null
+  overviewLoadedAt = 0
   surface.value = null
   defense.value = null
   anomalies.value = null
   chartHoverIndex.value = null
-  await loadOverview()
+  const hadCache = hydrateOverviewCache(next)
+  await loadOverview({ silent: hadCache })
   if (activeTab.value === 'surface') loadSurface()
   if (activeTab.value === 'defense') loadDefense()
   if (activeTab.value === 'anomalies') loadAnomalies()
@@ -437,8 +507,8 @@ const otmChart = computed(() => {
   const today = [...(surface.value?.today_otm_curve || [])].sort((a, b) => num0(a.moneyness_pct) - num0(b.moneyness_pct))
   const prev = [...(surface.value?.previous_otm_curve || [])].sort((a, b) => num0(a.moneyness_pct) - num0(b.moneyness_pct))
   return buildMiniChart([
-    { label: surface.value?.display_date || '最新', color: '#fb7185', points: today.map(r => ({ x: `${fmtNum(r.moneyness_pct, 0)}%`, y: asNum(r.iv_pct) })) },
-    { label: compactDate(surface.value?.previous_trade_date || '') || '前日', color: '#38bdf8', points: prev.map(r => ({ x: `${fmtNum(r.moneyness_pct, 0)}%`, y: asNum(r.iv_pct) })) },
+    { label: surface.value?.display_date || '最新', color: '#fb7185', points: today.map(r => ({ x: `${fmtNum(r.moneyness_pct, 0)}%`, xSort: asNum(r.moneyness_pct), y: asNum(r.iv_pct) })) },
+    { label: compactDate(surface.value?.previous_trade_date || '') || '前日', color: '#38bdf8', points: prev.map(r => ({ x: `${fmtNum(r.moneyness_pct, 0)}%`, xSort: asNum(r.moneyness_pct), y: asNum(r.iv_pct) })) },
   ])
 })
 
@@ -880,16 +950,22 @@ function buildMiniChart(inputLines: ChartLineInput[]): MiniChart {
     .map(line => ({
       label: line.label,
       color: line.color,
-      points: line.points.filter(p => p.x && asNum(p.y) !== null).map(p => ({ x: p.x, y: asNum(p.y) as number })),
+      points: line.points.filter(p => p.x && asNum(p.y) !== null).map(p => ({ x: p.x, xSort: asNum(p.xSort), y: asNum(p.y) as number })),
     }))
     .filter(line => line.points.length > 0)
 
-  const xValues: string[] = []
+  const xEntries: Array<{ label: string; sort: number | null; order: number }> = []
   for (const line of cleanLines) {
     for (const p of line.points) {
-      if (!xValues.includes(p.x)) xValues.push(p.x)
+      if (!xEntries.some(item => item.label === p.x)) {
+        xEntries.push({ label: p.x, sort: p.xSort, order: xEntries.length })
+      }
     }
   }
+  const canSortX = xEntries.length > 0 && xEntries.every(item => item.sort !== null)
+  const xValues = [...xEntries]
+    .sort((a, b) => canSortX ? (a.sort as number) - (b.sort as number) : a.order - b.order)
+    .map(item => item.label)
   const values = cleanLines.flatMap(line => line.points.map(p => p.y))
   if (!xValues.length || !values.length) {
     return { hasData: false, width, height, lines: [], segments: [], nodes: [], xLabels: [], yLabels: [] }
@@ -914,7 +990,9 @@ function buildMiniChart(inputLines: ChartLineInput[]): MiniChart {
 
   for (const line of cleanLines) {
     visibleLines.push({ label: line.label, color: line.color })
-    const pts = line.points.map(p => ({ x: xPos(p.x), y: yPos(p.y) }))
+    const pts = line.points
+      .map(p => ({ x: xPos(p.x), y: yPos(p.y) }))
+      .sort((a, b) => a.x - b.x)
     for (const pt of pts) nodes.push({ left: pt.x, top: pt.y, color: line.color })
     for (let i = 1; i < pts.length; i++) {
       const a = pts[i - 1]
@@ -1020,7 +1098,7 @@ function axisYStyle(label: { top: number }) {
     </view>
 
     <view v-if="activeTab === 'overview'" class="content">
-      <view v-if="loading" class="center-tip">加载美股期权总览...</view>
+      <view v-if="loading && !overview" class="center-tip">加载美股期权总览...</view>
       <view v-else>
         <view class="panel chart-panel-main">
           <view class="panel-head chart-head">
