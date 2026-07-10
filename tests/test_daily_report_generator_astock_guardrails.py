@@ -38,6 +38,13 @@ def _snapshot():
 
 
 class DailyReportAStockGuardrailTest(unittest.TestCase):
+    def test_historical_report_date_controls_header_date_and_weekday(self):
+        date_key, title_date, weekday = drg._report_date_context("20260710")
+
+        self.assertEqual(date_key, "20260710")
+        self.assertEqual(title_date, "2026年07月10日")
+        self.assertEqual(weekday, "周五")
+
     def test_rejects_published_report_direction_flow_and_iv_conflicts(self):
         html = """
         <h4>股票板块</h4>
@@ -70,6 +77,26 @@ class DailyReportAStockGuardrailTest(unittest.TestCase):
           科创50 78.9% 偏高；上证50 61.7% 偏高。
         </div>
         <p>创业板ETF当日下跌4.41%，收出大阴线。</p>
+        <h2>每日牛股</h2>
+        """
+
+        violations = drg.validate_a_share_report_facts(html, _snapshot())
+
+        self.assertEqual(violations, [])
+
+    def test_accepts_common_etf_and_sector_name_suffixes(self):
+        html = """
+        <h4>股票板块</h4>
+        <p>
+          主力净流入：国防军工板块(+77.5亿)、医药生物行业(+40.8亿)、汽车板块(+30.4亿)；
+          主力净流出：电子行业(-435.1亿)、半导体板块(-248.8亿)、数字芯片设计行业(-155.9亿)。
+        </p>
+        <h4>期货商持仓</h4>
+        <h2>期权波动率</h2>
+        <div>
+          沪深300ETF 71.7%（偏高）；中证500ETF 61.0%（偏高）；
+          创业板ETF 82.9%（高）；科创50ETF 78.9%（偏高）；上证50ETF 61.7%（偏高）。
+        </div>
         <h2>每日牛股</h2>
         """
 

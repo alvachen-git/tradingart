@@ -130,6 +130,16 @@ def _normalize_report_trade_date(value) -> str:
     return cleaned if len(cleaned) == 8 else ""
 
 
+def _report_date_context(report_trade_date: str = None):
+    """Return normalized date key, localized title date and weekday for a report."""
+    date_key = _normalize_report_trade_date(report_trade_date or _current_trade_date_key())
+    if not date_key:
+        raise ValueError(f"无效报告交易日: {report_trade_date}")
+    report_dt = datetime.strptime(date_key, "%Y%m%d")
+    weekday = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"][report_dt.weekday()]
+    return date_key, report_dt.strftime("%Y年%m月%d日"), weekday
+
+
 def _require_report_date(dataset_name: str, actual_date, expected_date: str) -> str:
     """Fail closed when a required dataset has not reached the report date."""
     actual = _normalize_report_trade_date(actual_date)
@@ -359,7 +369,7 @@ def _fetch_programmatic_a_share_snapshot(report_trade_date: str = None):
     return snapshot, "\n".join(lines)
 
 
-def _fetch_programmatic_commodity_iv_snapshot():
+def _fetch_programmatic_commodity_iv_snapshot(report_trade_date: str = None):
     """
     程序端确定性抓取 10 个商品当前 IV 与等级，作为晚报卡片真值。
     返回:
@@ -368,6 +378,11 @@ def _fetch_programmatic_commodity_iv_snapshot():
     """
     snapshot_map = {}
     lines = []
+    report_date = _normalize_report_trade_date(report_trade_date)
+    date_filter = (
+        f"AND REPLACE(trade_date, '-', '') <= '{report_date}'"
+        if report_date else ""
+    )
 
     for commodity in COMMODITY_CARD_LIST:
         prefixes = COMMODITY_IV_PREFIX_MAP.get(commodity, [])
@@ -380,6 +395,7 @@ def _fetch_programmatic_commodity_iv_snapshot():
                     FROM futures_price
                     WHERE {sql_prefix_condition(prefix)}
                       AND ts_code NOT LIKE '%%TAS%%'
+                      {date_filter}
                     ORDER BY trade_date DESC, oi DESC
                     LIMIT 1
                 """
@@ -392,6 +408,7 @@ def _fetch_programmatic_commodity_iv_snapshot():
                     SELECT REPLACE(trade_date, '-', '') AS trade_date, iv
                     FROM commodity_iv_history
                     WHERE ts_code = '{ts_code}'
+                      {date_filter}
                     ORDER BY trade_date DESC
                     LIMIT 1
                 """
@@ -402,6 +419,7 @@ def _fetch_programmatic_commodity_iv_snapshot():
                         SELECT ts_code, REPLACE(trade_date, '-', '') AS trade_date, iv
                         FROM commodity_iv_history
                         WHERE {sql_prefix_condition(prefix)}
+                          {date_filter}
                         ORDER BY trade_date DESC
                         LIMIT 1
                     """
@@ -415,10 +433,13 @@ def _fetch_programmatic_commodity_iv_snapshot():
                     latest_trade_date = str(df_latest.iloc[0]["trade_date"])
                     curr_iv = float(df_latest.iloc[0]["iv"])
 
+                latest_trade_date = _normalize_report_trade_date(latest_trade_date)
+
                 sql_hist = f"""
                     SELECT iv
                     FROM commodity_iv_history
                     WHERE ts_code = '{ts_code}'
+                      AND REPLACE(trade_date, '-', '') <= '{latest_trade_date}'
                     ORDER BY trade_date DESC
                     LIMIT 252
                 """
@@ -753,6 +774,16 @@ def _entity_pattern(entity: str) -> str:
     return rf"{re.escape(entity)}(?![\u4e00-\u9fffA-Za-z0-9])"
 
 
+def _sector_entity_pattern(entity: str) -> str:
+    """Match a sector name with the common optional 行业/板块 suffix."""
+    return rf"{re.escape(entity)}(?:行业|板块)?(?![\u4e00-\u9fffA-Za-z0-9])"
+
+
+def _etf_entity_pattern(entity: str) -> str:
+    """Match both 沪深300 and 沪深300ETF before applying the boundary."""
+    return rf"{re.escape(entity)}(?:ETF)?(?![\u4e00-\u9fffA-Za-z0-9])"
+
+
 def _is_conditional_context(context: str) -> bool:
     return any(token in context for token in ["若", "如果", "一旦", "可能", "预期", "关注", "假设"])
 
@@ -787,7 +818,7 @@ def validate_a_share_report_facts(html_content: str, snapshot: dict) -> list[str
         required_sector_rows = list(snapshot.get("sector_top_in") or []) + list(snapshot.get("sector_top_out") or [])
         for row in required_sector_rows:
             name = str(row.get("display_name") or "").strip()
-            if name and not re.search(_entity_pattern(name), stock_section):
+            if name and not re.search(_sector_entity_pattern(name), stock_section):
                 violations.append(f"股票板块未列出主力资金Top3必选行业：{name}")
 
         # Any explicit "行业(±X亿)" in the stock section must match DB main_net_inflow.
@@ -797,7 +828,7 @@ def validate_a_share_report_facts(html_content: str, snapshot: dict) -> list[str
             reverse=True,
         ):
             amount_pattern = re.compile(
-                rf"{_entity_pattern(name)}\s*(?:板块)?\s*[（(]?\s*"
+                rf"{_sector_entity_pattern(name)}\s*[（(]?\s*"
                 rf"(?P<amount>[+\-]?\d+(?:\.\d+)?)\s*亿",
                 re.I,
             )
@@ -820,7 +851,7 @@ def validate_a_share_report_facts(html_content: str, snapshot: dict) -> list[str
             expected_amount = float(row.get("main_flow_yi") or 0.0)
             if abs(expected_amount) < 0.5:
                 continue
-            name_pat = _entity_pattern(name)
+            name_pat = _sector_entity_pattern(name)
             positive_claim = re.search(
                 rf"(?:{name_pat}.{{0,16}}(?:{positive_flow_tokens})|"
                 rf"(?:{positive_flow_tokens}).{{0,16}}{name_pat})",
@@ -875,7 +906,7 @@ def validate_a_share_report_facts(html_content: str, snapshot: dict) -> list[str
     else:
         for name, iv_info in (snapshot.get("etf_iv") or {}).items():
             iv_pattern = re.compile(
-                rf"{_entity_pattern(name)}(?:ETF)?(?P<body>.{{0,120}}?)"
+                rf"{_etf_entity_pattern(name)}(?P<body>.{{0,120}}?)"
                 rf"(?P<rank>\d+(?:\.\d+)?)\s*%\s*[（(]?\s*"
                 rf"(?P<level>极低|偏低|低|中等|中|偏高|高|极高)",
                 re.S,
@@ -1007,7 +1038,7 @@ def _get_recent_holding_dates():
     fallback = datetime.now().strftime("%Y%m%d")
     return fallback, fallback
 
-def collect_data_via_agent():
+def collect_data_via_agent(report_trade_date: str = None):
     """
     🔥 派出 AI 记者去采集素材
     """
@@ -1037,8 +1068,7 @@ def collect_data_via_agent():
         search_top_stocks
     ]
 
-    today_str = datetime.now().strftime("%Y年%m月%d日")
-    trade_date_key = _current_trade_date_key()
+    trade_date_key, today_str, _ = _report_date_context(report_trade_date)
     holdings_start_date, holdings_end_date = _get_recent_holding_dates()
     system_prompt = f"""
     你是一位**顶级财经记者**，正在为今天的《晚间深度复盘日报》采集素材。
@@ -1095,13 +1125,14 @@ def collect_data_via_agent():
     - 你的短期判断
 
     ## 第六步：ETF期权分析 (Options)
-    记录以下 ETF 的期权IV等级和K线分析：
-    - 510300
-    - 510500
-    - 159915
-    - 588000
-    - 510050
-    调用get_commodity_iv_info计算IV等级，不是单纯IV
+    记录以下 ETF 的期权IV等级和K线分析。调用 `get_commodity_iv_info` 时，
+    query 必须逐字使用下列字符串，确保工具进入252日 Rank 分支，而不是只查5日IV：
+    - `510300 IV等级`
+    - `510500 IV等级`
+    - `159915 IV等级`
+    - `588000 IV等级`
+    - `510050 IV等级`
+    必须记录当前IV、252日IV Rank和等级，不是只记录当前IV。
     调用analyze_kline_pattern做最近几天技术面分析
 
     ## 第七步：选股与技术 (Picks)
@@ -1156,23 +1187,22 @@ def collect_data_via_agent():
         return "AI 采集失败，请检查日志。"
 
 
-def draft_report(raw_material, a_share_snapshot: dict = None, a_share_snapshot_text: str = None):
+def draft_report(raw_material, a_share_snapshot: dict = None, a_share_snapshot_text: str = None,
+                 report_trade_date: str = None):
     """
     让 AI 主编基于记者提供的素材写稿
     🔥 v2.0 升级版：玻璃拟态 + 响应式 + 商品图标 + IV进度条
     """
     print("✏️ [AI主编] 正在撰写晚报...")
 
-    today = datetime.now().strftime("%Y年%m月%d日")
-    weekday = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"][datetime.now().weekday()]
-    trade_date_key = _current_trade_date_key()
+    trade_date_key, today, weekday = _report_date_context(report_trade_date)
     if a_share_snapshot is None or a_share_snapshot_text is None:
         a_share_snapshot, a_share_snapshot_text = _fetch_programmatic_a_share_snapshot(trade_date_key)
     print(
         f"🏦 [程序注入] A股/ETF/板块资金真值已生成: "
         f"交易日 {a_share_snapshot.get('report_date', '-')}"
     )
-    iv_snapshot_map, iv_snapshot_text = _fetch_programmatic_commodity_iv_snapshot()
+    iv_snapshot_map, iv_snapshot_text = _fetch_programmatic_commodity_iv_snapshot(trade_date_key)
     print(f"🧮 [程序注入] 商品IV真值已生成: {len(iv_snapshot_map)}/{len(COMMODITY_CARD_LIST)}")
     kline_snapshot_map, kline_snapshot_text = _fetch_programmatic_commodity_kline_snapshot(trade_date_key)
     print(f"📈 [程序注入] 商品K线形态真值已生成: {len(kline_snapshot_map)}/{len(COMMODITY_CARD_LIST)}")
