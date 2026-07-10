@@ -1,5 +1,6 @@
 import pandas as pd
 import os
+import re
 from sqlalchemy import create_engine, text
 from dotenv import load_dotenv
 from langchain_core.tools import tool
@@ -141,39 +142,67 @@ def get_all_sectors(sector_type='行业'):
 # ==========================================
 #  🔥 AI 专用工具: 量化/机构合力资金分析 (加上了 @tool)
 # ==========================================
+def _normalize_trade_date(value):
+    """Normalize a date-like value to YYYYMMDD for report freshness checks."""
+    cleaned = re.sub(r"\D", "", str(value or ""))[:8]
+    return cleaned if len(cleaned) == 8 else ""
+
+
 @tool
-def tool_get_retail_money_flow(days: int = 1):
+def tool_get_retail_money_flow(days: int = 1, as_of_date: str = None):
     """
     查询股票的机构资金流向。
     用于回答“股票资金最近在哪些行业流动”、“量化资金去哪了”、“机构在买什么”等问题。
 
     Args:
         days (int): 统计天数。1代表当日，3代表最近3天，5代表最近5天。
+        as_of_date (str): 可选，报告对应交易日（YYYYMMDD）。传入后若该日
+            数据尚未入库，会明确返回“数据未就绪”，禁止用上一交易日冒充当日。
     """
     if engine is None: return "数据库连接失败"
 
     try:
-        # 1. 确定日期范围
-        dates_df = pd.read_sql(
-            f"SELECT DISTINCT trade_date FROM sector_moneyflow ORDER BY trade_date DESC LIMIT {days + 5}", engine)
+        # 1. 确定日期范围；报告生成链路必须把 as_of_date 传进来，避免静默取到昨日数据。
+        safe_days = max(1, min(int(days or 1), 60))
+        normalized_as_of = _normalize_trade_date(as_of_date)
+        date_where = ""
+        date_params = {}
+        if normalized_as_of:
+            date_where = "WHERE REPLACE(trade_date, '-', '') <= :as_of_date"
+            date_params["as_of_date"] = normalized_as_of
+
+        dates_sql = text(f"""
+            SELECT DISTINCT REPLACE(trade_date, '-', '') AS trade_date
+            FROM sector_moneyflow
+            {date_where}
+            ORDER BY trade_date DESC
+            LIMIT {safe_days + 5}
+        """)
+        dates_df = pd.read_sql(dates_sql, engine, params=date_params)
         if dates_df.empty: return "暂无资金数据，请先运行数据更新脚本。"
 
         # 截取最近 days 天的日期
-        target_dates = dates_df.head(days)['trade_date'].tolist()
+        target_dates = [str(x) for x in dates_df.head(safe_days)['trade_date'].tolist()]
+        if normalized_as_of and target_dates[0] != normalized_as_of:
+            return (
+                f"⚠️ 板块资金数据未就绪：报告日 {normalized_as_of}，"
+                f"数据库最新仅到 {target_dates[0]}。禁止将旧数据写成当日资金流。"
+            )
         date_str = "'" + "','".join(target_dates) + "'"
         date_range_info = f"{target_dates[-1]} ~ {target_dates[0]}"
 
-        # 2. 核心查询：只算 Medium + Small
+        # 2. 统一使用数据源标准口径“主力净额”。
+        # sector_moneyflow.main_net_inflow 对应 Tushare/DC 的 net_amount，
+        # 不再把不同单量层级相加后仍称作“净流入”，避免口径含混。
         sql = f"""
             SELECT 
                 industry,
-                SUM(medium_net_inflow + main_net_inflow) as hidden_flow,
-                SUM(main_net_inflow) as main_flow,  -- 查出来仅作对比参考
+                SUM(main_net_inflow) as main_flow,
                 AVG(pct_change) as avg_pct
             FROM sector_moneyflow 
             WHERE trade_date IN ({date_str}) AND sector_type='行业' -- 默认只看行业
             GROUP BY industry
-            ORDER BY hidden_flow DESC
+            ORDER BY main_flow DESC
         """
 
         df = pd.read_sql(sql, engine)
@@ -181,22 +210,28 @@ def tool_get_retail_money_flow(days: int = 1):
         if df.empty: return "该时间段内无数据。"
 
         # 3. 生成 AI 可读的分析报告
-        report = f"📊 **【资金流向分析】**\n"
+        report = f"📊 **【主力资金流向分析】**\n"
         report += f"📅 统计区间：{date_range_info} (近{days}个交易日)\n"
 
-        # 取前 10 名 (流入)
+        # 取前 3 名（流入）
         top_10 = df.head(3)
-        report += "🚀 **净流入 Top 3 :**\n"
+        report += "🚀 **主力净流入 Top 3：**\n"
         for _, row in top_10.iterrows():
-            report += f"- **{row['industry']}**: +{row['hidden_flow']:.0f}万 (均涨: {row['avg_pct']:.2f}%)"
-
-        report += "\n"
+            amount_yi = float(row['main_flow']) / 10000.0
+            report += (
+                f"- **{row['industry']}**: {amount_yi:+.1f}亿 "
+                f"(板块涨跌: {row['avg_pct']:+.2f}%)\n"
+            )
 
         # 取后 3 名 (流出)
-        bottom_5 = df.tail(3).sort_values('hidden_flow', ascending=True)
-        report += "🧊 **净流出 Top 3 :**\n"
+        bottom_5 = df.tail(3).sort_values('main_flow', ascending=True)
+        report += "🧊 **主力净流出 Top 3：**\n"
         for _, row in bottom_5.iterrows():
-            report += f"- **{row['industry']}**: {row['hidden_flow']:.0f}万\n"
+            amount_yi = float(row['main_flow']) / 10000.0
+            report += (
+                f"- **{row['industry']}**: {amount_yi:+.1f}亿 "
+                f"(板块涨跌: {row['avg_pct']:+.2f}%)\n"
+            )
 
         return report
 

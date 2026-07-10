@@ -10,6 +10,8 @@ import pandas as pd
 import os
 import time
 import re
+import json
+from html import unescape
 from datetime import datetime
 from sqlalchemy import create_engine, text
 from dotenv import load_dotenv
@@ -69,6 +71,27 @@ COMMODITY_IV_LEVEL_TOKENS = ["极低", "低", "偏低", "中", "中等", "偏高
 COMMODITY_IV_INVALID_TOKENS = ["无数据", "N/A", "未知", "None", "--"]
 MAX_REWRITE_ROUNDS = 2
 
+# A股晚报硬事实配置。股票/指数方向、板块资金与ETF IV都必须先通过程序查库，
+# AI只能解释这些事实，不能自行补数或沿用上一交易日素材。
+A_SHARE_INDEX_MAP = {
+    "上证指数": "000001.SH",
+    "深证成指": "399001.SZ",
+    "创业板指": "399006.SZ",
+}
+ETF_OPTION_SNAPSHOT_MAP = {
+    "沪深300": "510300.SH",
+    "中证500": "510500.SH",
+    "创业板": "159915.SZ",
+    "科创50": "588000.SH",
+    "上证50": "510050.SH",
+}
+SECTOR_FLOW_AMOUNT_TOLERANCE_YI = 0.25
+ETF_IV_RANK_TOLERANCE = 0.75
+
+
+class ReportDataNotReadyError(RuntimeError):
+    """Essential report data has not reached the requested trading date."""
+
 
 def _current_trade_date_key() -> str:
     """报告运行日对应的 YYYYMMDD，传给K线工具避免重跑历史日报时漂移到最新K线。"""
@@ -99,6 +122,241 @@ def _calc_iv_level(iv_rank: float) -> str:
     if iv_rank < 80:
         return "偏高"
     return "高"
+
+
+def _normalize_report_trade_date(value) -> str:
+    """Normalize DB/tool dates to YYYYMMDD."""
+    cleaned = re.sub(r"\D", "", str(value or ""))[:8]
+    return cleaned if len(cleaned) == 8 else ""
+
+
+def _require_report_date(dataset_name: str, actual_date, expected_date: str) -> str:
+    """Fail closed when a required dataset has not reached the report date."""
+    actual = _normalize_report_trade_date(actual_date)
+    expected = _normalize_report_trade_date(expected_date)
+    if not actual:
+        raise ReportDataNotReadyError(f"{dataset_name} 无可用交易日，报告已阻断")
+    if actual != expected:
+        raise ReportDataNotReadyError(
+            f"{dataset_name} 数据未就绪：报告日 {expected}，数据库最新仅到 {actual}；"
+            "禁止用旧交易日数据生成当日晚报"
+        )
+    return actual
+
+
+def _fetch_price_move(table_name: str, ts_code: str, report_trade_date: str) -> dict:
+    """Fetch two closes and derive a deterministic daily/candlestick direction."""
+    if table_name not in {"index_price", "stock_price"}:
+        raise ValueError(f"不允许的行情表: {table_name}")
+
+    sql = text(f"""
+        SELECT REPLACE(trade_date, '-', '') AS trade_date,
+               open_price, high_price, low_price, close_price
+        FROM {table_name}
+        WHERE ts_code = :ts_code
+          AND REPLACE(trade_date, '-', '') <= :report_trade_date
+        ORDER BY trade_date DESC
+        LIMIT 2
+    """)
+    df = pd.read_sql(
+        sql,
+        engine,
+        params={"ts_code": ts_code, "report_trade_date": report_trade_date},
+    )
+    if len(df) < 2:
+        raise ReportDataNotReadyError(f"{table_name} 缺少 {ts_code} 最近两个交易日行情")
+
+    latest = df.iloc[0]
+    previous = df.iloc[1]
+    latest_date = _require_report_date(f"{table_name}:{ts_code}", latest["trade_date"], report_trade_date)
+    close_price = float(latest["close_price"])
+    previous_close = float(previous["close_price"])
+    open_price = float(latest["open_price"])
+    pct_change = ((close_price / previous_close) - 1.0) * 100.0 if previous_close else 0.0
+    candle_change = ((close_price / open_price) - 1.0) * 100.0 if open_price else 0.0
+
+    if candle_change >= 1.0:
+        candle = "大阳线"
+    elif candle_change > 0.05:
+        candle = "阳线"
+    elif candle_change <= -1.0:
+        candle = "大阴线"
+    elif candle_change < -0.05:
+        candle = "阴线"
+    else:
+        candle = "十字/平盘K线"
+
+    return {
+        "trade_date": latest_date,
+        "previous_trade_date": _normalize_report_trade_date(previous["trade_date"]),
+        "open": open_price,
+        "high": float(latest["high_price"]),
+        "low": float(latest["low_price"]),
+        "close": close_price,
+        "previous_close": previous_close,
+        "pct_change": round(pct_change, 4),
+        "candle_change_pct": round(candle_change, 4),
+        "direction": "上涨" if pct_change > 0 else "下跌" if pct_change < 0 else "平盘",
+        "candle": candle,
+        "ts_code": ts_code,
+    }
+
+
+def _canonical_sector_name(value: str) -> str:
+    """Collapse duplicate DC hierarchy suffixes such as 航天装备Ⅱ/Ⅲ."""
+    name = str(value or "").strip()
+    name = re.sub(r"[ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩ]+$", "", name).strip()
+    return name
+
+
+def _fetch_etf_iv_snapshot(etf_code: str, report_trade_date: str) -> dict:
+    sql = text("""
+        SELECT REPLACE(trade_date, '-', '') AS trade_date, iv
+        FROM etf_iv_history
+        WHERE etf_code = :etf_code
+          AND REPLACE(trade_date, '-', '') <= :report_trade_date
+        ORDER BY trade_date DESC
+        LIMIT 252
+    """)
+    df = pd.read_sql(
+        sql,
+        engine,
+        params={"etf_code": etf_code, "report_trade_date": report_trade_date},
+    )
+    if df.empty:
+        raise ReportDataNotReadyError(f"etf_iv_history 缺少 {etf_code} IV数据")
+
+    latest_date = _require_report_date(
+        f"etf_iv_history:{etf_code}",
+        df.iloc[0]["trade_date"],
+        report_trade_date,
+    )
+    iv_values = pd.to_numeric(df["iv"], errors="coerce").dropna()
+    if iv_values.empty:
+        raise ReportDataNotReadyError(f"etf_iv_history:{etf_code} IV均为无效值")
+
+    current_iv = float(iv_values.iloc[0])
+    min_iv = float(iv_values.min())
+    max_iv = float(iv_values.max())
+    iv_rank = ((current_iv - min_iv) / (max_iv - min_iv) * 100.0) if max_iv != min_iv else 50.0
+    return {
+        "trade_date": latest_date,
+        "iv": round(current_iv, 2),
+        "iv_rank": round(iv_rank, 1),
+        "level": _calc_iv_level(iv_rank),
+        "sample_days": int(len(iv_values)),
+        "etf_code": etf_code,
+    }
+
+
+def _fetch_programmatic_a_share_snapshot(report_trade_date: str = None):
+    """
+    Build the publication truth set for A-share direction, sector flow and ETF IV.
+
+    Every required dataset must be fresh for report_trade_date. A stale/missing table
+    raises ReportDataNotReadyError so the report is not generated or published.
+    """
+    report_date = _normalize_report_trade_date(report_trade_date or _current_trade_date_key())
+    snapshot = {
+        "report_date": report_date,
+        "indices": {},
+        "etfs": {},
+        "etf_iv": {},
+        "sectors": {},
+        "sector_top_in": [],
+        "sector_top_out": [],
+    }
+
+    lines = [f"【A股发布真值｜交易日 {report_date}】"]
+    lines.append("指数/ETF当日方向（收盘对前收盘）：")
+
+    for display_name, ts_code in A_SHARE_INDEX_MAP.items():
+        move = _fetch_price_move("index_price", ts_code, report_date)
+        move["display_name"] = display_name
+        snapshot["indices"][display_name] = move
+        lines.append(
+            f"- {display_name}({ts_code}): {move['pct_change']:+.2f}%，"
+            f"收盘 {move['close']:.2f}，{move['candle']}，当日{move['direction']}"
+        )
+
+    for display_name, ts_code in ETF_OPTION_SNAPSHOT_MAP.items():
+        move = _fetch_price_move("stock_price", ts_code, report_date)
+        move["display_name"] = display_name
+        snapshot["etfs"][display_name] = move
+        iv_info = _fetch_etf_iv_snapshot(ts_code, report_date)
+        iv_info["display_name"] = display_name
+        snapshot["etf_iv"][display_name] = iv_info
+        lines.append(
+            f"- {display_name}ETF({ts_code}): {move['pct_change']:+.2f}%，"
+            f"{move['candle']}；IV {iv_info['iv']:.2f}%，"
+            f"252日Rank {iv_info['iv_rank']:.1f}%（{iv_info['level']}）"
+        )
+
+    sector_date_sql = text("""
+        SELECT MAX(REPLACE(trade_date, '-', '')) AS trade_date
+        FROM sector_moneyflow
+        WHERE sector_type = '行业'
+          AND REPLACE(trade_date, '-', '') <= :report_trade_date
+    """)
+    with engine.connect() as conn:
+        sector_date = conn.execute(
+            sector_date_sql,
+            {"report_trade_date": report_date},
+        ).scalar()
+    sector_date = _require_report_date("sector_moneyflow", sector_date, report_date)
+
+    sector_sql = text("""
+        SELECT industry, main_net_inflow, pct_change, net_rate
+        FROM sector_moneyflow
+        WHERE sector_type = '行业'
+          AND REPLACE(trade_date, '-', '') = :trade_date
+    """)
+    sector_df = pd.read_sql(sector_sql, engine, params={"trade_date": sector_date})
+    if sector_df.empty:
+        raise ReportDataNotReadyError(f"sector_moneyflow:{sector_date} 无行业资金记录")
+
+    # DC数据可能同时包含Ⅱ/Ⅲ层级的同名重复行业；按规范名保留绝对主力净额更大的记录。
+    sector_records = {}
+    for _, row in sector_df.iterrows():
+        display_name = _canonical_sector_name(row.get("industry"))
+        if not display_name:
+            continue
+        main_flow_yi = float(pd.to_numeric(row.get("main_net_inflow"), errors="coerce") or 0.0) / 10000.0
+        record = {
+            "display_name": display_name,
+            "raw_name": str(row.get("industry") or "").strip(),
+            "trade_date": sector_date,
+            "main_flow_yi": round(main_flow_yi, 4),
+            "pct_change": round(float(pd.to_numeric(row.get("pct_change"), errors="coerce") or 0.0), 4),
+            "net_rate": round(float(pd.to_numeric(row.get("net_rate"), errors="coerce") or 0.0), 4),
+        }
+        current = sector_records.get(display_name)
+        if current is None or abs(record["main_flow_yi"]) > abs(current["main_flow_yi"]):
+            sector_records[display_name] = record
+
+    snapshot["sectors"] = sector_records
+    ranked = list(sector_records.values())
+    snapshot["sector_top_in"] = sorted(
+        (x for x in ranked if x["main_flow_yi"] > 0),
+        key=lambda x: x["main_flow_yi"],
+        reverse=True,
+    )[:3]
+    snapshot["sector_top_out"] = sorted(
+        (x for x in ranked if x["main_flow_yi"] < 0),
+        key=lambda x: x["main_flow_yi"],
+    )[:3]
+
+    lines.append("板块主力净额（main_net_inflow，单位亿元；必须按正负号写流入/流出）：")
+    lines.append("- 主力净流入Top3：" + "；".join(
+        f"{x['display_name']} {x['main_flow_yi']:+.1f}亿（板块{x['pct_change']:+.2f}%）"
+        for x in snapshot["sector_top_in"]
+    ))
+    lines.append("- 主力净流出Top3：" + "；".join(
+        f"{x['display_name']} {x['main_flow_yi']:+.1f}亿（板块{x['pct_change']:+.2f}%）"
+        for x in snapshot["sector_top_out"]
+    ))
+    lines.append("硬规则：记者素材与本真值冲突时，以本真值为准；不得把下跌写成上涨、流出写成流入。")
+    return snapshot, "\n".join(lines)
 
 
 def _fetch_programmatic_commodity_iv_snapshot():
@@ -469,12 +727,218 @@ def validate_commodity_cards(html: str, expected_iv_map: dict = None, expected_k
     return len(anomalies) == 0, anomalies
 
 
+def _report_html_to_plain_text(html_content: str) -> str:
+    text_value = re.sub(r"<style[\s\S]*?</style>", " ", str(html_content or ""), flags=re.I)
+    text_value = re.sub(r"<script[\s\S]*?</script>", " ", text_value, flags=re.I)
+    text_value = re.sub(r"<!--[\s\S]*?-->", " ", text_value)
+    text_value = re.sub(r"<(?:br|/p|/div|/td|/tr|/h[1-6])\b[^>]*>", "\n", text_value, flags=re.I)
+    text_value = re.sub(r"<[^>]+>", " ", text_value)
+    text_value = unescape(text_value).replace("−", "-").replace("＋", "+")
+    text_value = re.sub(r"[ \t\r\f\v]+", " ", text_value)
+    text_value = re.sub(r"\n\s*\n+", "\n", text_value)
+    return text_value.strip()
+
+
+def _extract_plain_section(plain_text: str, start_token: str, end_tokens) -> str:
+    start = plain_text.find(start_token)
+    if start < 0:
+        return ""
+    end_positions = [plain_text.find(token, start + len(start_token)) for token in end_tokens]
+    end_positions = [pos for pos in end_positions if pos >= 0]
+    end = min(end_positions) if end_positions else len(plain_text)
+    return plain_text[start:end].strip()
+
+
+def _entity_pattern(entity: str) -> str:
+    return rf"{re.escape(entity)}(?![\u4e00-\u9fffA-Za-z0-9])"
+
+
+def _is_conditional_context(context: str) -> bool:
+    return any(token in context for token in ["若", "如果", "一旦", "可能", "预期", "关注", "假设"])
+
+
+def _bounded_entity_context(text_value: str, start: int, end: int, padding: int = 40) -> str:
+    """Keep direction checks inside the entity's sentence/line to avoid cross-card bleed."""
+    left = max(0, start - padding)
+    right = min(len(text_value), end + padding)
+    for delimiter in ["\n", "。", "；"]:
+        prev_pos = text_value.rfind(delimiter, left, start)
+        if prev_pos >= 0:
+            left = max(left, prev_pos + 1)
+        next_pos = text_value.find(delimiter, end, right)
+        if next_pos >= 0:
+            right = min(right, next_pos)
+    return text_value[left:right]
+
+
+def validate_a_share_report_facts(html_content: str, snapshot: dict) -> list[str]:
+    """Reject stale/invented A-share directions, sector amounts and ETF IV ranks."""
+    violations = []
+    if not html_content:
+        return ["HTML为空，无法校验A股事实"]
+    if not snapshot:
+        return ["缺少A股程序真值，禁止发布"]
+
+    plain = _report_html_to_plain_text(html_content)
+    stock_section = _extract_plain_section(plain, "股票板块", ["期货商持仓", "商品期货全景"])
+    if not stock_section:
+        violations.append("缺少“股票板块”区块，无法核验板块资金")
+    else:
+        required_sector_rows = list(snapshot.get("sector_top_in") or []) + list(snapshot.get("sector_top_out") or [])
+        for row in required_sector_rows:
+            name = str(row.get("display_name") or "").strip()
+            if name and not re.search(_entity_pattern(name), stock_section):
+                violations.append(f"股票板块未列出主力资金Top3必选行业：{name}")
+
+        # Any explicit "行业(±X亿)" in the stock section must match DB main_net_inflow.
+        for name, row in sorted(
+            (snapshot.get("sectors") or {}).items(),
+            key=lambda item: len(item[0]),
+            reverse=True,
+        ):
+            amount_pattern = re.compile(
+                rf"{_entity_pattern(name)}\s*(?:板块)?\s*[（(]?\s*"
+                rf"(?P<amount>[+\-]?\d+(?:\.\d+)?)\s*亿",
+                re.I,
+            )
+            for match in amount_pattern.finditer(stock_section):
+                actual_amount = float(match.group("amount"))
+                expected_amount = float(row.get("main_flow_yi") or 0.0)
+                tolerance = max(
+                    SECTOR_FLOW_AMOUNT_TOLERANCE_YI,
+                    abs(expected_amount) * 0.015,
+                )
+                if abs(actual_amount - expected_amount) > tolerance:
+                    violations.append(
+                        f"{name}主力净额与真值不一致：页面={actual_amount:+.1f}亿，"
+                        f"真值={expected_amount:+.1f}亿"
+                    )
+
+        positive_flow_tokens = "净流入|资金流入|资金涌入|主力流入|抢筹|吸金"
+        negative_flow_tokens = "净流出|资金流出|资金撤离|主力流出|抛售|出逃"
+        for name, row in (snapshot.get("sectors") or {}).items():
+            expected_amount = float(row.get("main_flow_yi") or 0.0)
+            if abs(expected_amount) < 0.5:
+                continue
+            name_pat = _entity_pattern(name)
+            positive_claim = re.search(
+                rf"(?:{name_pat}.{{0,16}}(?:{positive_flow_tokens})|"
+                rf"(?:{positive_flow_tokens}).{{0,16}}{name_pat})",
+                stock_section,
+            )
+            negative_claim = re.search(
+                rf"(?:{name_pat}.{{0,16}}(?:{negative_flow_tokens})|"
+                rf"(?:{negative_flow_tokens}).{{0,16}}{name_pat})",
+                stock_section,
+            )
+            if expected_amount < 0 and positive_claim:
+                violations.append(f"{name}真实主力净流出 {expected_amount:+.1f}亿，但页面写成资金流入")
+            if expected_amount > 0 and negative_claim:
+                violations.append(f"{name}真实主力净流入 {expected_amount:+.1f}亿，但页面写成资金流出")
+
+    # Direct daily direction wording must agree with deterministic price moves.
+    bullish_tokens = ["大涨", "收涨", "上涨", "大阳线", "阳线突破", "强势突破", "放量突破", "涨停"]
+    bearish_tokens = ["大跌", "收跌", "下跌", "大阴线", "破位下跌", "放量杀跌", "跌停"]
+    direction_items = []
+    for name, move in (snapshot.get("indices") or {}).items():
+        direction_items.append((name, [name], move))
+    for name, move in (snapshot.get("etfs") or {}).items():
+        direction_items.append((f"{name}ETF", [f"{name}ETF", name], move))
+
+    seen_direction_errors = set()
+    for label, aliases, move in direction_items:
+        pct_change = float(move.get("pct_change") or 0.0)
+        for alias in aliases:
+            # Chinese prose commonly has no delimiter (e.g. “创业板高IV叠加大阳线”).
+            # Only exclude the two known longer entity suffixes instead of requiring
+            # a generic word boundary after the alias.
+            mention_pattern = re.escape(alias)
+            if not alias.endswith("ETF") and not alias.endswith("指"):
+                mention_pattern += r"(?!ETF|指)"
+            for mention in re.finditer(mention_pattern, plain):
+                context = _bounded_entity_context(plain, mention.start(), mention.end())
+                if _is_conditional_context(context):
+                    continue
+                conflicts = bullish_tokens if pct_change < -0.05 else bearish_tokens if pct_change > 0.05 else []
+                hit = next((token for token in conflicts if token in context), "")
+                if hit:
+                    key = (label, hit)
+                    if key not in seen_direction_errors:
+                        seen_direction_errors.add(key)
+                        violations.append(
+                            f"{label}当日涨跌幅 {pct_change:+.2f}%，但页面出现相反方向表述“{hit}”"
+                        )
+
+    iv_section = _extract_plain_section(plain, "期权波动率", ["每日牛股", "风险警示", "明日策略"])
+    if not iv_section:
+        violations.append("缺少“期权波动率”区块，无法核验ETF IV")
+    else:
+        for name, iv_info in (snapshot.get("etf_iv") or {}).items():
+            iv_pattern = re.compile(
+                rf"{_entity_pattern(name)}(?:ETF)?(?P<body>.{{0,120}}?)"
+                rf"(?P<rank>\d+(?:\.\d+)?)\s*%\s*[（(]?\s*"
+                rf"(?P<level>极低|偏低|低|中等|中|偏高|高|极高)",
+                re.S,
+            )
+            match = iv_pattern.search(iv_section)
+            if not match:
+                violations.append(f"{name}缺少可核验的IV Rank百分比与等级")
+                continue
+            actual_rank = float(match.group("rank"))
+            expected_rank = float(iv_info.get("iv_rank") or 0.0)
+            if abs(actual_rank - expected_rank) > ETF_IV_RANK_TOLERANCE:
+                violations.append(
+                    f"{name} IV Rank与真值不一致：页面={actual_rank:.1f}%，"
+                    f"真值={expected_rank:.1f}%"
+                )
+            actual_level = match.group("level")
+            expected_level = str(iv_info.get("level") or "")
+            level_alias = {"中": "中等", "低": "低", "高": "高"}
+            if level_alias.get(actual_level, actual_level) != level_alias.get(expected_level, expected_level):
+                violations.append(
+                    f"{name} IV等级与真值不一致：页面={actual_level}，真值={expected_level}"
+                )
+
+    return violations
+
+
+def _inject_report_data_provenance(html_content: str, snapshot: dict) -> str:
+    """Add a visible data-date marker so readers can audit report freshness."""
+    report_date = str((snapshot or {}).get("report_date") or "")
+    if not html_content or not report_date or 'data-market-trade-date=' in html_content:
+        return html_content
+    marker = (
+        f'<p data-market-trade-date="{report_date}" '
+        'style="color:#64748b; font-size:11px; margin:6px 0 0;">'
+        f'A股行情 / 板块资金 / ETF IV 数据日：{report_date}</p>'
+    )
+    return html_content.replace("</p>", f"</p>{marker}", 1)
+
+
+def _write_daily_report_audit(snapshot: dict, raw_material: str) -> str:
+    """Persist the reporter material and deterministic truth set for later incident review."""
+    report_date = str((snapshot or {}).get("report_date") or _current_trade_date_key())
+    output_dir = "outputs"
+    os.makedirs(output_dir, exist_ok=True)
+    audit_path = os.path.join(output_dir, f"daily_report_audit_{report_date}.json")
+    payload = {
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "report_date": report_date,
+        "a_share_snapshot": snapshot,
+        "reporter_material": str(raw_material or ""),
+    }
+    with open(audit_path, "w", encoding="utf-8") as audit_file:
+        json.dump(payload, audit_file, ensure_ascii=False, indent=2, default=str)
+    return audit_path
+
+
 def _rewrite_report_after_validation(raw_material: str, html: str, anomalies: list, round_idx: int,
-                                     iv_snapshot_text: str = "", kline_snapshot_text: str = "") -> str:
-    """当商品卡片校验失败时，提醒 LLM 定向重写整份 HTML。"""
+                                     iv_snapshot_text: str = "", kline_snapshot_text: str = "",
+                                     a_share_snapshot_text: str = "") -> str:
+    """当发布事实校验失败时，提醒 LLM 定向重写整份 HTML。"""
     anomaly_text = "\n".join([f"- {x}" for x in anomalies])
     rewrite_prompt = f"""
-你生成的《每日深度复盘》HTML存在商品卡片数据错误，请完整重写并修复。
+你生成的《每日深度复盘》HTML存在发布事实错误，请完整重写并修复。
 
 【第{round_idx}轮校验发现的问题】
 {anomaly_text}
@@ -488,12 +952,18 @@ def _rewrite_report_after_validation(raw_material: str, html: str, anomalies: li
 6. 不要再写“支撑：... | 压力：...”这一行。
 7. 趋势标签只允许“看多/看空/震荡”，不得自行改写或根据宏观素材覆盖程序真值。
 8. 其他板块风格与结构尽量保持原有质量。
+9. 股票板块只能使用下方A股发布真值中的主力净额Top3，金额单位为亿元且必须保留正负号。
+10. 指数/ETF当日涨跌、K线阴阳、ETF IV Rank和等级必须逐字匹配A股发布真值。
+11. 记者素材与程序真值冲突时，忽略记者素材；不得把下跌写成上涨、流出写成流入。
 
 【程序注入的商品IV真值（最高优先级，必须原样使用）】
 {iv_snapshot_text}
 
 【程序注入的商品K线形态/趋势真值（最高优先级，必须原样使用）】
 {kline_snapshot_text}
+
+【程序注入的A股/ETF/板块资金真值（最高优先级，必须原样使用）】
+{a_share_snapshot_text}
 
 【记者素材】
 {raw_material}
@@ -588,7 +1058,10 @@ def collect_data_via_agent():
     - 针对今天的热点事件（如美联储、地缘），调用 `tool_get_polymarket_sentiment` 看市场押注概率
 
     ## 第三步：资金流向
-    - 调用 `tool_get_retail_money_flow`，看今天天股票资金前3大流出和流入的板块是什么
+    - 必须调用 `tool_get_retail_money_flow(days=1, as_of_date="{trade_date_key}")`，
+      看当日股票主力资金前3大流出和流入板块
+    - 如果工具返回“数据未就绪”或数据日期不是 {trade_date_key}，必须明确标记数据缺失，
+      严禁拿上一交易日数据冒充今天，也不得自行补写板块金额
 
     ## 第四步：期货商持仓分析 
     - 调用 `search_broker_holdings_on_date` 记录以下期货商的前3大多头净持仓和前3大空头净持仓
@@ -683,7 +1156,7 @@ def collect_data_via_agent():
         return "AI 采集失败，请检查日志。"
 
 
-def draft_report(raw_material):
+def draft_report(raw_material, a_share_snapshot: dict = None, a_share_snapshot_text: str = None):
     """
     让 AI 主编基于记者提供的素材写稿
     🔥 v2.0 升级版：玻璃拟态 + 响应式 + 商品图标 + IV进度条
@@ -693,6 +1166,12 @@ def draft_report(raw_material):
     today = datetime.now().strftime("%Y年%m月%d日")
     weekday = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"][datetime.now().weekday()]
     trade_date_key = _current_trade_date_key()
+    if a_share_snapshot is None or a_share_snapshot_text is None:
+        a_share_snapshot, a_share_snapshot_text = _fetch_programmatic_a_share_snapshot(trade_date_key)
+    print(
+        f"🏦 [程序注入] A股/ETF/板块资金真值已生成: "
+        f"交易日 {a_share_snapshot.get('report_date', '-')}"
+    )
     iv_snapshot_map, iv_snapshot_text = _fetch_programmatic_commodity_iv_snapshot()
     print(f"🧮 [程序注入] 商品IV真值已生成: {len(iv_snapshot_map)}/{len(COMMODITY_CARD_LIST)}")
     kline_snapshot_map, kline_snapshot_text = _fetch_programmatic_commodity_kline_snapshot(trade_date_key)
@@ -707,6 +1186,9 @@ def draft_report(raw_material):
 
     【程序查库得到的商品K线形态/趋势真值（最高优先级，必须原样使用）】
     {kline_snapshot_text}
+
+    【程序查库得到的A股/ETF/板块资金真值（最高优先级，必须原样使用）】
+    {a_share_snapshot_text}
 
     【记者提交的素材】：
     {raw_material}
@@ -950,6 +1432,11 @@ def draft_report(raw_material):
     - 看多背景 #dc2626；看空背景 #16a34a；震荡背景 #d97706。
 
     ## 9. 内容要求
+    - 股票板块只允许使用【A股/ETF/板块资金真值】中的主力净流入Top3和主力净流出Top3；
+      金额统一写成“行业名(+/-X.X亿)”，必须保留正负号
+    - 期权波动率进度条百分比代表252日 IV Rank，数值和等级必须逐字匹配A股程序真值
+    - 指数/ETF当日涨跌与K线阴阳必须匹配A股程序真值；下跌日严禁写“大涨/上涨/大阳线/突破”
+    - 记者素材与程序真值冲突时，必须忽略记者素材，严禁融合或折中
     - 商品期货全景：必须包含 10 个商品卡片（5行2列）
     - 商品卡片第一行必须展示“形态：xxx”
     - 各商品形态与趋势标签，必须逐字匹配【程序查库得到的商品K线形态/趋势真值】
@@ -970,12 +1457,19 @@ def draft_report(raw_material):
     )
     html = res.content.replace("```html", "").replace("```", "").strip()
 
-    # 发布前商品卡片校验：异常则提醒 LLM 重写
-    is_valid, anomalies = validate_commodity_cards(html, iv_snapshot_map, kline_snapshot_map)
+    # 发布前双重事实校验：商品真值 + A股/ETF/板块资金真值。
+    commodity_valid, commodity_anomalies = validate_commodity_cards(
+        html,
+        iv_snapshot_map,
+        kline_snapshot_map,
+    )
+    a_share_anomalies = validate_a_share_report_facts(html, a_share_snapshot)
+    anomalies = commodity_anomalies + a_share_anomalies
+    is_valid = commodity_valid and not a_share_anomalies
     for i in range(1, MAX_REWRITE_ROUNDS + 1):
         if is_valid:
             break
-        print(f"⚠️ [发布前校验] 商品卡片异常，触发重写（第{i}轮）")
+        print(f"⚠️ [发布前校验] 报告事实异常，触发重写（第{i}轮）")
         for a in anomalies[:8]:
             print(f"   - {a}")
         html = _rewrite_report_after_validation(
@@ -985,16 +1479,24 @@ def draft_report(raw_material):
             i,
             iv_snapshot_text,
             kline_snapshot_text,
+            a_share_snapshot_text,
         )
-        is_valid, anomalies = validate_commodity_cards(html, iv_snapshot_map, kline_snapshot_map)
+        commodity_valid, commodity_anomalies = validate_commodity_cards(
+            html,
+            iv_snapshot_map,
+            kline_snapshot_map,
+        )
+        a_share_anomalies = validate_a_share_report_facts(html, a_share_snapshot)
+        anomalies = commodity_anomalies + a_share_anomalies
+        is_valid = commodity_valid and not a_share_anomalies
 
     if not is_valid:
-        print("❌ [发布前校验] 商品卡片校验仍未通过，终止发布。")
+        print("❌ [发布前校验] 报告事实校验仍未通过，终止发布。")
         for a in anomalies[:12]:
             print(f"   - {a}")
         return ""
 
-    return html
+    return _inject_report_data_provenance(html, a_share_snapshot)
 
 
 # ==========================================
@@ -1111,20 +1613,35 @@ def blast_emails(html_content):
 if __name__ == "__main__":
     start_t = time.time()
 
+    # 0. 在付出LLM调用成本前先做数据日门禁。任一核心表未到报告日即失败退出，
+    # 不再静默使用昨日数据或让模型填补空白。
+    report_trade_date = _current_trade_date_key()
+    try:
+        a_share_snapshot, a_share_snapshot_text = _fetch_programmatic_a_share_snapshot(report_trade_date)
+    except ReportDataNotReadyError as exc:
+        print(f"❌ [数据日门禁] {exc}")
+        raise SystemExit(2)
+
     # 1. AI 记者出动
     material = collect_data_via_agent()
+    try:
+        audit_path = _write_daily_report_audit(a_share_snapshot, material)
+        print(f"🧾 [审计留档] 记者素材与程序真值已保存: {audit_path}")
+    except Exception as exc:
+        # 留档失败不改变市场真值，但必须在日志中可见。
+        print(f"⚠️ [审计留档] 保存失败: {exc}")
 
     # 2. AI 主编撰稿
     if len(material) > 100:
-        report_html = draft_report(material)
-
-        # 保存到本地预览
-        with open("preview_report.html", "w", encoding="utf-8") as f:
-            f.write(report_html)
-        print("📄 预览文件已保存: preview_report.html")
+        report_html = draft_report(material, a_share_snapshot, a_share_snapshot_text)
 
         # 3. 发布和发送
         if len(report_html) > 300:
+            # 只有通过全部事实校验的HTML才落盘/发布。
+            with open("preview_report.html", "w", encoding="utf-8") as f:
+                f.write(report_html)
+            print("📄 预览文件已保存: preview_report.html")
+
             # 🔥 新增：发布到订阅中心数据库
             pub_success, pub_result = publish_to_subscription_center(report_html)
 
@@ -1138,8 +1655,10 @@ if __name__ == "__main__":
             print(f"数据库发布: {'✅ 成功' if pub_success else '❌ 失败'}")
             print(f"邮件发送: {email_count} 人")
         else:
-            print("❌ 报告内容过少，取消发布")
+            print("❌ 报告内容过少或事实校验失败，取消发布")
+            raise SystemExit(2)
     else:
         print("❌ 采集素材失败")
+        raise SystemExit(2)
 
     print(f"⏱️ 总耗时: {time.time() - start_t:.1f} 秒")
