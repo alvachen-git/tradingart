@@ -6,9 +6,49 @@ import io
 import json
 import os
 import re
+import sys
+import xml.etree.ElementTree as ET
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, timedelta
+from email.utils import parsedate_to_datetime
+from pathlib import Path
 from typing import Any, Iterable
+
+
+def remove_local_dependency_override() -> bool:
+    blocked = (Path(__file__).resolve().parent / ".codex_pydeps").resolve()
+    cleaned: list[str] = []
+    removed = False
+    for entry in sys.path:
+        try:
+            resolved = Path(entry or ".").resolve()
+        except (OSError, RuntimeError):
+            resolved = None
+        if resolved == blocked:
+            removed = True
+            continue
+        cleaned.append(entry)
+    if removed:
+        sys.path[:] = cleaned
+    return removed
+
+
+def configure_windows_ssl_trust() -> bool:
+    if os.name != "nt":
+        return False
+    try:
+        import truststore  # type: ignore[import-not-found]
+    except ImportError:
+        try:
+            from pip._vendor import truststore  # type: ignore[no-redef]
+        except ImportError:
+            return False
+    truststore.inject_into_ssl()
+    return True
+
+
+remove_local_dependency_override()
+configure_windows_ssl_trust()
 
 import pandas as pd
 import requests
@@ -25,6 +65,7 @@ DEFAULT_CBOE_URLS = {
 DEFAULT_CME_FEDWATCH_URL = "https://www.cmegroup.com/CmeWS/mvc/Markets/FedWatch/Tool/565"
 DEFAULT_AAII_SENTIMENT_URL = "https://www.aaii.com/sentimentsurvey"
 DEFAULT_AAII_SENTIMENT_XLS_URL = "https://www.aaii.com/files/surveys/sentiment.xls"
+DEFAULT_AAII_INSIGHTS_FEED_URL = "https://insights.aaii.com/feed"
 DEFAULT_CFTC_TFF_URL = (
     "https://publicreporting.cftc.gov/resource/gpe5-46if.json"
     "?$limit=5000&$order=report_date_as_yyyy_mm_dd%20DESC"
@@ -85,7 +126,7 @@ def make_session() -> requests.Session:
                 "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36"
             ),
-            "Accept": "text/html,application/json,text/csv,*/*",
+            "Accept": "text/html,application/json,text/csv,application/rss+xml,application/xml,*/*",
         }
     )
     return session
@@ -236,6 +277,69 @@ def parse_aaii_sentiment_workbook(content: bytes) -> MarketClimateRecord | None:
     return parse_aaii_sentiment_frame(frame, source="aaii_xls")
 
 
+def _aaii_release_date(published: date) -> date:
+    """Use AAII's Thursday release date for weekly survey records."""
+    return published - timedelta(days=(published.weekday() - 3) % 7)
+
+
+def parse_aaii_insights_feed(xml_text: str) -> MarketClimateRecord | None:
+    root = ET.fromstring(xml_text)
+    content_tag = "{http://purl.org/rss/1.0/modules/content/}encoded"
+    candidates: list[MarketClimateRecord] = []
+    for item in root.findall("./channel/item"):
+        title = (item.findtext("title") or "").strip()
+        if "aaii sentiment survey:" not in title.lower():
+            continue
+
+        published_text = (item.findtext("pubDate") or "").strip()
+        try:
+            published_at = parsedate_to_datetime(published_text)
+        except (TypeError, ValueError, OverflowError):
+            continue
+
+        content_html = item.findtext(content_tag) or item.findtext("description") or ""
+        content_text = _soup_text(content_html)
+        values: dict[str, float] = {}
+        for label in ("bullish", "neutral", "bearish"):
+            match = re.search(rf"\b{label}\s*:\s*(-?\d+(?:\.\d+)?)\s*%", content_text, re.IGNORECASE)
+            if match:
+                values[label] = float(match.group(1))
+        if "bullish" not in values or "bearish" not in values:
+            continue
+
+        as_of = _aaii_release_date(published_at.date())
+        record = build_aaii_sentiment_record(
+            as_of,
+            values.get("bullish"),
+            values.get("neutral"),
+            values.get("bearish"),
+            source="aaii_insights",
+        )
+        if record is None:
+            continue
+        payload = dict(record.payload)
+        payload.update(
+            {
+                "article_title": title,
+                "article_url": (item.findtext("link") or "").strip(),
+                "published_at": published_at.isoformat(),
+            }
+        )
+        candidates.append(
+            MarketClimateRecord(
+                indicator_code=record.indicator_code,
+                as_of_date=record.as_of_date,
+                value=record.value,
+                secondary_value=record.secondary_value,
+                unit=record.unit,
+                source=record.source,
+                payload=payload,
+            )
+        )
+
+    return max(candidates, key=lambda record: record.as_of_date) if candidates else None
+
+
 def _soup_text(html: str) -> str:
     return re.sub(r"\s+", " ", BeautifulSoup(html, "html.parser").get_text(" ", strip=True))
 
@@ -302,16 +406,40 @@ def fetch_aaii_sentiment_record(session: requests.Session) -> MarketClimateRecor
         with open(local_file, "rb") as fh:
             return parse_aaii_sentiment_workbook(fh.read())
 
+    candidates: list[MarketClimateRecord] = []
+    errors: list[str] = []
+    try:
+        record = parse_aaii_insights_feed(
+            http_get_text(session, os.getenv("AAII_INSIGHTS_FEED_URL", DEFAULT_AAII_INSIGHTS_FEED_URL), timeout=30)
+        )
+        if record is not None:
+            candidates.append(record)
+    except Exception as exc:
+        errors.append(f"insights: {exc}")
+
     try:
         record = parse_aaii_sentiment_workbook(
             http_get_bytes(session, os.getenv("AAII_SENTIMENT_XLS_URL", DEFAULT_AAII_SENTIMENT_XLS_URL))
         )
         if record is not None:
-            return record
-    except Exception:
-        pass
+            candidates.append(record)
+    except Exception as exc:
+        errors.append(f"xls: {exc}")
 
-    return parse_aaii_sentiment_html(http_get_text(session, os.getenv("AAII_SENTIMENT_URL", DEFAULT_AAII_SENTIMENT_URL)))
+    try:
+        record = parse_aaii_sentiment_html(
+            http_get_text(session, os.getenv("AAII_SENTIMENT_URL", DEFAULT_AAII_SENTIMENT_URL))
+        )
+        if record is not None:
+            candidates.append(record)
+    except Exception as exc:
+        errors.append(f"html: {exc}")
+
+    if candidates:
+        return max(candidates, key=lambda record: record.as_of_date)
+    if errors:
+        raise RuntimeError("; ".join(errors))
+    return None
 
 
 def _walk_dicts(value: Any) -> Iterable[dict[str, Any]]:
@@ -679,12 +807,24 @@ FETCHERS = {
     "cftc_vix": fetch_cftc_vix_record,
     "gscpi": fetch_gscpi_record,
 }
+FETCH_MAX_AGE_DAYS = {
+    "vix_term": 7,
+    "fedwatch": 7,
+    "aaii": 10,
+    "cftc_vix": 14,
+    "gscpi": 60,
+}
 
 
-def fetch_records(only: set[str] | None = None) -> tuple[list[MarketClimateRecord], dict[str, str]]:
+def fetch_records(
+    only: set[str] | None = None,
+    *,
+    today: date | None = None,
+) -> tuple[list[MarketClimateRecord], dict[str, str]]:
     session = make_session()
     records: list[MarketClimateRecord] = []
     errors: dict[str, str] = {}
+    current_date = today or date.today()
     for name, fetcher in FETCHERS.items():
         if only and name not in only:
             continue
@@ -693,10 +833,28 @@ def fetch_records(only: set[str] | None = None) -> tuple[list[MarketClimateRecor
             if record is None:
                 errors[name] = "no usable data"
                 continue
+            age_days = (current_date - record.as_of_date).days
+            max_age_days = FETCH_MAX_AGE_DAYS.get(name)
+            if max_age_days is not None and age_days > max_age_days:
+                errors[name] = (
+                    f"stale data: as_of={record.as_of_date.isoformat()}, "
+                    f"age_days={age_days}, max_age_days={max_age_days}"
+                )
+                continue
             records.append(record)
         except Exception as exc:
             errors[name] = str(exc)
     return records, errors
+
+
+def update_result_status(records: list[MarketClimateRecord], errors: dict[str, str]) -> tuple[str, int]:
+    if errors and records:
+        return "partial_error", 2
+    if errors:
+        return "error", 1
+    if records:
+        return "ok", 0
+    return "no_data", 1
 
 
 def main() -> int:
@@ -711,7 +869,9 @@ def main() -> int:
 
     only = {item.strip() for item in args.only.split(",") if item.strip()} or None
     records, errors = fetch_records(only)
+    status, exit_code = update_result_status(records, errors)
     output = {
+        "status": status,
         "saved": 0,
         "records": [asdict(record) | {"as_of_date": record.as_of_date.isoformat()} for record in records],
         "errors": errors,
@@ -720,7 +880,7 @@ def main() -> int:
         engine = create_engine_from_env()
         output["saved"] = save_records(engine, records)
     print(json.dumps(output, ensure_ascii=False, indent=2, default=str))
-    return 0 if records else 1
+    return exit_code
 
 
 if __name__ == "__main__":

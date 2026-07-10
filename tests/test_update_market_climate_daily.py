@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 import pandas as pd
 
@@ -6,6 +7,19 @@ import update_market_climate_daily as climate
 
 
 class MarketClimateDailyTests(unittest.TestCase):
+    def test_remove_local_dependency_override_drops_codex_temp_path(self):
+        original_path = list(climate.sys.path)
+        blocked = str((climate.Path(climate.__file__).resolve().parent / ".codex_pydeps").resolve())
+        try:
+            climate.sys.path.insert(0, blocked)
+
+            removed = climate.remove_local_dependency_override()
+
+            self.assertTrue(removed)
+            self.assertNotIn(blocked, climate.sys.path)
+        finally:
+            climate.sys.path[:] = original_path
+
     def test_parse_cboe_csv_and_build_vix_term_record(self):
         vix9d = climate.parse_cboe_history_csv("DATE,CLOSE\n2026-06-28,14.5\n2026-06-30,15.1\n")
         vix = climate.parse_cboe_history_csv("DATE,VIX Close\n2026-06-30,16.2\n")
@@ -54,6 +68,109 @@ class MarketClimateDailyTests(unittest.TestCase):
         self.assertAlmostEqual(record.value, 8.8106, places=4)
         self.assertAlmostEqual(record.payload["bullish_pct"], 44.9339, places=4)
         self.assertAlmostEqual(record.payload["bearish_pct"], 36.1233, places=4)
+
+    def test_parse_aaii_insights_feed_uses_latest_survey_release(self):
+        xml_text = """<?xml version="1.0" encoding="UTF-8"?>
+        <rss xmlns:content="http://purl.org/rss/1.0/modules/content/" version="2.0">
+          <channel>
+            <item>
+              <title>AAII Sentiment Survey: Optimism Leaps</title>
+              <link>https://insights.aaii.com/p/older</link>
+              <pubDate>Sat, 27 Jun 2026 15:30:39 GMT</pubDate>
+              <content:encoded><![CDATA[
+                <p>This week’s Sentiment Survey results:</p>
+                <p>Bullish: 44.9%</p><p>Neutral: 19.0%</p><p>Bearish: 36.1%</p>
+              ]]></content:encoded>
+            </item>
+            <item>
+              <title>AAII Sentiment Survey: Optimism Plummets</title>
+              <link>https://insights.aaii.com/p/latest</link>
+              <pubDate>Sat, 04 Jul 2026 15:30:14 GMT</pubDate>
+              <content:encoded><![CDATA[
+                <p>This week’s Sentiment Survey results:</p>
+                <p>Bullish: 31.4%, down 13.6 points</p>
+                <p>Neutral: 26.4%, up 7.4 points</p>
+                <p>Bearish: 42.3%, up 6.1 points</p>
+              ]]></content:encoded>
+            </item>
+          </channel>
+        </rss>"""
+
+        record = climate.parse_aaii_insights_feed(xml_text)
+
+        self.assertIsNotNone(record)
+        self.assertEqual(record.as_of_date.isoformat(), "2026-07-02")
+        self.assertAlmostEqual(record.value, -10.9)
+        self.assertEqual(record.source, "aaii_insights")
+        self.assertEqual(record.payload["article_url"], "https://insights.aaii.com/p/latest")
+
+    def test_fetch_aaii_sentiment_record_prefers_newer_insights_record(self):
+        feed = """<?xml version="1.0" encoding="UTF-8"?>
+        <rss xmlns:content="http://purl.org/rss/1.0/modules/content/" version="2.0">
+          <channel><item>
+            <title>AAII Sentiment Survey: Optimism Plummets</title>
+            <link>https://insights.aaii.com/p/latest</link>
+            <pubDate>Sat, 04 Jul 2026 15:30:14 GMT</pubDate>
+            <content:encoded><![CDATA[
+              Bullish: 31.4% Neutral: 26.4% Bearish: 42.3%
+            ]]></content:encoded>
+          </item></channel>
+        </rss>"""
+        old_record = climate.build_aaii_sentiment_record(
+            pd.Timestamp("2026-06-25").date(),
+            44.9,
+            19.0,
+            36.1,
+            source="aaii_xls",
+        )
+        old_html = """
+        <table><tr><th>Date</th><th>Bullish</th><th>Neutral</th><th>Bearish</th></tr>
+        <tr><td>6/3/2026</td><td>36.3%</td><td>26.7%</td><td>37.0%</td></tr></table>
+        """
+
+        with (
+            patch.object(climate, "http_get_text", side_effect=[feed, old_html]),
+            patch.object(climate, "http_get_bytes", return_value=b"old-workbook"),
+            patch.object(climate, "parse_aaii_sentiment_workbook", return_value=old_record),
+        ):
+            record = climate.fetch_aaii_sentiment_record(climate.make_session())
+
+        self.assertIsNotNone(record)
+        self.assertEqual(record.as_of_date.isoformat(), "2026-07-02")
+        self.assertEqual(record.source, "aaii_insights")
+
+    def test_update_result_status_marks_partial_source_failure(self):
+        record = climate.build_aaii_sentiment_record(
+            pd.Timestamp("2026-07-02").date(),
+            31.4,
+            26.4,
+            42.3,
+            source="aaii_insights",
+        )
+
+        status, exit_code = climate.update_result_status([record], {"gscpi": "timeout"})
+
+        self.assertEqual(status, "partial_error")
+        self.assertEqual(exit_code, 2)
+
+    def test_fetch_records_rejects_stale_fallback_data(self):
+        stale_record = climate.build_aaii_sentiment_record(
+            pd.Timestamp("2026-06-25").date(),
+            44.9,
+            19.0,
+            36.1,
+            source="aaii_xls",
+        )
+
+        with patch.dict(climate.FETCHERS, {"aaii": lambda _session: stale_record}, clear=True):
+            records, errors = climate.fetch_records(
+                {"aaii"},
+                today=pd.Timestamp("2026-07-10").date(),
+            )
+
+        self.assertEqual(records, [])
+        self.assertIn("stale data", errors["aaii"])
+        self.assertIn("age_days=15", errors["aaii"])
 
     def test_parse_fedwatch_payload_selects_highest_probability(self):
         payload = {
