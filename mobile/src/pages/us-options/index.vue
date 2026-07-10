@@ -344,13 +344,13 @@ const snapshotCards = computed(() => {
       tone: signedTone(putSkew),
     },
     {
-      label: 'Put/Call OI',
-      sub: `Top OI ${fmtNum(m.top_oi_strike, 0)}`,
-      value: fmtNum(m.put_call_oi, 2),
-      percentile: asNum(m.put_call_oi_percentile),
+      label: 'Call Skew',
+      sub: '上方追涨相对 ATM',
+      value: fmtSigned(callSkew, '%'),
+      percentile: asNum(m.call_skew_5pct_percentile),
       percentileLabel: '历史分位',
-      sample: sampleLabel(m.put_call_oi_history_count, m.put_call_oi_min_samples || m.historical_percentile_min_samples),
-      tone: 'gold',
+      sample: sampleLabel(m.call_skew_5pct_history_count, m.call_skew_5pct_min_samples || m.historical_percentile_min_samples),
+      tone: signedTone(callSkew),
     },
     {
       label: 'Put-Call Skew',
@@ -1004,9 +1004,6 @@ function axisYStyle(label: { top: number }) {
         <text>最新：{{ overview?.display_date || overview?.trade_date || '--' }}</text>
         <text>收盘：{{ fmtMoney(overview?.underlying_price) }}</text>
       </view>
-      <view class="hero-status">
-        <text>{{ overview?.status_brief || overview?.message || '数据加载中' }}</text>
-      </view>
     </view>
 
     <view class="tab-bar">
@@ -1253,7 +1250,7 @@ function axisYStyle(label: { top: number }) {
 
 .hero {
   margin: 24rpx;
-  padding: 26rpx;
+  padding: 22rpx 24rpx 20rpx;
   border: 1px solid #20324f;
   border-radius: 24rpx;
   background:
@@ -1279,9 +1276,9 @@ function axisYStyle(label: { top: number }) {
 .hero-title {
   display: block;
   color: #f8fafc;
-  font-size: 40rpx;
+  font-size: 38rpx;
   font-weight: 900;
-  margin-top: 8rpx;
+  margin-top: 6rpx;
 }
 
 .symbol-trigger {
@@ -1316,16 +1313,9 @@ function axisYStyle(label: { top: number }) {
 .hero-meta {
   display: flex;
   justify-content: space-between;
-  margin-top: 22rpx;
+  margin-top: 18rpx;
   color: #8ea0ba;
   font-size: 22rpx;
-}
-
-.hero-status {
-  margin-top: 16rpx;
-  color: #d6e4ff;
-  font-size: 24rpx;
-  line-height: 1.55;
 }
 
 .tab-bar {
