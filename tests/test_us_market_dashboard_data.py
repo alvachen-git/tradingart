@@ -696,6 +696,71 @@ class UsMarketDashboardDataTests(unittest.TestCase):
         self.assertEqual(dash.get_underlying_profile("SPY")["next_earnings_date"], dash.ETF_EARNINGS_NOTE)
         self.assertEqual(dash.get_underlying_profile("AAPL")["next_earnings_date"], dash.STOCK_EARNINGS_NOTE)
 
+    def test_underlying_a_share_benchmarks_filter_by_asset_type(self):
+        nvda = dash.get_underlying_a_share_benchmarks("NVDA")
+        spy = dash.get_underlying_a_share_benchmarks("SPY")
+        raw_items = [
+            item
+            for entries in dash.UNDERLYING_A_SHARE_BENCHMARKS.values()
+            for item in entries
+        ]
+
+        self.assertTrue(nvda)
+        self.assertTrue(all(item["type"] == "stock" for item in nvda))
+        self.assertTrue(any(item["name"] == "寒武纪" for item in nvda))
+        self.assertTrue(spy)
+        self.assertTrue(all(item["type"] in {"etf", "index"} for item in spy))
+        self.assertTrue(all(item.get("relation") for item in raw_items))
+        self.assertTrue(all(item.get("note") for item in raw_items))
+        self.assertEqual(dash.get_underlying_a_share_benchmarks("GME"), [])
+
+    def test_a_share_benchmarks_follow_domestic_substitution_mapping_rules(self):
+        asml = dash.get_underlying_a_share_benchmarks("ASML")
+        mrvl = dash.get_underlying_a_share_benchmarks("MRVL")
+        nvda = dash.get_underlying_a_share_benchmarks("NVDA")
+        qcom = dash.get_underlying_a_share_benchmarks("QCOM")
+        orcl = dash.get_underlying_a_share_benchmarks("ORCL")
+        lly = dash.get_underlying_a_share_benchmarks("LLY")
+        panw = dash.get_underlying_a_share_benchmarks("PANW")
+        spcx = dash.get_underlying_a_share_benchmarks("SPCX")
+        asml_names = {item["name"] for item in asml}
+        mrvl_names = {item["name"] for item in mrvl}
+        nvda_names = {item["name"] for item in nvda}
+        qcom_names = {item["name"] for item in qcom}
+        orcl_names = {item["name"] for item in orcl}
+        lly_names = {item["name"] for item in lly}
+        panw_names = {item["name"] for item in panw}
+        spcx_names = {item["name"] for item in spcx}
+        broadcom_names = {item["name"] for item in dash.get_underlying_a_share_benchmarks("AVGO")}
+
+        self.assertEqual(asml_names, {"芯源微", "芯碁微装"})
+        self.assertTrue(all(item["relation"] == "核心映射" for item in asml))
+        self.assertTrue(any("不是光刻机整机" in item["note"] for item in asml))
+        self.assertEqual(mrvl_names, {"盛科通信", "源杰科技", "中际旭创", "新易盛", "天孚通信"})
+        self.assertIn("国产替代", {item["relation"] for item in mrvl})
+        self.assertIn("核心映射", {item["relation"] for item in mrvl})
+        self.assertTrue({"摩尔线程", "沐曦股份-U"} <= nvda_names)
+        self.assertTrue(all(item["relation"] == "国产替代" for item in nvda))
+        self.assertIn("翱捷科技-U", qcom_names)
+        self.assertIn("达梦数据", orcl_names)
+        self.assertTrue({"翰宇药业", "诺泰生物"} <= lly_names)
+        self.assertIn("安恒信息", panw_names)
+        self.assertIn("航天环宇", spcx_names)
+        self.assertIn("芯原股份", broadcom_names)
+        self.assertIn("盛科通信", broadcom_names)
+        self.assertIn("裕太微-U", broadcom_names)
+        self.assertEqual(dash.get_underlying_a_share_benchmarks("NKE"), [])
+        self.assertEqual(dash.get_underlying_a_share_benchmarks("SOFI"), [])
+        self.assertEqual(dash.get_underlying_a_share_benchmarks("UNH"), [])
+
+    def test_build_underlying_profile_card_includes_a_share_benchmarks(self):
+        nvda = dash.build_underlying_profile_card("NVDA", use_test_tables=True, engine=self.engine)
+        gme = dash.build_underlying_profile_card("GME", use_test_tables=True, engine=self.engine)
+
+        self.assertIn("a_share_benchmarks", nvda)
+        self.assertTrue(any(item["name"] == "寒武纪" for item in nvda["a_share_benchmarks"]))
+        self.assertEqual(gme["a_share_benchmarks"], [])
+
     def test_spcx_profile_is_spacex_stock_not_etf(self):
         profile = dash.get_underlying_profile("SPCX")
 

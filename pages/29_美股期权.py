@@ -791,6 +791,56 @@ def _inject_page_style() -> None:
             font-size: 13px;
             line-height: 1.45;
         }
+        .us-underlying-benchmarks {
+            margin-top: 10px;
+            padding-top: 9px;
+            border-top: 1px solid #e5edf7;
+        }
+        .us-underlying-benchmarks-head {
+            color: #2563eb;
+            font-size: 12px;
+            line-height: 1.2;
+            font-weight: 850;
+            margin-bottom: 7px;
+        }
+        .us-underlying-benchmarks-list {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 7px;
+            align-items: center;
+        }
+        .us-underlying-benchmark-chip {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            min-height: 26px;
+            padding: 5px 8px;
+            border: 1px solid #dbeafe;
+            border-radius: 999px;
+            background: #ffffff;
+            color: #334155;
+            font-size: 12px;
+            line-height: 1.1;
+            font-weight: 750;
+        }
+        .us-underlying-benchmark-code {
+            color: #64748b;
+            font-weight: 700;
+        }
+        .us-underlying-benchmark-type {
+            padding: 2px 5px;
+            border-radius: 999px;
+            background: #eff6ff;
+            color: #2563eb;
+            font-size: 11px;
+            line-height: 1;
+            font-weight: 850;
+        }
+        .us-underlying-benchmark-empty {
+            color: #64748b;
+            font-size: 13px;
+            line-height: 1.35;
+        }
         .us-underlying-dynamic-source {
             margin-top: 8px;
             color: #64748b;
@@ -1096,6 +1146,9 @@ def _inject_page_style() -> None:
                 grid-template-columns: 1fr;
                 gap: 9px;
             }
+            .us-underlying-benchmark-chip {
+                max-width: 100%;
+            }
             .us-option-anomaly-metrics {
                 grid-template-columns: repeat(2, minmax(0, 1fr));
             }
@@ -1399,6 +1452,44 @@ def _profile_updated_label(value: Any, as_of_date: Any) -> str:
     return format_profile_updated_at_beijing(value, as_of_date)
 
 
+def _render_a_share_benchmarks_html(profile: dict[str, Any]) -> str:
+    type_labels = {"stock": "A股", "etf": "ETF", "index": "指数"}
+    chips: list[str] = []
+    raw_items = profile.get("a_share_benchmarks") or []
+    if isinstance(raw_items, list):
+        for raw in raw_items:
+            if not isinstance(raw, dict):
+                continue
+            name = str(raw.get("name") or "").strip()
+            code = str(raw.get("code") or "").strip()
+            item_type = str(raw.get("type") or "").strip().lower()
+            if not name:
+                continue
+            label = str(raw.get("relation") or "").strip() or type_labels.get(item_type, "A股")
+            note = str(raw.get("note") or "").strip()
+            title_attr = f' title="{escape(note, quote=True)}"' if note else ""
+            code_html = f'<span class="us-underlying-benchmark-code">{escape(code)}</span>' if code else ""
+            chips.append(
+                '<span class="us-underlying-benchmark-chip"'
+                f"{title_attr}>"
+                f'<span class="us-underlying-benchmark-type">{escape(label)}</span>'
+                f"<span>{escape(name)}</span>"
+                f"{code_html}"
+                "</span>"
+            )
+    body = (
+        f'<div class="us-underlying-benchmarks-list">{"".join(chips)}</div>'
+        if chips
+        else '<div class="us-underlying-benchmark-empty">没有</div>'
+    )
+    return (
+        '<div class="us-underlying-benchmarks">'
+        '<div class="us-underlying-benchmarks-head">对标A股</div>'
+        f"{body}"
+        "</div>"
+    )
+
+
 def _render_underlying_profile_card(symbol: str) -> None:
     profile = _cached_underlying_profile_card(symbol, dt.date.today().strftime("%Y%m%d"))
     code = str(profile.get("symbol") or symbol or "").upper()
@@ -1433,6 +1524,7 @@ def _render_underlying_profile_card(symbol: str) -> None:
     updated_display = f"{updated_label} 北京时间" if ":" in updated_label else updated_label
     recent_hotspot = str(profile.get("recent_hotspot") or profile.get("recent_catalyst") or "近期热点待更新")
     option_data = str(profile.get("option_data") or profile.get("recent_risk") or "期权数据待更新")
+    benchmarks_html = _render_a_share_benchmarks_html(profile)
     st.markdown(
         f"""
         <div class="us-underlying-brief">
@@ -1457,6 +1549,7 @@ def _render_underlying_profile_card(symbol: str) -> None:
                         <div class="us-underlying-dynamic-text">{escape(option_data)}</div>
                     </div>
                 </div>
+                {benchmarks_html}
                 <div class="us-underlying-dynamic-source">
                     更新于 {escape(updated_display)} / 来源：{escape(source_summary)}
                 </div>
