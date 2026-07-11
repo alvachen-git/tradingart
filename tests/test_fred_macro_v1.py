@@ -63,6 +63,41 @@ def test_stale_flag_thresholds_by_frequency():
     assert stale_days_missing == -1
 
 
+def test_inflation_freshness_accounts_for_publication_lag():
+    now = datetime.now()
+    cpi_flag, cpi_age = update_micro_daily._get_stale_flag(
+        now - timedelta(days=71), "M", "CPIAUCSL"
+    )
+    pce_flag, pce_age = update_micro_daily._get_stale_flag(
+        now - timedelta(days=91), "M", "PCEPILFE"
+    )
+
+    assert cpi_flag == "N"
+    assert cpi_age >= 71
+    assert pce_flag == "N"
+    assert pce_age >= 91
+
+
+def test_required_fred_health_uses_release_adjusted_thresholds(monkeypatch):
+    dates = {
+        "CPIAUCSL": (datetime.now() - timedelta(days=71)).strftime("%Y-%m-%d"),
+        "PCEPILFE": (datetime.now() - timedelta(days=91)).strftime("%Y-%m-%d"),
+    }
+    monkeypatch.setattr(update_micro_daily, "get_latest_indicator_date", lambda code: dates[code])
+
+    failures = update_micro_daily.check_required_fred_freshness({"CPIAUCSL", "PCEPILFE"})
+
+    assert failures == []
+
+
+def test_required_fred_health_reports_missing(monkeypatch):
+    monkeypatch.setattr(update_micro_daily, "get_latest_indicator_date", lambda _code: "NONE")
+
+    failures = update_micro_daily.check_required_fred_freshness({"CPIAUCSL"})
+
+    assert failures == ["CPIAUCSL:missing"]
+
+
 def test_fetch_fred_core_macro_partial_success(monkeypatch):
     monkeypatch.setattr(update_micro_daily, "FRED_API_KEY", "dummy-key")
     monkeypatch.setattr(
@@ -123,6 +158,21 @@ def test_macro_freshness_helper():
     assert threshold_m == 45
 
 
+def test_macro_freshness_uses_indicator_specific_release_lag():
+    now = datetime.now()
+    cpi_status, cpi_age, cpi_threshold = macro_tools._freshness(
+        now - timedelta(days=71), "M", "CPIAUCSL"
+    )
+    pce_status, pce_age, pce_threshold = macro_tools._freshness(
+        now - timedelta(days=91), "M", "PCEPILFE"
+    )
+
+    assert (cpi_status, cpi_threshold) == ("fresh", 80)
+    assert cpi_age >= 71
+    assert (pce_status, pce_threshold) == ("fresh", 100)
+    assert pce_age >= 91
+
+
 def test_get_macro_indicator_contains_source_and_freshness(monkeypatch):
     monkeypatch.setattr(macro_tools, "engine", DummyEngine())
     monkeypatch.setattr(
@@ -153,7 +203,8 @@ def test_get_macro_indicator_contains_source_and_freshness(monkeypatch):
     assert "source:" in out
     assert "as_of_date:" in out
     assert "freshness_status:" in out
-    assert "stale_days:" in out
+    assert "observation_age_days:" in out
+    assert "overdue_days:" in out
     assert "UNKNOWN" in out
     assert "missing" in out
 

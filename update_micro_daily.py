@@ -15,6 +15,8 @@ import yfinance as yf
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, text
 
+from macro_freshness import freshness_threshold_days
+
 
 load_dotenv(override=True)
 
@@ -33,6 +35,11 @@ engine = create_engine(DB_URL, pool_recycle=3600, pool_pre_ping=True)
 LOOKBACK_DAYS = int(os.getenv("MACRO_LOOKBACK_DAYS", "5"))
 VERBOSE_TRACEBACK = os.getenv("MACRO_VERBOSE_TRACEBACK", "0") == "1"
 FRED_API_KEY = os.getenv("FRED_API_KEY", "")
+FRED_REQUIRED_CODES = {
+    code.strip().upper()
+    for code in os.getenv("FRED_REQUIRED_CODES", "CPIAUCSL,PCEPILFE").split(",")
+    if code.strip()
+}
 DXY_FRED_SERIES_ID = os.getenv("DXY_FRED_SERIES_ID", "DTWEXM").strip() or "DTWEXM"
 DXY_BACKFILL_DAYS = int(os.getenv("DXY_BACKFILL_DAYS", "20"))
 DXY_REQUIRED = os.getenv("DXY_REQUIRED", "1").strip().lower() in {"1", "true", "yes", "on"}
@@ -51,13 +58,6 @@ DXY_FRED_SERIES_CANDIDATES = [
 
 # Third-party warning noise should not pollute daily update logs.
 warnings.filterwarnings("ignore", category=FutureWarning, module="akshare")
-
-FRESHNESS_THRESHOLD_BY_FREQ = {
-    "D": 7,
-    "W": 21,
-    "M": 45,
-    "Q": 120,
-}
 
 FRED_BACKFILL_DAYS_BY_FREQ = {
     "D": 180,
@@ -276,22 +276,26 @@ def _fetch_fred_series(
     return pd.DataFrame(records)
 
 
-def _threshold_days_for_freq(freq: str) -> int:
-    return FRESHNESS_THRESHOLD_BY_FREQ.get((freq or "D").upper(), 45)
+def _threshold_days_for_freq(freq: str, indicator_code: str = "") -> int:
+    return freshness_threshold_days(freq, indicator_code)
 
 
 def _backfill_days_for_freq(freq: str) -> int:
     return FRED_BACKFILL_DAYS_BY_FREQ.get((freq or "D").upper(), 365)
 
 
-def _get_stale_flag(trade_date: datetime | pd.Timestamp | None, freq: str) -> tuple[str, int]:
+def _get_stale_flag(
+    trade_date: datetime | pd.Timestamp | None,
+    freq: str,
+    indicator_code: str = "",
+) -> tuple[str, int]:
     if trade_date is None:
         return "UNKNOWN", -1
     as_of = pd.to_datetime(trade_date, errors="coerce")
     if pd.isna(as_of):
         return "UNKNOWN", -1
     stale_days = (datetime.now().date() - as_of.date()).days
-    threshold = _threshold_days_for_freq(freq)
+    threshold = _threshold_days_for_freq(freq, indicator_code)
     return ("Y" if stale_days > threshold else "N"), stale_days
 
 
@@ -670,6 +674,31 @@ def get_latest_indicator_date(indicator_code: str) -> str:
     return pd.to_datetime(latest).strftime("%Y-%m-%d")
 
 
+def check_required_fred_freshness(required_codes: set[str] | None = None) -> list[str]:
+    failures: list[str] = []
+    for code in sorted(required_codes if required_codes is not None else FRED_REQUIRED_CODES):
+        meta = FRED_CORE_SERIES.get(code)
+        if meta is None:
+            failures.append(f"{code}:unknown_code")
+            continue
+        latest = get_latest_indicator_date(code)
+        if latest == "NONE":
+            print(f"FRED_HEALTH_FAIL={code}|LATEST_DATE=NONE|REASON=missing")
+            failures.append(f"{code}:missing")
+            continue
+        stale_flag, observation_age_days = _get_stale_flag(
+            pd.to_datetime(latest), meta["frequency"], code
+        )
+        threshold = _threshold_days_for_freq(meta["frequency"], code)
+        print(
+            f"FRED_HEALTH={code}|LATEST_DATE={latest}|STALE_FLAG={stale_flag}|"
+            f"OBSERVATION_AGE_DAYS={observation_age_days}|THRESHOLD_DAYS={threshold}"
+        )
+        if stale_flag != "N":
+            failures.append(f"{code}:stale:{observation_age_days}>{threshold}")
+    return failures
+
+
 def fetch_offshore_cny_yahoo() -> dict:
     results = {}
     print("  更新离岸人民币(Yahoo)...")
@@ -809,7 +838,7 @@ def fetch_fred_core_macro() -> tuple[dict[str, dict[str, Any]], list[str], list[
                 continue
 
             latest_trade_date = series_df["trade_date"].max()
-            stale_flag, stale_days = _get_stale_flag(latest_trade_date, freq)
+            stale_flag, stale_days = _get_stale_flag(latest_trade_date, freq, code)
             results[code] = {
                 "df": series_df,
                 "name": meta["name"],
@@ -861,10 +890,20 @@ def run_daily_update() -> None:
     print(f"FRED_FETCH_OK={','.join(sorted(fred_ok_codes)) if fred_ok_codes else 'NONE'}")
     print(f"FRED_FETCH_FAIL={','.join(sorted(fred_fail_codes)) if fred_fail_codes else 'NONE'}")
 
+    required_fred_failures = check_required_fred_freshness()
+    print(
+        "FRED_REQUIRED_HEALTH="
+        + ("OK" if not required_fred_failures else ",".join(required_fred_failures))
+    )
+
     if DXY_REQUIRED and (dxy_age_days < 0 or dxy_age_days > DXY_MAX_STALE_DAYS):
         raise RuntimeError(
             f"DXY freshness check failed: latest={dxy_latest_date}, "
             f"age_days={dxy_age_days}, threshold={DXY_MAX_STALE_DAYS}"
+        )
+    if required_fred_failures:
+        raise RuntimeError(
+            "Required FRED freshness check failed: " + ", ".join(required_fred_failures)
         )
 
 

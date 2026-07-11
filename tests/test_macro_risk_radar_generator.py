@@ -41,6 +41,15 @@ def _sample_context():
 
 
 class TestMacroRiskRadarGenerator(unittest.TestCase):
+    def test_cpi_freshness_accounts_for_release_lag(self):
+        status, age_days, threshold = radar._freshness(
+            date(2026, 5, 1), "M", date(2026, 7, 11), "CPIAUCSL"
+        )
+
+        self.assertEqual(status, "fresh")
+        self.assertEqual(age_days, 71)
+        self.assertEqual(threshold, 80)
+
     def test_news_dedup(self):
         items = [
             {"source": "A", "title": "美元指数走强", "time": "", "summary": ""},

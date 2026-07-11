@@ -7,6 +7,8 @@ from dotenv import load_dotenv
 from langchain_core.tools import tool
 from sqlalchemy import create_engine, text
 
+from macro_freshness import freshness_basis, freshness_threshold_days
+
 
 load_dotenv(override=True)
 
@@ -27,13 +29,6 @@ def get_db_engine():
 
 
 engine = get_db_engine()
-
-FRESHNESS_THRESHOLD_BY_FREQ = {
-    "D": 7,
-    "W": 21,
-    "M": 45,
-    "Q": 120,
-}
 
 FRED_CORE_CODES = [
     "FEDFUNDS",
@@ -149,9 +144,9 @@ def _resolve_meta(code: str, category: str, db_meta: dict[str, dict[str, str]]) 
     }
 
 
-def _freshness(as_of: object, frequency: str) -> tuple[str, int, int]:
+def _freshness(as_of: object, frequency: str, indicator_code: str = "") -> tuple[str, int, int]:
     as_of_dt = pd.to_datetime(as_of, errors="coerce")
-    threshold = FRESHNESS_THRESHOLD_BY_FREQ.get((frequency or "D").upper(), 45)
+    threshold = freshness_threshold_days(frequency, indicator_code)
     if pd.isna(as_of_dt):
         return "missing", -1, threshold
     stale_days = (datetime.now().date() - as_of_dt.date()).days
@@ -229,7 +224,9 @@ def get_macro_indicator(indicator_code: str, days: int = 30) -> str:
             latest = df.iloc[0]
             category = str(latest.get("category") or "unknown")
             meta = _resolve_meta(code, category, db_meta)
-            status, stale_days, threshold = _freshness(latest["trade_date"], meta["frequency"])
+            status, observation_age_days, threshold = _freshness(
+                latest["trade_date"], meta["frequency"], code
+            )
 
             name = str(latest.get("indicator_name") or code)
             latest_value = _format_value(code, pd.to_numeric(latest.get("close_value"), errors="coerce"), meta["unit"])
@@ -250,17 +247,20 @@ def get_macro_indicator(indicator_code: str, days: int = 30) -> str:
             low = pd.to_numeric(df["close_value"], errors="coerce").min()
             change_str = f"{change_pct:+.2f}%" if pd.notna(change_pct) else "N/A"
 
+            date_label = "观测期日期" if freshness_basis(code) == "release_lag_adjusted" else "日期"
             block_lines = [
                 f"📊 **{name}** ({code})",
                 f"- 最新值: {latest_value}",
-                f"- 日期: {date_str}",
+                f"- {date_label}: {date_str}",
                 f"- 涨跌幅: {change_str}",
                 f"- 趋势: {trend}",
                 f"- 区间({len(df)}): {low:.4f} ~ {high:.4f}",
                 f"- source: {meta['source']}",
                 f"- as_of_date: {date_str}",
                 f"- freshness_status: {status}",
-                f"- stale_days: {stale_days}",
+                f"- freshness_basis: {freshness_basis(code)}",
+                f"- observation_age_days: {observation_age_days}",
+                f"- overdue_days: {max(0, observation_age_days - threshold)}",
             ]
             if status == "stale":
                 block_lines.append(f"- 建议: 已超过{threshold}天阈值，{_suggestion_by_frequency(meta['frequency'])}")
@@ -300,7 +300,7 @@ def get_macro_health_snapshot(indicator_code: str = "") -> str:
             df = pd.read_sql(sql, conn, params={"code": code})
 
         if df.empty:
-            rows.append(f"| {code} | N/A | N/A | unknown | missing | - |")
+            rows.append(f"| {code} | N/A | N/A | unknown | missing | - | - |")
             missing_details.append(
                 f"- {code}: 数据缺失。建议检查 `update_micro_daily.py` 任务日志中的 `FRED_FETCH_FAIL`。"
             )
@@ -311,20 +311,24 @@ def get_macro_health_snapshot(indicator_code: str = "") -> str:
         meta = _resolve_meta(code, category, db_meta)
         as_of_date = pd.to_datetime(latest["trade_date"], errors="coerce")
         as_of_str = as_of_date.strftime("%Y-%m-%d") if pd.notna(as_of_date) else "N/A"
-        status, stale_days, threshold = _freshness(as_of_date, meta["frequency"])
+        status, observation_age_days, threshold = _freshness(as_of_date, meta["frequency"], code)
 
         val = _format_value(code, pd.to_numeric(latest.get("close_value"), errors="coerce"), meta["unit"])
-        rows.append(f"| {code} | {val} | {as_of_str} | {meta['source']} | {status} | {stale_days} |")
+        rows.append(
+            f"| {code} | {val} | {as_of_str} | {meta['source']} | {status} | "
+            f"{observation_age_days} | {max(0, observation_age_days - threshold)} |"
+        )
         if status == "stale":
             missing_details.append(
-                f"- {code}: 数据陈旧（{stale_days}天 > 阈值{threshold}天）。{_suggestion_by_frequency(meta['frequency'])}"
+                f"- {code}: 数据陈旧（观测期年龄{observation_age_days}天 > 阈值{threshold}天）。"
+                f"{_suggestion_by_frequency(meta['frequency'])}"
             )
 
     result = [
         "📋 **宏观健康快照**",
         "",
-        "| 指标 | 最新值 | as_of_date | source | freshness_status | stale_days |",
-        "|---|---:|---|---|---|---:|",
+        "| 指标 | 最新值 | as_of_date | source | freshness_status | observation_age_days | overdue_days |",
+        "|---|---:|---|---|---|---:|---:|",
         *rows,
     ]
 

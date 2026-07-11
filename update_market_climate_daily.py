@@ -66,6 +66,7 @@ DEFAULT_CME_FEDWATCH_URL = "https://www.cmegroup.com/CmeWS/mvc/Markets/FedWatch/
 DEFAULT_AAII_SENTIMENT_URL = "https://www.aaii.com/sentimentsurvey"
 DEFAULT_AAII_SENTIMENT_XLS_URL = "https://www.aaii.com/files/surveys/sentiment.xls"
 DEFAULT_AAII_INSIGHTS_FEED_URL = "https://insights.aaii.com/feed"
+DEFAULT_AAII_INSIGHTS_ARCHIVE_URL = "https://insights.aaii.com/api/v1/archive"
 DEFAULT_CFTC_TFF_URL = (
     "https://publicreporting.cftc.gov/resource/gpe5-46if.json"
     "?$limit=5000&$order=report_date_as_yyyy_mm_dd%20DESC"
@@ -179,9 +180,13 @@ def parse_cboe_history_csv(csv_text: str) -> pd.DataFrame:
     return out
 
 
-def build_vix_term_record(vix9d: pd.DataFrame, vix: pd.DataFrame, vix3m: pd.DataFrame) -> MarketClimateRecord | None:
+def build_vix_term_history(
+    vix9d: pd.DataFrame,
+    vix: pd.DataFrame,
+    vix3m: pd.DataFrame,
+) -> list[MarketClimateRecord]:
     if vix9d.empty or vix.empty or vix3m.empty:
-        return None
+        return []
     merged = (
         vix9d.rename(columns={"close": "vix9d"})
         .merge(vix.rename(columns={"close": "vix"}), on="as_of_date", how="inner")
@@ -189,23 +194,32 @@ def build_vix_term_record(vix9d: pd.DataFrame, vix: pd.DataFrame, vix3m: pd.Data
         .sort_values("as_of_date")
     )
     if merged.empty:
-        return None
-    row = merged.iloc[-1]
-    as_of = parse_date(row["as_of_date"])
-    if as_of is None:
-        return None
-    vix9d_value = float(row["vix9d"])
-    vix_value = float(row["vix"])
-    vix3m_value = float(row["vix3m"])
-    return MarketClimateRecord(
-        indicator_code="VIX_TERM",
-        as_of_date=as_of,
-        value=vix9d_value - vix3m_value,
-        secondary_value=vix_value,
-        unit="vol_points",
-        source="cboe",
-        payload={"vix9d": vix9d_value, "vix": vix_value, "vix3m": vix3m_value},
-    )
+        return []
+    records: list[MarketClimateRecord] = []
+    for _, row in merged.iterrows():
+        as_of = parse_date(row["as_of_date"])
+        vix9d_value = clean_number(row.get("vix9d"))
+        vix_value = clean_number(row.get("vix"))
+        vix3m_value = clean_number(row.get("vix3m"))
+        if as_of is None or vix9d_value is None or vix_value is None or vix3m_value is None:
+            continue
+        records.append(
+            MarketClimateRecord(
+                indicator_code="VIX_TERM",
+                as_of_date=as_of,
+                value=vix9d_value - vix3m_value,
+                secondary_value=vix_value,
+                unit="vol_points",
+                source="cboe",
+                payload={"vix9d": vix9d_value, "vix": vix_value, "vix3m": vix3m_value},
+            )
+        )
+    return records
+
+
+def build_vix_term_record(vix9d: pd.DataFrame, vix: pd.DataFrame, vix3m: pd.DataFrame) -> MarketClimateRecord | None:
+    records = build_vix_term_history(vix9d, vix, vix3m)
+    return records[-1] if records else None
 
 
 def fetch_vix_term_record(session: requests.Session) -> MarketClimateRecord | None:
@@ -214,6 +228,14 @@ def fetch_vix_term_record(session: requests.Session) -> MarketClimateRecord | No
         url = os.getenv(f"CBOE_{code}_CSV_URL", default_url)
         frames[code] = parse_cboe_history_csv(http_get_text(session, url))
     return build_vix_term_record(frames["VIX9D"], frames["VIX"], frames["VIX3M"])
+
+
+def fetch_vix_term_history(session: requests.Session) -> list[MarketClimateRecord]:
+    frames = {}
+    for code, default_url in DEFAULT_CBOE_URLS.items():
+        url = os.getenv(f"CBOE_{code}_CSV_URL", default_url)
+        frames[code] = parse_cboe_history_csv(http_get_text(session, url))
+    return build_vix_term_history(frames["VIX9D"], frames["VIX"], frames["VIX3M"])
 
 
 def _aaii_pct(value: Any) -> float | None:
@@ -251,15 +273,20 @@ def build_aaii_sentiment_record(
     )
 
 
-def parse_aaii_sentiment_frame(frame: pd.DataFrame, *, source: str = "aaii_xls") -> MarketClimateRecord | None:
+def parse_aaii_sentiment_history_frame(
+    frame: pd.DataFrame,
+    *,
+    source: str = "aaii_xls",
+) -> list[MarketClimateRecord]:
     if frame is None or frame.empty or frame.shape[1] < 4:
-        return None
+        return []
     data = frame.copy()
     data["_as_of"] = pd.to_datetime(data.iloc[:, 0], errors="coerce", format="mixed")
     data = data.dropna(subset=["_as_of"])
     if data.empty:
-        return None
-    for _, row in data.iloc[::-1].iterrows():
+        return []
+    by_date: dict[date, MarketClimateRecord] = {}
+    for _, row in data.iterrows():
         record = build_aaii_sentiment_record(
             row["_as_of"].date(),
             row.iloc[1],
@@ -268,13 +295,23 @@ def parse_aaii_sentiment_frame(frame: pd.DataFrame, *, source: str = "aaii_xls")
             source=source,
         )
         if record is not None:
-            return record
-    return None
+            by_date[record.as_of_date] = record
+    return [by_date[key] for key in sorted(by_date)]
+
+
+def parse_aaii_sentiment_frame(frame: pd.DataFrame, *, source: str = "aaii_xls") -> MarketClimateRecord | None:
+    records = parse_aaii_sentiment_history_frame(frame, source=source)
+    return records[-1] if records else None
 
 
 def parse_aaii_sentiment_workbook(content: bytes) -> MarketClimateRecord | None:
     frame = pd.read_excel(io.BytesIO(content), sheet_name="SENTIMENT", header=None)
     return parse_aaii_sentiment_frame(frame, source="aaii_xls")
+
+
+def parse_aaii_sentiment_history_workbook(content: bytes) -> list[MarketClimateRecord]:
+    frame = pd.read_excel(io.BytesIO(content), sheet_name="SENTIMENT", header=None)
+    return parse_aaii_sentiment_history_frame(frame, source="aaii_xls")
 
 
 def _aaii_release_date(published: date) -> date:
@@ -338,6 +375,96 @@ def parse_aaii_insights_feed(xml_text: str) -> MarketClimateRecord | None:
         )
 
     return max(candidates, key=lambda record: record.as_of_date) if candidates else None
+
+
+def parse_aaii_insights_archive(rows: list[dict[str, Any]]) -> list[MarketClimateRecord]:
+    by_date: dict[date, MarketClimateRecord] = {}
+    for item in rows:
+        title = str(item.get("title") or "").strip()
+        if "aaii sentiment survey" not in title.lower():
+            continue
+        published_text = str(item.get("post_date") or "").strip()
+        try:
+            published_at = datetime.fromisoformat(published_text.replace("Z", "+00:00"))
+        except (TypeError, ValueError, OverflowError):
+            continue
+        content_html = str(item.get("body_html") or item.get("truncated_body_text") or "")
+        content_text = _soup_text(content_html)
+        values: dict[str, float] = {}
+        for label in ("bullish", "neutral", "bearish"):
+            match = re.search(rf"\b{label}\s*:\s*(-?\d+(?:\.\d+)?)\s*%", content_text, re.IGNORECASE)
+            if match is None:
+                match = re.search(rf"\b{label}\s*:\s*(-?\d+(?:\.\d+)?)\s*%", content_html, re.IGNORECASE)
+            if match:
+                values[label] = float(match.group(1))
+        if "bullish" not in values or "bearish" not in values:
+            continue
+        record = build_aaii_sentiment_record(
+            _aaii_release_date(published_at.date()),
+            values.get("bullish"),
+            values.get("neutral"),
+            values.get("bearish"),
+            source="aaii_insights_archive",
+        )
+        if record is None:
+            continue
+        payload = dict(record.payload)
+        payload.update(
+            {
+                "article_title": title,
+                "article_url": str(item.get("canonical_url") or "").strip(),
+                "published_at": published_at.isoformat(),
+            }
+        )
+        by_date[record.as_of_date] = MarketClimateRecord(
+            indicator_code=record.indicator_code,
+            as_of_date=record.as_of_date,
+            value=record.value,
+            secondary_value=record.secondary_value,
+            unit=record.unit,
+            source=record.source,
+            payload=payload,
+        )
+    return [by_date[key] for key in sorted(by_date)]
+
+
+def fetch_aaii_insights_archive_history(
+    session: requests.Session,
+    *,
+    max_pages: int = 8,
+    page_size: int = 12,
+    target_records: int = 32,
+) -> list[MarketClimateRecord]:
+    rows: list[dict[str, Any]] = []
+    url = os.getenv("AAII_INSIGHTS_ARCHIVE_URL", DEFAULT_AAII_INSIGHTS_ARCHIVE_URL)
+    for page in range(max_pages):
+        resp = session.get(
+            url,
+            params={
+                "sort": "new",
+                "search": "AAII Sentiment Survey",
+                "offset": page * page_size,
+                "limit": page_size,
+            },
+            timeout=30,
+        )
+        resp.raise_for_status()
+        payload = resp.json()
+        page_rows = payload if isinstance(payload, list) else []
+        for item in page_rows:
+            if not isinstance(item, dict):
+                continue
+            item_copy = dict(item)
+            if not item_copy.get("body_html") and item_copy.get("canonical_url"):
+                article = session.get(str(item_copy["canonical_url"]), timeout=30)
+                article.raise_for_status()
+                item_copy["body_html"] = article.text
+            rows.append(item_copy)
+        if len(parse_aaii_insights_archive(rows)) >= target_records:
+            break
+        if len(page_rows) < page_size:
+            break
+    return parse_aaii_insights_archive(rows)
 
 
 def _soup_text(html: str) -> str:
@@ -440,6 +567,31 @@ def fetch_aaii_sentiment_record(session: requests.Session) -> MarketClimateRecor
     if errors:
         raise RuntimeError("; ".join(errors))
     return None
+
+
+def fetch_aaii_sentiment_history(session: requests.Session) -> list[MarketClimateRecord]:
+    local_file = os.getenv("AAII_SENTIMENT_FILE")
+    if local_file:
+        with open(local_file, "rb") as fh:
+            return parse_aaii_sentiment_history_workbook(fh.read())
+    errors: list[str] = []
+    try:
+        content = http_get_bytes(
+            session,
+            os.getenv("AAII_SENTIMENT_XLS_URL", DEFAULT_AAII_SENTIMENT_XLS_URL),
+        )
+        records = parse_aaii_sentiment_history_workbook(content)
+        if records:
+            return records
+    except Exception as exc:
+        errors.append(f"xls: {exc}")
+    try:
+        records = fetch_aaii_insights_archive_history(session)
+        if records:
+            return records
+    except Exception as exc:
+        errors.append(f"archive: {exc}")
+    raise RuntimeError("; ".join(errors) if errors else "no usable AAII historical data")
 
 
 def _walk_dicts(value: Any) -> Iterable[dict[str, Any]]:
@@ -587,8 +739,8 @@ def _field_text(row: dict[str, Any], candidates: list[str]) -> str:
     return ""
 
 
-def parse_cftc_vix_json(rows: list[dict[str, Any]]) -> MarketClimateRecord | None:
-    matches = []
+def parse_cftc_vix_json_history(rows: list[dict[str, Any]]) -> list[MarketClimateRecord]:
+    by_date: dict[date, MarketClimateRecord] = {}
     for row in rows:
         market_name = _field_text(row, ["market_and_exchange_names", "market_name", "contract_market_name"])
         if "VIX" not in market_name.upper():
@@ -613,25 +765,27 @@ def parse_cftc_vix_json(rows: list[dict[str, Any]]) -> MarketClimateRecord | Non
         open_interest = _field_number(row, ["open_interest_all", "open_interest"])
         if report_date is None or long_pos is None or short_pos is None or not open_interest:
             continue
-        matches.append((report_date, market_name, long_pos, short_pos, open_interest))
-    if not matches:
-        return None
-    report_date, market_name, long_pos, short_pos, open_interest = sorted(matches, key=lambda item: item[0])[-1]
-    net_contracts = long_pos - short_pos
-    return MarketClimateRecord(
-        indicator_code="CFTC_VIX_LEV_NET",
-        as_of_date=report_date,
-        value=net_contracts / open_interest * 100,
-        secondary_value=net_contracts,
-        unit="%_oi",
-        source="cftc",
-        payload={
-            "market": market_name,
-            "leveraged_funds_long": long_pos,
-            "leveraged_funds_short": short_pos,
-            "open_interest": open_interest,
-        },
-    )
+        net_contracts = long_pos - short_pos
+        by_date[report_date] = MarketClimateRecord(
+            indicator_code="CFTC_VIX_LEV_NET",
+            as_of_date=report_date,
+            value=net_contracts / open_interest * 100,
+            secondary_value=net_contracts,
+            unit="%_oi",
+            source="cftc",
+            payload={
+                "market": market_name,
+                "leveraged_funds_long": long_pos,
+                "leveraged_funds_short": short_pos,
+                "open_interest": open_interest,
+            },
+        )
+    return [by_date[key] for key in sorted(by_date)]
+
+
+def parse_cftc_vix_json(rows: list[dict[str, Any]]) -> MarketClimateRecord | None:
+    records = parse_cftc_vix_json_history(rows)
+    return records[-1] if records else None
 
 
 def parse_cftc_vix_text(text_body: str) -> MarketClimateRecord | None:
@@ -689,6 +843,13 @@ def fetch_cftc_vix_record(session: requests.Session) -> MarketClimateRecord | No
 
     txt = http_get_text(session, os.getenv("CFTC_TFF_TXT_URL", DEFAULT_CFTC_TFF_TXT_URL), timeout=30)
     return parse_cftc_vix_text(txt)
+
+
+def fetch_cftc_vix_history(session: requests.Session) -> list[MarketClimateRecord]:
+    resp = session.get(os.getenv("CFTC_TFF_JSON_URL", DEFAULT_CFTC_TFF_URL), timeout=30)
+    resp.raise_for_status()
+    data = resp.json()
+    return parse_cftc_vix_json_history(data if isinstance(data, list) else [])
 
 
 def build_gscpi_record(df: pd.DataFrame) -> MarketClimateRecord | None:
@@ -807,6 +968,11 @@ FETCHERS = {
     "cftc_vix": fetch_cftc_vix_record,
     "gscpi": fetch_gscpi_record,
 }
+HISTORY_FETCHERS = {
+    "vix_term": fetch_vix_term_history,
+    "aaii": fetch_aaii_sentiment_history,
+    "cftc_vix": fetch_cftc_vix_history,
+}
 FETCH_MAX_AGE_DAYS = {
     "vix_term": 7,
     "fedwatch": 7,
@@ -847,6 +1013,46 @@ def fetch_records(
     return records, errors
 
 
+def fetch_history_records(only: set[str] | None = None) -> tuple[list[MarketClimateRecord], dict[str, str]]:
+    session = make_session()
+    records: list[MarketClimateRecord] = []
+    errors: dict[str, str] = {}
+    selected = only or set(HISTORY_FETCHERS)
+    unsupported = sorted(selected - set(HISTORY_FETCHERS))
+    for name in unsupported:
+        errors[name] = "history backfill is not supported for this source"
+    for name, fetcher in HISTORY_FETCHERS.items():
+        if name not in selected:
+            continue
+        try:
+            fetched = fetcher(session)
+            if not fetched:
+                errors[name] = "no usable historical data"
+                continue
+            records.extend(fetched)
+        except Exception as exc:
+            errors[name] = str(exc)
+    deduped = {
+        (record.indicator_code, record.as_of_date): record
+        for record in records
+    }
+    return [deduped[key] for key in sorted(deduped)], errors
+
+
+def history_summary(records: list[MarketClimateRecord]) -> dict[str, dict[str, Any]]:
+    grouped: dict[str, list[MarketClimateRecord]] = {}
+    for record in records:
+        grouped.setdefault(record.indicator_code, []).append(record)
+    return {
+        code: {
+            "count": len(items),
+            "start": min(item.as_of_date for item in items).isoformat(),
+            "end": max(item.as_of_date for item in items).isoformat(),
+        }
+        for code, items in sorted(grouped.items())
+    }
+
+
 def update_result_status(records: list[MarketClimateRecord], errors: dict[str, str]) -> tuple[str, int]:
     if errors and records:
         return "partial_error", 2
@@ -861,6 +1067,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Update cached market-climate indicators for the US options page.")
     parser.add_argument("--dry-run", action="store_true", help="Fetch and parse data without writing to the database.")
     parser.add_argument(
+        "--backfill-history",
+        action="store_true",
+        help="Backfill available AAII, CFTC VIX positioning and VIX term-structure history.",
+    )
+    parser.add_argument(
         "--only",
         default="",
         help="Comma-separated source names: vix_term,fedwatch,aaii,cftc_vix,gscpi",
@@ -868,14 +1079,18 @@ def main() -> int:
     args = parser.parse_args()
 
     only = {item.strip() for item in args.only.split(",") if item.strip()} or None
-    records, errors = fetch_records(only)
+    records, errors = fetch_history_records(only) if args.backfill_history else fetch_records(only)
     status, exit_code = update_result_status(records, errors)
     output = {
         "status": status,
+        "mode": "history_backfill" if args.backfill_history else "daily",
         "saved": 0,
-        "records": [asdict(record) | {"as_of_date": record.as_of_date.isoformat()} for record in records],
         "errors": errors,
     }
+    if args.backfill_history:
+        output["summary"] = history_summary(records)
+    else:
+        output["records"] = [asdict(record) | {"as_of_date": record.as_of_date.isoformat()} for record in records]
     if not args.dry_run and records:
         engine = create_engine_from_env()
         output["saved"] = save_records(engine, records)

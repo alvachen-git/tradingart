@@ -12,6 +12,8 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 import pandas as pd
 from sqlalchemy import text
 
+from macro_freshness import freshness_threshold_days
+
 try:
     import plotly.graph_objects as go
     from plotly.subplots import make_subplots
@@ -37,7 +39,6 @@ DEFAULT_NEWS_QUERY = (
     "geopolitical conflict war sanctions tariff middle east ukraine"
 )
 
-FRESHNESS_THRESHOLD_BY_FREQ = {"D": 7, "W": 21, "M": 45, "Q": 120}
 REQUIRED_ANALYSIS_KEYS = (
     "overview",
     "yield_curve_comment",
@@ -173,8 +174,13 @@ def _dedupe_news_items(items: List[Dict[str, str]], limit: int = 10) -> List[Dic
     return out
 
 
-def _freshness(as_of: Optional[date], frequency: str, as_of_now: date) -> Tuple[str, int, int]:
-    threshold = FRESHNESS_THRESHOLD_BY_FREQ.get(str(frequency or "D").upper(), 45)
+def _freshness(
+    as_of: Optional[date],
+    frequency: str,
+    as_of_now: date,
+    indicator_code: str = "",
+) -> Tuple[str, int, int]:
+    threshold = freshness_threshold_days(frequency, indicator_code)
     if as_of is None:
         return "missing", -1, threshold
     stale_days = (as_of_now - as_of).days
@@ -521,7 +527,7 @@ def _collect_gold_silver_context(engine: Any, as_of_now: date, lookback_days: in
 def _collect_indicator_event_context(engine: Any, code: str, label: str, frequency: str, as_of_now: date, event_window_days: int) -> Dict[str, Any]:
     snap = _fetch_indicator_latest_two(engine, [code])
     as_of_date = snap.get("as_of_date")
-    status, stale_days, _ = _freshness(as_of_date, frequency, as_of_now)
+    status, stale_days, _ = _freshness(as_of_date, frequency, as_of_now, code)
     recently_updated = bool(as_of_date and (as_of_now - as_of_date).days <= int(event_window_days))
     return {
         "label": label,
@@ -616,8 +622,15 @@ def _collect_news_context() -> Dict[str, Any]:
 def _build_freshness_rows(context: Dict[str, Any], as_of_now: date) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
 
-    def add_row(name: str, value: Any, as_of_date: Optional[date], frequency: str, source: str) -> None:
-        status, stale_days, _ = _freshness(as_of_date, frequency, as_of_now)
+    def add_row(
+        name: str,
+        value: Any,
+        as_of_date: Optional[date],
+        frequency: str,
+        source: str,
+        indicator_code: str = "",
+    ) -> None:
+        status, stale_days, _ = _freshness(as_of_date, frequency, as_of_now, indicator_code)
         rows.append({"name": name, "value": value, "as_of_date": as_of_date.strftime("%Y-%m-%d") if as_of_date else "-", "source": source, "status": status, "stale_days": stale_days})
 
     yld = context.get("yield_curve", {})
@@ -627,7 +640,7 @@ def _build_freshness_rows(context: Dict[str, Any], as_of_now: date) -> List[Dict
     gsr = context.get("gold_silver_ratio", {})
     add_row("金银比", gsr.get("latest_value"), gsr.get("as_of_date"), "D", "futures_price")
     cpi = context.get("cpi", {})
-    add_row("美国CPI同比(%)", cpi.get("latest_yoy") if cpi.get("latest_yoy") is not None else cpi.get("latest_value"), cpi.get("as_of_date"), "M", "macro_daily")
+    add_row("美国CPI同比(%)", cpi.get("latest_yoy") if cpi.get("latest_yoy") is not None else cpi.get("latest_value"), cpi.get("as_of_date"), "M", "macro_daily", "CPIAUCSL")
     nfp = context.get("nfp", {})
     add_row("美国非农新增(千人)", nfp.get("latest_mom_change") if nfp.get("latest_mom_change") is not None else nfp.get("latest_value"), nfp.get("as_of_date"), "M", "macro_daily")
     fed = context.get("fed", {})
