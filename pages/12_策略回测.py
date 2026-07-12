@@ -9,7 +9,15 @@ from ui_components import (
     render_quant_ops_header,
 )
 
-from backtest_engine import engine, run_etf_roll_backtest, get_etf_underlyings, get_etf_expiries, get_etf_strikes_for_expiry, get_etf_first_trade_date, get_etf_strikes_for_range
+from backtest_engine import (
+    engine,
+    get_etf_expiries,
+    get_etf_first_trade_date,
+    get_etf_strikes_for_expiry,
+    get_etf_strikes_for_range,
+    get_etf_underlyings,
+    run_etf_roll_backtest,
+)
 
 
 st.set_page_config(page_title="策略回测", page_icon="favicon.ico",layout="wide")
@@ -187,7 +195,8 @@ render_quant_ops_header(
 )
 
 
-def _latest_trade_date(table: str) -> str:
+@st.cache_data(ttl=300, show_spinner=False)
+def _cached_latest_trade_date(table: str) -> str:
     if engine is None:
         return datetime.now().strftime("%Y%m%d")
     sql = text(f"SELECT MAX(trade_date) AS md FROM {table}")
@@ -198,8 +207,60 @@ def _latest_trade_date(table: str) -> str:
     return datetime.now().strftime("%Y%m%d")
 
 
-etf_latest = _latest_trade_date("option_daily")
-com_latest = _latest_trade_date("commodity_opt_daily")
+@st.cache_data(ttl=300, show_spinner=False)
+def _cached_etf_underlyings():
+    return get_etf_underlyings()
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _cached_etf_first_trade_date(underlying: str, start_date: str, end_date: str):
+    return get_etf_first_trade_date(underlying, start_date, end_date)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _cached_etf_expiries(underlying: str, trade_date: str):
+    return get_etf_expiries(underlying, trade_date)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _cached_etf_strikes_for_range(underlying: str, start_date: str, end_date: str):
+    return get_etf_strikes_for_range(underlying, start_date, end_date)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _cached_etf_strikes_for_expiry(underlying: str, trade_date: str, expiry: str):
+    return get_etf_strikes_for_expiry(underlying, trade_date, expiry)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _cached_run_etf_roll_backtest(
+    data_version: str,
+    underlying: str,
+    strategy: str,
+    start_date: str,
+    end_date: str,
+    fee_per_lot: float,
+    margin_rate: float,
+    strike_mode: str | None,
+    manual_params_items: tuple,
+    lots: int,
+    calendar_type: str,
+):
+    return run_etf_roll_backtest(
+        underlying=underlying,
+        strategy=strategy,
+        start_date=start_date,
+        end_date=end_date,
+        fee_per_lot=fee_per_lot,
+        margin_rate=margin_rate,
+        strike_mode=strike_mode,
+        manual_params=dict(manual_params_items),
+        lots=lots,
+        calendar_type=calendar_type,
+    )
+
+
+etf_latest = _cached_latest_trade_date("option_daily")
 
 default_end = datetime.strptime(etf_latest, "%Y%m%d")
 default_start = default_end - timedelta(days=180)
@@ -221,7 +282,7 @@ end_str = end_date.strftime("%Y%m%d")
 
 st.markdown('<div class="ta-section-title">单标的回测</div>', unsafe_allow_html=True)
 
-etf_list = get_etf_underlyings()
+etf_list = _cached_etf_underlyings()
 if not etf_list:
     st.warning("未检测到 ETF 期权数据（option_basic 为空或无 underlying）")
 else:
@@ -265,14 +326,14 @@ else:
     # 手动合约选择：从起始日的近月合约里取可选行权价
     manual_params = {}
     calendar_type = "C"
-    trade_date = get_etf_first_trade_date(symbol, start_str, end_str) or start_str
-    expiries = get_etf_expiries(symbol, trade_date)
-    expiry = expiries[0] if expiries else None
-    strikes = get_etf_strikes_for_range(symbol, start_str, end_str)
-    if not strikes["C"] and not strikes["P"] and expiry:
-        strikes = get_etf_strikes_for_expiry(symbol, trade_date, expiry)
-
     if strike_mode == "手动选择":
+        trade_date = _cached_etf_first_trade_date(symbol, start_str, end_str) or start_str
+        expiries = _cached_etf_expiries(symbol, trade_date)
+        expiry = expiries[0] if expiries else None
+        strikes = _cached_etf_strikes_for_range(symbol, start_str, end_str)
+        if not strikes["C"] and not strikes["P"] and expiry:
+            strikes = _cached_etf_strikes_for_expiry(symbol, trade_date, expiry)
+
         if strategy in {"单买认购", "单卖认购"}:
             if strikes["C"]:
                 manual_params["single_strike"] = st.selectbox("认购行权价", strikes["C"])
@@ -328,7 +389,8 @@ else:
                     else "MANUAL"
                 )
 
-            result = run_etf_roll_backtest(
+            result = _cached_run_etf_roll_backtest(
+                data_version=etf_latest,
                 underlying=symbol,
                 strategy=strat_key,
                 start_date=start_str,
@@ -336,7 +398,7 @@ else:
                 fee_per_lot=2.0,
                 margin_rate=0.15 + extra_margin_rate,
                 strike_mode=mapped_strike_mode,
-                manual_params=manual_params,
+                manual_params_items=tuple(sorted(manual_params.items())),
                 lots=lots,
                 calendar_type=calendar_type,
             )

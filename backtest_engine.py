@@ -1,4 +1,5 @@
 import os
+import time
 from datetime import datetime, timedelta
 
 import numpy as np
@@ -32,6 +33,24 @@ def get_db_engine():
 
 
 engine = get_db_engine()
+
+
+def _log_backtest_perf(
+    *,
+    strategy: str,
+    rows: int,
+    dates: int,
+    fetch_ms: float,
+    prep_ms: float,
+    simulate_ms: float,
+    total_ms: float,
+) -> None:
+    print(
+        "PERF_BACKTEST "
+        f"strategy={strategy} rows={rows} dates={dates} "
+        f"fetch_ms={fetch_ms:.1f} prep_ms={prep_ms:.1f} "
+        f"simulate_ms={simulate_ms:.1f} total_ms={total_ms:.1f}"
+    )
 
 
 OPTION_MULTIPLIER = {
@@ -470,6 +489,7 @@ def run_etf_roll_backtest(
     - double_sell: 双卖（同月卖出OI最大认购+认沽）
     - deep_otm_put: 买深虚值看跌（同月最小行权价认沽）
     """
+    total_t0 = time.perf_counter()
     if engine is None:
         return {"error": "❌ 数据库未连接"}
 
@@ -564,25 +584,59 @@ def run_etf_roll_backtest(
             "no_contract_dates": [],
         }
 
+    fetch_t0 = time.perf_counter()
     df = _fetch_option_data("etf", underlying, start_date, end_date)
+    fetch_ms = (time.perf_counter() - fetch_t0) * 1000
     if df.empty:
         return {"error": f"⚠️ {underlying} 在区间 {start_date}-{end_date} 无数据"}
 
-    df = df.dropna(subset=["close"])
+    prep_t0 = time.perf_counter()
+    df = df.dropna(subset=["close"]).copy()
     df["call_put"] = df["call_put"].apply(_normalize_call_put)
     df = df.dropna(subset=["call_put"])
     df["exercise_price"] = pd.to_numeric(df["exercise_price"], errors="coerce")
 
-    df = df.sort_values(["trade_date", "ts_code"])
+    df = df.sort_values(["trade_date", "ts_code"]).copy()
+    df["_is_standard_strike"] = df["exercise_price"].map(_is_standard_strike)
     dates = sorted(df["trade_date"].unique().tolist())
     if len(dates) < 2:
         return {"error": f"⚠️ {underlying} 数据天数不足"}
 
-    # 价格索引
-    price_map = {(r["ts_code"], r["trade_date"]): r["close"] for _, r in df.iterrows()}
-    strike_map = {r["ts_code"]: r["exercise_price"] for _, r in df.dropna(subset=["exercise_price"]).iterrows()}
-    call_put_map = {r["ts_code"]: r["call_put"] for _, r in df.iterrows()}
+    price_map = {
+        (ts_code, trade_date): close
+        for ts_code, trade_date, close in df[["ts_code", "trade_date", "close"]].itertuples(
+            index=False, name=None
+        )
+    }
+    metadata = df.drop_duplicates(subset=["ts_code"], keep="last")
+    strike_rows = metadata.dropna(subset=["exercise_price"])
+    strike_map = dict(zip(strike_rows["ts_code"], strike_rows["exercise_price"]))
+    call_put_map = dict(zip(metadata["ts_code"], metadata["call_put"]))
+    delist_map = dict(zip(metadata["ts_code"], metadata["delist_date"]))
+    daily_frames = {
+        trade_date: frame
+        for trade_date, frame in df.groupby("trade_date", sort=False)
+    }
+    prep_ms = (time.perf_counter() - prep_t0) * 1000
+
+    underlying_fetch_t0 = time.perf_counter()
     underlying_prices = _fetch_underlying_prices(underlying, start_date, end_date)
+    fetch_ms += (time.perf_counter() - underlying_fetch_t0) * 1000
+
+    def _standard_strike_mask(frame: pd.DataFrame) -> pd.Series:
+        if "_is_standard_strike" in frame.columns:
+            return frame["_is_standard_strike"].fillna(False)
+        return frame["exercise_price"].map(_is_standard_strike)
+
+    def _effective_standard_mask(frame: pd.DataFrame, target_strike: float | None) -> pd.Series:
+        if target_strike is None:
+            return _standard_strike_mask(frame)
+        try:
+            target = float(target_strike)
+        except Exception:
+            return pd.Series(False, index=frame.index)
+        exact = (frame["exercise_price"] - target).abs() < 1e-6
+        return exact.fillna(False) | _standard_strike_mask(frame)
 
     def _select_contract(
         df_exp,
@@ -597,12 +651,12 @@ def run_etf_roll_backtest(
             return None
         if target_strike is None:
             if standard_only:
-                df_cp = df_cp[df_cp["exercise_price"].apply(_is_standard_strike)]
+                df_cp = df_cp[_standard_strike_mask(df_cp)]
             if df_cp.empty:
                 return None
             return df_cp.sort_values("oi", ascending=False).iloc[0]
         if standard_only:
-            df_cp = df_cp[df_cp["exercise_price"].apply(lambda x: _is_effective_standard(x, target_strike))]
+            df_cp = df_cp[_effective_standard_mask(df_cp, target_strike)]
         if df_cp.empty:
             return None
         if direction_filter == "gte":
@@ -649,10 +703,11 @@ def run_etf_roll_backtest(
             df_dir = df_cp
         # Prefer standard strikes if available
         if prefer_standard:
-            df_std = df_dir[df_dir["exercise_price"].apply(_is_standard_strike)]
+            df_std = df_dir[_standard_strike_mask(df_dir)]
             if not df_std.empty:
                 df_dir = df_std
         # Compute OTM percentage
+        df_dir = df_dir.copy()
         if call_put == "C":
             df_dir["otm_pct"] = df_dir["exercise_price"] / S - 1.0
         else:
@@ -672,7 +727,7 @@ def run_etf_roll_backtest(
         if df_cp.empty:
             return None
         if prefer_standard:
-            df_std = df_cp[df_cp["exercise_price"].apply(_is_standard_strike)]
+            df_std = df_cp[_standard_strike_mask(df_cp)]
             if not df_std.empty:
                 df_cp = df_std
         uniq = sorted(df_cp["exercise_price"].unique().tolist())
@@ -727,7 +782,7 @@ def run_etf_roll_backtest(
         info["max_all"] = float(df_cp["exercise_price"].max())
         df_std = df_cp
         if standard_only:
-            df_std = df_cp[df_cp["exercise_price"].apply(lambda x: _is_effective_standard(x, target_strike))]
+            df_std = df_cp[_effective_standard_mask(df_cp, target_strike)]
         if df_std.empty:
             info["cnt_std"] = 0
             return None, info
@@ -774,7 +829,7 @@ def run_etf_roll_backtest(
         if df_cp.empty:
             return None
         if standard_only:
-            df_cp = df_cp[df_cp["exercise_price"].apply(lambda x: _is_effective_standard(x, target_strike))]
+            df_cp = df_cp[_effective_standard_mask(df_cp, target_strike)]
         df_cp = df_cp[df_cp["exercise_price"] == target_strike]
         if df_cp.empty:
             return None
@@ -818,8 +873,8 @@ def run_etf_roll_backtest(
         return stats
 
     def pick_contracts(date_str: str, min_expiry: str = None, standard_only: bool = True, reason: str = "entry"):
-        df_today = df[df["trade_date"] == date_str]
-        if df_today.empty:
+        df_today = daily_frames.get(date_str)
+        if df_today is None or df_today.empty:
             return None, None
         df_valid = df_today[df_today["delist_date"] >= date_str]
         if min_expiry is not None:
@@ -1172,6 +1227,7 @@ def run_etf_roll_backtest(
     last_S = None
     multiplier = _get_multiplier("etf", underlying)
 
+    simulate_t0 = time.perf_counter()
     for date_str in dates:
         # 首次建仓
         if current_contracts is None:
@@ -1325,7 +1381,6 @@ def run_etf_roll_backtest(
             trade_gross = sum(leg_returns)
             realized_pnl += trade_gross
             trade_ret = trade_gross - fee_open_total - fee_close_total
-            delist_map = {r["ts_code"]: r["delist_date"] for _, r in df.iterrows()}
 
             def _fmt_contract(ts_code: str, direction: str) -> str:
                 strike = strike_map.get(ts_code)
@@ -1573,6 +1628,17 @@ def run_etf_roll_backtest(
         "realized_pnl": realized_pnl,
         "unrealized_pnl": unrealized_pnl,
     }
+
+    simulate_ms = (time.perf_counter() - simulate_t0) * 1000
+    _log_backtest_perf(
+        strategy=strategy,
+        rows=len(df),
+        dates=len(dates),
+        fetch_ms=fetch_ms,
+        prep_ms=prep_ms,
+        simulate_ms=simulate_ms,
+        total_ms=(time.perf_counter() - total_t0) * 1000,
+    )
 
     return {
         "summary": summary,
