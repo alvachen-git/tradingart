@@ -15,7 +15,7 @@ from ui_components import (
     render_option_page_title,
     render_option_sidebar_footer,
 )
-from symbol_match import sql_prefix_condition
+from symbol_match import strict_futures_prefix_pattern
 # 1. 基础配置
 st.set_page_config(
     page_title="爱波塔-商品期权技术分析",
@@ -27,7 +27,6 @@ st.set_page_config(
 PAGE_NAME = "商品期权"
 _PAGE_T0 = time.perf_counter()
 _PERF_LOGGER = logging.getLogger(__name__)
-_CACHE_PROBE_SEEN = set()
 USE_GLOBAL_MONITOR_SNAPSHOT = False
 CONTRACT_LOOKBACK_DAYS = 420
 MAX_CONTRACT_POOL_ROWS = 1200
@@ -48,22 +47,6 @@ COMMODITY_MAP = {
 }
 
 
-def _perf_user_id() -> str:
-    return str(
-        st.session_state.get("username")
-        or st.session_state.get("user")
-        or st.session_state.get("current_user")
-        or "anonymous"
-    )
-
-
-def _probe_cache(tag: str, signature: str) -> int:
-    cache_key = f"{PAGE_NAME}::{tag}::{signature}"
-    hit = 1 if cache_key in _CACHE_PROBE_SEEN else 0
-    _CACHE_PROBE_SEEN.add(cache_key)
-    return hit
-
-
 def _perf_page_log(
     *,
     page: str,
@@ -71,42 +54,48 @@ def _perf_page_log(
     db_ms: float = 0.0,
     api_ms: float = 0.0,
     cache_hit: int = -1,
+    rows: int = -1,
     stage: str = "main",
 ) -> None:
     msg = (
         f"PERF_PAGE page={page} stage={stage} "
-        f"render_ms={render_ms:.1f} db_ms={db_ms:.1f} api_ms={api_ms:.1f} cache_hit={cache_hit}"
+        f"render_ms={render_ms:.1f} db_ms={db_ms:.1f} api_ms={api_ms:.1f} "
+        f"cache_hit={cache_hit} rows={rows}"
     )
     print(msg)
     _PERF_LOGGER.info(msg)
 
 
 @st.cache_data(ttl=300, show_spinner=False)
-def _cached_recent_contract_pool(
-    user_id: str, page: str, symbol: str, date_window: str, cutoff_yyyymmdd: str, variety_code: str
-) -> list[str]:
+def _cached_recent_contract_pool(cutoff_yyyymmdd: str, variety_code: str) -> list[str]:
     if de.engine is None:
         return []
-    prefix_sql = sql_prefix_condition(variety_code)
+    clean_code = re.sub(r"[^A-Z0-9]", "", str(variety_code).upper())
+    prefix_sql = "ts_code LIKE :prefix_like"
+    params = {
+        "cutoff": cutoff_yyyymmdd,
+        "prefix_like": f"{clean_code}%",
+    }
+    if len(clean_code) == 1:
+        prefix_sql += " AND ts_code REGEXP :prefix_regex"
+        params["prefix_regex"] = strict_futures_prefix_pattern(clean_code)
     sql = text(
         f"""
         SELECT DISTINCT ts_code
         FROM commodity_iv_history
-        WHERE REPLACE(trade_date, '-', '') >= :cutoff
+        WHERE trade_date >= :cutoff
           AND {prefix_sql}
         ORDER BY ts_code DESC
         LIMIT {MAX_CONTRACT_POOL_ROWS}
         """
     )
     with de.engine.connect() as conn:
-        rows = conn.execute(sql, {"cutoff": cutoff_yyyymmdd}).fetchall()
+        rows = conn.execute(sql, params).fetchall()
     return [str(r[0]) for r in rows if r and r[0]]
 
 
 @st.cache_data(ttl=300, show_spinner=False)
-def _cached_comprehensive_market_data(
-    user_id: str, page: str, symbol: str, date_window: str
-) -> pd.DataFrame:
+def _cached_comprehensive_market_data() -> pd.DataFrame:
     # Reuse the same precomputed dataset as ranking page to keep IV Rank consistent.
     return de.get_comprehensive_market_data()
 
@@ -667,18 +656,13 @@ inject_option_page_header_style()
 
 # 获取合约列表函数 (已修复 % 报错问题)
 @st.cache_data(ttl=300, show_spinner=False)
-def get_contracts(user_id, page, symbol, date_window, v):
+def get_contracts(v: str, cutoff_yyyymmdd: str, current_yymm: int):
     if de.engine is None:
         return []
     try:
         # 直接按品种前缀在 SQL 过滤，避免全表合约池扫描
-        now = dt.datetime.now()
-        cutoff_yyyymmdd = (now - dt.timedelta(days=CONTRACT_LOOKBACK_DAYS)).strftime("%Y%m%d")
-        raw_codes = _cached_recent_contract_pool(
-            user_id, page, v, "contracts_pool_300s", cutoff_yyyymmdd, v
-        )
+        raw_codes = _cached_recent_contract_pool(cutoff_yyyymmdd, v)
         valid_subs = []
-        current_yymm = int(now.strftime('%y%m'))
 
         for code in raw_codes:
             # 正则提取：字母部分 + 数字部分
@@ -720,7 +704,6 @@ def get_contracts(user_id, page, symbol, date_window, v):
         return []
 
 
-user_id = _perf_user_id()
 title_col, variety_col, contract_col = st.columns([0.50, 0.22, 0.28], gap="small")
 with title_col:
     render_option_page_title("商品期权")
@@ -732,15 +715,15 @@ with variety_col:
         label_visibility="collapsed",
     )
 
-contracts_window = "contracts_120s"
-contracts_sig = f"{user_id}|{PAGE_NAME}|{variety}|{contracts_window}"
-contracts_hit = _probe_cache("contracts", contracts_sig)
+now = dt.datetime.now()
+cutoff_yyyymmdd = (now - dt.timedelta(days=CONTRACT_LOOKBACK_DAYS)).strftime("%Y%m%d")
+current_yymm = int(now.strftime("%y%m"))
 _db_t0 = time.perf_counter()
-options = get_contracts(user_id, PAGE_NAME, variety, contracts_window, variety)
+options = get_contracts(variety, cutoff_yyyymmdd, current_yymm)
 _perf_page_log(
     page=PAGE_NAME,
     db_ms=(time.perf_counter() - _db_t0) * 1000,
-    cache_hit=contracts_hit,
+    rows=len(options),
     stage="get_contracts",
 )
 
@@ -765,7 +748,7 @@ else:
 
 # 3. 数据获取函数
 @st.cache_data(ttl=90, show_spinner=False)
-def get_chart_data(user_id, page, symbol, date_window, code, is_continuous_flag):
+def get_chart_data(code: str, is_continuous_flag: bool):
     if not code: return None, None
     try:
         # A. 获取 IV (直接查 commodity_iv_history)
@@ -812,46 +795,55 @@ def get_chart_data(user_id, page, symbol, date_window, code, is_continuous_flag)
         return None, None
 
 
+@st.cache_data(ttl=90, show_spinner=False)
+def _prepare_chart_frames(df_kline: pd.DataFrame, df_iv: pd.DataFrame | None):
+    chart_k = df_kline[["trade_date", "open", "high", "low", "close"]].copy()
+    chart_k.columns = ["date", "open", "high", "low", "close"]
+    chart_k["date"] = pd.to_datetime(chart_k["date"]).dt.strftime("%Y-%m-%d")
+
+    chart_iv = pd.DataFrame()
+    rank_base = pd.DataFrame()
+    if df_iv is not None and not df_iv.empty:
+        chart_iv = df_iv[["trade_date", "iv"]].rename(
+            columns={"trade_date": "date", "iv": "隐含波动率"}
+        )
+        chart_iv["date"] = pd.to_datetime(chart_iv["date"]).dt.strftime("%Y-%m-%d")
+        chart_iv = chart_iv[chart_iv["隐含波动率"] > 0]
+
+        rank_base = df_iv.copy()
+        rank_base["iv"] = pd.to_numeric(rank_base["iv"], errors="coerce")
+        rank_base = rank_base[rank_base["iv"] > 0.0001].tail(252)
+
+    return chart_k, chart_iv, rank_base
+
+
 # 4. 绘图逻辑
 if target_contract:
-    chart_window = "chart_90s"
-    chart_sig = f"{_perf_user_id()}|{PAGE_NAME}|{target_contract}|{chart_window}|{is_continuous}"
-    chart_hit = _probe_cache("chart_data", chart_sig)
     _db_t0 = time.perf_counter()
-    df_kline, df_iv = get_chart_data(
-        _perf_user_id(),
-        PAGE_NAME,
-        target_contract,
-        chart_window,
-        target_contract,
-        is_continuous,
-    )
+    df_kline, df_iv = get_chart_data(target_contract, is_continuous)
+    chart_rows = (len(df_kline) if df_kline is not None else 0) + (len(df_iv) if df_iv is not None else 0)
     _perf_page_log(
         page=PAGE_NAME,
         db_ms=(time.perf_counter() - _db_t0) * 1000,
-        cache_hit=chart_hit,
+        rows=chart_rows,
         stage="get_chart_data",
     )
 
     if df_kline is not None and not df_kline.empty:
         st.subheader(f"{target_contract} ")
+        chart_k, chart_iv, df_rank_base = _prepare_chart_frames(df_kline, df_iv)
 
         # --- 【新增功能】IV Rank 仪表盘 (仅主力连续显示) ---        if is_continuous and df_iv is not None and not df_iv.empty:
             latest_used_contract = str(df_iv.iloc[-1].get("used_contract") or "").split(".")[0].upper()
 
             market_row = None
             if USE_GLOBAL_MONITOR_SNAPSHOT:
-                monitor_window = "market_monitor_3600s"
-                monitor_sig = f"{_perf_user_id()}|{PAGE_NAME}|{variety}|{monitor_window}"
-                monitor_hit = _probe_cache("comprehensive_market_data", monitor_sig)
                 _db_t1 = time.perf_counter()
-                df_market = _cached_comprehensive_market_data(
-                    _perf_user_id(), PAGE_NAME, variety, monitor_window
-                )
+                df_market = _cached_comprehensive_market_data()
                 _perf_page_log(
                     page=PAGE_NAME,
                     db_ms=(time.perf_counter() - _db_t1) * 1000,
-                    cache_hit=monitor_hit,
+                    rows=len(df_market),
                     stage="get_comprehensive_market_data",
                 )
                 market_row = _pick_market_row_by_product(df_market, variety, latest_used_contract)
@@ -867,9 +859,6 @@ if target_contract:
 
             # Fallback: keep page available when market snapshot has no usable row.
             if curr_iv is None or iv_rank is None:
-                df_rank_base = df_iv.copy()
-                df_rank_base["iv"] = pd.to_numeric(df_rank_base["iv"], errors="coerce")
-                df_rank_base = df_rank_base[df_rank_base["iv"] > 0.0001].tail(252)
                 if not df_rank_base.empty:
                     curr_iv = float(df_rank_base.iloc[-1]["iv"])
                     max_iv = float(df_rank_base["iv"].max())
@@ -881,9 +870,6 @@ if target_contract:
                     min_iv = curr_iv
                     iv_rank = 0.0
             else:
-                df_rank_base = df_iv.copy()
-                df_rank_base["iv"] = pd.to_numeric(df_rank_base["iv"], errors="coerce")
-                df_rank_base = df_rank_base[df_rank_base["iv"] > 0.0001].tail(252)
                 if not df_rank_base.empty:
                     max_iv = float(df_rank_base["iv"].max())
                     min_iv = float(df_rank_base["iv"].min())
@@ -908,24 +894,7 @@ if target_contract:
             st.divider()
 
 
-        # --- K线数据处理 ---
         st.subheader("📊 价格与波动率")
-        chart_k = df_kline[['trade_date', 'open', 'high', 'low', 'close']].copy()
-        chart_k.columns = ['date', 'open', 'high', 'low', 'close']
-        chart_k['date'] = pd.to_datetime(chart_k['date']).dt.strftime('%Y-%m-%d')
-
-        # --- IV数据处理 ---
-        chart_iv = pd.DataFrame()
-        if df_iv is not None and not df_iv.empty:
-            df_iv = df_iv.copy()
-
-            line_name = '隐含波动率'
-
-            chart_iv = df_iv[['trade_date', 'iv']].rename(
-                columns={'trade_date': 'date', 'iv': line_name}
-            )
-            chart_iv['date'] = pd.to_datetime(chart_iv['date']).dt.strftime('%Y-%m-%d')
-            chart_iv = chart_iv[chart_iv[line_name] > 0]
 
         # --- 绘图 ---
         chart = StreamlitChart(height=500, width=None)
@@ -943,7 +912,7 @@ if target_contract:
 
         # 2. IV (左轴)
         if not chart_iv.empty:
-            line = chart.create_line(name=line_name, color='#2962FF', width=2, price_scale_id='left')
+            line = chart.create_line(name="隐含波动率", color='#2962FF', width=2, price_scale_id='left')
             line.set(chart_iv)
 
         chart.load()
