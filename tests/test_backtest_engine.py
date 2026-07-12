@@ -47,14 +47,14 @@ STRATEGY_CASES = {
 EXPECTED_DIGESTS = {
     "hold_underlying": "8c736be1446bcc3f414f2679727e5fac1c606ad4aac54cf56372280f6bba9591",
     "single_call_atm": "3180c6738b7d369fa46f1f5e4eda907c69e0fce68478dcbe0b6cdeb11f58c71b",
-    "single_put_otm5": "378ef47b0e94be7d571fb208ccf8c8ac356343e651f9816ff2af720ad8ce80d8",
+    "single_put_otm5": "3b544c314a51f6ae4ba3f3f89df696098edc8f9b6b2e51e008f5cc1df0059bf0",
     "single_sell_call": "4d55c166b9fede69dc9730a738bd638eaaf45de782dd33555b688aea751e06ce",
-    "single_sell_put": "cfb9473119791f5df4083f1eb62629723dd5d977c7076ea710bb2b56071a3bc2",
+    "single_sell_put": "a791c45253bd321f62128d8c62506bffebfac8805a65757abde4f7622d9d8501",
     "double_buy": "6bd657ceead28817d7dbeb7b313dad90aa31df6fbdbb4d4b5338a3c1186589db",
     "double_sell": "51712abd38b828c930ac18c65094ce13bb22ef396f8e3c765c0ab31010ccf75a",
     "bull_spread": "b39d1c04a31571b9c75fece9f72abd9a32d3af9db6c3058279a1e9dc74656ada",
-    "bear_spread": "4d52dcf47f577ffe954fd7cd1964f6bd24ba0cf8f576c2463fce4c594c23ffcd",
-    "calendar_spread": "38f92797f0343ef750db2d777773d3d8d3c1a5e9dd90f17bc29f219b8c31491d",
+    "bear_spread": "cb1aa2a378b6407ad02a4b11639b7e1f83734424b3f6df43c280782a958a4434",
+    "calendar_spread": "eef4cf79ca4e14af4bd6726b758c1ee62b0a6194a90228e1918421fe1d75d539",
     "manual_call": "ed15433dad8f55c0c76ae43a6816ecd301f988e4150904b21022e79e149d8527",
 }
 
@@ -124,7 +124,8 @@ def _normalize_value(value):
     except (TypeError, ValueError):
         pass
     if isinstance(value, (np.floating, float)):
-        return round(float(value), 10)
+        normalized = round(float(value), 10)
+        return 0.0 if normalized == 0.0 else normalized
     if isinstance(value, (np.integer, int)):
         return int(value)
     if isinstance(value, (pd.Timestamp,)):
