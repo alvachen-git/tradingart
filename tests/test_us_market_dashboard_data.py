@@ -841,6 +841,79 @@ class UsMarketDashboardDataTests(unittest.TestCase):
         self.assertTrue(out["recent_risk"])
         self.assertEqual(out["confidence"], "medium")
 
+    def test_summarize_option_market_bias_uses_requested_weights(self):
+        result = dash.summarize_option_market_bias(
+            {
+                "put_call_oi_percentile": 90.0,
+                "put_skew_5pct_percentile": 10.0,
+                "call_skew_5pct_percentile": 90.0,
+                "put_call_skew_5pct_percentile": 10.0,
+                "term_slope_percentile": 90.0,
+            }
+        )
+
+        self.assertEqual(result["direction"], "明显偏多")
+        self.assertAlmostEqual(result["score"], 64.0)
+        self.assertIn("Put保护溢价处于低位", result["basis"])
+        self.assertIn("期限结构正常", result["basis"])
+        weights = {item["field"]: item["weight"] for item in result["contributions"]}
+        self.assertEqual(weights["put_call_oi"], 10.0)
+        self.assertEqual(weights["put_skew_5pct"], 30.0)
+
+    def test_summarize_option_market_bias_excludes_missing_oi_percentile(self):
+        result = dash.summarize_option_market_bias(
+            {
+                "put_call_oi": 1.92,
+                "put_call_oi_percentile": None,
+                "put_skew_5pct_percentile": 15.0,
+                "call_skew_5pct_percentile": 85.0,
+                "put_call_skew_5pct_percentile": 20.0,
+                "term_slope_percentile": 80.0,
+            }
+        )
+
+        self.assertNotEqual(result["direction"], "参考性有限")
+        self.assertEqual(result["eligible_indicators"], 4)
+        self.assertEqual(result["available_weight"], 90.0)
+        self.assertNotIn("Put侧持仓偏重", result["basis"])
+
+    def test_summarize_option_market_bias_reports_insufficient_history(self):
+        result = dash.summarize_option_market_bias(
+            {
+                "put_skew_5pct_percentile": 80.0,
+                "call_skew_5pct_percentile": 20.0,
+            }
+        )
+
+        self.assertEqual(result["direction"], "参考性有限")
+        self.assertIsNone(result["score"])
+        self.assertEqual(
+            result["summary"],
+            "期权判断：参考性有限；主要依据：历史样本不足，当前持仓与波动率信号尚未形成一致方向。",
+        )
+
+    def test_profile_options_context_keeps_concise_market_bias_summary(self):
+        metrics = {
+            "trade_date": "20260710",
+            "put_call_oi_percentile": 10.0,
+            "put_skew_5pct_percentile": 10.0,
+            "call_skew_5pct_percentile": 90.0,
+            "put_call_skew_5pct_percentile": 10.0,
+            "term_slope_percentile": 90.0,
+        }
+
+        result = dash._profile_options_context(
+            "SPY",
+            metrics=metrics,
+            as_of_date="20260710",
+            engine=None,
+        )
+
+        self.assertTrue(result["summary"].startswith("期权判断："))
+        self.assertIn("；主要依据：", result["summary"])
+        self.assertNotIn("Put/Call OI", result["summary"])
+        self.assertNotIn("ATM IV", result["summary"])
+
     def test_profile_dynamic_v2_uses_llm_json_when_valid(self):
         profile = dash.get_underlying_profile("AMD")
         with patch.object(
@@ -992,7 +1065,7 @@ class UsMarketDashboardDataTests(unittest.TestCase):
         self.assertIn("估算", card["earnings_date"])
         self.assertEqual(card["earnings_source"], "估算")
         self.assertIn("迪士尼", card["recent_hotspot"])
-        self.assertIn("期权数据", card["option_data"])
+        self.assertIn("期权数据暂无最新样本", card["option_data"])
         self.assertEqual(card["dynamic_source_refs"][0]["source"], "估算")
 
     def test_rebuild_underlying_profile_cache_falls_back_without_network_or_llm(self):
@@ -1040,7 +1113,8 @@ class UsMarketDashboardDataTests(unittest.TestCase):
         self.assertEqual(card["earnings_date"], dash.ETF_EARNINGS_NOTE)
         self.assertIn("ETF", card["earnings_source"])
         self.assertIn("成分板块轮动", card["recent_hotspot"])
-        self.assertIn("期权数据", card["option_data"])
+        self.assertIn("期权判断：", card["option_data"])
+        self.assertIn("主要依据：", card["option_data"])
 
     def test_rebuild_underlying_profile_cache_combines_news_web_and_llm_summary(self):
         analyst_ref = dash._classify_profile_source_ref(
@@ -1077,7 +1151,9 @@ class UsMarketDashboardDataTests(unittest.TestCase):
         self.assertEqual(result["news_refs"], 1)
         self.assertEqual(result["web_refs"], 1)
         self.assertIn("分析师上调", card["recent_hotspot"])
-        self.assertIn("IV", card["option_data"])
+        self.assertIn("期权判断：", card["option_data"])
+        self.assertIn("主要依据：", card["option_data"])
+        self.assertNotIn("财报前IV升温", card["option_data"])
         self.assertIn("analyst", source_kinds)
 
     def test_load_market_climate_strip_missing_tables_returns_placeholders(self):

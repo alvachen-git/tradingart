@@ -1098,6 +1098,49 @@ HISTORICAL_PERCENTILE_MIN_SAMPLE_OVERRIDES = {
     "put_call_skew_5pct": 20,
 }
 
+OPTION_MARKET_BIAS_SPECS = (
+    {
+        "field": "put_call_oi",
+        "percentile": "put_call_oi_percentile",
+        "weight": 10.0,
+        "bullish_when_high": False,
+        "bullish_reason": "Put侧持仓压力较低",
+        "bearish_reason": "Put侧持仓偏重",
+    },
+    {
+        "field": "put_skew_5pct",
+        "percentile": "put_skew_5pct_percentile",
+        "weight": 30.0,
+        "bullish_when_high": False,
+        "bullish_reason": "Put保护溢价处于低位",
+        "bearish_reason": "Put保护需求偏强",
+    },
+    {
+        "field": "call_skew_5pct",
+        "percentile": "call_skew_5pct_percentile",
+        "weight": 15.0,
+        "bullish_when_high": True,
+        "bullish_reason": "Call需求相对偏强",
+        "bearish_reason": "Call追涨需求偏弱",
+    },
+    {
+        "field": "put_call_skew_5pct",
+        "percentile": "put_call_skew_5pct_percentile",
+        "weight": 20.0,
+        "bullish_when_high": False,
+        "bullish_reason": "保护需求未明显强于追涨需求",
+        "bearish_reason": "保护需求明显强于追涨需求",
+    },
+    {
+        "field": "term_slope_30_60",
+        "percentile": "term_slope_percentile",
+        "weight": 25.0,
+        "bullish_when_high": True,
+        "bullish_reason": "期限结构正常",
+        "bearish_reason": "期限结构走平或倒挂",
+    },
+)
+
 
 def dashboard_engine():
     return get_db_engine()
@@ -1540,7 +1583,7 @@ def _latest_profile_metric_snapshot(
     try:
         df = load_market_metrics_history(
             underlying,
-            window=2,
+            window=252,
             use_test_tables=use_test_tables,
             engine=engine,
         )
@@ -1549,7 +1592,93 @@ def _latest_profile_metric_snapshot(
     if df is None or df.empty:
         return {}
     row = df.sort_values("trade_date").iloc[-1].to_dict()
-    return {str(key): value for key, value in row.items()}
+    trade_date = normalize_trade_date(row.get("trade_date"))
+    return apply_historical_percentiles(
+        {str(key): value for key, value in row.items()},
+        df,
+        trade_date=trade_date,
+    )
+
+
+def summarize_option_market_bias(metrics: dict[str, Any] | None) -> dict[str, Any]:
+    """Build a concise directional read from comparable historical percentiles."""
+    values = metrics or {}
+    contributions: list[dict[str, Any]] = []
+    available_weight = 0.0
+
+    for spec in OPTION_MARKET_BIAS_SPECS:
+        percentile = _clean_number(values.get(str(spec["percentile"])))
+        if percentile is None:
+            continue
+        percentile = min(max(percentile, 0.0), 100.0)
+        relative = (percentile - 50.0) / 50.0
+        signal = relative if bool(spec["bullish_when_high"]) else -relative
+        weight = float(spec["weight"])
+        contribution = signal * weight
+        contributions.append(
+            {
+                **spec,
+                "percentile_value": percentile,
+                "signal": signal,
+                "contribution": contribution,
+            }
+        )
+        available_weight += weight
+
+    if len(contributions) < 3 or available_weight < 60.0:
+        basis = "历史样本不足，当前持仓与波动率信号尚未形成一致方向"
+        return {
+            "direction": "参考性有限",
+            "score": None,
+            "basis": basis,
+            "summary": f"期权判断：参考性有限；主要依据：{basis}。",
+            "eligible_indicators": len(contributions),
+            "available_weight": available_weight,
+        }
+
+    score = sum(float(item["contribution"]) for item in contributions) / available_weight * 100.0
+    if score >= 35.0:
+        direction = "明显偏多"
+    elif score >= 15.0:
+        direction = "温和偏多"
+    elif score <= -35.0:
+        direction = "明显偏空"
+    elif score <= -15.0:
+        direction = "温和偏空"
+    else:
+        direction = "中性"
+
+    positive = sorted(
+        (item for item in contributions if float(item["contribution"]) > 0),
+        key=lambda item: abs(float(item["contribution"])),
+        reverse=True,
+    )
+    negative = sorted(
+        (item for item in contributions if float(item["contribution"]) < 0),
+        key=lambda item: abs(float(item["contribution"])),
+        reverse=True,
+    )
+    if direction == "中性" and positive and negative:
+        basis = f"{positive[0]['bullish_reason']}，但{negative[0]['bearish_reason']}"
+    else:
+        preferred = positive if score > 0 else negative
+        reasons = [
+            str(item["bullish_reason"] if score > 0 else item["bearish_reason"])
+            for item in preferred[:2]
+        ]
+        if not reasons:
+            reasons = ["期权指标尚未形成一致方向"]
+        basis = "、".join(reasons)
+
+    return {
+        "direction": direction,
+        "score": score,
+        "basis": basis,
+        "summary": f"期权判断：{direction}；主要依据：{basis}。",
+        "eligible_indicators": len(contributions),
+        "available_weight": available_weight,
+        "contributions": contributions,
+    }
 
 
 def _format_metric_sentence(metrics: dict[str, Any]) -> str:
@@ -1844,37 +1973,8 @@ def _profile_options_context(
     engine=None,
     use_test_tables: bool = False,
 ) -> dict[str, Any]:
-    metric_parts: list[str] = []
     metrics = metrics or {}
-    atm_iv = _clean_number(metrics.get("atm_iv_pct"))
-    iv_change = _clean_number(metrics.get("iv_change_1d"))
-    iv_rv = _clean_number(metrics.get("iv_rv20_spread"))
-    put_call_oi = _clean_number(metrics.get("put_call_oi"))
-    put_call_volume = _clean_number(metrics.get("put_call_volume"))
-    zero_dte = _clean_number(metrics.get("zero_dte_volume_share_pct"))
-    put_skew = _clean_number(metrics.get("put_skew_5pct"))
-    call_skew = _clean_number(metrics.get("call_skew_5pct"))
-    if atm_iv is not None:
-        metric_parts.append(f"ATM IV {atm_iv:.1f}%")
-    if iv_change is not None and abs(iv_change) >= 0.05:
-        metric_parts.append(f"IV较前日{'升' if iv_change > 0 else '降'}{abs(iv_change):.1f}点")
-    if iv_rv is not None:
-        metric_parts.append(f"IV-RV20 {iv_rv:+.1f}点")
-    if put_call_oi is not None:
-        if put_call_oi >= 1.2:
-            metric_parts.append(f"Put/Call OI {put_call_oi:.2f}，保护需求偏高")
-        elif put_call_oi <= 0.8:
-            metric_parts.append(f"Put/Call OI {put_call_oi:.2f}，看涨仓位更活跃")
-        else:
-            metric_parts.append(f"Put/Call OI {put_call_oi:.2f}，仓位相对均衡")
-    if put_call_volume is not None and put_call_volume >= 1.2:
-        metric_parts.append(f"Put/Call成交 {put_call_volume:.2f}，短线避险成交增加")
-    if call_skew is not None and call_skew > 0:
-        metric_parts.append(f"Call Skew {call_skew:+.1f}，上方追涨溢价抬升")
-    if put_skew is not None and put_skew > 0:
-        metric_parts.append(f"Put Skew {put_skew:+.1f}，下方保护溢价抬升")
-    if zero_dte is not None and zero_dte >= 15:
-        metric_parts.append(f"0DTE占比约{zero_dte:.1f}%，盘中波动放大")
+    bias = summarize_option_market_bias(metrics)
 
     anomaly_parts: list[str] = []
     trade_date = normalize_trade_date(metrics.get("trade_date")) or normalize_trade_date(as_of_date)
@@ -1906,39 +2006,8 @@ def _profile_options_context(
                     label = f"{label} score {score:.0f}"
                 anomaly_parts.append(label)
 
-    summary_parts = [*metric_parts[:4]]
-    if anomaly_parts:
-        summary_parts.append("异动：" + "；".join(anomaly_parts[:2]))
-    direction_score = 0.0
-    if put_call_oi is not None:
-        if put_call_oi <= 0.8:
-            direction_score += 1.0
-        elif put_call_oi >= 1.2:
-            direction_score -= 1.0
-    if put_call_volume is not None:
-        if put_call_volume <= 0.8:
-            direction_score += 0.8
-        elif put_call_volume >= 1.2:
-            direction_score -= 0.8
-    if call_skew is not None and call_skew > 0:
-        direction_score += 0.8
-    if put_skew is not None and put_skew > 0:
-        direction_score -= 0.8
-    for item in anomaly_parts:
-        if item.startswith("Call"):
-            direction_score += 0.4
-        elif item.startswith("Put"):
-            direction_score -= 0.4
-    if direction_score >= 1.0:
-        direction = "偏多"
-    elif direction_score <= -1.0:
-        direction = "偏空"
-    else:
-        direction = "中性"
-    if summary_parts:
-        summary = "；".join(summary_parts) + f"。期权信号{direction}。"
-    else:
-        summary = "本地期权指标暂无最新样本，方向倾向暂不判断。"
+    summary = str(bias["summary"])
+    direction = str(bias["direction"])
     return {
         "summary": summary,
         "direction": direction,
@@ -2051,6 +2120,8 @@ def _ensure_option_direction(summary: str, direction: str | None = None) -> str:
     text_value = re.sub(r"\s+", " ", str(summary or "")).strip()
     if not text_value or "暂无最新样本" in text_value:
         return ""
+    if "期权判断：" in text_value and "主要依据：" in text_value:
+        return text_value
     if "期权信号" in text_value or "方向倾向" in text_value:
         return text_value
     signal = str(direction or "").strip()
@@ -2089,7 +2160,9 @@ def _fallback_profile_dynamic_v2(
             if catalyst_base
             else f"近期看{name}成分板块轮动、宏观利率和风险偏好变化。"
         )
-        option_data = f"期权数据：{option_summary}" if option_summary else "期权数据暂无最新样本，方向倾向暂不判断。"
+        option_data = option_summary if option_summary.startswith("期权判断：") else (
+            f"期权数据：{option_summary}" if option_summary else "期权数据暂无最新样本，方向倾向暂不判断。"
+        )
     else:
         headline = ""
         if analyst_refs:
@@ -2102,7 +2175,9 @@ def _fallback_profile_dynamic_v2(
             if headline
             else f"近期看{name}的{earnings_hint}、财报预期和业务进展。"
         )
-        option_data = f"期权数据：{option_summary}" if option_summary else "期权数据暂无最新样本，方向倾向暂不判断。"
+        option_data = option_summary if option_summary.startswith("期权判断：") else (
+            f"期权数据：{option_summary}" if option_summary else "期权数据暂无最新样本，方向倾向暂不判断。"
+        )
     return {
         "recent_catalyst": recent_hotspot[:160],
         "recent_hotspot": recent_hotspot[:160],
@@ -2130,7 +2205,7 @@ def _summarize_profile_dynamic_v2(
     )
     if llm_data:
         hotspot = str(llm_data.get("recent_hotspot") or llm_data.get("recent_catalyst") or "")
-        option_data = str(llm_data.get("option_data") or llm_data.get("recent_risk") or "")
+        option_data = str(options_context.get("summary") or "")
         return {
             "recent_catalyst": hotspot,
             "recent_hotspot": hotspot,

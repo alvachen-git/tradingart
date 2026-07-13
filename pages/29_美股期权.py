@@ -56,6 +56,7 @@ from us_market_dashboard_data import (
     load_volatility_cone_history,
     oi_defense_y_axis_range,
     selected_underlying_price,
+    summarize_option_market_bias,
     summarize_option_chain,
 )
 from us_options_polygon import default_trade_date
@@ -1490,8 +1491,12 @@ def _render_a_share_benchmarks_html(profile: dict[str, Any]) -> str:
     )
 
 
-def _render_underlying_profile_card(symbol: str) -> None:
+def _render_underlying_profile_card(symbol: str, option_metrics: dict[str, Any] | None = None) -> None:
     profile = _cached_underlying_profile_card(symbol, dt.date.today().strftime("%Y%m%d"))
+    if option_metrics:
+        option_summary = summarize_option_market_bias(option_metrics)["summary"]
+        profile["option_data"] = option_summary
+        profile["recent_risk"] = option_summary
     code = str(profile.get("symbol") or symbol or "").upper()
     name = str(profile.get("name") or code)
     asset_type = str(profile.get("asset_type") or "stock").lower()
@@ -4588,7 +4593,7 @@ if active_view == "总览":
     main_col, rail_col = st.columns([2.55, 1.05], gap="small")
     with main_col:
         _render_lightweight_chart(stock_df, iv_history, symbol, trade_date, current_iv_pct, height=650)
-        _render_underlying_profile_card(symbol)
+        _render_underlying_profile_card(symbol, vol_position_metrics)
     with rail_col:
         _render_rail(vol_position_metrics, trade_date)
 
