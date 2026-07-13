@@ -779,13 +779,25 @@ def _inject_page_style() -> None:
         .us-underlying-dynamic-item {
             min-width: 0;
         }
+        .us-underlying-dynamic-heading {
+            display: flex;
+            align-items: baseline;
+            flex-wrap: wrap;
+            gap: 7px;
+            margin-bottom: 4px;
+        }
         .us-underlying-dynamic-label {
-            display: block;
             color: #2563eb;
             font-size: 12px;
             line-height: 1.2;
             font-weight: 850;
-            margin-bottom: 4px;
+        }
+        .us-underlying-dynamic-time {
+            color: #94a3b8;
+            font-size: 11px;
+            line-height: 1.2;
+            font-weight: 650;
+            white-space: nowrap;
         }
         .us-underlying-dynamic-text {
             color: #334155;
@@ -840,12 +852,6 @@ def _inject_page_style() -> None:
         .us-underlying-benchmark-empty {
             color: #64748b;
             font-size: 13px;
-            line-height: 1.35;
-        }
-        .us-underlying-dynamic-source {
-            margin-top: 8px;
-            color: #64748b;
-            font-size: 12px;
             line-height: 1.35;
         }
         .us-option-anomaly-shell {
@@ -1438,17 +1444,6 @@ def _underlying_option_label(symbol: str) -> str:
     return f"{code}  {name}" if name else code
 
 
-def _profile_source_summary(refs: Any) -> str:
-    sources: list[str] = []
-    for ref in refs if isinstance(refs, list) else []:
-        if not isinstance(ref, dict):
-            continue
-        source = str(ref.get("source") or "").strip()
-        if source and source not in sources:
-            sources.append(source)
-    return " + ".join(sources[:3]) if sources else "待更新"
-
-
 def _profile_updated_label(value: Any, as_of_date: Any) -> str:
     return format_profile_updated_at_beijing(value, as_of_date)
 
@@ -1491,7 +1486,11 @@ def _render_a_share_benchmarks_html(profile: dict[str, Any]) -> str:
     )
 
 
-def _render_underlying_profile_card(symbol: str, option_metrics: dict[str, Any] | None = None) -> None:
+def _render_underlying_profile_card(
+    symbol: str,
+    option_metrics: dict[str, Any] | None = None,
+    option_trade_date: str | None = None,
+) -> None:
     profile = _cached_underlying_profile_card(symbol, dt.date.today().strftime("%Y%m%d"))
     if option_metrics:
         option_summary = summarize_option_market_bias(option_metrics)["summary"]
@@ -1524,9 +1523,10 @@ def _render_underlying_profile_card(symbol: str, option_metrics: dict[str, Any] 
         )
         for label, text in items
     )
-    source_summary = _profile_source_summary(profile.get("dynamic_source_refs"))
     updated_label = _profile_updated_label(profile.get("dynamic_updated_at"), profile.get("dynamic_as_of_date"))
-    updated_display = f"{updated_label} 北京时间" if ":" in updated_label else updated_label
+    hotspot_time = f"更新于 {updated_label}" if updated_label != "待更新" else "待更新"
+    formatted_option_date = _format_trade_date(option_trade_date)
+    option_time = f"数据截至 {formatted_option_date}" if formatted_option_date != "-" else "数据待更新"
     recent_hotspot = str(profile.get("recent_hotspot") or profile.get("recent_catalyst") or "近期热点待更新")
     option_data = str(profile.get("option_data") or profile.get("recent_risk") or "期权数据待更新")
     benchmarks_html = _render_a_share_benchmarks_html(profile)
@@ -1546,18 +1546,21 @@ def _render_underlying_profile_card(symbol: str, option_metrics: dict[str, Any] 
             <div class="us-underlying-dynamic">
                 <div class="us-underlying-dynamic-grid">
                     <div class="us-underlying-dynamic-item">
-                        <span class="us-underlying-dynamic-label">近期热点</span>
+                        <div class="us-underlying-dynamic-heading">
+                            <span class="us-underlying-dynamic-label">近期热点</span>
+                            <span class="us-underlying-dynamic-time">{escape(hotspot_time)}</span>
+                        </div>
                         <div class="us-underlying-dynamic-text">{escape(recent_hotspot)}</div>
                     </div>
                     <div class="us-underlying-dynamic-item">
-                        <span class="us-underlying-dynamic-label">期权数据</span>
+                        <div class="us-underlying-dynamic-heading">
+                            <span class="us-underlying-dynamic-label">期权数据</span>
+                            <span class="us-underlying-dynamic-time">{escape(option_time)}</span>
+                        </div>
                         <div class="us-underlying-dynamic-text">{escape(option_data)}</div>
                     </div>
                 </div>
                 {benchmarks_html}
-                <div class="us-underlying-dynamic-source">
-                    更新于 {escape(updated_display)} / 来源：{escape(source_summary)}
-                </div>
             </div>
         </div>
         """,
@@ -4593,7 +4596,7 @@ if active_view == "总览":
     main_col, rail_col = st.columns([2.55, 1.05], gap="small")
     with main_col:
         _render_lightweight_chart(stock_df, iv_history, symbol, trade_date, current_iv_pct, height=650)
-        _render_underlying_profile_card(symbol, vol_position_metrics)
+        _render_underlying_profile_card(symbol, vol_position_metrics, latest_option_trade_date)
     with rail_col:
         _render_rail(vol_position_metrics, trade_date)
 
