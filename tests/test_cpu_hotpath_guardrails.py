@@ -15,6 +15,22 @@ def _function_args(source: str, function_name: str) -> list[str]:
     raise AssertionError(f"function not found: {function_name}")
 
 
+def _literal_assignment(source: str, variable_name: str):
+    tree = ast.parse(source)
+    for node in tree.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        if any(isinstance(target, ast.Name) and target.id == variable_name for target in node.targets):
+            return ast.literal_eval(node.value)
+    raise AssertionError(f"assignment not found: {variable_name}")
+
+
+def test_commodity_page_includes_red_date_option():
+    source = COMMODITY_PAGE.read_text(encoding="utf-8")
+    commodity_map = _literal_assignment(source, "COMMODITY_MAP")
+    assert commodity_map["CJ"] == "红枣"
+
+
 def test_commodity_contract_query_keeps_indexable_predicates():
     source = COMMODITY_PAGE.read_text(encoding="utf-8")
     assert "WHERE trade_date >= :cutoff" in source
