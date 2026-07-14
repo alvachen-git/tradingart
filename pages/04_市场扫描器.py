@@ -1458,7 +1458,7 @@ with col_info_top:
         st.markdown("""
 <div class="data-help-grid">
   <div><b>IV</b><span>隐含波动率</span></div>
-  <div><b>IV Rank</b><span>近一年百分位排名</span></div>
+  <div><b>IV Rank</b><span>品种主连最近252条有效IV的历史区间位置；同品种合约共享该数值</span></div>
   <div><b>散户变动</b><span>散户集中席位净持仓变化，偏反向观察</span></div>
   <div><b>机构变动</b><span>机构集中席位净持仓变化，偏顺向观察</span></div>
 </div>
@@ -2082,6 +2082,7 @@ if not df_monitor.empty:
 
             gb.configure_column("IV Rank",
                                 width=120,
+                                headerTooltip="品种主连最近252条有效IV的历史区间位置",
                                 cellRenderer=iv_rank_renderer,
                                 comparator=iv_rank_comparator,
                                 filter="agNumberColumnFilter",
