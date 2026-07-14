@@ -63,22 +63,55 @@ class ComprehensiveMarketDataSnapshotTests(unittest.TestCase):
                     {"ts_code": "RB2609", "close_price": 302.0, "oi": 200.0, "trade_date": "2026-04-28"},
                     {"ts_code": "RB2610", "close_price": 304.0, "oi": 1000.0, "trade_date": "2026-04-28"},
                     {"ts_code": "HC2609", "close_price": 310.0, "oi": 500.0, "trade_date": "2026-04-28"},
+                    {"ts_code": "IM2607", "close_price": 6000.0, "oi": 1000.0, "trade_date": "2026-04-28"},
+                    {"ts_code": "IM2609", "close_price": 6100.0, "oi": 2000.0, "trade_date": "2026-04-28"},
                     {"ts_code": "MA2609", "close_price": 190.0, "oi": 1100.0, "trade_date": "2026-04-27"},
                     {"ts_code": "MA2606", "close_price": 188.0, "oi": 880.0, "trade_date": "2026-04-27"},
                     {"ts_code": "RB2608", "close_price": 298.0, "oi": 90.0, "trade_date": "2026-04-27"},
                     {"ts_code": "RB2609", "close_price": 299.0, "oi": 190.0, "trade_date": "2026-04-27"},
                     {"ts_code": "RB2610", "close_price": 301.0, "oi": 950.0, "trade_date": "2026-04-27"},
                     {"ts_code": "HC2609", "close_price": 308.0, "oi": 480.0, "trade_date": "2026-04-27"},
+                    {"ts_code": "IM2607", "close_price": 5980.0, "oi": 980.0, "trade_date": "2026-04-27"},
+                    {"ts_code": "IM2609", "close_price": 6080.0, "oi": 1980.0, "trade_date": "2026-04-27"},
                     {"ts_code": "MA2609", "close_price": 180.0, "oi": 1000.0, "trade_date": "2026-04-21"},
                     {"ts_code": "MA2606", "close_price": 178.0, "oi": 860.0, "trade_date": "2026-04-21"},
                     {"ts_code": "RB2608", "close_price": 296.0, "oi": 80.0, "trade_date": "2026-04-21"},
                     {"ts_code": "RB2609", "close_price": 297.0, "oi": 180.0, "trade_date": "2026-04-21"},
                     {"ts_code": "RB2610", "close_price": 300.0, "oi": 900.0, "trade_date": "2026-04-21"},
                     {"ts_code": "HC2609", "close_price": 306.0, "oi": 460.0, "trade_date": "2026-04-21"},
+                    {"ts_code": "IM2607", "close_price": 5900.0, "oi": 950.0, "trade_date": "2026-04-21"},
+                    {"ts_code": "IM2609", "close_price": 6000.0, "oi": 1950.0, "trade_date": "2026-04-21"},
                     {"ts_code": "TA2609", "close_price": 100.0, "oi": 1500.0, "trade_date": "2026-04-27"},
                     {"ts_code": "TA2606", "close_price": 98.0, "oi": 1000.0, "trade_date": "2026-04-27"},
                     {"ts_code": "TA2609", "close_price": 95.0, "oi": 1400.0, "trade_date": "2026-04-24"},
                     {"ts_code": "TA2606", "close_price": 96.0, "oi": 950.0, "trade_date": "2026-04-24"},
+                ]
+            )
+
+        if "ranked_product_iv" in sql_text:
+            return pd.DataFrame(
+                [
+                    {
+                        "product": "MA",
+                        "product_latest_iv": 40.0,
+                        "product_min_iv": 20.0,
+                        "product_max_iv": 40.0,
+                        "product_sample_count": 2,
+                    },
+                    {
+                        "product": "RB",
+                        "product_latest_iv": 12.0,
+                        "product_min_iv": 10.0,
+                        "product_max_iv": 14.0,
+                        "product_sample_count": 3,
+                    },
+                    {
+                        "product": "IM",
+                        "product_latest_iv": 29.4507,
+                        "product_min_iv": 15.5467,
+                        "product_max_iv": 32.3741,
+                        "product_sample_count": 3,
+                    },
                 ]
             )
 
@@ -93,7 +126,7 @@ class ComprehensiveMarketDataSnapshotTests(unittest.TestCase):
                     {"ts_code": "MA2606", "iv": 31.0, "trade_date": "2026-04-28"},
                     {"ts_code": "MA2606", "iv": 27.0, "trade_date": "2026-04-27"},
                     {"ts_code": "MA2606", "iv": 24.0, "trade_date": "2026-04-21"},
-                    {"ts_code": "RB2609", "iv": 12.0, "trade_date": "2026-04-28"},
+                    {"ts_code": "RB2609", "iv": 9.0, "trade_date": "2026-04-28"},
                     {"ts_code": "RB2609", "iv": 11.0, "trade_date": "2026-04-27"},
                     {"ts_code": "RB2610", "iv": 13.0, "trade_date": "2026-04-28"},
                     {"ts_code": "RB2610", "iv": 12.5, "trade_date": "2026-04-27"},
@@ -101,6 +134,10 @@ class ComprehensiveMarketDataSnapshotTests(unittest.TestCase):
                     {"ts_code": "TA2609", "iv": 20.0, "trade_date": "2026-04-24"},
                     {"ts_code": "TA2606", "iv": 18.0, "trade_date": "2026-04-27"},
                     {"ts_code": "TA2606", "iv": 16.0, "trade_date": "2026-04-24"},
+                    {"ts_code": "IM2607", "iv": 34.7225, "trade_date": "2026-04-28"},
+                    {"ts_code": "IM2607", "iv": 33.0, "trade_date": "2026-04-27"},
+                    {"ts_code": "IM2609", "iv": 29.4507, "trade_date": "2026-04-28"},
+                    {"ts_code": "IM2609", "iv": 28.0, "trade_date": "2026-04-27"},
                 ]
             )
 
@@ -135,7 +172,7 @@ class ComprehensiveMarketDataSnapshotTests(unittest.TestCase):
         self.assertFalse(ta_main.empty)
         self.assertAlmostEqual(float(ta_main.iloc[0]["涨跌%(日)"]), round((100.0 - 95.0) / 95.0 * 100, 2))
 
-    def test_iv_rank_prefers_product_continuous_history(self):
+    def test_iv_rank_uses_product_continuous_latest_and_range(self):
         with patch.object(data_engine, "engine", object()), \
              patch.object(data_engine, "check_expiry_validity", return_value=True), \
              patch.object(data_engine.pd, "read_sql", side_effect=self._fake_read_sql):
@@ -143,7 +180,121 @@ class ComprehensiveMarketDataSnapshotTests(unittest.TestCase):
 
         ma_main = df[df["合约"] == "MA2609 (甲醇)"]
         self.assertFalse(ma_main.empty)
-        self.assertEqual(ma_main.iloc[0]["IV Rank"], 25)
+        self.assertEqual(ma_main.iloc[0]["IV Rank"], 100)
+
+    def test_im_contracts_share_product_rank_instead_of_exceeding_100(self):
+        with patch.object(data_engine, "engine", object()), \
+             patch.object(data_engine, "check_expiry_validity", return_value=True), \
+             patch.object(data_engine.pd, "read_sql", side_effect=self._fake_read_sql):
+            df = data_engine.get_comprehensive_market_data()
+
+        im_rows = df[df["合约"].isin(["IM2607 (中证1000)", "IM2609 (中证1000)"])]
+        self.assertEqual(len(im_rows), 2)
+        self.assertEqual(set(im_rows["IV Rank"].tolist()), {83})
+        self.assertAlmostEqual(
+            float(im_rows.loc[im_rows["合约"] == "IM2607 (中证1000)", "当前IV"].iloc[0]),
+            34.72,
+            places=2,
+        )
+
+    def test_product_rank_ignores_contract_iv_below_product_range(self):
+        with patch.object(data_engine, "engine", object()), \
+             patch.object(data_engine, "check_expiry_validity", return_value=True), \
+             patch.object(data_engine.pd, "read_sql", side_effect=self._fake_read_sql):
+            df = data_engine.get_comprehensive_market_data()
+
+        rb_rows = df[df["合约"].astype(str).str.startswith("RB")]
+        self.assertFalse(rb_rows.empty)
+        self.assertEqual(set(rb_rows["IV Rank"].tolist()), {50})
+
+    def test_missing_product_history_returns_na_without_contract_fallback(self):
+        def fake_read_sql(sql, engine, params=None):
+            if "ranked_product_iv" in str(sql):
+                return pd.DataFrame(
+                    columns=[
+                        "product",
+                        "product_latest_iv",
+                        "product_min_iv",
+                        "product_max_iv",
+                        "product_sample_count",
+                    ]
+                )
+            return self._fake_read_sql(sql, engine, params=params)
+
+        with patch.object(data_engine, "engine", object()), \
+             patch.object(data_engine, "check_expiry_validity", return_value=True), \
+             patch.object(data_engine.pd, "read_sql", side_effect=fake_read_sql):
+            df = data_engine.get_comprehensive_market_data()
+
+        ma_main = df[df["合约"] == "MA2609 (甲醇)"]
+        self.assertFalse(ma_main.empty)
+        self.assertEqual(float(ma_main.iloc[0]["当前IV"]), 25.0)
+        self.assertEqual(ma_main.iloc[0]["IV Rank"], "N/A")
+
+    def test_product_rank_helper_uses_last_252_valid_rows_and_constant_is_zero(self):
+        dates = pd.date_range("2025-01-01", periods=253, freq="D")
+        rolling_rows = [
+            {"ts_code": "WINDOW", "iv": 1000.0, "trade_date": dates[0]},
+            *[
+                {"ts_code": "WINDOW", "iv": 10.0 + idx / 100.0, "trade_date": trade_date}
+                for idx, trade_date in enumerate(dates[1:], start=1)
+            ],
+            {"ts_code": "FLAT", "iv": 20.0, "trade_date": dates[-2]},
+            {"ts_code": "FLAT", "iv": 20.0, "trade_date": dates[-1]},
+            {"ts_code": "BAD", "iv": 0.0, "trade_date": dates[-1]},
+        ]
+
+        stats = data_engine._build_product_iv_rank_stats(pd.DataFrame(rolling_rows))
+        window = stats[stats["product"] == "WINDOW"].iloc[0]
+        flat = stats[stats["product"] == "FLAT"].iloc[0]
+
+        self.assertEqual(int(window["product_sample_count"]), 252)
+        self.assertAlmostEqual(float(window["product_min_iv"]), 10.01)
+        self.assertEqual(float(window["iv_rank"]), 100.0)
+        self.assertEqual(float(flat["iv_rank"]), 0.0)
+        self.assertNotIn("BAD", set(stats["product"]))
+
+    def test_product_rank_aggregate_guard_logs_and_clips_invalid_boundaries(self):
+        aggregates = pd.DataFrame(
+            [
+                {
+                    "product": "HIGH",
+                    "product_latest_iv": 30.0,
+                    "product_min_iv": 10.0,
+                    "product_max_iv": 20.0,
+                    "product_sample_count": 252,
+                },
+                {
+                    "product": "LOW",
+                    "product_latest_iv": 5.0,
+                    "product_min_iv": 10.0,
+                    "product_max_iv": 20.0,
+                    "product_sample_count": 252,
+                },
+            ]
+        )
+
+        with self.assertLogs(data_engine._PERF_LOGGER, level="WARNING"):
+            stats = data_engine._finalize_product_iv_rank_stats(aggregates)
+
+        ranks = stats.set_index("product")["iv_rank"].to_dict()
+        self.assertEqual(ranks, {"HIGH": 100.0, "LOW": 0.0})
+
+    def test_market_refresh_uses_one_batch_product_rank_query(self):
+        with patch.object(data_engine, "engine", object()), \
+             patch.object(data_engine, "check_expiry_validity", return_value=True), \
+             patch.object(data_engine.pd, "read_sql", side_effect=self._fake_read_sql) as read_sql_mock:
+            df = data_engine.get_comprehensive_market_data()
+
+        self.assertFalse(df.empty)
+        rank_queries = [
+            call
+            for call in read_sql_mock.call_args_list
+            if "ranked_product_iv" in str(call.args[0])
+        ]
+        self.assertEqual(len(rank_queries), 1)
+        numeric_ranks = pd.to_numeric(df["IV Rank"], errors="coerce").dropna()
+        self.assertTrue(numeric_ranks.between(0, 100).all())
 
     def test_near_contract_prefers_available_iv_over_blank_near_month(self):
         with patch.object(data_engine, "engine", object()), \

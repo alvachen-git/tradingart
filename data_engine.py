@@ -10,7 +10,7 @@ import os
 import sys
 import threading
 import time
-from sqlalchemy import create_engine, text
+from sqlalchemy import bindparam, create_engine, text
 from dotenv import load_dotenv
 from pathlib import Path
 from langchain_core.tools import tool
@@ -1111,7 +1111,9 @@ _MARKET_SNAPSHOT_LAST_AT = 0.0
 _MARKET_SNAPSHOT_TTL_SEC = 300
 _MARKET_SNAPSHOT_STALE_MAX_SEC = 1800
 _MARKET_SNAPSHOT_WAIT_SEC = 0.8
-_MARKET_SNAPSHOT_SCHEMA_VERSION = 5
+_MARKET_SNAPSHOT_SCHEMA_VERSION = 6
+_MARKET_IV_RANK_WINDOW = 252
+_MARKET_CONTRACT_IV_LOOKBACK_DAYS = 45
 _MARKET_DISK_SNAPSHOT_PATH = Path(
     os.getenv("TRADINGART_MARKET_SNAPSHOT_CACHE", "/tmp/tradingart_comprehensive_market_data_snapshot.json")
 )
@@ -1224,6 +1226,107 @@ def _parse_market_monitor_date(value):
     if pd.isna(parsed):
         parsed = pd.to_datetime(raw, errors="coerce")
     return parsed
+
+
+def _finalize_product_iv_rank_stats(product_stats):
+    """Calculate and guard IV Rank from product-continuous aggregate statistics."""
+    columns = [
+        "product",
+        "product_latest_iv",
+        "product_min_iv",
+        "product_max_iv",
+        "product_sample_count",
+        "iv_rank",
+    ]
+    required_columns = columns[:-1]
+    if (
+        product_stats is None
+        or product_stats.empty
+        or not set(required_columns).issubset(product_stats.columns)
+    ):
+        return pd.DataFrame(columns=columns)
+
+    product_stats = product_stats[required_columns].copy()
+    product_stats["product"] = product_stats["product"].astype(str).str.strip().str.upper()
+    for column in ["product_latest_iv", "product_min_iv", "product_max_iv", "product_sample_count"]:
+        product_stats[column] = pd.to_numeric(product_stats[column], errors="coerce")
+    product_stats = product_stats[
+        product_stats["product"].str.fullmatch(r"[A-Z]+", na=False)
+        & product_stats["product_latest_iv"].notna()
+        & product_stats["product_min_iv"].notna()
+        & product_stats["product_max_iv"].notna()
+    ].copy()
+    if product_stats.empty:
+        return pd.DataFrame(columns=columns)
+
+    iv_range = product_stats["product_max_iv"] - product_stats["product_min_iv"]
+    product_stats["iv_rank"] = np.where(
+        iv_range > 0.0001,
+        (
+            (product_stats["product_latest_iv"] - product_stats["product_min_iv"])
+            / iv_range
+            * 100
+        ),
+        0.0,
+    )
+    product_stats["iv_rank"] = product_stats["iv_rank"].replace([np.inf, -np.inf], np.nan)
+
+    out_of_range = product_stats[
+        product_stats["iv_rank"].notna()
+        & ((product_stats["iv_rank"] < -1e-9) | (product_stats["iv_rank"] > 100 + 1e-9))
+    ]
+    if not out_of_range.empty:
+        _PERF_LOGGER.warning(
+            "market IV Rank outside 0-100 before clipping: %s",
+            out_of_range[["product", "iv_rank"]].to_dict(orient="records"),
+        )
+    product_stats["iv_rank"] = product_stats["iv_rank"].clip(lower=0.0, upper=100.0)
+    return product_stats[columns]
+
+
+def _build_product_iv_rank_stats(df_history, window_size=_MARKET_IV_RANK_WINDOW):
+    """Calculate product-continuous IV Rank from one internally consistent series."""
+    if df_history is None or df_history.empty:
+        return _finalize_product_iv_rank_stats(pd.DataFrame())
+
+    required = {"ts_code", "iv", "trade_date"}
+    if not required.issubset(df_history.columns):
+        return _finalize_product_iv_rank_stats(pd.DataFrame())
+
+    history = df_history[["ts_code", "iv", "trade_date"]].copy()
+    history["product"] = (
+        history["ts_code"]
+        .astype(str)
+        .str.strip()
+        .str.upper()
+        .str.split(".")
+        .str[0]
+    )
+    history["iv"] = pd.to_numeric(history["iv"], errors="coerce")
+    history["trade_date"] = pd.to_datetime(history["trade_date"], errors="coerce")
+    history = history[
+        history["product"].str.fullmatch(r"[A-Z]+", na=False)
+        & (history["iv"] > 0.0001)
+        & history["trade_date"].notna()
+    ].copy()
+    if history.empty:
+        return _finalize_product_iv_rank_stats(pd.DataFrame())
+
+    history = history.sort_values(["product", "trade_date"])
+    history = history.groupby("product", group_keys=False).tail(max(int(window_size), 1))
+
+    product_stats = (
+        history.groupby("product")["iv"]
+        .agg(product_min_iv="min", product_max_iv="max", product_sample_count="count")
+        .reset_index()
+    )
+    latest = (
+        history.groupby("product", as_index=False)
+        .tail(1)[["product", "iv"]]
+        .rename(columns={"iv": "product_latest_iv"})
+    )
+    product_stats = product_stats.merge(latest, on="product", how="left")
+    return _finalize_product_iv_rank_stats(product_stats)
 
 
 _INDEX_OPTION_TO_FUTURE_PRODUCT = {"IO": "IF", "HO": "IH", "MO": "IM"}
@@ -1860,16 +1963,18 @@ def get_comprehensive_market_data():
         df_now = df_prices_all.merge(product_date_map[['product', 'latest_date_key']], on='product', how='left')
         df_now = df_now[df_now['trade_date_key'] == df_now['latest_date_key']].copy()
 
-        # === 【优化2】合并IV查询 - 一次性获取历史和最新数据 ===
+        # === 【优化2】合约IV仅保留计算最新/1日/5日变动所需的安全窗口 ===
         date_7d = (today_dt - pd.Timedelta(days=7)).strftime('%Y%m%d')
-        date_1y = (today_dt - pd.Timedelta(days=252)).strftime('%Y%m%d')
+        date_iv_history = (
+            today_dt - pd.Timedelta(days=_MARKET_CONTRACT_IV_LOOKBACK_DAYS)
+        ).strftime('%Y%m%d')
 
         sql_iv_all = text("""
         SELECT ts_code, iv, trade_date
         FROM commodity_iv_history 
-        WHERE trade_date >= :date_1y
+        WHERE trade_date >= :date_iv_history
         """)
-        df_iv_all = read_sql_timed(sql_iv_all, params={"date_1y": date_1y})
+        df_iv_all = read_sql_timed(sql_iv_all, params={"date_iv_history": date_iv_history})
         if not df_iv_all.empty:
             df_iv_all['iv'] = pd.to_numeric(df_iv_all['iv'], errors='coerce')
             df_iv_all['trade_date_key'] = pd.to_datetime(df_iv_all['trade_date']).dt.strftime('%Y%m%d')
@@ -1882,9 +1987,8 @@ def get_comprehensive_market_data():
         )
         df_iv_all = df_iv_all[df_iv_all['product'] != ""].copy()
         df_iv_contract = df_iv_all[df_iv_all['join_key'] != ""].copy()
-        df_iv_product = df_iv_all[df_iv_all['join_key'] == ""].copy()
 
-        # 分离最新7天和全年数据
+        # 分离最新7天和45天安全窗口数据
         df_iv_recent = df_iv_contract[df_iv_contract['trade_date_key'] >= date_7d].copy()
         df_iv_latest = df_iv_recent.sort_values('trade_date_key').groupby('join_key').tail(1)[['join_key', 'iv']]
 
@@ -1930,60 +2034,48 @@ def get_comprehensive_market_data():
         # 如果主力合约刚好也是近月合约，drop_duplicates 会自动把它们变成一条
         df_selected = pd.concat([top_oi, top_near]).drop_duplicates(subset=['join_key'])
 
-        # === 第5步：计算IV Rank（使用已加载的全年数据）===
+        # === 第5步：计算IV Rank（品种主连自身最近252条有效记录）===
         keys = df_selected['join_key'].unique().tolist()
         if keys:
-            # 复用已加载的一年IV数据，避免重复全量扫描
-            products = df_selected['product'].dropna().unique().tolist()
-            df_h = df_iv_contract[df_iv_contract['join_key'].isin(keys)][['join_key', 'iv']].copy()
-
-            # --- 【核心修改】 过滤掉 IV 为 0 的异常值 ---
-            # 只有大于 0.0001 的 IV 才参与统计
-            # 这样 Min 值就是“历史最低的有效IV”，而不是 0
-            df_h_valid = df_h[df_h['iv'] > 0.0001]
-            df_product_valid = df_iv_product[
-                (df_iv_product['product'].isin(products)) & (df_iv_product['iv'] > 0.0001)
-            ].copy()
-
-            if not df_h_valid.empty:
-                stats = (
-                    df_h_valid
-                    .groupby('join_key')['iv']
-                    .agg(['min', 'max'])
-                    .reset_index()
-                    .rename(columns={'min': 'contract_min', 'max': 'contract_max'})
-                )
-                df_final = df_selected.merge(stats, on='join_key', how='left')
-            else:
-                # 如果全是 0，给个空列防止报错
-                df_final = df_selected.copy()
-                df_final['contract_min'] = np.nan
-                df_final['contract_max'] = np.nan
-
-            if not df_product_valid.empty:
-                product_stats = (
-                    df_product_valid
-                    .groupby('product')['iv']
-                    .agg(['min', 'max'])
-                    .reset_index()
-                    .rename(columns={'min': 'product_min', 'max': 'product_max'})
-                )
-                df_final = df_final.merge(product_stats, on='product', how='left')
-            else:
-                df_final['product_min'] = np.nan
-                df_final['product_max'] = np.nan
-
-            # 计算 Rank
-            df_final['rank_min'] = df_final['product_min'].combine_first(df_final['contract_min'])
-            df_final['rank_max'] = df_final['product_max'].combine_first(df_final['contract_max'])
-            df_final['iv_range'] = df_final['rank_max'] - df_final['rank_min']
-            # 分母极小时保护
-            df_final['iv_rank'] = np.where(
-                (df_final['iv'].fillna(0) > 0.0001) & (df_final['iv_range'] > 0.0001),
-                (df_final['iv'] - df_final['rank_min']) / df_final['iv_range'] * 100,
-                np.nan
+            products = sorted(df_selected['product'].dropna().astype(str).str.upper().unique().tolist())
+            sql_product_iv_rank = text("""
+            WITH ranked_product_iv AS (
+                SELECT
+                    ts_code,
+                    iv,
+                    trade_date,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY ts_code
+                        ORDER BY trade_date DESC
+                    ) AS history_rank
+                FROM commodity_iv_history
+                WHERE ts_code IN :products
+                  AND iv > 0.0001
             )
-            df_final['iv_rank'] = df_final['iv_rank'].replace([np.inf, -np.inf], np.nan)
+            SELECT
+                ts_code AS product,
+                MAX(CASE WHEN history_rank = 1 THEN iv END) AS product_latest_iv,
+                MIN(iv) AS product_min_iv,
+                MAX(iv) AS product_max_iv,
+                COUNT(*) AS product_sample_count
+            FROM ranked_product_iv
+            WHERE history_rank <= :rank_window
+            GROUP BY ts_code
+            """).bindparams(bindparam("products", expanding=True))
+            product_rank_aggregates = read_sql_timed(
+                sql_product_iv_rank,
+                params={"products": products, "rank_window": _MARKET_IV_RANK_WINDOW},
+            )
+            product_rank_stats = _finalize_product_iv_rank_stats(product_rank_aggregates)
+            if product_rank_stats.empty:
+                df_final = df_selected.copy()
+                df_final['iv_rank'] = np.nan
+            else:
+                df_final = df_selected.merge(
+                    product_rank_stats[["product", "iv_rank"]],
+                    on="product",
+                    how="left",
+                )
         else:
             df_final = df_selected
             df_final['iv_rank'] = np.nan
