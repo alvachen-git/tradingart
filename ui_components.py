@@ -143,6 +143,33 @@ def inject_option_page_header_style() -> None:
             fill: #64748b;
         }
 
+        /* Edge can paint BaseWeb's inner control with the browser theme even
+           when the select wrapper is white. Keep the main canvas explicitly
+           light without overriding the dark sidebar controls. */
+        [data-testid="stMain"] div[data-testid="stSelectbox"] [data-baseweb="select"],
+        [data-testid="stMain"] div[data-testid="stSelectbox"] [data-baseweb="select"] > div {
+            color-scheme: light !important;
+            background-color: #ffffff !important;
+        }
+
+        [data-testid="stMain"] div[data-testid="stSelectbox"] [data-baseweb="select"] > div,
+        [data-testid="stMain"] div[data-testid="stSelectbox"] [data-baseweb="select"] [role="combobox"],
+        [data-testid="stMain"] div[data-testid="stSelectbox"] [data-baseweb="select"] input,
+        [data-testid="stMain"] div[data-testid="stSelectbox"] [data-baseweb="select"] span {
+            color: #0f172a !important;
+            -webkit-text-fill-color: #0f172a !important;
+            caret-color: #0f172a !important;
+        }
+
+        [data-testid="stMain"] div[data-testid="stSelectbox"] [data-baseweb="select"] input {
+            background-color: transparent !important;
+        }
+
+        [data-testid="stMain"] div[data-testid="stSelectbox"] [data-baseweb="select"] svg {
+            color: #64748b !important;
+            fill: #64748b !important;
+        }
+
         div[data-testid="stSegmentedControl"] {
             display: inline-flex;
             width: auto;
@@ -162,6 +189,13 @@ def inject_option_page_header_style() -> None:
             border-radius: 6px !important;
             color: #475569 !important;
             font-weight: 700 !important;
+        }
+
+        [data-testid="stMain"] div[data-testid="stSegmentedControl"] button:not([aria-pressed="true"]) {
+            color-scheme: light !important;
+            background-color: #ffffff !important;
+            color: #475569 !important;
+            -webkit-text-fill-color: #475569 !important;
         }
 
         div[data-testid="stSegmentedControl"] button[aria-pressed="true"] {
