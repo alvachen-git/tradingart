@@ -247,6 +247,29 @@ def get_iv_rank_data(etf_code, window=252):
 # ==========================================
 #   功能 3: 获取绘图数据
 # ==========================================
+def _read_kline_with_volume(table_name, etf_code, limit):
+    """Load OHLCV while allowing legacy fallback tables without a volume column."""
+    base_columns = (
+        "trade_date, open_price as open, high_price as high, "
+        "low_price as low, close_price as close"
+    )
+    volume_sql = (
+        f"SELECT {base_columns}, COALESCE(vol, 0) as volume "
+        f"FROM {table_name} WHERE ts_code='{etf_code}' "
+        f"ORDER BY trade_date DESC LIMIT {int(limit)}"
+    )
+    try:
+        return pd.read_sql(volume_sql, engine)
+    except Exception:
+        fallback_sql = (
+            f"SELECT {base_columns} FROM {table_name} WHERE ts_code='{etf_code}' "
+            f"ORDER BY trade_date DESC LIMIT {int(limit)}"
+        )
+        frame = pd.read_sql(fallback_sql, engine)
+        frame["volume"] = 0.0
+        return frame
+
+
 @st.cache_data(ttl=600)
 def get_kline_and_iv_data(etf_code, limit=100):
     if engine is None: return pd.DataFrame(), pd.DataFrame()
@@ -254,11 +277,9 @@ def get_kline_and_iv_data(etf_code, limit=100):
     try:
         iv_sql = f"SELECT * FROM etf_iv_history WHERE etf_code='{etf_code}' ORDER BY trade_date"
         df_iv = pd.read_sql(iv_sql, engine)
-        kline_sql = f"SELECT trade_date, open_price as open, high_price as high, low_price as low, close_price as close FROM stock_price WHERE ts_code='{etf_code}' ORDER BY trade_date DESC LIMIT {limit}"
-        df_k = pd.read_sql(kline_sql, engine)
+        df_k = _read_kline_with_volume("stock_price", etf_code, limit)
         if df_k.empty:
-            kline_sql = f"SELECT trade_date, open_price as open, high_price as high, low_price as low, close_price as close FROM index_price WHERE ts_code='{etf_code}' ORDER BY trade_date DESC LIMIT {limit}"
-            df_k = pd.read_sql(kline_sql, engine)
+            df_k = _read_kline_with_volume("index_price", etf_code, limit)
         return df_k.sort_values('trade_date'), df_iv
     except:
         return pd.DataFrame(), pd.DataFrame()

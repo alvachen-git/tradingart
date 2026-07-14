@@ -57,6 +57,52 @@ class TestUpdateAstockDaily(unittest.TestCase):
         self.assertEqual(out.loc[0, "ts_code"], "510300.SH")
         self.assertAlmostEqual(out.loc[0, "amount"], 123456.0)
 
+    def test_standardize_akshare_spot_etf_converts_shares_and_yuan_to_tushare_units(self):
+        raw = pd.DataFrame(
+            [
+                {
+                    "代码": "510300",
+                    "名称": "沪深300ETF",
+                    "最新价": 4.862,
+                    "今开": 4.828,
+                    "最高": 4.868,
+                    "最低": 4.807,
+                    "成交量": 1_325_050_000,
+                    "成交额": 6_421_618_436.0,
+                    "涨跌幅": 1.12,
+                }
+            ]
+        )
+
+        out = upd._standardize_akshare_spot_df(raw, "20260522", "E")
+
+        self.assertEqual(out.loc[0, "trade_date"], "20260522")
+        self.assertEqual(out.loc[0, "ts_code"], "510300.SH")
+        self.assertAlmostEqual(out.loc[0, "vol"], 13_250_500.0)
+        self.assertAlmostEqual(out.loc[0, "amount"], 6_421_618.436)
+
+    def test_standardize_akshare_spot_stock_keeps_volume_lot_unit(self):
+        raw = pd.DataFrame(
+            [
+                {
+                    "代码": "600519",
+                    "名称": "贵州茅台",
+                    "最新价": 1500.0,
+                    "今开": 1490.0,
+                    "最高": 1510.0,
+                    "最低": 1480.0,
+                    "成交量": 123_456,
+                    "成交额": 18_518_400_000.0,
+                    "涨跌幅": 0.5,
+                }
+            ]
+        )
+
+        out = upd._standardize_akshare_spot_df(raw, "20260522", "S")
+
+        self.assertAlmostEqual(out.loc[0, "vol"], 123_456.0)
+        self.assertAlmostEqual(out.loc[0, "amount"], 18_518_400.0)
+
     @patch("update_astock_daily._save_price_df", return_value=1)
     @patch("update_astock_daily._fetch_akshare_df")
     @patch("update_astock_daily._fetch_tushare_df")

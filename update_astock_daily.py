@@ -196,7 +196,7 @@ def _normalize_akshare_code(value: Any) -> str:
     return normalize_symbol(raw)
 
 
-def _standardize_akshare_spot_df(df: pd.DataFrame, trade_date: str) -> pd.DataFrame:
+def _standardize_akshare_spot_df(df: pd.DataFrame, trade_date: str, asset_type: str) -> pd.DataFrame:
     if df is None or df.empty:
         return _empty_price_df()
     out = pd.DataFrame()
@@ -225,6 +225,9 @@ def _standardize_akshare_spot_df(df: pd.DataFrame, trade_date: str) -> pd.DataFr
     out["vol"] = raw[vol_col] if vol_col else 0
     out["amount"] = raw[amount_col] if amount_col else 0
     out["pct_chg"] = raw[pct_col] if pct_col else 0
+    if str(asset_type or "").upper() != "S":
+        # AkShare ETF spot returns shares, while stock_price follows Tushare's lot unit.
+        out["vol"] = pd.to_numeric(out["vol"], errors="coerce") / 100.0
     out["amount"] = pd.to_numeric(out["amount"], errors="coerce") / 1000.0
     return _prepare_save_df(out)
 
@@ -278,7 +281,7 @@ def _fetch_akshare_spot_df(trade_date: str, asset_type: str) -> pd.DataFrame:
         raw = ak.stock_zh_a_spot_em()
     else:
         raw = ak.fund_etf_spot_em()
-    return _standardize_akshare_spot_df(raw, trade_date)
+    return _standardize_akshare_spot_df(raw, trade_date, asset_type)
 
 
 def _save_price_df(ts_code: str, start_date: str, end_date: str, df_save: pd.DataFrame) -> int:

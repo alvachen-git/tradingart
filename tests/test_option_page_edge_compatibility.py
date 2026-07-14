@@ -7,15 +7,14 @@ import ui_components
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 US_OPTIONS_PAGE = ROOT_DIR / "pages" / "29_美股期权.py"
+OPTION_KLINE_CHART = ROOT_DIR / "option_kline_chart.py"
 
 
 class OptionPageEdgeCompatibilityTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.us_options_source = US_OPTIONS_PAGE.read_text(encoding="utf-8")
-        chart_start = cls.us_options_source.index("html = Template(")
-        chart_end = cls.us_options_source.index("components.html", chart_start)
-        cls.chart_source = cls.us_options_source[chart_start:chart_end]
+        cls.chart_source = OPTION_KLINE_CHART.read_text(encoding="utf-8")
 
     def test_shared_option_controls_style_actual_baseweb_inner_nodes(self):
         with patch.object(ui_components.st, "markdown") as markdown:

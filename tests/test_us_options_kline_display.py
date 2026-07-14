@@ -152,6 +152,18 @@ class USOptionsKlineDisplayTests(unittest.TestCase):
 
         self.assertEqual(selected_underlying_price(df, "20260701"), 800.0)
 
+    def test_us_options_page_uses_shared_renderer_with_preserved_defaults(self):
+        page_source = Path("pages/29_美股期权.py").read_text(encoding="utf-8")
+        chart_source = Path("option_kline_chart.py").read_text(encoding="utf-8")
+
+        self.assertIn("from option_kline_chart import lightweight_chart_loader_html, render_option_kline_chart", page_source)
+        self.assertIn("render_option_kline_chart(", page_source)
+        self.assertIn('showTitle: true', chart_source)
+        self.assertIn('showLatest: true', chart_source)
+        self.assertIn('storageNamespace: "us-options-chart-drawings"', chart_source)
+        self.assertIn('ivLabel: "ATM IV"', chart_source)
+        self.assertIn('const defaultVisible = { ma5: false, ma20: true, ma60: false, iv: true }', chart_source)
+
 
 if __name__ == "__main__":
     unittest.main()
