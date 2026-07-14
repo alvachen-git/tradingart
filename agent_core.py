@@ -114,6 +114,11 @@ from agent_prompt_policy import (
     is_option_strategy_question,
 )
 from followup_task_policy import apply_followup_supervisor_policy
+from option_scenario_policy import (
+    build_finalizer_scenario_context,
+    build_strategist_scenario_context,
+    detect_option_hypothetical_scenario,
+)
 from option_strategy_policy import build_option_strategy_policy
 from chat_context_layers import append_chat_trace_event, has_agent_context, render_agent_context
 from agent_expert_router import build_route_decision
@@ -4058,6 +4063,7 @@ def strategist_node(state: AgentState, llm):
     """
     symbol = state["symbol"]
     user_q = state.get("user_query", "")
+    option_scenario = detect_option_hypothetical_scenario(user_q)
     raw_risk_pref = state.get("risk_preference", "稳健型")
     fund = state.get("fund_data", "暂无明显资金流向")
     trend = state.get("trend_signal", "Neutral")
@@ -4363,6 +4369,8 @@ def strategist_node(state: AgentState, llm):
         {option_position_requirements}
 
         """
+    if option_scenario.active:
+        prompt += build_strategist_scenario_context(option_scenario)
 
     # === 🔥 创建 ReAct Agent ===
     strategist_agent = create_react_agent(llm, tools, prompt=prompt)
@@ -5804,6 +5812,7 @@ def finalizer_node(state: AgentState, llm):
     # 拼接到一起用于输入
     context_text = "\n".join([f"{m.content}" for m in worker_msgs])
     user_query = state.get("user_query", "")
+    option_scenario = detect_option_hypothetical_scenario(user_query)
     if _is_futures_broker_signal_task(user_query) and "【数据监控】" in context_text:
         return {
             "messages": [HumanMessage(content=context_text)],
@@ -6225,7 +6234,7 @@ def finalizer_node(state: AgentState, llm):
         # 判断是否为"综合分析"类问题
         analysis_keywords = ["分析", "怎么看", "怎么做", "策略", "建议", "操作", "行情", "走势", "如何","趋势", "全面"]
         is_analysis_query = any(kw in user_query for kw in analysis_keywords)
-        force_option_deep_mode = is_option_position_mode
+        force_option_deep_mode = is_option_position_mode or option_scenario.active
 
         # 🎯 根据问题类型选择不同的 Prompt
         if is_data_query and not is_analysis_query and not force_option_deep_mode:
@@ -6405,6 +6414,9 @@ def finalizer_node(state: AgentState, llm):
                 ### 🛡️ 风控与对冲
                 (止损位、风险提示...)
                 """
+
+        if option_scenario.active:
+            cio_prompt += build_finalizer_scenario_context(option_scenario)
 
         final_verdict = llm.invoke(cio_prompt)
 
