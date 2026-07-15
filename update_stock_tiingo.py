@@ -112,12 +112,12 @@ SECTOR_SYMBOLS = {
     # 科技与互联网龙头（半导体/云计算/软件/平台）
     "tech": [
         "AAPL", "MSFT", "NVDA", "GOOG", "GOOGL", "META", "AMZN", "TSM", "AVGO", "AMD", "INTC",
-        "ORCL", "ADBE", "CRM", "CSCO", "QCOM", "TXN", "MU", "AMAT", "LRCX", "KLAC","TSLA",
+        "ORCL", "ADBE", "CRM", "IBM", "CSCO", "QCOM", "TXN", "MU", "AMAT", "LRCX", "KLAC","TSLA",
         "PANW", "CRWD", "PLTR", "SNOW", "NOW", "ANET", "CDNS", "SNPS", "INTU", "SHOP",
     ],
     # AI 主题补充（与 tech 并行维护，去重逻辑会自动处理重复代码）
     "ai_thematic": [
-        "ARM", "MRVL", "SMCI", "DELL", "ASML", "TSM",
+        "ARM", "MRVL", "SMCI", "DELL", "ASML", "TSM", "VRT",
     ],
     # 金融核心标的（银行/支付/资管/交易所）
     "financial": [
@@ -141,6 +141,7 @@ SECTOR_SYMBOLS = {
     "option_active": [
         "BABA", "UBER", "SOFI", "RIVN", "MARA", "DRAM",
         "BA", "CVNA", "F", "GME", "LLY", "PANW", "PDD", "PYPL", "SHOP", "UNH",
+        "ADBE", "APP", "C", "CAT", "CRM", "IBM", "PFE", "SNOW", "VRT", "WFC",
     ],
     # 石油与油服炼化
     "oil_energy": [
@@ -152,7 +153,7 @@ SECTOR_SYMBOLS = {
     ],
     # 美股行业高流动性 ETF
     "us_etf_sector": [
-        "XLK", "XLF", "XLE", "XLV", "XLI", "XLY", "XLP", "XLU", "XLB", "XLC", "SMH", "SOXX", "KRE",
+        "XLK", "XLF", "XLE", "XLV", "XLI", "XLY", "XLP", "XLU", "XLB", "XLC", "SMH", "SOXX", "KRE", "XBI",
     ],
     # 资产配置/宏观高流动性 ETF
     "us_etf_macro": [

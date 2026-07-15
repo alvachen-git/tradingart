@@ -22,13 +22,18 @@ class TestUSOptionsPolygon(unittest.TestCase):
     def test_default_underlyings_cover_dashboard_symbols_without_index_options(self):
         symbols = set(uop.DEFAULT_UNDERLYINGS)
         new_symbols = {
+            "ADBE",
+            "APP",
             "ARM",
             "ASML",
             "AVGO",
             "BA",
             "BABA",
             "BAC",
+            "C",
+            "CAT",
             "COIN",
+            "CRM",
             "CRWD",
             "CVNA",
             "DELL",
@@ -40,6 +45,7 @@ class TestUSOptionsPolygon(unittest.TestCase):
             "GME",
             "GOOGL",
             "HOOD",
+            "IBM",
             "INTC",
             "JPM",
             "KRE",
@@ -55,6 +61,7 @@ class TestUSOptionsPolygon(unittest.TestCase):
             "ORCL",
             "PANW",
             "PDD",
+            "PFE",
             "PLTR",
             "PYPL",
             "QCOM",
@@ -63,20 +70,28 @@ class TestUSOptionsPolygon(unittest.TestCase):
             "SHOP",
             "SMH",
             "SMCI",
+            "SNOW",
             "SOFI",
             "SPCX",
             "TSM",
             "UBER",
             "UNH",
             "USO",
+            "VRT",
+            "WFC",
             "WMT",
+            "XBI",
+            "XLI",
+            "XLK",
+            "XLV",
+            "XLY",
         }
 
         self.assertFalse({"SPX", "NDX", "RUT", "VIX"} & symbols)
         for symbol in ("SPY", "QQQ", "IWM", "GLD", "TLT", "TSLA", "NVDA", "AMD", "AAPL", "AMZN"):
             self.assertIn(symbol, symbols)
         self.assertTrue(new_symbols <= symbols)
-        self.assertEqual(len(uop.DEFAULT_UNDERLYINGS), 63)
+        self.assertEqual(len(uop.DEFAULT_UNDERLYINGS), 78)
 
     def test_parse_option_ticker_extracts_root_expiration_type_and_strike(self):
         parsed = uop.parse_option_ticker("O:SPY260619C00600000")

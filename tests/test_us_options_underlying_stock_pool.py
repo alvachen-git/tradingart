@@ -24,6 +24,11 @@ class UsOptionsUnderlyingStockPoolTests(unittest.TestCase):
             "FXI",
             "USO",
             "KRE",
+            "XBI",
+            "XLI",
+            "XLK",
+            "XLV",
+            "XLY",
         }
 
         self.assertFalse((option_symbols - etf_symbols) - stock_symbols)
