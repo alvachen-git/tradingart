@@ -22,6 +22,66 @@ if str(ROOT_DIR) not in sys.path:
 CHART_RENDER_WINDOW = 260
 TODAY_LINE_COLOR = "#2563eb"
 PREVIOUS_LINE_COLOR = "#f97316"
+SYMBOL_DEFAULT_FAVORITES = ("NVDA", "TSLA", "SPY", "QQQ", "ARM", "COIN")
+SYMBOL_CATEGORY_MEMBERS = {
+    "指数ETF": (
+        "SPY",
+        "QQQ",
+        "DIA",
+        "IWM",
+        "GLD",
+        "TLT",
+        "SLV",
+        "HYG",
+        "EEM",
+        "FXI",
+        "XLI",
+    ),
+    "科技老登": (
+        "AAPL",
+        "MSFT",
+        "GOOGL",
+        "AMZN",
+        "META",
+        "NFLX",
+        "XLK",
+    ),
+    "AI算力": (
+        "NVDA",
+        "AMD",
+        "AVGO",
+        "QCOM",
+        "ARM",
+        "MU",
+        "INTC",
+        "ASML",
+        "TSM",
+        "MRVL",
+        "SMCI",
+        "DELL",
+        "VRT",
+        "SMH",
+        "DRAM",
+    ),
+    "软件": (
+        "ADBE",
+        "CRM",
+        "IBM",
+        "PANW",
+        "CRWD",
+        "SNOW",
+        "PLTR",
+        "SHOP",
+        "APP",
+        "ORCL",
+    ),
+    "金融": ("JPM", "BAC", "C", "WFC", "PYPL", "HOOD", "COIN", "KRE", "XLF"),
+    "消费": ("XLY", "NKE", "WMT", "DIS", "F", "BABA", "PDD", "UBER"),
+    "高波动成长": ("TSLA", "MSTR", "MARA", "GME", "CVNA", "SOFI", "RIVN", "RKLB", "SPCX"),
+    "医疗": ("LLY", "PFE", "UNH", "XLV", "XBI"),
+    "能源": ("XLE", "USO"),
+}
+SYMBOL_CATEGORY_ORDER = ("我的自选", "指数ETF", "科技老登", "AI算力", "软件", "金融", "消费", "高波动成长", "医疗", "能源", "其他")
 
 import us_market_dashboard_data as dashboard_data
 from option_kline_chart import lightweight_chart_loader_html, render_option_kline_chart
@@ -179,6 +239,170 @@ def _inject_page_style() -> None:
         }
         .us-lab-control-band {
             display: none;
+        }
+        div[data-testid="stDialog"] {
+            justify-content: flex-end !important;
+            align-items: stretch !important;
+            padding: 0 !important;
+        }
+        div[data-testid="stDialog"] > div {
+            max-width: min(720px, 100vw) !important;
+            width: min(720px, 100vw) !important;
+            min-height: 100vh !important;
+            margin: 0 0 0 auto !important;
+            border-radius: 0 !important;
+            border-left: 1px solid #d8e0ea !important;
+            box-shadow: -18px 0 48px rgba(15, 23, 42, .16) !important;
+            background: #ffffff !important;
+        }
+        div[data-testid="stDialog"] [data-testid="stDialogHeader"] h1,
+        div[data-testid="stDialog"] [data-testid="stDialogHeader"] h2,
+        div[data-testid="stDialog"] [data-testid="stDialogHeader"] p {
+            display: none !important;
+        }
+        div[data-testid="stDialog"] [data-testid="stDialogHeader"] {
+            min-height: 0 !important;
+            padding-top: 0.35rem !important;
+            padding-bottom: 0 !important;
+        }
+        div[data-testid="stDialog"] .stButton > button {
+            min-height: 36px !important;
+            border-radius: 8px !important;
+            border: 1px solid #d8e0ea !important;
+            background: #ffffff !important;
+            color: #111827 !important;
+            font-size: 13px !important;
+            font-weight: 650 !important;
+            box-shadow: none !important;
+        }
+        div[data-testid="stDialog"] .stButton > button:hover {
+            border-color: #cbd5e1 !important;
+            color: #111827 !important;
+            background: #f8fafc !important;
+        }
+        div[data-testid="stDialog"] .stButton > button:focus {
+            border-color: #d8e0ea !important;
+            color: #111827 !important;
+            background: #ffffff !important;
+            box-shadow: none !important;
+            outline: none !important;
+        }
+        div[data-testid="stDialog"] .stButton > button[kind="primary"] {
+            border-color: #2563eb !important;
+            background: #eff6ff !important;
+            color: #1d4ed8 !important;
+            box-shadow: inset 3px 0 0 #2563eb !important;
+        }
+        div[data-testid="stDialog"] input {
+            border-radius: 8px !important;
+            border-color: #d8e0ea !important;
+            min-height: 44px !important;
+        }
+        div[data-testid="stDialog"] [role="radiogroup"] button[aria-checked="true"],
+        div[data-testid="stDialog"] [role="radiogroup"] button[aria-pressed="true"],
+        div[data-testid="stDialog"] [role="radiogroup"] button[aria-selected="true"] {
+            border-color: #2563eb !important;
+            background: #eff6ff !important;
+            color: #1d4ed8 !important;
+        }
+        div[data-testid="stDialog"] [role="radiogroup"] button[aria-checked="true"] p,
+        div[data-testid="stDialog"] [role="radiogroup"] button[aria-pressed="true"] p,
+        div[data-testid="stDialog"] [role="radiogroup"] button[aria-selected="true"] p {
+            color: #1d4ed8 !important;
+            font-weight: 750 !important;
+        }
+        .us-symbol-drawer-head {
+            display: flex;
+            align-items: flex-start;
+            justify-content: space-between;
+            gap: 18px;
+            padding: 2px 2px 14px;
+            border-bottom: 1px solid #e2e8f0;
+            margin: -2px 0 14px;
+        }
+        .us-symbol-drawer-title {
+            color: #0f172a;
+            font-size: 20px;
+            line-height: 1.2;
+            font-weight: 800;
+        }
+        .us-symbol-drawer-sub {
+            margin-top: 5px;
+            color: #64748b;
+            font-size: 12px;
+            line-height: 1.35;
+            font-weight: 600;
+        }
+        .us-symbol-drawer-current {
+            display: inline-flex;
+            align-items: center;
+            min-height: 28px;
+            padding: 5px 9px;
+            border-radius: 999px;
+            border: 1px solid #fde68a;
+            background: #fffbeb;
+            color: #b45309;
+            font-size: 12px;
+            font-weight: 750;
+            white-space: nowrap;
+        }
+        .us-symbol-rail-title {
+            color: #64748b;
+            font-size: 12px;
+            line-height: 1.2;
+            font-weight: 750;
+            margin: 3px 0 8px;
+        }
+        .us-symbol-table-summary {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            margin: 3px 0 8px;
+            color: #64748b;
+            font-size: 12px;
+            line-height: 1.2;
+            font-weight: 650;
+        }
+        .us-symbol-table-head {
+            display: grid;
+            grid-template-columns: .95fr 1.55fr .95fr .55fr;
+            gap: 8px;
+            padding: 9px 2px 8px;
+            border-top: 1px solid #e2e8f0;
+            border-bottom: 1px solid #e2e8f0;
+            margin-bottom: 10px;
+            color: #64748b;
+            font-size: 12px;
+            line-height: 1.2;
+            font-weight: 750;
+        }
+        .us-symbol-cell-name {
+            min-height: 36px;
+            display: flex;
+            align-items: center;
+            color: #111827;
+            font-size: 13px;
+            line-height: 1.25;
+            font-weight: 650;
+        }
+        .us-symbol-cell-muted {
+            min-height: 36px;
+            display: flex;
+            align-items: center;
+            color: #64748b;
+            font-size: 12px;
+            line-height: 1.25;
+            font-weight: 650;
+        }
+        .us-symbol-az-rail {
+            margin-top: 8px;
+            padding-top: 8px;
+            border-top: 1px dashed #d8e0ea;
+            color: #94a3b8;
+            font-size: 11px;
+            text-align: right;
+            letter-spacing: 0;
         }
         .us-lab-kpi-strip {
             display: grid;
@@ -1540,6 +1764,213 @@ def _underlying_option_label(symbol: str) -> str:
     code = str(symbol or "").upper()
     name = UNDERLYING_DISPLAY_NAMES.get(code)
     return f"{code}  {name}" if name else code
+
+
+def _underlying_name(symbol: str) -> str:
+    code = str(symbol or "").upper()
+    return str(UNDERLYING_DISPLAY_NAMES.get(code) or code)
+
+
+def _underlying_asset_label(symbol: str) -> str:
+    code = str(symbol or "").upper()
+    name = _underlying_name(code)
+    if code in SYMBOL_CATEGORY_MEMBERS["指数ETF"] or "ETF" in name.upper():
+        return "ETF"
+    return "股票"
+
+
+def _underlying_category(symbol: str) -> str:
+    code = str(symbol or "").upper()
+    for category, members in SYMBOL_CATEGORY_MEMBERS.items():
+        if code in members:
+            return category
+    if _underlying_asset_label(code) == "ETF":
+        return "指数ETF"
+    return "其他"
+
+
+def _symbol_favorites(symbol_options: list[str] | tuple[str, ...]) -> list[str]:
+    available = [str(item or "").upper() for item in symbol_options]
+    available_set = set(available)
+    raw = st.session_state.get("us_lab_symbol_favorites")
+    if isinstance(raw, (list, tuple)):
+        favorites = [str(item or "").upper() for item in raw if str(item or "").upper() in available_set]
+    else:
+        favorites = [item for item in SYMBOL_DEFAULT_FAVORITES if item in available_set]
+    if not favorites and available:
+        favorites = [available[0]]
+    st.session_state["us_lab_symbol_favorites"] = favorites
+    return favorites
+
+
+def _toggle_symbol_favorite(symbol: str, symbol_options: list[str] | tuple[str, ...]) -> None:
+    code = str(symbol or "").upper()
+    if not code:
+        return
+    favorites = _symbol_favorites(symbol_options)
+    if code in favorites:
+        favorites = [item for item in favorites if item != code]
+    else:
+        favorites = [code, *[item for item in favorites if item != code]]
+    st.session_state["us_lab_symbol_favorites"] = favorites
+
+
+def _category_symbol_count(
+    category: str,
+    symbol_options: list[str] | tuple[str, ...],
+    favorites: list[str],
+) -> int:
+    if category == "我的自选":
+        return len(favorites)
+    symbols = [str(item or "").upper() for item in symbol_options]
+    if category == "其他":
+        return sum(1 for item in symbols if _underlying_category(item) == "其他")
+    members = set(SYMBOL_CATEGORY_MEMBERS.get(category, ()))
+    return sum(1 for item in symbols if item in members)
+
+
+def _filter_underlying_symbols(
+    symbol_options: list[str] | tuple[str, ...],
+    *,
+    favorites: list[str],
+    category: str,
+    query: str,
+) -> list[str]:
+    symbols = [str(item or "").upper() for item in symbol_options]
+    favorite_set = set(favorites)
+    q = str(query or "").strip().upper()
+    category_members = set(SYMBOL_CATEGORY_MEMBERS.get(category, ()))
+
+    def keep(symbol: str) -> bool:
+        category_label = _underlying_category(symbol)
+        if category == "我的自选" and symbol not in favorite_set:
+            return False
+        if category not in ("我的自选", "其他") and symbol not in category_members:
+            return False
+        if category == "其他" and category_label != "其他":
+            return False
+        if q:
+            haystack = f"{symbol} {_underlying_name(symbol)} {category_label}".upper()
+            if q not in haystack:
+                return False
+        return True
+
+    return [item for item in symbols if keep(item)]
+
+
+def _ensure_symbol_picker_state(current_symbol: str, symbol_options: list[str] | tuple[str, ...]) -> None:
+    favorites = _symbol_favorites(symbol_options)
+    if "us_lab_symbol_picker_category" not in st.session_state:
+        st.session_state["us_lab_symbol_picker_category"] = "我的自选" if current_symbol in favorites else _underlying_category(current_symbol)
+    if st.session_state.get("us_lab_symbol_picker_category") not in SYMBOL_CATEGORY_ORDER:
+        st.session_state["us_lab_symbol_picker_category"] = "我的自选"
+    st.session_state.setdefault("us_lab_symbol_picker_query", "")
+
+
+def _set_symbol_picker_category(category: str) -> None:
+    st.session_state["us_lab_symbol_picker_category"] = category
+
+
+@st.dialog(" ", width="large")
+def _render_symbol_picker_dialog(symbol_options: list[str], current_symbol: str) -> None:
+    symbols = [str(item or "").upper() for item in symbol_options]
+    if not symbols:
+        st.warning("当前暂无可选标的。")
+        return
+    current = str(current_symbol or symbols[0]).upper()
+    if current not in symbols:
+        current = symbols[0]
+    _ensure_symbol_picker_state(current, symbols)
+    favorites = _symbol_favorites(symbols)
+
+    current_star = "已自选" if current in favorites else "未自选"
+    st.markdown(
+        f"""
+        <div class="us-symbol-drawer-head">
+            <div>
+                <div class="us-symbol-drawer-title">选择标的</div>
+                <div class="us-symbol-drawer-sub">当前 {escape(current)} · {escape(_underlying_name(current))}</div>
+            </div>
+            <div class="us-symbol-drawer-current">{escape(current_star)}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    query = st.text_input(
+        "搜索 ticker / 公司名",
+        key="us_lab_symbol_picker_query",
+        placeholder="搜索 ticker / 公司名",
+        label_visibility="collapsed",
+    )
+    active_category = str(st.session_state.get("us_lab_symbol_picker_category") or "我的自选")
+
+    rail_col, list_col = st.columns([0.34, 0.66], gap="medium")
+    with rail_col:
+        st.markdown('<div class="us-symbol-rail-title">分类</div>', unsafe_allow_html=True)
+        for category in SYMBOL_CATEGORY_ORDER:
+            count = _category_symbol_count(category, symbols, favorites)
+            if count <= 0 and category not in ("我的自选", "其他"):
+                continue
+            label = f"{category}  {count}"
+            st.button(
+                label,
+                key=f"us_symbol_category_{category}",
+                type="primary" if category == active_category else "secondary",
+                on_click=_set_symbol_picker_category,
+                args=(category,),
+                use_container_width=True,
+            )
+
+    with list_col:
+        filtered_symbols = _filter_underlying_symbols(
+            symbols,
+            favorites=favorites,
+            category=active_category,
+            query=query,
+        )
+        st.markdown(
+            f"""
+            <div class="us-symbol-table-summary">
+                <span>共 {len(filtered_symbols)} 个标的</span>
+                <span>点击代码立即切换</span>
+            </div>
+            <div class="us-symbol-table-head">
+                <span>代码</span><span>公司名</span><span>分类</span><span>自选</span>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        if not filtered_symbols:
+            st.info("没有匹配的标的，可以换个关键词或切换分类。")
+        for row_symbol in filtered_symbols[:48]:
+            row_cols = st.columns([0.95, 1.55, 0.95, 0.55], gap="small")
+            is_favorite = row_symbol in favorites
+            with row_cols[0]:
+                if st.button(
+                    row_symbol,
+                    key=f"us_symbol_pick_{row_symbol}",
+                    type="primary" if row_symbol == current else "secondary",
+                    use_container_width=True,
+                ):
+                    st.session_state["us_lab_symbol"] = row_symbol
+                    st.rerun(scope="app")
+            with row_cols[1]:
+                st.markdown(f'<div class="us-symbol-cell-name">{escape(_underlying_name(row_symbol))}</div>', unsafe_allow_html=True)
+            with row_cols[2]:
+                st.markdown(f'<div class="us-symbol-cell-muted">{escape(_underlying_category(row_symbol))}</div>', unsafe_allow_html=True)
+            with row_cols[3]:
+                st.button(
+                    "★" if is_favorite else "☆",
+                    key=f"us_symbol_star_{row_symbol}",
+                    help="加入或移出自选",
+                    on_click=_toggle_symbol_favorite,
+                    args=(row_symbol, symbols),
+                    use_container_width=True,
+                )
+
+        if len(filtered_symbols) > 48:
+            st.caption(f"已显示前 48 个，继续输入关键词可缩小范围。")
+        st.markdown('<div class="us-symbol-az-rail">A-Z · #</div>', unsafe_allow_html=True)
 
 
 def _profile_updated_label(value: Any, as_of_date: Any) -> str:
@@ -3650,14 +4081,27 @@ with nav_col:
         key="us_lab_active_view",
     )
 with symbol_col:
-    symbol = st.selectbox(
-        "标的",
-        symbol_options,
-        index=symbol_options.index(current_symbol),
-        format_func=_underlying_option_label,
-        label_visibility="collapsed",
-        key="us_lab_symbol",
-    )
+    picker_cols = st.columns([0.8, 0.2], gap="small")
+    with picker_cols[0]:
+        picker_arrow_gap = "\u00a0" * 4
+        if st.button(
+            f"{current_symbol}  {_underlying_name(current_symbol)}{picker_arrow_gap}▼",
+            key="us_lab_symbol_picker_open",
+            help="打开标的选择器",
+            use_container_width=True,
+        ):
+            _render_symbol_picker_dialog(symbol_options, current_symbol)
+    with picker_cols[1]:
+        current_favorites = _symbol_favorites(symbol_options)
+        st.button(
+            "★" if current_symbol in current_favorites else "☆",
+            key="us_lab_symbol_current_favorite",
+            help="加入或移出自选",
+            on_click=_toggle_symbol_favorite,
+            args=(current_symbol, symbol_options),
+            use_container_width=True,
+        )
+    symbol = current_symbol
 active_view = active_view or "总览"
 
 include_short_cycle = True
