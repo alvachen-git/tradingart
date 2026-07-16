@@ -6,6 +6,7 @@ from agent_prompt_policy import (
     TASK_TYPE_STOCK_SELECTION,
     TASK_TYPE_TECHNICAL_CONCEPT,
     classify_analysis_task_type,
+    has_explicit_stock_pool_selection_action,
 )
 from chat_context_utils import EXECUTE_SUGGESTED_ACTION_GOAL, infer_correction_intent, infer_followup_goal
 
@@ -331,6 +332,8 @@ def is_stock_selection_query(prompt_text: str) -> bool:
     lowered = text.lower()
     if any(prefix in text for prefix in STOCK_SELECTION_EXPLAIN_PREFIXES):
         return False
+    if has_explicit_stock_pool_selection_action(text):
+        return True
     has_action = any(keyword in text for keyword in STOCK_SELECTION_ACTION_KEYWORDS)
     has_subject = any(keyword in text for keyword in STOCK_SELECTION_SUBJECT_KEYWORDS)
     has_pattern = any(keyword in text for keyword in STOCK_SELECTION_PATTERN_KEYWORDS)
@@ -506,6 +509,9 @@ def is_us_option_market_profile_query(prompt_text: str) -> bool:
     if not text_lower:
         return False
 
+    if classify_analysis_task_type(text).task_type == TASK_TYPE_STOCK_SELECTION:
+        return False
+
     upper_text = text.upper()
     has_us_symbol = any(
         re.search(rf"(?<![A-Z0-9]){re.escape(symbol.upper())}(?![A-Z0-9])", upper_text)
@@ -536,6 +542,10 @@ def is_us_option_market_profile_query(prompt_text: str) -> bool:
 def is_market_data_query(prompt_text: str) -> bool:
     text = str(prompt_text or "").strip().lower()
     if not text:
+        return False
+
+    # 多标的筛选可以包含价格、成交量、IV 等数据维度，但仍属于筛选任务。
+    if classify_analysis_task_type(prompt_text).task_type == TASK_TYPE_STOCK_SELECTION:
         return False
 
     if is_volatility_divergence_query(prompt_text):

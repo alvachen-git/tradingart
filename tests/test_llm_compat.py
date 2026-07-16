@@ -2,7 +2,12 @@ import os
 import unittest
 from unittest.mock import patch
 
-from llm_compat import build_deepseek_flash_llm, build_report_tongyi_llm, invoke_report_llm_with_fallback
+from llm_compat import (
+    build_deepseek_flash_llm,
+    build_report_tongyi_llm,
+    build_screen_compiler_llm,
+    invoke_report_llm_with_fallback,
+)
 
 
 class LlmCompatTest(unittest.TestCase):
@@ -19,6 +24,9 @@ class LlmCompatTest(unittest.TestCase):
                 "REPORT_LLM_FALLBACK_MODEL",
                 "EXPIRY_OPTION_REPORT_LLM_MODEL",
                 "EXPIRY_OPTION_REPORT_LLM_TIMEOUT_SECONDS",
+                "US_STOCK_SCREEN_COMPILER_MODEL",
+                "US_STOCK_SCREEN_COMPILER_TIMEOUT_SECONDS",
+                "US_STOCK_SCREEN_COMPILER_MAX_RETRIES",
             )
         }
 
@@ -58,6 +66,23 @@ class LlmCompatTest(unittest.TestCase):
         self.assertEqual(kwargs["model"], "qwen3.6-plus")
         self.assertEqual(kwargs["request_timeout"], 600)
         self.assertEqual(kwargs["max_retries"], 1)
+
+    def test_build_screen_compiler_llm_puts_short_timeout_in_model_kwargs(self):
+        os.environ["DASHSCOPE_API_KEY"] = "test-key"
+        os.environ.pop("US_STOCK_SCREEN_COMPILER_MODEL", None)
+        os.environ.pop("US_STOCK_SCREEN_COMPILER_TIMEOUT_SECONDS", None)
+        os.environ.pop("US_STOCK_SCREEN_COMPILER_MAX_RETRIES", None)
+
+        with patch("llm_compat.ChatTongyiCompat") as mock_chat:
+            build_screen_compiler_llm()
+
+        kwargs = mock_chat.call_args.kwargs
+        self.assertEqual(kwargs["model"], "qwen-turbo")
+        self.assertEqual(kwargs["top_p"], 0.1)
+        self.assertFalse(kwargs["streaming"])
+        self.assertEqual(kwargs["max_retries"], 1)
+        self.assertNotIn("request_timeout", kwargs)
+        self.assertEqual(kwargs["model_kwargs"]["request_timeout"], 6)
 
     def test_build_report_tongyi_llm_accepts_script_default_model(self):
         os.environ["DASHSCOPE_API_KEY"] = "test-key"

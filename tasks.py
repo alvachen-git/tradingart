@@ -27,7 +27,7 @@ for key in [
     if key in os.environ:
         del os.environ[key]
 
-from llm_compat import ChatTongyiCompat as ChatTongyi
+from llm_compat import ChatTongyiCompat as ChatTongyi, build_screen_compiler_llm
 from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
 from agent_core import build_trading_graph, knowledge_chatter_node
 from chat_context_layers import append_chat_trace_event, attach_context_layers
@@ -778,10 +778,16 @@ def process_ai_query(
         fast_llm = ChatTongyi(model="qwen-turbo", streaming=False, temperature=0.1)
         mid_llm = ChatTongyi(model="qwen3.6-plus", streaming=False, temperature=0.2)
         smart_llm = ChatTongyi(model="qwen3-max", streaming=False, temperature=0.4)
+        screen_compiler_llm = build_screen_compiler_llm()
 
         self.update_state(state='PROCESSING', meta={'progress': '正在构建分析团队...'})
 
-        app = build_trading_graph(fast_llm, mid_llm, smart_llm)
+        app = build_trading_graph(
+            fast_llm,
+            mid_llm,
+            smart_llm,
+            screen_compiler_llm=screen_compiler_llm,
+        )
 
         final_prompt = image_context + prompt_for_graph if image_context else prompt_for_graph
         input_messages = []

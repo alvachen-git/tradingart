@@ -91,7 +91,11 @@ from chat_feedback_service import (
     submit_chat_feedback,
 )
 # --- AI 相关导入 ---
-from llm_compat import ChatTongyiCompat as ChatTongyi, build_deepseek_flash_llm
+from llm_compat import (
+    ChatTongyiCompat as ChatTongyi,
+    build_deepseek_flash_llm,
+    build_screen_compiler_llm,
+)
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 
 # Streamlit 运行时/第三方组件仍可能访问旧别名，提前映射以避免弃用日志噪音。
@@ -2692,10 +2696,12 @@ def get_agent(current_user="访客", user_query=""):
     )
     # 2. 构建图 (The Graph)
     # 直接调用 agent_core.py 里的函数
+    screen_compiler_llm = build_screen_compiler_llm(api_key=api_key)
     graph_app = build_trading_graph(
         fast_llm=llm_turbo,
         mid_llm=llm_plus,
-        smart_llm=llm_max
+        smart_llm=llm_max,
+        screen_compiler_llm=screen_compiler_llm,
     )
 
     return graph_app

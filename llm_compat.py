@@ -12,6 +12,9 @@ DEFAULT_REPORT_LLM_MODEL = "qwen3.6-plus"
 DEFAULT_REPORT_LLM_FALLBACK_MODEL = "qwen-plus"
 DEFAULT_REPORT_LLM_TIMEOUT_SECONDS = 600
 DEFAULT_REPORT_LLM_MAX_RETRIES = 1
+DEFAULT_SCREEN_COMPILER_MODEL = "qwen-turbo"
+DEFAULT_SCREEN_COMPILER_TIMEOUT_SECONDS = 6
+DEFAULT_SCREEN_COMPILER_MAX_RETRIES = 1
 
 
 def is_qwen_multimodal_family(model_name: str | None) -> bool:
@@ -70,6 +73,50 @@ def _read_int_env(name: str, default: int) -> int:
         return int(str(raw).strip())
     except ValueError:
         return default
+
+
+def build_screen_compiler_llm(
+    *,
+    model: str | None = None,
+    api_key: str | None = None,
+    request_timeout: int | None = None,
+    max_retries: int | None = None,
+    top_p: float = 0.1,
+    **kwargs: Any,
+) -> ChatTongyi:
+    """Build the low-latency, tool-calling LLM used only for ScreenPlan compilation."""
+    resolved_model = (
+        model
+        or os.getenv("US_STOCK_SCREEN_COMPILER_MODEL")
+        or DEFAULT_SCREEN_COMPILER_MODEL
+    )
+    resolved_timeout = request_timeout
+    if resolved_timeout is None:
+        resolved_timeout = _read_int_env(
+            "US_STOCK_SCREEN_COMPILER_TIMEOUT_SECONDS",
+            DEFAULT_SCREEN_COMPILER_TIMEOUT_SECONDS,
+        )
+    resolved_retries = max_retries
+    if resolved_retries is None:
+        resolved_retries = _read_int_env(
+            "US_STOCK_SCREEN_COMPILER_MAX_RETRIES",
+            DEFAULT_SCREEN_COMPILER_MAX_RETRIES,
+        )
+
+    # ChatTongyi has no request_timeout model field. DashScope only receives it
+    # when it is nested in model_kwargs.
+    model_kwargs = dict(kwargs.pop("model_kwargs", {}) or {})
+    model_kwargs["request_timeout"] = max(1, int(resolved_timeout))
+    kwargs.pop("streaming", None)
+    return ChatTongyiCompat(
+        model=resolved_model,
+        api_key=api_key or os.getenv("DASHSCOPE_API_KEY"),
+        top_p=top_p,
+        streaming=False,
+        max_retries=max(1, int(resolved_retries)),
+        model_kwargs=model_kwargs,
+        **kwargs,
+    )
 
 
 def build_report_tongyi_llm(

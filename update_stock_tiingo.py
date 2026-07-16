@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import datetime
 import gc
 import os
@@ -72,16 +73,27 @@ TWELVEDATA_API_KEY = str(os.getenv("TWELVEDATA_API_KEY", "")).strip()
 
 US_SOURCE_PRIORITY = _parse_source_priority(
     os.getenv("US_SOURCE_PRIORITY", ""),
-    "akshare,tiingo,twelvedata",
+    "tiingo,akshare,twelvedata",
 )
 US_BACKFILL_SOURCE_PRIORITY = _parse_source_priority(
     os.getenv("US_BACKFILL_SOURCE_PRIORITY", ""),
-    "akshare,twelvedata,tiingo",
+    "tiingo,akshare,twelvedata",
 )
+US_REQUIRE_ADJUSTED_SOURCE_FIRST = _env_bool("US_REQUIRE_ADJUSTED_SOURCE_FIRST", True)
+if US_REQUIRE_ADJUSTED_SOURCE_FIRST:
+    # Older deployments may still carry an AkShare-first value in .env.  Move
+    # the only complete adjusted-OHLCV provider to the front unless an operator
+    # explicitly disables the safety policy.
+    if "tiingo" in US_SOURCE_PRIORITY:
+        US_SOURCE_PRIORITY = ["tiingo", *(item for item in US_SOURCE_PRIORITY if item != "tiingo")]
+    if "tiingo" in US_BACKFILL_SOURCE_PRIORITY:
+        US_BACKFILL_SOURCE_PRIORITY = ["tiingo", *(item for item in US_BACKFILL_SOURCE_PRIORITY if item != "tiingo")]
 
 US_BACKFILL_DAYS_PER_RUN = _env_int("US_BACKFILL_DAYS_PER_RUN", 120)
 US_TARGET_HISTORY_DAYS = _env_int("US_TARGET_HISTORY_DAYS", 1095)
-US_INCREMENTAL_LOOKBACK_DAYS = _env_int("US_INCREMENTAL_LOOKBACK_DAYS", 1)
+US_INCREMENTAL_LOOKBACK_DAYS = _env_int("US_INCREMENTAL_LOOKBACK_DAYS", 7)
+US_ADJUSTMENT_REPAIR_LOOKBACK_DAYS = _env_int("US_ADJUSTMENT_REPAIR_LOOKBACK_DAYS", 550)
+US_ADJUSTMENT_REPAIR_MIN_RATIO = _env_float("US_ADJUSTMENT_REPAIR_MIN_RATIO", 3.0)
 US_BACKFILL_BATCH_SIZE = _env_int("US_BACKFILL_BATCH_SIZE", 6)
 US_ENABLE_BACKFILL = _env_bool("US_ENABLE_BACKFILL", True)
 US_MAX_SYMBOLS_PER_RUN = _env_int("US_MAX_SYMBOLS_PER_RUN", 0)
@@ -98,6 +110,12 @@ US_REQUEST_SLEEP_TD = _env_float("US_REQUEST_SLEEP_TD", 8.0)
 US_RETRY_MAX_AK = _env_int("US_RETRY_MAX_AK", 2)
 US_RETRY_MAX_TIINGO = _env_int("US_RETRY_MAX_TIINGO", 2)
 US_RETRY_MAX_TD = _env_int("US_RETRY_MAX_TD", 2)
+
+COMMON_SPLIT_RATIOS = (1.5, 2.0, 3.0, 4.0, 5.0, 7.0, 8.0, 10.0, 15.0, 20.0, 25.0, 50.0, 100.0)
+US_EXCHANGE_CODES = {
+    "AMEX", "BATS", "CBOE", "IEX", "NASDAQ", "NYSE", "NYSEARCA", "NYSEMKT",
+    "OTC", "OTCEXCHANGE",
+}
 
 # 数据库配置（优先 .env，兼容历史默认值）
 DB_USER = os.getenv("DB_USER", "root")
@@ -211,7 +229,7 @@ class ProviderUnavailableError(ProviderError):
 
 
 def _empty_ohlcv_df() -> pd.DataFrame:
-    return pd.DataFrame(columns=["date", "symbol", "open", "high", "low", "close", "volume", "adjClose"])
+    return pd.DataFrame(columns=["date", "symbol", "open", "high", "low", "close", "volume", "adjClose", "splitFactor"])
 
 
 def _looks_like_rate_limit(msg: str) -> bool:
@@ -257,6 +275,7 @@ def _normalize_ohlcv_df(
     close_col: str,
     volume_col: str,
     adj_close_col: Optional[str] = None,
+    split_factor_col: Optional[str] = None,
 ) -> pd.DataFrame:
     if df is None or df.empty:
         return _empty_ohlcv_df()
@@ -277,6 +296,10 @@ def _normalize_ohlcv_df(
         out["adjClose"] = pd.to_numeric(df[adj_close_col], errors="coerce")
     else:
         out["adjClose"] = out["close"]
+    if split_factor_col and split_factor_col in df.columns:
+        out["splitFactor"] = pd.to_numeric(df[split_factor_col], errors="coerce").fillna(1.0)
+    else:
+        out["splitFactor"] = 1.0
 
     for c in ["open", "high", "low"]:
         out[c] = out[c].fillna(out["close"])
@@ -285,7 +308,7 @@ def _normalize_ohlcv_df(
 
     out = out.dropna(subset=["date", "close"])
     out = out.sort_values("date").drop_duplicates(subset=["date"], keep="last")
-    return out[["date", "symbol", "open", "high", "low", "close", "volume", "adjClose"]]
+    return out[["date", "symbol", "open", "high", "low", "close", "volume", "adjClose", "splitFactor"]]
 
 
 @dataclass
@@ -472,9 +495,34 @@ class TiingoProvider(BaseProvider):
         )
         self.api_key = str(api_key or "").strip()
         self.client = TiingoClient({"session": True, "api_key": self.api_key}) if self.api_key else None
+        self._metadata_cache: dict[str, dict[str, Any]] = {}
 
     def is_configured(self) -> bool:
         return bool(self.client is not None)
+
+    @staticmethod
+    def _normalize_exchange(value: Any) -> str:
+        return "".join(ch for ch in str(value or "").upper() if ch.isalnum())
+
+    def _validate_us_listing(self, symbol: str) -> None:
+        """Reject same-ticker foreign listings before they can pollute US history."""
+        code = str(symbol or "").strip().upper()
+        metadata = self._metadata_cache.get(code)
+        if metadata is None:
+            try:
+                raw = self.client.get_ticker_metadata(code) if self.client else None
+            except Exception as exc:
+                if _looks_like_rate_limit(str(exc)):
+                    raise RateLimitError(str(exc))
+                raise ProviderError(f"metadata lookup failed: {exc}")
+            metadata = raw if isinstance(raw, dict) else {}
+            self._metadata_cache[code] = metadata
+        exchange = self._normalize_exchange(metadata.get("exchangeCode"))
+        returned_ticker = str(metadata.get("ticker") or code).strip().upper()
+        if returned_ticker != code:
+            raise ProviderError(f"ticker mismatch: requested={code}, returned={returned_ticker}")
+        if exchange not in US_EXCHANGE_CODES:
+            raise ProviderError(f"non-US listing rejected: symbol={code}, exchange={exchange or 'unknown'}")
 
     def _fetch_impl(
         self,
@@ -484,6 +532,7 @@ class TiingoProvider(BaseProvider):
     ) -> pd.DataFrame:
         if not self.client:
             raise ProviderUnavailableError("TIINGO_API_KEY is missing")
+        self._validate_us_listing(symbol)
         kwargs: dict[str, Any] = {
             "fmt": "json",
             "startDate": start_date.strftime("%Y-%m-%d"),
@@ -503,16 +552,19 @@ class TiingoProvider(BaseProvider):
             return _empty_ohlcv_df()
 
         df = pd.DataFrame(history_data)
+        adjusted_columns = {"adjOpen", "adjHigh", "adjLow", "adjClose", "adjVolume"}
+        use_adjusted = adjusted_columns.issubset(df.columns)
         return _normalize_ohlcv_df(
             df=df,
             symbol=symbol,
             date_col="date",
-            open_col="open",
-            high_col="high",
-            low_col="low",
-            close_col="close",
-            volume_col="volume",
+            open_col="adjOpen" if use_adjusted else "open",
+            high_col="adjHigh" if use_adjusted else "high",
+            low_col="adjLow" if use_adjusted else "low",
+            close_col="adjClose" if use_adjusted else "close",
+            volume_col="adjVolume" if use_adjusted else "volume",
             adj_close_col="adjClose",
+            split_factor_col="splitFactor",
         )
 
 
@@ -724,9 +776,116 @@ def _get_incremental_start(last_date: Optional[datetime.datetime], today: dateti
         return None
     suggested = (last_date + datetime.timedelta(days=1)).date()
     floor_date = today - datetime.timedelta(days=max(0, US_INCREMENTAL_LOOKBACK_DAYS))
-    if suggested < floor_date:
-        return floor_date
-    return suggested
+    # Re-read a small overlap even when the DB is current.  Without overlap a
+    # splitFactor that arrives on the split session is never observed and the
+    # pre-split history cannot be repaired.
+    return min(suggested, floor_date)
+
+
+def _nearest_common_split_ratio(value: Any, *, tolerance: float = 0.12) -> Optional[float]:
+    try:
+        number = float(value)
+    except Exception:
+        return None
+    if not pd.notna(number) or number <= 0:
+        return None
+    candidates = (*COMMON_SPLIT_RATIOS, *(1.0 / item for item in COMMON_SPLIT_RATIOS))
+    for candidate in candidates:
+        if abs(number - candidate) / candidate <= tolerance:
+            return float(candidate)
+    return None
+
+
+def _has_split_event(df: pd.DataFrame) -> bool:
+    if df is None or df.empty or "splitFactor" not in df.columns:
+        return False
+    values = pd.to_numeric(df["splitFactor"], errors="coerce").fillna(1.0)
+    return bool((values.sub(1.0).abs() > 1e-9).any())
+
+
+def _has_unresolved_scale_break(df: pd.DataFrame, *, minimum_scale: float = 1.45) -> bool:
+    if df is None or df.empty or "close" not in df.columns:
+        return False
+    values = pd.to_numeric(df["close"], errors="coerce")
+    steps = values / values.shift(1).replace(0, pd.NA)
+    for value in steps.dropna():
+        number = float(value)
+        if number <= 0:
+            continue
+        scale = max(number, 1.0 / number)
+        if scale >= minimum_scale and _nearest_common_split_ratio(number) is not None:
+            return True
+    return False
+
+
+def _find_adjustment_repair_symbols(
+    today: datetime.date,
+    symbols: list[str],
+) -> set[str]:
+    """Find histories whose adjusted price or factor still contains a split-scale break.
+
+    This scanner only selects symbols for a trusted re-fetch.  It never guesses
+    a split factor and never mutates prices itself.
+    """
+    requested = {str(item).strip().upper() for item in symbols if str(item).strip()}
+    if not requested:
+        return set()
+    start_date = today - datetime.timedelta(days=max(90, US_ADJUSTMENT_REPAIR_LOOKBACK_DAYS))
+    try:
+        with engine.connect() as conn:
+            columns = {str(row[0]) for row in conn.execute(text("SHOW COLUMNS FROM stock_prices")).fetchall()}
+            select_adj = ", adjClose" if "adjClose" in columns else ""
+            history = pd.read_sql(
+                text(
+                    f"""
+                    SELECT date, UPPER(symbol) AS symbol, close{select_adj}
+                    FROM stock_prices
+                    WHERE date >= :start_date
+                    ORDER BY symbol, date
+                    """
+                ),
+                conn,
+                params={"start_date": start_date},
+            )
+    except Exception as exc:
+        print(f"⚠️ 复权质量扫描失败，本轮继续使用读取端安全闸门: {exc}")
+        return set()
+    if history.empty:
+        return set()
+    history["symbol"] = history["symbol"].astype(str).str.upper().str.strip()
+    history = history[history["symbol"].isin(requested)]
+    repair: set[str] = set()
+    for symbol, group in history.groupby("symbol"):
+        group = group.sort_values("date")
+        raw_close = pd.to_numeric(group["close"], errors="coerce")
+        adjusted_close = (
+            pd.to_numeric(group["adjClose"], errors="coerce")
+            if "adjClose" in group.columns
+            else raw_close.copy()
+        )
+        adjusted_close = adjusted_close.where(adjusted_close.gt(0), raw_close)
+        price_steps = adjusted_close / adjusted_close.shift(1).replace(0, pd.NA)
+        factor = adjusted_close / raw_close.replace(0, pd.NA)
+        factor_steps = factor / factor.shift(1).replace(0, pd.NA)
+        # A jump in adjClose/close is already positive split evidence, so even
+        # a 3-for-2 or 2-for-1 event merits a full rebuild to repair volume.
+        # A jump left in adjusted price is ambiguous with a real crash and is
+        # auto-refetched only for larger (>= configured) scale breaks.
+        series_thresholds = (
+            (price_steps, max(1.0, US_ADJUSTMENT_REPAIR_MIN_RATIO)),
+            (factor_steps, 1.45),
+        )
+        for series, minimum_scale in series_thresholds:
+            for value in pd.to_numeric(series, errors="coerce").dropna():
+                scale = max(float(value), 1.0 / float(value)) if float(value) > 0 else 0.0
+                if scale < minimum_scale:
+                    continue
+                if _nearest_common_split_ratio(value) is not None:
+                    repair.add(str(symbol))
+                    break
+            if symbol in repair:
+                break
+    return repair
 
 
 def _select_symbols_for_run(all_symbols: list[str]) -> list[str]:
@@ -806,9 +965,16 @@ def _run_low_priority_backfill(today: datetime.date, candidate_symbols: Optional
     return stats
 
 
-def update_stock_data() -> None:
+def update_stock_data(
+    *,
+    symbols: Optional[list[str]] = None,
+    repair_only: bool = False,
+) -> None:
     today = datetime.date.today()
-    run_symbols = _select_symbols_for_run(SYMBOLS)
+    run_symbols = _select_symbols_for_run(symbols or SYMBOLS)
+    adjustment_repair_symbols = _find_adjustment_repair_symbols(today, run_symbols)
+    if repair_only:
+        run_symbols = [item for item in run_symbols if item in adjustment_repair_symbols]
     print(f"🚀 开始更新美股日线，标的总数: {len(SYMBOLS)}，本轮处理: {len(run_symbols)}")
     print(f"🔗 源优先级: {US_SOURCE_PRIORITY}")
     print(f"🔁 回填源优先级: {US_BACKFILL_SOURCE_PRIORITY}")
@@ -818,6 +984,11 @@ def update_stock_data() -> None:
         print(f"🧩 分片模式: chunk {US_SYMBOL_CHUNK_INDEX % US_SYMBOL_CHUNK_TOTAL + 1}/{US_SYMBOL_CHUNK_TOTAL}")
     if US_MAX_SYMBOLS_PER_RUN > 0:
         print(f"🎯 本轮上限: {US_MAX_SYMBOLS_PER_RUN} 只")
+    if adjustment_repair_symbols:
+        print(
+            "🧹 检测到需整段重建的复权/源冲突标的: "
+            + ", ".join(sorted(adjustment_repair_symbols))
+        )
 
     summary_items = []
     for key, symbols in SECTOR_SYMBOLS.items():
@@ -832,11 +1003,17 @@ def update_stock_data() -> None:
         print(f"\n处理: {symbol}")
         try:
             last_date = get_last_date_from_db(symbol)
-            incremental_start = _get_incremental_start(last_date, today)
-            if incremental_start is not None:
+            force_adjustment_repair = symbol in adjustment_repair_symbols
+            if force_adjustment_repair:
+                start_date = today - datetime.timedelta(days=max(90, US_ADJUSTMENT_REPAIR_LOOKBACK_DAYS))
+                print(f"   -> 复权质量修复，整段重拉起始日: {start_date}")
+            else:
+                incremental_start = _get_incremental_start(last_date, today)
+                start_date = incremental_start
+            if not force_adjustment_repair and start_date is not None:
                 start_date = incremental_start
                 print(f"   -> 增量更新起始日: {start_date}")
-            else:
+            elif not force_adjustment_repair:
                 start_date = today - datetime.timedelta(days=max(2, US_BACKFILL_DAYS_PER_RUN))
                 print(f"   -> 首次抓取分层回填，先拉近 {US_BACKFILL_DAYS_PER_RUN} 天: {start_date}")
 
@@ -862,6 +1039,35 @@ def update_stock_data() -> None:
                 print(f"   ⚠️ 无新增数据 (source={source_name}, switches={switches})")
                 continue
 
+            if force_adjustment_repair and source_name != "tiingo" and _has_unresolved_scale_break(data):
+                symbol_stats["failed_symbols"] += 1
+                print(
+                    f"   ❌ {source_name}整段历史仍有未复权尺度断层，本轮拒绝覆盖既有数据；"
+                    "等待可信复权源恢复"
+                )
+                continue
+
+            if source_name == "tiingo" and _has_split_event(data):
+                repair_start = today - datetime.timedelta(days=max(90, US_ADJUSTMENT_REPAIR_LOOKBACK_DAYS))
+                if start_date > repair_start:
+                    print(f"   -> Tiingo返回拆股事件，改为整段重拉: {repair_start}")
+                    repair_data, repair_source, repair_switches, repair_attempts = fetch_with_fallback(
+                        symbol=symbol,
+                        start_date=repair_start,
+                        end_date=None,
+                        source_priority=["tiingo"],
+                    )
+                    if repair_source != "tiingo" or repair_data.empty:
+                        symbol_stats["failed_symbols"] += 1
+                        print(
+                            "   ❌ 拆股历史整段重拉失败，本轮不写入局部数据 | attempts="
+                            + "; ".join(repair_attempts)
+                        )
+                        continue
+                    data = repair_data
+                    source_name = repair_source
+                    switches += repair_switches
+
             rows = save_symbol_data(symbol, data)
             symbol_stats["success_symbols"] += 1
             symbol_stats["saved_rows"] += rows
@@ -875,7 +1081,11 @@ def update_stock_data() -> None:
         finally:
             time.sleep(0.2)
 
-    backfill_stats = _run_low_priority_backfill(today, run_symbols)
+    backfill_stats = (
+        {"attempted": 0, "saved": 0, "failed": 0, "skipped": 0}
+        if repair_only
+        else _run_low_priority_backfill(today, run_symbols)
+    )
 
     print("\n📊 源级汇总")
     for key in ["akshare", "tiingo", "twelvedata"]:
@@ -907,5 +1117,31 @@ def update_stock_data() -> None:
     print("🏁 全部更新完成")
 
 
+def _command_line() -> None:
+    parser = argparse.ArgumentParser(description="更新并校验本地美股复权日线")
+    parser.add_argument(
+        "--audit-adjustments",
+        action="store_true",
+        help="只读扫描需重建的复权/源冲突标的，不写数据库",
+    )
+    parser.add_argument(
+        "--repair-adjustments-only",
+        action="store_true",
+        help="仅重拉审计命中的异常标的，跳过普通标的和低优先级回填",
+    )
+    parser.add_argument(
+        "--symbols",
+        default="",
+        help="可选，逗号分隔的代码白名单，例如 KLAC,BKNG,CRWD,BK",
+    )
+    args = parser.parse_args()
+    selected = [item.strip().upper() for item in str(args.symbols).split(",") if item.strip()] or SYMBOLS
+    if args.audit_adjustments:
+        repair = sorted(_find_adjustment_repair_symbols(datetime.date.today(), selected))
+        print("复权/源冲突审计：" + (", ".join(repair) if repair else "未发现需重建标的"))
+        return
+    update_stock_data(symbols=selected, repair_only=bool(args.repair_adjustments_only))
+
+
 if __name__ == "__main__":
-    update_stock_data()
+    _command_line()

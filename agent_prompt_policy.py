@@ -665,6 +665,19 @@ def _contains_any(text: str, keywords: Sequence[str]) -> bool:
     return any(keyword in text for keyword in keywords)
 
 
+def has_explicit_stock_pool_selection_action(query: str) -> bool:
+    """识别“从/在某股票市场或股票池里找/选/筛”的自然表达。"""
+    text = str(query or "").strip()
+    if not text:
+        return False
+    return bool(re.search(
+        r"(?:从|在)?(?:(?:美股|a股)(?:股票)?(?:池)?|股票池|纳斯达克|纽交所)"
+        r"(?:里|中|内)?(?:帮我)?(?:找|选|筛|挑|扫描)",
+        text,
+        flags=re.IGNORECASE,
+    ))
+
+
 def _looks_like_stock_selection(query: str) -> bool:
     text = str(query or "").strip()
     if not text:
@@ -672,6 +685,8 @@ def _looks_like_stock_selection(query: str) -> bool:
     lowered = text.lower()
     if _contains_any(text, EXPLAIN_PREFIXES):
         return False
+    if has_explicit_stock_pool_selection_action(text):
+        return True
     has_action = _contains_any(text, STOCK_SELECTION_ACTION_KEYWORDS)
     has_subject = _contains_any(text, STOCK_SELECTION_SUBJECT_KEYWORDS) or _contains_any(
         text,
@@ -788,25 +803,6 @@ def classify_analysis_task_type(
 ) -> AnalysisTaskPolicy:
     text = str(query or "").strip()
     subject_policy = build_subject_policy(text, symbol_hint=symbol_hint)
-    if subject_policy.is_option_strategy and subject_policy.has_explicit_subject:
-        return AnalysisTaskPolicy(
-            task_type=TASK_TYPE_OPTION_STRATEGY_WITH_SUBJECT,
-            recommended_chat_mode=CHAT_MODE_ANALYSIS,
-            recommended_plan=("analyst", "strategist"),
-            clear_symbol=False,
-            hard_override=False,
-            reason=subject_policy.reason,
-        )
-    if subject_policy.is_option_strategy and not subject_policy.has_explicit_subject:
-        return AnalysisTaskPolicy(
-            task_type=TASK_TYPE_OPTION_STRATEGY_NEEDS_SUBJECT,
-            recommended_chat_mode=CHAT_MODE_ANALYSIS,
-            recommended_plan=("chatter",),
-            clear_symbol=True,
-            hard_override=True,
-            reason=subject_policy.reason,
-        )
-
     if _looks_like_futures_broker_signal(text):
         return AnalysisTaskPolicy(
             task_type=TASK_TYPE_FUTURES_BROKER_SIGNAL,
@@ -845,6 +841,27 @@ def classify_analysis_task_type(
             hard_override=True,
             reason="用户要求找/选/筛/推荐一批股票",
         )
+    # Multi-symbol stock screening must take precedence over generic option
+    # strategy routing when option volatility is only a screening dimension.
+    if subject_policy.is_option_strategy and subject_policy.has_explicit_subject:
+        return AnalysisTaskPolicy(
+            task_type=TASK_TYPE_OPTION_STRATEGY_WITH_SUBJECT,
+            recommended_chat_mode=CHAT_MODE_ANALYSIS,
+            recommended_plan=("analyst", "strategist"),
+            clear_symbol=False,
+            hard_override=False,
+            reason=subject_policy.reason,
+        )
+    if subject_policy.is_option_strategy and not subject_policy.has_explicit_subject:
+        return AnalysisTaskPolicy(
+            task_type=TASK_TYPE_OPTION_STRATEGY_NEEDS_SUBJECT,
+            recommended_chat_mode=CHAT_MODE_ANALYSIS,
+            recommended_plan=("chatter",),
+            clear_symbol=True,
+            hard_override=True,
+            reason=subject_policy.reason,
+        )
+
     if _looks_like_technical_concept(text):
         return AnalysisTaskPolicy(
             task_type=TASK_TYPE_TECHNICAL_CONCEPT,
@@ -879,7 +896,10 @@ def is_option_strategy_question(query: str) -> bool:
     text = str(query or "")
     if not text:
         return False
-    if "期权" in text or any(k in text for k in ["认购", "认沽"]):
+    has_strategy_action = any(k in text for k in OPTION_STRATEGY_ACTION_KEYWORDS)
+    if any(k in text for k in ["认购", "认沽"]):
+        return True
+    if "期权" in text and has_strategy_action:
         return True
     text_lower = text.lower()
     if _has_english_option_strategy_term(text_lower) and any(k in text for k in OPTION_STRATEGY_ACTION_KEYWORDS):

@@ -29,6 +29,12 @@ from langgraph.types import Send
 from chart_annotation_tools import draw_pattern_annotation_chart, draw_forecast_chart
 from kline_tools import analyze_kline_pattern
 from screener_tool import search_top_stocks, get_available_patterns, search_us_stocks_by_technical_setup
+from us_stock_multifactor_screener import (
+    compare_semantic_plan_to_rules,
+    compile_screen_plan_with_llm,
+    is_us_multifactor_screen_query,
+    screen_us_stocks,
+)
 from news_tools import get_financial_news
 from news_rag_interpreter import interpret_market_news_tool
 from fund_flow_tools import tool_get_retail_money_flow
@@ -5178,9 +5184,13 @@ def _is_us_stock_selection_query(query: str) -> bool:
     has_us_subject = any(keyword in text for keyword in ("美股", "纳斯达克", "纽交所")) or "us stock" in lower
     if not has_us_subject:
         return False
+    us_pool_action = bool(re.search(
+        r"(?:从|在)?美股(?:股票)?(?:池)?(?:里|中|内)?(?:帮我)?(?:找|筛选|选|挑)",
+        text,
+    ))
     has_action = any(keyword in text for keyword in ("推荐", "筛选", "帮我找", "帮我选", "找几只", "选几只", "哪些", "候选股", "股票池"))
     has_stock_word = any(keyword in text for keyword in ("股票", "个股", "标的", "候选"))
-    return bool(has_action or has_stock_word)
+    return bool(us_pool_action or has_action or has_stock_word)
 
 
 _US_STOCK_BEARISH_SETUP_KEYWORDS = (
@@ -5198,7 +5208,16 @@ def _infer_us_stock_technical_setup(query: str) -> str:
 
 def _extract_requested_candidate_limit(query: str, default: int = 10) -> int:
     text = str(query or "")
-    match = re.search(r"(\d{1,2})\s*(?:只|支|个|个名称|只名称|支名称)", text)
+    # 先识别明确的结果数量，避免把“过去60个交易日”误当成要返回60个候选。
+    match = re.search(
+        r"(?:只看|仅看|展示|返回|给我|列出|最多)\s*(?:前)?\s*(\d{1,2})\s*(?:只|支|个)?",
+        text,
+        re.IGNORECASE,
+    )
+    if not match:
+        match = re.search(r"(?:前|top)\s*(\d{1,2})\s*(?:只|支|个)?", text, re.IGNORECASE)
+    if not match:
+        match = re.search(r"(\d{1,2})\s*(?:只|支|个名称|只名称|支名称)", text)
     if match:
         return max(1, min(20, int(match.group(1))))
 
@@ -5216,7 +5235,7 @@ def _extract_requested_candidate_limit(query: str, default: int = 10) -> int:
         "十": 10,
     }
     for digit, value in chinese_digits.items():
-        if re.search(rf"{digit}\s*(?:只|支|个|个名称|只名称|支名称)", text):
+        if re.search(rf"{digit}\s*(?:只|支|个名称|只名称|支名称)", text):
             return value
     return default
 
@@ -5294,7 +5313,7 @@ def _reason_us_stock_screener_result(query: str, result_text: str, llm, setup: s
     return f"【精选股票】\n{result_text}"
 
 
-def screener_node(state: AgentState, llm):
+def screener_node(state: AgentState, llm, compiler_llm=None):
     # --- 1. 获取宏观资金风向 (Sector Flow) ---
     sector_flow_info = ""
     query = state["user_query"]
@@ -5314,6 +5333,76 @@ def screener_node(state: AgentState, llm):
 
     if _is_link_article_stock_mapping_task(query):
         return _answer_link_article_stock_mapping(state, llm)
+
+    # 多维筛选器自身已经同时校验“美股市场 + 筛选动作 + 可执行维度”。
+    # 这里不再叠加另一套意图判断，避免“从美股池里找……”因两套关键词不一致而落入A股工具。
+    if is_us_multifactor_screen_query(query):
+        try:
+            limit = _extract_requested_candidate_limit(query, default=10)
+            compiler_mode = str(os.getenv("US_STOCK_SCREEN_LLM_MODE", "on") or "on").strip().lower()
+            compiled_plan = None
+            compile_error = ""
+            if compiler_mode != "off":
+                compile_outcome = compile_screen_plan_with_llm(
+                    query,
+                    compiler_llm or llm,
+                    limit=limit,
+                )
+                if hasattr(compile_outcome, "plan"):
+                    compiled_plan = compile_outcome.plan
+                    compile_status = str(getattr(compile_outcome, "status", "") or "")
+                    compile_error = str(getattr(compile_outcome, "error", "") or "")
+                    compile_model = str(getattr(compile_outcome, "model", "") or "")
+                    compile_ms = int(getattr(compile_outcome, "elapsed_ms", 0) or 0)
+                    has_tool_call = bool(getattr(compile_outcome, "has_tool_call", False))
+                else:
+                    # Temporary compatibility for older compiler implementations and test doubles.
+                    compiled_plan, compile_error = compile_outcome
+                    compile_status = "success" if compiled_plan is not None else "provider_error"
+                    compile_model = str(
+                        getattr(compiler_llm or llm, "model_name", "")
+                        or getattr(compiler_llm or llm, "model", "")
+                        or ""
+                    )
+                    compile_ms = 0
+                    has_tool_call = compiled_plan is not None
+                fallback_reason = "" if compiled_plan is not None else (compile_status or "compile_failed")
+                print(
+                    f"[USStockScreen] semantic_compile mode={compiler_mode} "
+                    f"compile_status={compile_status or 'unknown'} model={compile_model or 'unknown'} "
+                    f"compile_ms={compile_ms} has_tool_call={has_tool_call} "
+                    f"fallback_reason={fallback_reason or '-'}"
+                )
+                _append_agent_trace_event(
+                    state,
+                    "screen_compile",
+                    {
+                        "mode": compiler_mode,
+                        "status": compile_status or "unknown",
+                        "model": compile_model or "unknown",
+                        "duration_ms": compile_ms,
+                        "has_tool_call": has_tool_call,
+                        "fallback_reason": fallback_reason,
+                    },
+                )
+                if compiled_plan is not None:
+                    plan_payload = compiled_plan.model_dump() if hasattr(compiled_plan, "model_dump") else compiled_plan.dict()
+                    print(f"[USStockScreen] semantic_plan mode={compiler_mode} plan={plan_payload}")
+                    if compiler_mode == "shadow":
+                        comparison = compare_semantic_plan_to_rules(query, compiled_plan, limit=limit)
+                        print(f"[USStockScreen] shadow_comparison={comparison}")
+                elif compile_error:
+                    print(f"[USStockScreen] semantic_compile_failed fallback=rules reason={compile_error}")
+            payload = {"query": query, "limit": limit}
+            if compiled_plan is not None and compiler_mode not in {"off", "shadow"}:
+                payload["plan"] = compiled_plan.model_dump() if hasattr(compiled_plan, "model_dump") else compiled_plan.dict()
+            result = screen_us_stocks.invoke(payload)
+        except Exception as exc:
+            result = f"【美股多维筛选】\n结论：数据不足\n- 原因：美股多维筛选工具调用失败：{exc}"
+        return {
+            "messages": [HumanMessage(content=result)],
+            "symbol": "",
+        }
 
     if _is_us_stock_selection_query(query):
         try:
@@ -6576,7 +6665,7 @@ def portfolio_analyst_node(state: AgentState, llm):
 # 4. 构建图 (The Graph)
 # ==========================================
 
-def build_trading_graph(fast_llm, mid_llm, smart_llm):
+def build_trading_graph(fast_llm, mid_llm, smart_llm, screen_compiler_llm=None):
     """
     构建并编译 LangGraph
     """
@@ -6684,7 +6773,17 @@ def build_trading_graph(fast_llm, mid_llm, smart_llm):
     workflow.add_node("monitor", _wrap_worker("monitor", lambda state: monitor_node(state, mid_llm)))
     workflow.add_node("researcher", _wrap_worker("researcher", lambda state: researcher_node(state, mid_llm)))
     workflow.add_node("chatter", _wrap_worker("chatter", lambda state: chatter_node(state, mid_llm)))
-    workflow.add_node("screener", _wrap_worker("screener", lambda state: screener_node(state, mid_llm)))
+    workflow.add_node(
+        "screener",
+        _wrap_worker(
+            "screener",
+            lambda state: screener_node(
+                state,
+                mid_llm,
+                compiler_llm=screen_compiler_llm,
+            ),
+        ),
+    )
     workflow.add_node("roaster", _wrap_worker("roaster", lambda state: roaster_node(state, mid_llm)))
     workflow.add_node("macro_analyst", _wrap_worker("macro_analyst", lambda state: macro_analyst_node(state, mid_llm)))
     # 持仓分析师 -> 用 Plus (均衡)
