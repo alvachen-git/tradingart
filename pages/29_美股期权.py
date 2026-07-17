@@ -3856,24 +3856,8 @@ def _cached_auto_option_source(symbol: str) -> tuple[bool, str | None, str]:
 
 
 @st.cache_data(show_spinner=False, ttl=600)
-def _cached_stock_daily(symbol: str, limit: int, cache_version: str) -> pd.DataFrame:
-    del cache_version
+def _cached_stock_daily(symbol: str, limit: int) -> pd.DataFrame:
     return load_stock_daily(symbol, limit=limit, engine=_cached_engine())
-
-
-def _stock_daily_cache_version(symbol: str) -> str:
-    latest = load_stock_daily(symbol, limit=1, engine=_cached_engine())
-    if latest.empty or "date" not in latest.columns:
-        return "empty"
-    row = latest.iloc[-1]
-    date_value = pd.to_datetime(row.get("date"), errors="coerce")
-    if pd.isna(date_value):
-        date_text = "unknown"
-    else:
-        date_text = date_value.strftime("%Y%m%d")
-    close_value = row.get("close", "")
-    volume_value = row.get("volume", "")
-    return f"{date_text}:{close_value}:{volume_value}"
 
 
 @st.cache_data(show_spinner=False, ttl=600)
@@ -4114,8 +4098,7 @@ if not market_metrics_history.empty:
 else:
     use_test_tables, latest_option_trade_date, table_label = _cached_auto_option_source(symbol)
     market_metrics_history = _cached_market_metrics_history(symbol, 252, use_test_tables)
-stock_cache_version = _stock_daily_cache_version(symbol)
-stock_df = _cached_stock_daily(symbol, stock_limit, stock_cache_version)
+stock_df = _cached_stock_daily(symbol, stock_limit)
 fallback_date = dt.datetime.strptime(default_trade_date(), "%Y%m%d").date()
 if not stock_df.empty:
     latest_stock_date = pd.to_datetime(stock_df["date"].max()).date()
