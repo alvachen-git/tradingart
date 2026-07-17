@@ -391,15 +391,6 @@ def _inject_page_style() -> None:
             line-height: 1.25;
             font-weight: 650;
         }
-        .us-symbol-cell-star {
-            min-height: 36px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            color: #0f172a;
-            font-size: 18px;
-            line-height: 1;
-        }
         .us-symbol-cell-muted {
             min-height: 36px;
             display: flex;
@@ -2000,7 +1991,14 @@ def _render_symbol_picker_dialog(symbol_options: list[str], current_symbol: str)
                     st.markdown(f'<div class="us-symbol-cell-muted">{escape(_underlying_category(row_symbol))}</div>', unsafe_allow_html=True)
                 with row_cols[3]:
                     star = "★" if row_symbol in favorite_set else "☆"
-                    st.markdown(f'<div class="us-symbol-cell-star">{escape(star)}</div>', unsafe_allow_html=True)
+                    st.button(
+                        star,
+                        key=f"us_symbol_star_{row_symbol}",
+                        help="加入或移出自选",
+                        on_click=_toggle_symbol_favorite,
+                        args=(row_symbol, symbols),
+                        use_container_width=True,
+                    )
 
         if len(filtered_symbols) > len(display_symbols):
             st.caption(f"已显示前 {len(display_symbols)} 个，继续输入关键词可缩小范围。")
@@ -4129,7 +4127,7 @@ with symbol_col:
             _render_symbol_picker_dialog(symbol_options, current_symbol)
     with picker_cols[1]:
         st.button(
-            "自选→",
+            "★→",
             key="us_lab_symbol_next_favorite",
             help="切换到下一个自选标的",
             on_click=_switch_to_next_favorite,
