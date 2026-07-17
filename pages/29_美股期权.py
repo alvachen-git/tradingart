@@ -81,7 +81,12 @@ SYMBOL_CATEGORY_MEMBERS = {
     "医疗": ("LLY", "PFE", "UNH", "XLV", "XBI"),
     "能源": ("XLE", "USO"),
 }
-SYMBOL_CATEGORY_ORDER = ("我的自选", "指数ETF", "科技老登", "AI算力", "软件", "金融", "消费", "高波动成长", "医疗", "能源", "其他")
+SYMBOL_CATEGORY_ORDER = ("全部", "我的自选", "指数ETF", "科技老登", "AI算力", "软件", "金融", "消费", "高波动成长", "医疗", "能源", "其他")
+SYMBOL_CATEGORY_LOOKUP = {
+    symbol: category
+    for category, members in SYMBOL_CATEGORY_MEMBERS.items()
+    for symbol in members
+}
 
 import us_market_dashboard_data as dashboard_data
 from option_kline_chart import lightweight_chart_loader_html, render_option_kline_chart
@@ -385,6 +390,15 @@ def _inject_page_style() -> None:
             font-size: 13px;
             line-height: 1.25;
             font-weight: 650;
+        }
+        .us-symbol-cell-star {
+            min-height: 36px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #0f172a;
+            font-size: 18px;
+            line-height: 1;
         }
         .us-symbol-cell-muted {
             min-height: 36px;
@@ -1781,9 +1795,9 @@ def _underlying_asset_label(symbol: str) -> str:
 
 def _underlying_category(symbol: str) -> str:
     code = str(symbol or "").upper()
-    for category, members in SYMBOL_CATEGORY_MEMBERS.items():
-        if code in members:
-            return category
+    category = SYMBOL_CATEGORY_LOOKUP.get(code)
+    if category:
+        return category
     if _underlying_asset_label(code) == "ETF":
         return "指数ETF"
     return "其他"
@@ -1815,11 +1829,25 @@ def _toggle_symbol_favorite(symbol: str, symbol_options: list[str] | tuple[str, 
     st.session_state["us_lab_symbol_favorites"] = favorites
 
 
+def _switch_to_next_favorite(current_symbol: str, symbol_options: list[str] | tuple[str, ...]) -> None:
+    favorites = _symbol_favorites(symbol_options)
+    if not favorites:
+        return
+    current = str(current_symbol or "").upper()
+    if current in favorites:
+        next_symbol = favorites[(favorites.index(current) + 1) % len(favorites)]
+    else:
+        next_symbol = favorites[0]
+    st.session_state["us_lab_symbol"] = next_symbol
+
+
 def _category_symbol_count(
     category: str,
     symbol_options: list[str] | tuple[str, ...],
     favorites: list[str],
 ) -> int:
+    if category == "全部":
+        return len(symbol_options)
     if category == "我的自选":
         return len(favorites)
     symbols = [str(item or "").upper() for item in symbol_options]
@@ -1843,11 +1871,13 @@ def _filter_underlying_symbols(
 
     def keep(symbol: str) -> bool:
         category_label = _underlying_category(symbol)
-        if category == "我的自选" and symbol not in favorite_set:
+        if category == "全部":
+            pass
+        elif category == "我的自选" and symbol not in favorite_set:
             return False
-        if category not in ("我的自选", "其他") and symbol not in category_members:
+        elif category == "其他" and category_label != "其他":
             return False
-        if category == "其他" and category_label != "其他":
+        elif category not in ("我的自选", "其他") and symbol not in category_members:
             return False
         if q:
             haystack = f"{symbol} {_underlying_name(symbol)} {category_label}".upper()
@@ -1928,11 +1958,12 @@ def _render_symbol_picker_dialog(symbol_options: list[str], current_symbol: str)
             category=active_category,
             query=query,
         )
+        display_symbols = filtered_symbols[:72]
         st.markdown(
             f"""
             <div class="us-symbol-table-summary">
                 <span>共 {len(filtered_symbols)} 个标的</span>
-                <span>点击代码立即切换</span>
+                <span>点击代码或公司名立即切换</span>
             </div>
             <div class="us-symbol-table-head">
                 <span>代码</span><span>公司名</span><span>分类</span><span>自选</span>
@@ -1942,34 +1973,37 @@ def _render_symbol_picker_dialog(symbol_options: list[str], current_symbol: str)
         )
         if not filtered_symbols:
             st.info("没有匹配的标的，可以换个关键词或切换分类。")
-        for row_symbol in filtered_symbols[:48]:
-            row_cols = st.columns([0.95, 1.55, 0.95, 0.55], gap="small")
-            is_favorite = row_symbol in favorites
-            with row_cols[0]:
-                if st.button(
-                    row_symbol,
-                    key=f"us_symbol_pick_{row_symbol}",
-                    type="primary" if row_symbol == current else "secondary",
-                    use_container_width=True,
-                ):
-                    st.session_state["us_lab_symbol"] = row_symbol
-                    st.rerun(scope="app")
-            with row_cols[1]:
-                st.markdown(f'<div class="us-symbol-cell-name">{escape(_underlying_name(row_symbol))}</div>', unsafe_allow_html=True)
-            with row_cols[2]:
-                st.markdown(f'<div class="us-symbol-cell-muted">{escape(_underlying_category(row_symbol))}</div>', unsafe_allow_html=True)
-            with row_cols[3]:
-                st.button(
-                    "★" if is_favorite else "☆",
-                    key=f"us_symbol_star_{row_symbol}",
-                    help="加入或移出自选",
-                    on_click=_toggle_symbol_favorite,
-                    args=(row_symbol, symbols),
-                    use_container_width=True,
-                )
+        else:
+            favorite_set = set(favorites)
+            for row_symbol in display_symbols:
+                row_cols = st.columns([0.95, 1.55, 0.95, 0.55], gap="small")
+                row_type = "primary" if row_symbol == current else "secondary"
+                with row_cols[0]:
+                    if st.button(
+                        row_symbol,
+                        key=f"us_symbol_pick_code_{row_symbol}",
+                        type=row_type,
+                        use_container_width=True,
+                    ):
+                        st.session_state["us_lab_symbol"] = row_symbol
+                        st.rerun(scope="app")
+                with row_cols[1]:
+                    if st.button(
+                        _underlying_name(row_symbol),
+                        key=f"us_symbol_pick_name_{row_symbol}",
+                        type=row_type,
+                        use_container_width=True,
+                    ):
+                        st.session_state["us_lab_symbol"] = row_symbol
+                        st.rerun(scope="app")
+                with row_cols[2]:
+                    st.markdown(f'<div class="us-symbol-cell-muted">{escape(_underlying_category(row_symbol))}</div>', unsafe_allow_html=True)
+                with row_cols[3]:
+                    star = "★" if row_symbol in favorite_set else "☆"
+                    st.markdown(f'<div class="us-symbol-cell-star">{escape(star)}</div>', unsafe_allow_html=True)
 
-        if len(filtered_symbols) > 48:
-            st.caption(f"已显示前 48 个，继续输入关键词可缩小范围。")
+        if len(filtered_symbols) > len(display_symbols):
+            st.caption(f"已显示前 {len(display_symbols)} 个，继续输入关键词可缩小范围。")
         st.markdown('<div class="us-symbol-az-rail">A-Z · #</div>', unsafe_allow_html=True)
 
 
@@ -3922,6 +3956,24 @@ def _cached_market_metrics_history(symbol: str, window: int, use_test_tables: bo
 
 
 @st.cache_data(show_spinner=False, ttl=600)
+def _cached_overview_metrics_from_market_history(
+    symbol: str,
+    trade_date: str,
+    use_test_tables: bool,
+    stock_df: pd.DataFrame,
+    market_metrics_history: pd.DataFrame,
+) -> dict[str, Any]:
+    return calculate_overview_metrics_from_market_history(
+        stock_df=stock_df,
+        market_metrics_history=market_metrics_history,
+        trade_date=trade_date,
+        underlying=symbol,
+        use_test_tables=use_test_tables,
+        engine=_cached_engine(),
+    )
+
+
+@st.cache_data(show_spinner=False, ttl=600)
 def _cached_option_anomaly_scan(
     trade_date: str,
     underlyings_key: str,
@@ -4076,12 +4128,11 @@ with symbol_col:
         ):
             _render_symbol_picker_dialog(symbol_options, current_symbol)
     with picker_cols[1]:
-        current_favorites = _symbol_favorites(symbol_options)
         st.button(
-            "★" if current_symbol in current_favorites else "☆",
-            key="us_lab_symbol_current_favorite",
-            help="加入或移出自选",
-            on_click=_toggle_symbol_favorite,
+            "自选→",
+            key="us_lab_symbol_next_favorite",
+            help="切换到下一个自选标的",
+            on_click=_switch_to_next_favorite,
             args=(current_symbol, symbol_options),
             use_container_width=True,
         )
@@ -4121,13 +4172,12 @@ if market_metrics_history.empty:
 else:
     summary = _summary_from_market_metrics(market_metrics_history, trade_date)
 iv_history = _iv_history_from_market_metrics(market_metrics_history)
-vol_position_metrics = calculate_overview_metrics_from_market_history(
-    stock_df=stock_df,
-    market_metrics_history=market_metrics_history,
-    trade_date=trade_date,
-    underlying=symbol,
-    use_test_tables=use_test_tables,
-    engine=_cached_engine(),
+vol_position_metrics = _cached_overview_metrics_from_market_history(
+    symbol,
+    trade_date,
+    use_test_tables,
+    stock_df,
+    market_metrics_history,
 )
 current_iv_pct = vol_position_metrics.get("atm_iv_pct")
 if current_iv_pct is None or pd.isna(current_iv_pct):
