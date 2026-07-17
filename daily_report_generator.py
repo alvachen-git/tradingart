@@ -13,6 +13,7 @@ import re
 import json
 from html import unescape
 from datetime import datetime
+from bs4 import BeautifulSoup
 from sqlalchemy import create_engine, text
 from dotenv import load_dotenv
 from llm_compat import build_report_tongyi_llm, invoke_report_llm_with_fallback
@@ -48,7 +49,12 @@ engine = create_engine(db_url)
 # 初始化 LLM
 REPORT_LLM_ENV_PREFIX = "DAILY_REPORT"
 REPORT_LLM_TEMPERATURE = 0.1
+REPORT_REWRITE_TEMPERATURE = 0.0
 llm = build_report_tongyi_llm(env_prefix=REPORT_LLM_ENV_PREFIX, temperature=REPORT_LLM_TEMPERATURE)
+rewrite_llm = build_report_tongyi_llm(
+    env_prefix=REPORT_LLM_ENV_PREFIX,
+    temperature=REPORT_REWRITE_TEMPERATURE,
+)
 
 # 商品卡片发布前校验配置（仅校验“商品期货全景”中的隐含波动率口径）
 COMMODITY_CARD_LIST = [
@@ -69,7 +75,28 @@ COMMODITY_IV_PREFIX_MAP = {
 }
 COMMODITY_IV_LEVEL_TOKENS = ["极低", "低", "偏低", "中", "中等", "偏高", "高", "极高"]
 COMMODITY_IV_INVALID_TOKENS = ["无数据", "N/A", "未知", "None", "--"]
-MAX_REWRITE_ROUNDS = 2
+
+
+def _bounded_int_env(name: str, default: int, minimum: int, maximum: int) -> int:
+    raw = os.getenv(name)
+    try:
+        value = int(str(raw).strip()) if raw is not None else default
+    except (TypeError, ValueError):
+        value = default
+    return max(minimum, min(maximum, value))
+
+
+MAX_REWRITE_ROUNDS = _bounded_int_env("DAILY_REPORT_MAX_REWRITE_ROUNDS", 4, 1, 6)
+REPORT_SLOT_ORDER = (
+    "market-headline", "stock-sector", "futures-holding", "commodity-panorama",
+    "option-volatility", "daily-bull", "risk-warning", "tomorrow-strategy", "footer-quote",
+)
+REPORT_SLOT_LABELS = {
+    "market-headline": "市场头条", "stock-sector": "股票板块", "futures-holding": "期货商持仓",
+    "commodity-panorama": "商品期货全景", "option-volatility": "期权波动率", "daily-bull": "每日牛股",
+    "risk-warning": "风险警示", "tomorrow-strategy": "明日策略", "footer-quote": "底部点评",
+}
+REPORT_REPAIR_FORBIDDEN_TAGS = {"html", "head", "body", "style", "script", "link", "meta"}
 
 # A股晚报硬事实配置。股票/指数方向、板块资金与ETF IV都必须先通过程序查库，
 # AI只能解释这些事实，不能自行补数或沿用上一交易日素材。
@@ -946,6 +973,290 @@ def _inject_report_data_provenance(html_content: str, snapshot: dict) -> str:
     return html_content.replace("</p>", f"</p>{marker}", 1)
 
 
+def _append_inline_style(node, declarations: str) -> None:
+    existing = str(node.get("style") or "").strip().rstrip(";")
+    node["style"] = f"{existing}; {declarations}" if existing else declarations
+
+
+def _normalize_report_slot_fragment(slot_name: str, fragment: str) -> str:
+    """Normalize rich list content without allowing it to influence the locked shell."""
+    fragment_soup = BeautifulSoup(str(fragment or ""), "html.parser")
+    if slot_name not in {"stock-sector", "futures-holding"}:
+        return _slot_inner_html(fragment_soup)
+
+    for list_node in fragment_soup.find_all(["ul", "ol"]):
+        _append_inline_style(
+            list_node,
+            "list-style:none; margin:0; padding:0; color:#e2e8f0; text-align:left",
+        )
+        items = list_node.find_all("li", recursive=False)
+        for item in items:
+            _append_inline_style(
+                item,
+                "color:#e2e8f0; margin:0 0 10px 0; padding:0; line-height:1.8; text-align:left",
+            )
+        if items:
+            _append_inline_style(items[-1], "margin-bottom:0")
+    for paragraph in fragment_soup.find_all("p"):
+        _append_inline_style(paragraph, "color:#e2e8f0; margin:0 0 8px 0; line-height:1.8; text-align:left")
+    for strong in fragment_soup.find_all("strong"):
+        _append_inline_style(strong, "color:#f8fafc; font-weight:700")
+    return _slot_inner_html(fragment_soup)
+
+
+def _render_locked_report_layout(slots: dict, today: str, weekday: str) -> str:
+    """Render the existing visual shell while allowing content only in named slots."""
+    values = {
+        name: _normalize_report_slot_fragment(name, str((slots or {}).get(name) or ""))
+        for name in REPORT_SLOT_ORDER
+    }
+    return f"""<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <style>
+    @media screen and (max-width: 640px) {{
+      .two-col-table {{ width: 100% !important; }}
+      .two-col-table td {{ display: block !important; width: 100% !important; padding: 6px 0 !important; }}
+      .main-container {{ padding: 20px 16px !important; }}
+      .section-title {{ font-size: 18px !important; }}
+      .card-content {{ padding: 16px !important; }}
+    }}
+    @media screen {{
+      .glass-card {{
+        backdrop-filter: blur(12px) !important; -webkit-backdrop-filter: blur(12px) !important;
+        background: rgba(30, 41, 59, 0.8) !important; border: 1px solid rgba(255,255,255,0.08) !important;
+        box-shadow: 0 8px 32px rgba(0,0,0,0.3) !important;
+      }}
+      .glass-header {{
+        backdrop-filter: blur(16px) !important; -webkit-backdrop-filter: blur(16px) !important;
+        background: rgba(15, 23, 42, 0.9) !important;
+      }}
+    }}
+  </style>
+</head>
+<body style="margin:0; padding:0; background:#0f172a; font-family:'PingFang SC','Microsoft YaHei',sans-serif;">
+<div class="main-container" style="max-width:700px; margin:0 auto; padding:30px 24px; background:linear-gradient(180deg,#0f172a 0%,#1e293b 100%);">
+  <div class="glass-header" style="text-align:center; padding:32px 24px; border-radius:20px; background:rgba(15,23,42,0.9); border:1px solid rgba(255,255,255,0.08); margin-bottom:28px;">
+    <div style="font-size:13px; color:#64748b; letter-spacing:2px; margin-bottom:8px;">AIPROTA DAILY REPORT</div>
+    <h1 style="color:#fbbf24; font-size:26px; margin:0; font-weight:700; letter-spacing:2px;">📊 爱波塔复盘晚报</h1>
+    <p style="color:#64748b; font-size:14px; margin-top:12px;">{today} {weekday} | 深度复盘</p>
+  </div>
+  <div style="margin-bottom:24px;">
+    <h2 class="section-title" style="color:#fbbf24; font-size:18px; margin:0 0 14px 0; font-weight:600; display:flex; align-items:center; gap:8px;"><span style="width:3px; height:20px; background:#fbbf24; border-radius:2px;"></span>🚀 市场头条</h2>
+    <div class="glass-card card-content" style="background:rgba(30,41,59,0.6); padding:18px; border-radius:14px; border:1px solid rgba(255,255,255,0.06);">
+      <p data-report-slot="market-headline" style="color:#e2e8f0; font-size:14px; margin:0; line-height:1.9;">{values['market-headline']}</p>
+    </div>
+  </div>
+  <div style="margin-bottom:24px;">
+    <h2 class="section-title" style="color:#fbbf24; font-size:18px; margin:0 0 14px 0; font-weight:600; display:flex; align-items:center; gap:8px;"><span style="width:3px; height:20px; background:#fbbf24; border-radius:2px;"></span>💰 资金暗流</h2>
+    <table class="two-col-table" data-report-layout="fund-flow" width="100%" cellpadding="0" cellspacing="0" border="0"><tr>
+      <td width="50%" style="padding:0 6px 12px 0;" valign="top"><div class="glass-card card-content" style="background:rgba(30,41,59,0.6); padding:18px; border-radius:14px; border:1px solid rgba(255,255,255,0.06); height:100%;">
+        <h4 style="color:#94a3b8; margin:0 0 10px 0; font-size:14px; font-weight:600;">📈 股票板块</h4>
+        <div data-report-slot="stock-sector" style="color:#e2e8f0; font-size:13px; margin:0; line-height:1.8; text-align:left;">{values['stock-sector']}</div>
+      </div></td>
+      <td width="50%" style="padding:0 0 12px 6px;" valign="top"><div class="glass-card card-content" style="background:rgba(30,41,59,0.6); padding:18px; border-radius:14px; border:1px solid rgba(255,255,255,0.06); height:100%;">
+        <h4 style="color:#94a3b8; margin:0 0 10px 0; font-size:14px; font-weight:600;">📊 期货商持仓</h4>
+        <div data-report-slot="futures-holding" style="color:#e2e8f0; font-size:13px; margin:0; line-height:1.8; text-align:left;">{values['futures-holding']}</div>
+      </div></td>
+    </tr></table>
+  </div>
+  <div style="margin-bottom:24px;">
+    <h2 class="section-title" style="color:#fbbf24; font-size:18px; margin:0 0 14px 0; font-weight:600; display:flex; align-items:center; gap:8px;"><span style="width:3px; height:20px; background:#fbbf24; border-radius:2px;"></span>🏆 商品期货全景</h2>
+    <table class="two-col-table" data-report-slot="commodity-panorama" width="100%" cellpadding="0" cellspacing="0" border="0">{values['commodity-panorama']}</table>
+  </div>
+  <div style="margin-bottom:24px;">
+    <h2 class="section-title" style="color:#fbbf24; font-size:18px; margin:0 0 14px 0; font-weight:600; display:flex; align-items:center; gap:8px;"><span style="width:3px; height:20px; background:#fbbf24; border-radius:2px;"></span>⚖️ 期权波动率</h2>
+    <div data-report-slot="option-volatility" class="glass-card card-content" style="background:rgba(30,41,59,0.6); padding:18px; border-radius:14px; border:1px solid rgba(255,255,255,0.06);">{values['option-volatility']}</div>
+  </div>
+  <div style="margin-bottom:24px;">
+    <h2 class="section-title" style="color:#fbbf24; font-size:18px; margin:0 0 14px 0; font-weight:600; display:flex; align-items:center; gap:8px;"><span style="width:3px; height:20px; background:#fbbf24; border-radius:2px;"></span>🐂 每日牛股</h2>
+    <div class="glass-card card-content" style="background:rgba(30,41,59,0.6); padding:18px; border-radius:14px; border:1px solid rgba(255,255,255,0.06);"><p data-report-slot="daily-bull" style="color:#e2e8f0; font-size:13px; margin:0; line-height:1.9;">{values['daily-bull']}</p></div>
+  </div>
+  <div style="margin-bottom:24px;">
+    <h2 class="section-title" style="color:#fbbf24; font-size:18px; margin:0 0 14px 0; font-weight:600; display:flex; align-items:center; gap:8px;"><span style="width:3px; height:20px; background:#fbbf24; border-radius:2px;"></span>🐻 风险警示</h2>
+    <div class="glass-card card-content" style="background:rgba(30,41,59,0.6); padding:18px; border-radius:14px; border:1px solid rgba(255,255,255,0.06);"><p data-report-slot="risk-warning" style="color:#e2e8f0; font-size:13px; margin:0; line-height:1.9;">{values['risk-warning']}</p></div>
+  </div>
+  <div style="margin-bottom:24px;"><div class="glass-card" style="background:rgba(251,191,36,0.08); padding:20px; border-radius:14px; border:1px solid rgba(251,191,36,0.25);">
+    <h2 style="color:#fbbf24; font-size:18px; margin:0 0 14px 0; font-weight:600;">💡 明日策略</h2>
+    <p data-report-slot="tomorrow-strategy" style="color:#e2e8f0; font-size:14px; line-height:1.9; margin:0;">{values['tomorrow-strategy']}</p>
+  </div></div>
+  <div style="text-align:center; padding:20px 0; border-top:1px solid rgba(255,255,255,0.06);">
+    <p data-report-slot="footer-quote" style="color:#64748b; font-size:13px; font-style:italic; margin:0;">{values['footer-quote']}</p>
+    <p style="color:#475569; font-size:12px; margin-top:14px;">爱波塔 · 最懂期权的AI | www.aiprota.com</p>
+  </div>
+</div>
+</body>
+</html>"""
+
+
+def _slot_inner_html(node) -> str:
+    return "".join(str(child) for child in node.contents).strip() if node else ""
+
+
+def _find_report_slot_node(soup: BeautifulSoup, slot_name: str):
+    node = soup.find(attrs={"data-report-slot": slot_name})
+    if node is not None:
+        return node
+
+    label = REPORT_SLOT_LABELS.get(slot_name, "")
+    heading = soup.find(
+        lambda tag: tag.name in {"h2", "h4"} and label in tag.get_text(" ", strip=True)
+    )
+    if heading is None:
+        if slot_name == "footer-quote":
+            brand = soup.find(string=lambda value: value and "www.aiprota.com" in value)
+            brand_node = brand.parent if brand else None
+            return brand_node.find_previous_sibling("p") if brand_node else None
+        return None
+    if slot_name == "commodity-panorama":
+        return heading.find_next("table", class_="two-col-table")
+    if slot_name in {"market-headline", "stock-sector", "futures-holding", "daily-bull", "risk-warning", "tomorrow-strategy"}:
+        return heading.find_next("p")
+    if slot_name == "option-volatility":
+        return heading.find_next("div", class_="glass-card")
+    return None
+
+
+def _fragment_has_forbidden_markup(fragment: str, slot_name: str) -> bool:
+    fragment_soup = BeautifulSoup(str(fragment or ""), "html.parser")
+    if any(fragment_soup.find(tag_name) is not None for tag_name in REPORT_REPAIR_FORBIDDEN_TAGS):
+        return True
+    if fragment_soup.find(attrs={"data-report-slot": True}) is not None:
+        return True
+    if fragment_soup.find(attrs={"data-report-layout": True}) is not None:
+        return True
+    paragraph_slots = {
+        "market-headline", "daily-bull", "risk-warning", "tomorrow-strategy", "footer-quote",
+    }
+    if slot_name in paragraph_slots and fragment_soup.find(["p", "table", "section"]):
+        return True
+    if slot_name in {"stock-sector", "futures-holding"} and fragment_soup.find(["table", "section"]):
+        return True
+    return slot_name == "commodity-panorama" and fragment_soup.find("table") is not None
+
+
+def _extract_report_slots(html_content: str) -> dict:
+    soup = BeautifulSoup(str(html_content or ""), "html.parser")
+    slots = {}
+    for slot_name in REPORT_SLOT_ORDER:
+        fragment = _slot_inner_html(_find_report_slot_node(soup, slot_name))
+        slots[slot_name] = "" if _fragment_has_forbidden_markup(fragment, slot_name) else fragment
+    return slots
+
+
+def validate_report_layout(html_content: str) -> list[str]:
+    """Validate the locked shell independently from market-fact validation."""
+    anomalies = []
+    soup = BeautifulSoup(str(html_content or ""), "html.parser")
+    if soup.find("div", class_="main-container") is None:
+        anomalies.append("排版缺少 main-container 外层容器")
+    if soup.find("div", class_="glass-header") is None:
+        anomalies.append("排版缺少 glass-header 头部")
+    if soup.find("script") is not None:
+        anomalies.append("排版包含禁止的 script 标签")
+    for style_node in soup.find_all("style"):
+        if style_node.find_parent("head") is None:
+            anomalies.append("正文插槽包含禁止的 style 标签")
+
+    html_text = str(html_content or "")
+    positions = []
+    for slot_name in REPORT_SLOT_ORDER:
+        nodes = soup.find_all(attrs={"data-report-slot": slot_name})
+        if len(nodes) != 1:
+            anomalies.append(f"排版插槽 {slot_name} 数量异常：{len(nodes)}")
+        else:
+            positions.append(html_text.find(f'data-report-slot="{slot_name}"'))
+            if slot_name != "commodity-panorama" and not nodes[0].get_text(" ", strip=True):
+                anomalies.append(f"排版插槽 {slot_name} 内容为空")
+    if positions != sorted(positions):
+        anomalies.append("排版插槽顺序异常")
+
+    fund_table = soup.find("table", attrs={"data-report-layout": "fund-flow"})
+    if fund_table is None or len(fund_table.find_all("td")) < 2:
+        anomalies.append("资金暗流双栏结构不完整")
+    commodity_table = soup.find(attrs={"data-report-slot": "commodity-panorama"})
+    commodity_cards = commodity_table.find_all("td") if commodity_table else []
+    if len(commodity_cards) != len(COMMODITY_CARD_LIST):
+        anomalies.append(
+            f"商品期货全景卡片数量异常：页面={len(commodity_cards)}，要求={len(COMMODITY_CARD_LIST)}"
+        )
+    return anomalies
+
+
+def _plain_fragment(fragment: str) -> str:
+    return BeautifulSoup(str(fragment or ""), "html.parser").get_text(" ", strip=True)
+
+
+def _classify_repair_slots(anomalies: list, html_content: str) -> list[str]:
+    slots = _extract_report_slots(html_content)
+    targets = set()
+    commodity_tokens = tuple(COMMODITY_CARD_LIST) + ("商品期货全景", "商品卡片", "趋势标签", "形态字段")
+    sector_tokens = ("股票板块", "主力资金Top3", "主力净额", "真实主力净流", "资金流入", "资金流出")
+    iv_tokens = ("IV Rank", "IV等级", "可核验的IV", "期权波动率")
+    narrative_slots = (
+        "market-headline", "stock-sector", "futures-holding", "option-volatility",
+        "daily-bull", "risk-warning", "tomorrow-strategy",
+    )
+    direction_entities = list(A_SHARE_INDEX_MAP) + list(ETF_OPTION_SNAPSHOT_MAP)
+
+    for anomaly in anomalies:
+        message = str(anomaly)
+        if any(token in message for token in commodity_tokens):
+            targets.add("commodity-panorama")
+        if any(token in message for token in sector_tokens):
+            targets.add("stock-sector")
+        if any(token in message for token in iv_tokens):
+            targets.add("option-volatility")
+        if "当日涨跌幅" in message or "相反方向" in message:
+            entities = [entity for entity in direction_entities if entity in message]
+            located = {
+                slot_name
+                for slot_name in narrative_slots
+                if any(entity in _plain_fragment(slots.get(slot_name, "")) for entity in entities)
+            }
+            targets.update(located or {"market-headline", "option-volatility", "tomorrow-strategy"})
+        if message.startswith("排版插槽 "):
+            targets.update(slot_name for slot_name in REPORT_SLOT_ORDER if slot_name in message)
+
+    return [slot_name for slot_name in REPORT_SLOT_ORDER if slot_name in targets] or list(REPORT_SLOT_ORDER)
+
+
+def _parse_slot_repair_response(response_text: str, allowed_slots: list[str]) -> tuple[dict, list[str]]:
+    cleaned = str(response_text or "").replace("```html", "").replace("```", "").strip()
+    soup = BeautifulSoup(cleaned, "html.parser")
+    if any(soup.find(tag_name) is not None for tag_name in REPORT_REPAIR_FORBIDDEN_TAGS):
+        return {}, ["<page-markup>"]
+    repair_root = soup.find("report-repair")
+    if repair_root is None:
+        return {}, ["<invalid-wrapper>"]
+    repairs = {}
+    rejected = []
+    allowed = set(allowed_slots)
+    for node in repair_root.find_all("section", attrs={"data-slot": True}, recursive=False):
+        slot_name = str(node.get("data-slot") or "").strip()
+        if slot_name not in allowed or slot_name not in REPORT_SLOT_ORDER:
+            rejected.append(slot_name or "<empty>")
+            continue
+        fragment = _slot_inner_html(node)
+        if _fragment_has_forbidden_markup(fragment, slot_name):
+            rejected.append(slot_name)
+            continue
+        repairs[slot_name] = fragment
+    return repairs, rejected
+
+
+def _write_failed_daily_report(html_content: str, snapshot: dict) -> str:
+    report_date = str((snapshot or {}).get("report_date") or _current_trade_date_key())
+    os.makedirs("outputs", exist_ok=True)
+    timestamp = datetime.now().strftime("%H%M%S")
+    output_path = os.path.join("outputs", f"failed_daily_report_{report_date}_{timestamp}.html")
+    with open(output_path, "w", encoding="utf-8") as output_file:
+        output_file.write(str(html_content or ""))
+    return output_path
+
+
 def _write_daily_report_audit(snapshot: dict, raw_material: str) -> str:
     """Persist the reporter material and deterministic truth set for later incident review."""
     report_date = str((snapshot or {}).get("report_date") or _current_trade_date_key())
@@ -963,52 +1274,77 @@ def _write_daily_report_audit(snapshot: dict, raw_material: str) -> str:
     return audit_path
 
 
-def _rewrite_report_after_validation(raw_material: str, html: str, anomalies: list, round_idx: int,
-                                     iv_snapshot_text: str = "", kline_snapshot_text: str = "",
-                                     a_share_snapshot_text: str = "") -> str:
-    """当发布事实校验失败时，提醒 LLM 定向重写整份 HTML。"""
-    anomaly_text = "\n".join([f"- {x}" for x in anomalies])
+def _rewrite_report_slots_after_validation(
+    raw_material: str,
+    html: str,
+    anomalies: list,
+    cumulative_anomalies: list,
+    target_slots: list[str],
+    round_idx: int,
+    today: str,
+    weekday: str,
+    iv_snapshot_text: str = "",
+    kline_snapshot_text: str = "",
+    a_share_snapshot_text: str = "",
+) -> str:
+    """Repair allowlisted slot content, then put it back into the locked report shell."""
+    current_slots = _extract_report_slots(html)
+    anomaly_text = "\n".join(f"- {item}" for item in anomalies)
+    history_text = "\n".join(f"- {item}" for item in cumulative_anomalies)
+    target_text = "\n\n".join(
+        f'<section data-slot="{slot_name}">\n{current_slots.get(slot_name, "")}\n</section>'
+        for slot_name in target_slots
+    )
     rewrite_prompt = f"""
-你生成的《每日深度复盘》HTML存在发布事实错误，请完整重写并修复。
+你正在修复《每日深度复盘》的局部内容。页面排版由程序锁定，你只能返回指定内容插槽的内部HTML。
 
 【第{round_idx}轮校验发现的问题】
 {anomaly_text}
 
-【强制要求】
-1. 必须是完整HTML（无Markdown代码块）。
-2. 商品期货全景必须保留10个商品卡片，且每个卡片都含“隐含波动率：X”字段。
-3. 隐含波动率字段必须体现“高/中/低”等级（可写成“偏高/偏低/中等/极高/极低”）。
-4. 必须写具体百分比，格式示例：“隐含波动率：42.5%（偏高）”。
-5. 商品卡片“形态：X”和趋势标签必须逐字匹配下方程序注入的K线形态/趋势真值。
-6. 不要再写“支撑：... | 压力：...”这一行。
-7. 趋势标签只允许“看多/看空/震荡”，不得自行改写或根据宏观素材覆盖程序真值。
-8. 其他板块风格与结构尽量保持原有质量。
-9. 股票板块只能使用下方A股发布真值中的主力净额Top3，金额单位为亿元且必须保留正负号。
-10. 指数/ETF当日涨跌、K线阴阳、ETF IV Rank和等级必须逐字匹配A股发布真值。
-11. 记者素材与程序真值冲突时，忽略记者素材；不得把下跌写成上涨、流出写成流入。
+【此前出现过的问题，禁止重新引入】
+{history_text}
 
-【程序注入的商品IV真值（最高优先级，必须原样使用）】
+【强制要求】
+1. 只返回下方列出的 data-slot，不得增加未知插槽。
+2. 输出格式必须是：<report-repair><section data-slot="插槽名">内部HTML</section></report-repair>。
+3. section 内不要返回外层 p、table、html、head、body、style、script 或 Markdown代码块。
+4. 未列出的插槽禁止改写；已正确内容尽量原样保留。
+5. 商品期货全景必须保留10个商品卡片，形态、趋势和隐含波动率必须逐字匹配程序真值。
+6. 股票板块只能使用A股真值中的主力净流入Top3和净流出Top3，金额必须保留正负号。
+7. 指数/ETF涨跌、K线阴阳、ETF IV Rank和等级必须逐字匹配程序真值。
+8. 记者素材与程序真值冲突时忽略记者素材；不得把下跌写成上涨、流出写成流入。
+
+【商品IV真值】
 {iv_snapshot_text}
 
-【程序注入的商品K线形态/趋势真值（最高优先级，必须原样使用）】
+【商品K线形态/趋势真值】
 {kline_snapshot_text}
 
-【程序注入的A股/ETF/板块资金真值（最高优先级，必须原样使用）】
+【A股/ETF/板块资金真值】
 {a_share_snapshot_text}
 
 【记者素材】
 {raw_material}
 
-【你上一次输出的HTML】
-{html}
+【本轮允许修复的插槽】
+{target_text}
 """
-    res = invoke_report_llm_with_fallback(
-        llm,
+    response = invoke_report_llm_with_fallback(
+        rewrite_llm,
         [HumanMessage(content=rewrite_prompt)],
         env_prefix=REPORT_LLM_ENV_PREFIX,
-        temperature=REPORT_LLM_TEMPERATURE,
+        temperature=REPORT_REWRITE_TEMPERATURE,
     )
-    return res.content.replace("```html", "").replace("```", "").strip()
+    repairs, rejected = _parse_slot_repair_response(response.content, target_slots)
+    if rejected:
+        print(f"⚠️ [局部修复] 拒绝非法或未知插槽: {', '.join(rejected)}")
+    if not repairs:
+        print("⚠️ [局部修复] 模型未返回可接受的插槽，保留上一版内容")
+        return html
+    for slot_name, fragment in repairs.items():
+        current_slots[slot_name] = fragment
+    print(f"🧩 [局部修复] 已替换插槽: {', '.join(repairs)}")
+    return _render_locked_report_layout(current_slots, today, weekday)
 
 
 # ==========================================
@@ -1485,28 +1821,40 @@ def draft_report(raw_material, a_share_snapshot: dict = None, a_share_snapshot_t
         env_prefix=REPORT_LLM_ENV_PREFIX,
         temperature=REPORT_LLM_TEMPERATURE,
     )
-    html = res.content.replace("```html", "").replace("```", "").strip()
+    raw_html = res.content.replace("```html", "").replace("```", "").strip()
+    # The model contributes content only. The program re-renders the fixed shell so
+    # later fact repairs cannot modify CSS, section order or outer card structure.
+    html = _render_locked_report_layout(_extract_report_slots(raw_html), today, weekday)
 
-    # 发布前双重事实校验：商品真值 + A股/ETF/板块资金真值。
+    # 发布前校验：固定排版 + 商品真值 + A股/ETF/板块资金真值。
     commodity_valid, commodity_anomalies = validate_commodity_cards(
         html,
         iv_snapshot_map,
         kline_snapshot_map,
     )
     a_share_anomalies = validate_a_share_report_facts(html, a_share_snapshot)
-    anomalies = commodity_anomalies + a_share_anomalies
-    is_valid = commodity_valid and not a_share_anomalies
+    layout_anomalies = validate_report_layout(html)
+    anomalies = layout_anomalies + commodity_anomalies + a_share_anomalies
+    is_valid = not layout_anomalies and commodity_valid and not a_share_anomalies
+    cumulative_anomalies = list(dict.fromkeys(anomalies))
     for i in range(1, MAX_REWRITE_ROUNDS + 1):
         if is_valid:
             break
-        print(f"⚠️ [发布前校验] 报告事实异常，触发重写（第{i}轮）")
+        before_anomalies = set(anomalies)
+        target_slots = _classify_repair_slots(anomalies, html)
+        print(f"⚠️ [发布前校验] 报告异常，触发局部修复（第{i}/{MAX_REWRITE_ROUNDS}轮）")
+        print(f"   - 目标插槽: {', '.join(target_slots)}")
         for a in anomalies[:8]:
             print(f"   - {a}")
-        html = _rewrite_report_after_validation(
+        html = _rewrite_report_slots_after_validation(
             raw_material,
             html,
             anomalies,
+            cumulative_anomalies,
+            target_slots,
             i,
+            today,
+            weekday,
             iv_snapshot_text,
             kline_snapshot_text,
             a_share_snapshot_text,
@@ -1517,13 +1865,31 @@ def draft_report(raw_material, a_share_snapshot: dict = None, a_share_snapshot_t
             kline_snapshot_map,
         )
         a_share_anomalies = validate_a_share_report_facts(html, a_share_snapshot)
-        anomalies = commodity_anomalies + a_share_anomalies
-        is_valid = commodity_valid and not a_share_anomalies
+        layout_anomalies = validate_report_layout(html)
+        anomalies = layout_anomalies + commodity_anomalies + a_share_anomalies
+        is_valid = not layout_anomalies and commodity_valid and not a_share_anomalies
+        after_anomalies = set(anomalies)
+        resolved = sorted(before_anomalies - after_anomalies)
+        new = sorted(after_anomalies - before_anomalies)
+        repeated = sorted(before_anomalies & after_anomalies)
+        print(
+            f"📋 [局部修复结果] 已解决={len(resolved)}，"
+            f"新增={len(new)}，重复={len(repeated)}"
+        )
+        for label, items in (("已解决", resolved), ("新增", new), ("重复", repeated)):
+            for item in items[:6]:
+                print(f"   - [{label}] {item}")
+        cumulative_anomalies = list(dict.fromkeys(cumulative_anomalies + anomalies))
 
     if not is_valid:
         print("❌ [发布前校验] 报告事实校验仍未通过，终止发布。")
         for a in anomalies[:12]:
             print(f"   - {a}")
+        try:
+            failed_path = _write_failed_daily_report(html, a_share_snapshot)
+            print(f"🗂️ [失败留档] 最终失败稿已保存: {failed_path}")
+        except Exception as exc:
+            print(f"⚠️ [失败留档] 保存失败: {exc}")
         return ""
 
     return _inject_report_data_provenance(html, a_share_snapshot)
