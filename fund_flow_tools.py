@@ -1,7 +1,7 @@
 import pandas as pd
 import os
 import re
-from sqlalchemy import create_engine, text
+from sqlalchemy import bindparam, create_engine, text
 from dotenv import load_dotenv
 from langchain_core.tools import tool
 
@@ -20,6 +20,163 @@ def get_db_engine():
 
 
 engine = get_db_engine()
+
+SECTOR_TYPE_INDUSTRY = "行业"
+SECTOR_HIERARCHY_SUFFIX_RE = re.compile(r"[ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩ]+$")
+
+
+class SectorMoneyFlowNotReadyError(RuntimeError):
+    """The requested industry money-flow snapshot is missing or stale."""
+
+
+def canonical_sector_name(value: str) -> str:
+    """Remove only the trailing DC hierarchy marker, preserving semantic names."""
+    name = str(value or "").strip()
+    return SECTOR_HIERARCHY_SUFFIX_RE.sub("", name).strip()
+
+
+def _numeric_or_zero(value) -> float:
+    numeric = pd.to_numeric(value, errors="coerce")
+    return 0.0 if pd.isna(numeric) else float(numeric)
+
+
+def build_sector_money_flow_snapshot(
+    days: int = 1,
+    as_of_date: str = None,
+    db_engine=None,
+) -> dict:
+    """Return one canonical, unique industry record per name and ranked Top3 lists."""
+    active_engine = db_engine if db_engine is not None else engine
+    if active_engine is None:
+        raise SectorMoneyFlowNotReadyError("数据库连接失败")
+
+    safe_days = max(1, min(int(days or 1), 60))
+    normalized_as_of = _normalize_trade_date(as_of_date)
+    date_where = ""
+    date_params = {"sector_type": SECTOR_TYPE_INDUSTRY}
+    if normalized_as_of:
+        date_where = "AND REPLACE(trade_date, '-', '') <= :as_of_date"
+        date_params["as_of_date"] = normalized_as_of
+
+    dates_sql = text(f"""
+        SELECT DISTINCT REPLACE(trade_date, '-', '') AS trade_date
+        FROM sector_moneyflow
+        WHERE sector_type = :sector_type
+          {date_where}
+        ORDER BY trade_date DESC
+        LIMIT {safe_days + 5}
+    """)
+    dates_df = pd.read_sql(dates_sql, active_engine, params=date_params)
+    if dates_df.empty:
+        raise SectorMoneyFlowNotReadyError("暂无资金数据，请先运行数据更新脚本。")
+
+    target_dates = [
+        _normalize_trade_date(value)
+        for value in dates_df.head(safe_days)["trade_date"].tolist()
+    ]
+    target_dates = [value for value in target_dates if value]
+    if not target_dates:
+        raise SectorMoneyFlowNotReadyError("板块资金交易日格式无效。")
+    if normalized_as_of and target_dates[0] != normalized_as_of:
+        raise SectorMoneyFlowNotReadyError(
+            f"板块资金数据未就绪：报告日 {normalized_as_of}，"
+            f"数据库最新仅到 {target_dates[0]}。禁止将旧数据写成当日资金流。"
+        )
+
+    rows_sql = text("""
+        SELECT REPLACE(trade_date, '-', '') AS trade_date,
+               industry, main_net_inflow, pct_change, net_rate
+        FROM sector_moneyflow
+        WHERE sector_type = :sector_type
+          AND REPLACE(trade_date, '-', '') IN :target_dates
+    """).bindparams(bindparam("target_dates", expanding=True))
+    rows_df = pd.read_sql(
+        rows_sql,
+        active_engine,
+        params={"sector_type": SECTOR_TYPE_INDUSTRY, "target_dates": target_dates},
+    )
+    if rows_df.empty:
+        raise SectorMoneyFlowNotReadyError("该时间段内无行业资金数据。")
+
+    # DC can publish the same semantic industry at multiple hierarchy levels.
+    # Select one row per date + canonical name before any multi-day aggregation.
+    selected_by_date = {}
+    for _, row in rows_df.iterrows():
+        trade_date = _normalize_trade_date(row.get("trade_date"))
+        display_name = canonical_sector_name(row.get("industry"))
+        if not trade_date or not display_name:
+            continue
+        record = {
+            "display_name": display_name,
+            "raw_name": str(row.get("industry") or "").strip(),
+            "trade_date": trade_date,
+            "main_flow_yi": _numeric_or_zero(row.get("main_net_inflow")) / 10000.0,
+            "pct_change": _numeric_or_zero(row.get("pct_change")),
+            "net_rate": _numeric_or_zero(row.get("net_rate")),
+        }
+        key = (trade_date, display_name)
+        current = selected_by_date.get(key)
+        if current is None or abs(record["main_flow_yi"]) > abs(current["main_flow_yi"]):
+            selected_by_date[key] = record
+
+    if not selected_by_date:
+        raise SectorMoneyFlowNotReadyError("行业资金记录无法规范化。")
+
+    aggregated = {}
+    date_priority = {value: index for index, value in enumerate(target_dates)}
+    for record in selected_by_date.values():
+        name = record["display_name"]
+        item = aggregated.setdefault(
+            name,
+            {
+                "display_name": name,
+                "raw_name": record["raw_name"],
+                "trade_date": target_dates[0],
+                "main_flow_yi": 0.0,
+                "pct_values": [],
+                "net_rate_values": [],
+                "raw_name_priority": len(target_dates),
+            },
+        )
+        item["main_flow_yi"] += record["main_flow_yi"]
+        item["pct_values"].append(record["pct_change"])
+        item["net_rate_values"].append(record["net_rate"])
+        priority = date_priority.get(record["trade_date"], len(target_dates))
+        if priority < item["raw_name_priority"]:
+            item["raw_name"] = record["raw_name"]
+            item["raw_name_priority"] = priority
+
+    sectors = {}
+    for name, item in aggregated.items():
+        pct_values = item.pop("pct_values")
+        net_rate_values = item.pop("net_rate_values")
+        item.pop("raw_name_priority", None)
+        item["main_flow_yi"] = round(item["main_flow_yi"], 4)
+        item["pct_change"] = round(sum(pct_values) / len(pct_values), 4)
+        item["net_rate"] = round(sum(net_rate_values) / len(net_rate_values), 4)
+        sectors[name] = item
+
+    ranked = list(sectors.values())
+    top_in = sorted(
+        (row for row in ranked if row["main_flow_yi"] > 0),
+        key=lambda row: row["main_flow_yi"],
+        reverse=True,
+    )[:3]
+    top_out = sorted(
+        (row for row in ranked if row["main_flow_yi"] < 0),
+        key=lambda row: row["main_flow_yi"],
+    )[:3]
+    return {
+        "report_date": target_dates[0],
+        "target_dates": target_dates,
+        "date_range": f"{target_dates[-1]} ~ {target_dates[0]}",
+        "sectors": sectors,
+        "sector_top_in": top_in,
+        "sector_top_out": top_out,
+        "raw_row_count": int(len(rows_df)),
+        "selected_row_count": int(len(selected_by_date)),
+        "collapsed_duplicate_count": int(len(rows_df) - len(selected_by_date)),
+    }
 
 
 # ==========================================
@@ -159,78 +316,23 @@ def tool_get_retail_money_flow(days: int = 1, as_of_date: str = None):
         as_of_date (str): 可选，报告对应交易日（YYYYMMDD）。传入后若该日
             数据尚未入库，会明确返回“数据未就绪”，禁止用上一交易日冒充当日。
     """
-    if engine is None: return "数据库连接失败"
-
     try:
-        # 1. 确定日期范围；报告生成链路必须把 as_of_date 传进来，避免静默取到昨日数据。
-        safe_days = max(1, min(int(days or 1), 60))
-        normalized_as_of = _normalize_trade_date(as_of_date)
-        date_where = ""
-        date_params = {}
-        if normalized_as_of:
-            date_where = "WHERE REPLACE(trade_date, '-', '') <= :as_of_date"
-            date_params["as_of_date"] = normalized_as_of
-
-        dates_sql = text(f"""
-            SELECT DISTINCT REPLACE(trade_date, '-', '') AS trade_date
-            FROM sector_moneyflow
-            {date_where}
-            ORDER BY trade_date DESC
-            LIMIT {safe_days + 5}
-        """)
-        dates_df = pd.read_sql(dates_sql, engine, params=date_params)
-        if dates_df.empty: return "暂无资金数据，请先运行数据更新脚本。"
-
-        # 截取最近 days 天的日期
-        target_dates = [str(x) for x in dates_df.head(safe_days)['trade_date'].tolist()]
-        if normalized_as_of and target_dates[0] != normalized_as_of:
-            return (
-                f"⚠️ 板块资金数据未就绪：报告日 {normalized_as_of}，"
-                f"数据库最新仅到 {target_dates[0]}。禁止将旧数据写成当日资金流。"
-            )
-        date_str = "'" + "','".join(target_dates) + "'"
-        date_range_info = f"{target_dates[-1]} ~ {target_dates[0]}"
-
-        # 2. 统一使用数据源标准口径“主力净额”。
-        # sector_moneyflow.main_net_inflow 对应 Tushare/DC 的 net_amount，
-        # 不再把不同单量层级相加后仍称作“净流入”，避免口径含混。
-        sql = f"""
-            SELECT 
-                industry,
-                SUM(main_net_inflow) as main_flow,
-                AVG(pct_change) as avg_pct
-            FROM sector_moneyflow 
-            WHERE trade_date IN ({date_str}) AND sector_type='行业' -- 默认只看行业
-            GROUP BY industry
-            ORDER BY main_flow DESC
-        """
-
-        df = pd.read_sql(sql, engine)
-
-        if df.empty: return "该时间段内无数据。"
-
-        # 3. 生成 AI 可读的分析报告
+        snapshot = build_sector_money_flow_snapshot(days=days, as_of_date=as_of_date)
         report = f"📊 **【主力资金流向分析】**\n"
-        report += f"📅 统计区间：{date_range_info} (近{days}个交易日)\n"
+        report += f"📅 统计区间：{snapshot['date_range']} (近{len(snapshot['target_dates'])}个交易日)\n"
 
-        # 取前 3 名（流入）
-        top_10 = df.head(3)
         report += "🚀 **主力净流入 Top 3：**\n"
-        for _, row in top_10.iterrows():
-            amount_yi = float(row['main_flow']) / 10000.0
+        for row in snapshot["sector_top_in"]:
             report += (
-                f"- **{row['industry']}**: {amount_yi:+.1f}亿 "
-                f"(板块涨跌: {row['avg_pct']:+.2f}%)\n"
+                f"- **{row['display_name']}**: {row['main_flow_yi']:+.1f}亿 "
+                f"(板块涨跌: {row['pct_change']:+.2f}%)\n"
             )
 
-        # 取后 3 名 (流出)
-        bottom_5 = df.tail(3).sort_values('main_flow', ascending=True)
         report += "🧊 **主力净流出 Top 3：**\n"
-        for _, row in bottom_5.iterrows():
-            amount_yi = float(row['main_flow']) / 10000.0
+        for row in snapshot["sector_top_out"]:
             report += (
-                f"- **{row['industry']}**: {amount_yi:+.1f}亿 "
-                f"(板块涨跌: {row['avg_pct']:+.2f}%)\n"
+                f"- **{row['display_name']}**: {row['main_flow_yi']:+.1f}亿 "
+                f"(板块涨跌: {row['pct_change']:+.2f}%)\n"
             )
 
         return report

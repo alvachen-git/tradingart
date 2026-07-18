@@ -104,6 +104,76 @@ class DailyReportAStockGuardrailTest(unittest.TestCase):
 
         self.assertEqual(violations, [])
 
+    def test_long_sector_name_does_not_match_nested_short_sector(self):
+        snapshot = _snapshot()
+        long_name_cases = (
+            ("国有大型银行", 5.1, "银行", -11.2),
+            ("光学光电子", 8.6, "电子", -435.1),
+            ("消费电子", 7.4, "电子", -435.1),
+        )
+        for long_name, long_amount, short_name, short_amount in long_name_cases:
+            with self.subTest(long_name=long_name, short_name=short_name):
+                case_snapshot = dict(snapshot)
+                sectors = dict(snapshot["sectors"])
+                long_row = {"display_name": long_name, "main_flow_yi": long_amount}
+                sectors[long_name] = long_row
+                sectors[short_name] = {"display_name": short_name, "main_flow_yi": short_amount}
+                case_snapshot["sectors"] = sectors
+                case_snapshot["sector_top_in"] = [
+                    long_row,
+                    snapshot["sector_top_in"][1],
+                    snapshot["sector_top_in"][2],
+                ]
+                html = f"""
+                <h4>股票板块</h4>
+                <p>
+                  主力净流入：{long_name}({long_amount:+.1f}亿)、医药生物(+40.8亿)、汽车(+30.4亿)；
+                  主力净流出：电子(-435.1亿)、半导体(-248.8亿)、数字芯片设计(-155.9亿)。
+                </p>
+                <h4>期货商持仓</h4>
+                <h2>期权波动率</h2>
+                <div>
+                  沪深300 71.7% 偏高；中证500 61.0% 偏高；创业板 82.9% 高；
+                  科创50 78.9% 偏高；上证50 61.7% 偏高。
+                </div>
+                <h2>每日牛股</h2>
+                """
+
+                violations = drg.validate_a_share_report_facts(html, case_snapshot)
+
+                self.assertFalse(
+                    any(f"{short_name}主力净额与真值不一致" in item for item in violations),
+                    violations,
+                )
+
+    def test_wrong_short_sector_amount_is_still_rejected(self):
+        snapshot = _snapshot()
+        bank_row = {"display_name": "国有大型银行", "main_flow_yi": 5.1}
+        snapshot["sectors"] = {
+            **snapshot["sectors"],
+            "国有大型银行": bank_row,
+            "银行": {"display_name": "银行", "main_flow_yi": -11.2},
+        }
+        snapshot["sector_top_in"] = [bank_row, *_snapshot()["sector_top_in"][1:]]
+        html = """
+        <h4>股票板块</h4>
+        <p>
+          主力净流入：银行(+5.1亿)、医药生物(+40.8亿)、汽车(+30.4亿)；
+          主力净流出：电子(-435.1亿)、半导体(-248.8亿)、数字芯片设计(-155.9亿)。
+        </p>
+        <h4>期货商持仓</h4>
+        <h2>期权波动率</h2>
+        <div>
+          沪深300 71.7% 偏高；中证500 61.0% 偏高；创业板 82.9% 高；
+          科创50 78.9% 偏高；上证50 61.7% 偏高。
+        </div>
+        <h2>每日牛股</h2>
+        """
+
+        violations = drg.validate_a_share_report_facts(html, snapshot)
+
+        self.assertTrue(any("银行主力净额与真值不一致" in item for item in violations))
+
     def test_data_date_gate_fails_closed_on_stale_dataset(self):
         with self.assertRaises(drg.ReportDataNotReadyError) as ctx:
             drg._require_report_date("sector_moneyflow", "20260709", "20260710")
@@ -123,12 +193,12 @@ class RetailMoneyFlowDateAndMetricTest(unittest.TestCase):
     def test_uses_main_net_inflow_metric_and_formats_billions(self):
         dates = pd.DataFrame([{"trade_date": "20260710"}])
         ranked = pd.DataFrame([
-            {"industry": "国防军工", "main_flow": 775000.0, "avg_pct": 3.43},
-            {"industry": "医药生物", "main_flow": 408000.0, "avg_pct": 2.82},
-            {"industry": "汽车", "main_flow": 304000.0, "avg_pct": 1.13},
-            {"industry": "数字芯片设计", "main_flow": -1559000.0, "avg_pct": -4.44},
-            {"industry": "半导体", "main_flow": -2488000.0, "avg_pct": -5.38},
-            {"industry": "电子", "main_flow": -4351000.0, "avg_pct": -3.13},
+            {"trade_date": "20260710", "industry": "国防军工", "main_net_inflow": 775000.0, "pct_change": 3.43, "net_rate": 1.0},
+            {"trade_date": "20260710", "industry": "医药生物", "main_net_inflow": 408000.0, "pct_change": 2.82, "net_rate": 1.0},
+            {"trade_date": "20260710", "industry": "汽车", "main_net_inflow": 304000.0, "pct_change": 1.13, "net_rate": 1.0},
+            {"trade_date": "20260710", "industry": "数字芯片设计", "main_net_inflow": -1559000.0, "pct_change": -4.44, "net_rate": -1.0},
+            {"trade_date": "20260710", "industry": "半导体", "main_net_inflow": -2488000.0, "pct_change": -5.38, "net_rate": -1.0},
+            {"trade_date": "20260710", "industry": "电子", "main_net_inflow": -4351000.0, "pct_change": -3.13, "net_rate": -1.0},
         ])
 
         with patch.object(fft, "engine", object()), patch.object(
@@ -142,6 +212,33 @@ class RetailMoneyFlowDateAndMetricTest(unittest.TestCase):
         self.assertIn("国防军工**: +77.5亿", result)
         self.assertIn("半导体**: -248.8亿", result)
         self.assertNotIn("hidden_flow", result)
+
+    def test_hierarchy_duplicates_use_one_top3_position(self):
+        dates = pd.DataFrame([{"trade_date": "20260716"}])
+        rows = pd.DataFrame([
+            {"trade_date": "20260716", "industry": "计算机", "main_net_inflow": 208533.0, "pct_change": 1.0, "net_rate": 1.0},
+            {"trade_date": "20260716", "industry": "IT服务Ⅱ", "main_net_inflow": 145097.0, "pct_change": 2.0, "net_rate": 1.0},
+            {"trade_date": "20260716", "industry": "IT服务Ⅲ", "main_net_inflow": 145097.0, "pct_change": 2.0, "net_rate": 1.0},
+            {"trade_date": "20260716", "industry": "印制电路板", "main_net_inflow": 94415.2, "pct_change": 3.0, "net_rate": 1.0},
+            {"trade_date": "20260716", "industry": "电子", "main_net_inflow": -3697520.0, "pct_change": -3.0, "net_rate": -1.0},
+            {"trade_date": "20260716", "industry": "半导体", "main_net_inflow": -2653660.0, "pct_change": -2.0, "net_rate": -1.0},
+            {"trade_date": "20260716", "industry": "通信", "main_net_inflow": -1153770.0, "pct_change": -1.0, "net_rate": -1.0},
+        ])
+
+        with patch.object(fft, "engine", object()), patch.object(
+            fft.pd,
+            "read_sql",
+            side_effect=[dates, rows, dates, rows],
+        ):
+            snapshot = fft.build_sector_money_flow_snapshot(days=1, as_of_date="20260716")
+            result = fft.tool_get_retail_money_flow.func(days=1, as_of_date="20260716")
+
+        top_names = [row["display_name"] for row in snapshot["sector_top_in"]]
+        self.assertEqual(top_names, ["计算机", "IT服务", "印制电路板"])
+        self.assertEqual(snapshot["collapsed_duplicate_count"], 1)
+        self.assertEqual(result.count("**IT服务**"), 1)
+        self.assertNotIn("IT服务Ⅱ", result)
+        self.assertNotIn("IT服务Ⅲ", result)
 
     def test_stale_as_of_date_is_reported_without_running_flow_query(self):
         dates = pd.DataFrame([{"trade_date": "20260709"}])

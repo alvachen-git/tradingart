@@ -11,7 +11,7 @@ import os
 import time
 import re
 import json
-from html import unescape
+from html import escape, unescape
 from datetime import datetime
 from bs4 import BeautifulSoup
 from sqlalchemy import create_engine, text
@@ -25,7 +25,12 @@ from symbol_match import sql_prefix_condition
 # 1. 引入全套工具 (Toolbox)
 # ==========================================
 from news_tools import get_financial_news
-from fund_flow_tools import tool_get_retail_money_flow
+from fund_flow_tools import (
+    SectorMoneyFlowNotReadyError,
+    build_sector_money_flow_snapshot,
+    canonical_sector_name,
+    tool_get_retail_money_flow,
+)
 from futures_fund_flow_tools import get_futures_fund_flow
 from volume_oi_tools import get_option_volume_abnormal, analyze_etf_option_sentiment
 from screener_tool import search_top_stocks
@@ -241,9 +246,7 @@ def _fetch_price_move(table_name: str, ts_code: str, report_trade_date: str) -> 
 
 def _canonical_sector_name(value: str) -> str:
     """Collapse duplicate DC hierarchy suffixes such as 航天装备Ⅱ/Ⅲ."""
-    name = str(value or "").strip()
-    name = re.sub(r"[ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩ]+$", "", name).strip()
-    return name
+    return canonical_sector_name(value)
 
 
 def _fetch_etf_iv_snapshot(etf_code: str, report_trade_date: str) -> dict:
@@ -329,59 +332,25 @@ def _fetch_programmatic_a_share_snapshot(report_trade_date: str = None):
             f"252日Rank {iv_info['iv_rank']:.1f}%（{iv_info['level']}）"
         )
 
-    sector_date_sql = text("""
-        SELECT MAX(REPLACE(trade_date, '-', '')) AS trade_date
-        FROM sector_moneyflow
-        WHERE sector_type = '行业'
-          AND REPLACE(trade_date, '-', '') <= :report_trade_date
-    """)
-    with engine.connect() as conn:
-        sector_date = conn.execute(
-            sector_date_sql,
-            {"report_trade_date": report_date},
-        ).scalar()
-    sector_date = _require_report_date("sector_moneyflow", sector_date, report_date)
+    try:
+        sector_snapshot = build_sector_money_flow_snapshot(
+            days=1,
+            as_of_date=report_date,
+            db_engine=engine,
+        )
+    except SectorMoneyFlowNotReadyError as exc:
+        raise ReportDataNotReadyError(str(exc)) from exc
 
-    sector_sql = text("""
-        SELECT industry, main_net_inflow, pct_change, net_rate
-        FROM sector_moneyflow
-        WHERE sector_type = '行业'
-          AND REPLACE(trade_date, '-', '') = :trade_date
-    """)
-    sector_df = pd.read_sql(sector_sql, engine, params={"trade_date": sector_date})
-    if sector_df.empty:
-        raise ReportDataNotReadyError(f"sector_moneyflow:{sector_date} 无行业资金记录")
-
-    # DC数据可能同时包含Ⅱ/Ⅲ层级的同名重复行业；按规范名保留绝对主力净额更大的记录。
-    sector_records = {}
-    for _, row in sector_df.iterrows():
-        display_name = _canonical_sector_name(row.get("industry"))
-        if not display_name:
-            continue
-        main_flow_yi = float(pd.to_numeric(row.get("main_net_inflow"), errors="coerce") or 0.0) / 10000.0
-        record = {
-            "display_name": display_name,
-            "raw_name": str(row.get("industry") or "").strip(),
-            "trade_date": sector_date,
-            "main_flow_yi": round(main_flow_yi, 4),
-            "pct_change": round(float(pd.to_numeric(row.get("pct_change"), errors="coerce") or 0.0), 4),
-            "net_rate": round(float(pd.to_numeric(row.get("net_rate"), errors="coerce") or 0.0), 4),
-        }
-        current = sector_records.get(display_name)
-        if current is None or abs(record["main_flow_yi"]) > abs(current["main_flow_yi"]):
-            sector_records[display_name] = record
-
-    snapshot["sectors"] = sector_records
-    ranked = list(sector_records.values())
-    snapshot["sector_top_in"] = sorted(
-        (x for x in ranked if x["main_flow_yi"] > 0),
-        key=lambda x: x["main_flow_yi"],
-        reverse=True,
-    )[:3]
-    snapshot["sector_top_out"] = sorted(
-        (x for x in ranked if x["main_flow_yi"] < 0),
-        key=lambda x: x["main_flow_yi"],
-    )[:3]
+    snapshot["sectors"] = sector_snapshot["sectors"]
+    snapshot["sector_top_in"] = sector_snapshot["sector_top_in"]
+    snapshot["sector_top_out"] = sector_snapshot["sector_top_out"]
+    print(
+        "🏦 [板块资金快照] source=programmatic "
+        f"date={sector_snapshot['report_date']} "
+        f"raw={sector_snapshot['raw_row_count']} "
+        f"unique={len(sector_snapshot['sectors'])} "
+        f"collapsed={sector_snapshot['collapsed_duplicate_count']}"
+    )
 
     lines.append("板块主力净额（main_net_inflow，单位亿元；必须按正负号写流入/流出）：")
     lines.append("- 主力净流入Top3：" + "；".join(
@@ -803,7 +772,10 @@ def _entity_pattern(entity: str) -> str:
 
 def _sector_entity_pattern(entity: str) -> str:
     """Match a sector name with the common optional 行业/板块 suffix."""
-    return rf"{re.escape(entity)}(?:行业|板块)?(?![\u4e00-\u9fffA-Za-z0-9])"
+    return (
+        rf"(?<![\u4e00-\u9fffA-Za-z0-9]){re.escape(entity)}"
+        rf"(?:行业|板块)?(?![\u4e00-\u9fffA-Za-z0-9])"
+    )
 
 
 def _etf_entity_pattern(entity: str) -> str:
@@ -829,6 +801,67 @@ def _bounded_entity_context(text_value: str, start: int, end: int, padding: int 
     return text_value[left:right]
 
 
+def _validate_programmatic_stock_sector(html_content: str, snapshot: dict) -> tuple[list[str], bool]:
+    """Validate exact program-rendered sector rows; return (violations, markers_found)."""
+    soup = BeautifulSoup(str(html_content or ""), "html.parser")
+    stock_node = soup.find(attrs={"data-report-slot": "stock-sector"})
+    markers = stock_node.find_all(attrs={"data-sector-name": True}) if stock_node else []
+    if not markers:
+        return [], False
+
+    expected = []
+    for direction, key in (("in", "sector_top_in"), ("out", "sector_top_out")):
+        for rank, row in enumerate(list((snapshot or {}).get(key) or []), start=1):
+            expected.append((direction, rank, row))
+
+    violations = []
+    if len(markers) != len(expected):
+        violations.append(
+            f"股票板块程序资金条目数量异常：页面={len(markers)}，真值={len(expected)}"
+        )
+
+    expected_names = {str(row.get("display_name") or "").strip() for _, _, row in expected}
+    actual_names = [str(marker.get("data-sector-name") or "").strip() for marker in markers]
+    for name in sorted(set(actual_names) - expected_names):
+        violations.append(f"股票板块出现非Top3程序行业：{name}")
+
+    for direction, rank, row in expected:
+        name = str(row.get("display_name") or "").strip()
+        matches = [marker for marker in markers if marker.get("data-sector-name") == name]
+        if len(matches) != 1:
+            violations.append(f"股票板块程序行业数量异常：{name}={len(matches)}")
+            continue
+        marker = matches[0]
+        if marker.get("data-sector-direction") != direction:
+            violations.append(f"{name}程序资金流方向分组错误")
+        if str(marker.get("data-sector-rank") or "") != str(rank):
+            violations.append(f"{name}程序资金排名错误：页面={marker.get('data-sector-rank')}，真值={rank}")
+
+        expected_amount = float(row.get("main_flow_yi") or 0.0)
+        try:
+            attribute_amount = float(marker.get("data-main-flow-yi"))
+        except (TypeError, ValueError):
+            violations.append(f"{name}程序资金属性金额无效")
+            continue
+        amount_match = re.search(r"(?P<amount>[+\-]?\d+(?:\.\d+)?)\s*亿", marker.get_text(" ", strip=True))
+        if not amount_match:
+            violations.append(f"{name}程序资金正文缺少亿元金额")
+            continue
+        displayed_amount = float(amount_match.group("amount"))
+        tolerance = max(SECTOR_FLOW_AMOUNT_TOLERANCE_YI, abs(expected_amount) * 0.015)
+        if abs(attribute_amount - expected_amount) > 0.0001:
+            violations.append(
+                f"{name}程序资金属性与真值不一致：页面={attribute_amount:+.4f}亿，"
+                f"真值={expected_amount:+.4f}亿"
+            )
+        if abs(displayed_amount - expected_amount) > tolerance:
+            violations.append(
+                f"{name}主力净额与真值不一致：页面={displayed_amount:+.1f}亿，"
+                f"真值={expected_amount:+.1f}亿"
+            )
+    return violations, True
+
+
 def validate_a_share_report_facts(html_content: str, snapshot: dict) -> list[str]:
     """Reject stale/invented A-share directions, sector amounts and ETF IV ranks."""
     violations = []
@@ -837,62 +870,73 @@ def validate_a_share_report_facts(html_content: str, snapshot: dict) -> list[str
     if not snapshot:
         return ["缺少A股程序真值，禁止发布"]
 
+    structured_sector_violations, has_structured_sector_rows = _validate_programmatic_stock_sector(
+        html_content,
+        snapshot,
+    )
+    violations.extend(structured_sector_violations)
+
     plain = _report_html_to_plain_text(html_content)
     stock_section = _extract_plain_section(plain, "股票板块", ["期货商持仓", "商品期货全景"])
     if not stock_section:
         violations.append("缺少“股票板块”区块，无法核验板块资金")
     else:
-        required_sector_rows = list(snapshot.get("sector_top_in") or []) + list(snapshot.get("sector_top_out") or [])
-        for row in required_sector_rows:
-            name = str(row.get("display_name") or "").strip()
-            if name and not re.search(_sector_entity_pattern(name), stock_section):
-                violations.append(f"股票板块未列出主力资金Top3必选行业：{name}")
+        if not has_structured_sector_rows:
+            required_sector_rows = list(snapshot.get("sector_top_in") or []) + list(snapshot.get("sector_top_out") or [])
+            for row in required_sector_rows:
+                name = str(row.get("display_name") or "").strip()
+                if name and not re.search(_sector_entity_pattern(name), stock_section):
+                    violations.append(f"股票板块未列出主力资金Top3必选行业：{name}")
 
-        # Any explicit "行业(±X亿)" in the stock section must match DB main_net_inflow.
-        for name, row in sorted(
-            (snapshot.get("sectors") or {}).items(),
-            key=lambda item: len(item[0]),
-            reverse=True,
-        ):
-            amount_pattern = re.compile(
-                rf"{_sector_entity_pattern(name)}\s*[（(]?\s*"
-                rf"(?P<amount>[+\-]?\d+(?:\.\d+)?)\s*亿",
-                re.I,
-            )
-            for match in amount_pattern.finditer(stock_section):
-                actual_amount = float(match.group("amount"))
-                expected_amount = float(row.get("main_flow_yi") or 0.0)
-                tolerance = max(
-                    SECTOR_FLOW_AMOUNT_TOLERANCE_YI,
-                    abs(expected_amount) * 0.015,
+            # Legacy/manual HTML fallback: exact bounded names must match DB main_net_inflow.
+            for name, row in sorted(
+                (snapshot.get("sectors") or {}).items(),
+                key=lambda item: len(item[0]),
+                reverse=True,
+            ):
+                amount_pattern = re.compile(
+                    rf"{_sector_entity_pattern(name)}\s*[（(]?\s*"
+                    rf"(?P<amount>[+\-]?\d+(?:\.\d+)?)\s*亿",
+                    re.I,
                 )
-                if abs(actual_amount - expected_amount) > tolerance:
-                    violations.append(
-                        f"{name}主力净额与真值不一致：页面={actual_amount:+.1f}亿，"
-                        f"真值={expected_amount:+.1f}亿"
+                for match in amount_pattern.finditer(stock_section):
+                    actual_amount = float(match.group("amount"))
+                    expected_amount = float(row.get("main_flow_yi") or 0.0)
+                    tolerance = max(
+                        SECTOR_FLOW_AMOUNT_TOLERANCE_YI,
+                        abs(expected_amount) * 0.015,
                     )
+                    if abs(actual_amount - expected_amount) > tolerance:
+                        violations.append(
+                            f"{name}主力净额与真值不一致：页面={actual_amount:+.1f}亿，"
+                            f"真值={expected_amount:+.1f}亿"
+                        )
 
-        positive_flow_tokens = "净流入|资金流入|资金涌入|主力流入|抢筹|吸金"
-        negative_flow_tokens = "净流出|资金流出|资金撤离|主力流出|抛售|出逃"
-        for name, row in (snapshot.get("sectors") or {}).items():
-            expected_amount = float(row.get("main_flow_yi") or 0.0)
-            if abs(expected_amount) < 0.5:
-                continue
-            name_pat = _sector_entity_pattern(name)
-            positive_claim = re.search(
-                rf"(?:{name_pat}.{{0,16}}(?:{positive_flow_tokens})|"
-                rf"(?:{positive_flow_tokens}).{{0,16}}{name_pat})",
-                stock_section,
-            )
-            negative_claim = re.search(
-                rf"(?:{name_pat}.{{0,16}}(?:{negative_flow_tokens})|"
-                rf"(?:{negative_flow_tokens}).{{0,16}}{name_pat})",
-                stock_section,
-            )
-            if expected_amount < 0 and positive_claim:
-                violations.append(f"{name}真实主力净流出 {expected_amount:+.1f}亿，但页面写成资金流入")
-            if expected_amount > 0 and negative_claim:
-                violations.append(f"{name}真实主力净流入 {expected_amount:+.1f}亿，但页面写成资金流出")
+        # Program-rendered rows already carry exact direction/rank/amount markers.
+        # Fuzzy prose matching is kept only for legacy/manual HTML, where it cannot
+        # accidentally bridge the end of the inflow list and the outflow heading.
+        if not has_structured_sector_rows:
+            positive_flow_tokens = "净流入|资金流入|资金涌入|主力流入|抢筹|吸金"
+            negative_flow_tokens = "净流出|资金流出|资金撤离|主力流出|抛售|出逃"
+            for name, row in (snapshot.get("sectors") or {}).items():
+                expected_amount = float(row.get("main_flow_yi") or 0.0)
+                if abs(expected_amount) < 0.5:
+                    continue
+                name_pat = _sector_entity_pattern(name)
+                positive_claim = re.search(
+                    rf"(?:{name_pat}.{{0,16}}(?:{positive_flow_tokens})|"
+                    rf"(?:{positive_flow_tokens}).{{0,16}}{name_pat})",
+                    stock_section,
+                )
+                negative_claim = re.search(
+                    rf"(?:{name_pat}.{{0,16}}(?:{negative_flow_tokens})|"
+                    rf"(?:{negative_flow_tokens}).{{0,16}}{name_pat})",
+                    stock_section,
+                )
+                if expected_amount < 0 and positive_claim:
+                    violations.append(f"{name}真实主力净流出 {expected_amount:+.1f}亿，但页面写成资金流入")
+                if expected_amount > 0 and negative_claim:
+                    violations.append(f"{name}真实主力净流入 {expected_amount:+.1f}亿，但页面写成资金流出")
 
     # Direct daily direction wording must agree with deterministic price moves.
     bullish_tokens = ["大涨", "收涨", "上涨", "大阳线", "阳线突破", "强势突破", "放量突破", "涨停"]
@@ -1002,6 +1046,42 @@ def _normalize_report_slot_fragment(slot_name: str, fragment: str) -> str:
     for strong in fragment_soup.find_all("strong"):
         _append_inline_style(strong, "color:#f8fafc; font-weight:700")
     return _slot_inner_html(fragment_soup)
+
+
+def _render_programmatic_stock_sector(snapshot: dict) -> str:
+    """Render the exact, unique Top3 sector facts without any LLM-authored numbers."""
+    groups = (
+        ("in", "主力净流入Top3：", list((snapshot or {}).get("sector_top_in") or [])),
+        ("out", "主力净流出Top3：", list((snapshot or {}).get("sector_top_out") or [])),
+    )
+    list_items = []
+    for direction, label, rows in groups:
+        entries = []
+        for rank, row in enumerate(rows, start=1):
+            name = str(row.get("display_name") or "").strip()
+            amount = float(row.get("main_flow_yi") or 0.0)
+            if not name:
+                continue
+            entries.append(
+                f'<span data-sector-name="{escape(name, quote=True)}" '
+                f'data-main-flow-yi="{amount:.4f}" '
+                f'data-sector-direction="{direction}" data-sector-rank="{rank}">'
+                f'{escape(name)}({amount:+.1f}亿)</span>'
+            )
+        list_items.append(
+            f'<li data-sector-flow-group="{direction}"><strong>{label}</strong>'
+            f'{"；".join(entries)}</li>'
+        )
+    return '<ul data-sector-flow-source="programmatic">' + "".join(list_items) + "</ul>"
+
+
+def _lock_programmatic_stock_sector(slots: dict, snapshot: dict) -> dict:
+    """Return slot content with the stock-sector facts forcibly replaced by DB truth."""
+    locked = dict(slots or {})
+    if snapshot is None:
+        return locked
+    locked["stock-sector"] = _render_programmatic_stock_sector(snapshot)
+    return locked
 
 
 def _render_locked_report_layout(slots: dict, today: str, weekday: str) -> str:
@@ -1223,6 +1303,18 @@ def _classify_repair_slots(anomalies: list, html_content: str) -> list[str]:
     return [slot_name for slot_name in REPORT_SLOT_ORDER if slot_name in targets] or list(REPORT_SLOT_ORDER)
 
 
+def _programmatic_stock_sector_failures(anomalies: list) -> list[str]:
+    """Identify stock-sector failures that must never be delegated back to the LLM."""
+    tokens = (
+        "股票板块",
+        "主力资金Top3",
+        "主力净额",
+        "真实主力净流",
+        "程序资金",
+    )
+    return [str(item) for item in anomalies if any(token in str(item) for token in tokens)]
+
+
 def _parse_slot_repair_response(response_text: str, allowed_slots: list[str]) -> tuple[dict, list[str]]:
     cleaned = str(response_text or "").replace("```html", "").replace("```", "").strip()
     soup = BeautifulSoup(cleaned, "html.parser")
@@ -1286,6 +1378,7 @@ def _rewrite_report_slots_after_validation(
     iv_snapshot_text: str = "",
     kline_snapshot_text: str = "",
     a_share_snapshot_text: str = "",
+    a_share_snapshot: dict = None,
 ) -> str:
     """Repair allowlisted slot content, then put it back into the locked report shell."""
     current_slots = _extract_report_slots(html)
@@ -1344,6 +1437,7 @@ def _rewrite_report_slots_after_validation(
     for slot_name, fragment in repairs.items():
         current_slots[slot_name] = fragment
     print(f"🧩 [局部修复] 已替换插槽: {', '.join(repairs)}")
+    current_slots = _lock_programmatic_stock_sector(current_slots, a_share_snapshot)
     return _render_locked_report_layout(current_slots, today, weekday)
 
 
@@ -1824,7 +1918,11 @@ def draft_report(raw_material, a_share_snapshot: dict = None, a_share_snapshot_t
     raw_html = res.content.replace("```html", "").replace("```", "").strip()
     # The model contributes content only. The program re-renders the fixed shell so
     # later fact repairs cannot modify CSS, section order or outer card structure.
-    html = _render_locked_report_layout(_extract_report_slots(raw_html), today, weekday)
+    initial_slots = _lock_programmatic_stock_sector(
+        _extract_report_slots(raw_html),
+        a_share_snapshot,
+    )
+    html = _render_locked_report_layout(initial_slots, today, weekday)
 
     # 发布前校验：固定排版 + 商品真值 + A股/ETF/板块资金真值。
     commodity_valid, commodity_anomalies = validate_commodity_cards(
@@ -1837,11 +1935,23 @@ def draft_report(raw_material, a_share_snapshot: dict = None, a_share_snapshot_t
     anomalies = layout_anomalies + commodity_anomalies + a_share_anomalies
     is_valid = not layout_anomalies and commodity_valid and not a_share_anomalies
     cumulative_anomalies = list(dict.fromkeys(anomalies))
+    stock_sector_failures = _programmatic_stock_sector_failures(anomalies)
+    if stock_sector_failures:
+        print("❌ [程序资金校验] 股票板块由程序生成但仍未通过，禁止交给AI重写。")
+        for item in stock_sector_failures[:6]:
+            print(f"   - {item}")
     for i in range(1, MAX_REWRITE_ROUNDS + 1):
-        if is_valid:
+        if is_valid or stock_sector_failures:
             break
         before_anomalies = set(anomalies)
-        target_slots = _classify_repair_slots(anomalies, html)
+        target_slots = [
+            slot_name
+            for slot_name in _classify_repair_slots(anomalies, html)
+            if slot_name != "stock-sector"
+        ]
+        if not target_slots:
+            print("❌ [局部修复] 没有可交给AI修复的内容插槽，终止重写。")
+            break
         print(f"⚠️ [发布前校验] 报告异常，触发局部修复（第{i}/{MAX_REWRITE_ROUNDS}轮）")
         print(f"   - 目标插槽: {', '.join(target_slots)}")
         for a in anomalies[:8]:
@@ -1858,6 +1968,7 @@ def draft_report(raw_material, a_share_snapshot: dict = None, a_share_snapshot_t
             iv_snapshot_text,
             kline_snapshot_text,
             a_share_snapshot_text,
+            a_share_snapshot,
         )
         commodity_valid, commodity_anomalies = validate_commodity_cards(
             html,
@@ -1868,6 +1979,9 @@ def draft_report(raw_material, a_share_snapshot: dict = None, a_share_snapshot_t
         layout_anomalies = validate_report_layout(html)
         anomalies = layout_anomalies + commodity_anomalies + a_share_anomalies
         is_valid = not layout_anomalies and commodity_valid and not a_share_anomalies
+        stock_sector_failures = _programmatic_stock_sector_failures(anomalies)
+        if stock_sector_failures:
+            print("❌ [程序资金校验] 股票板块校验失败，终止后续AI重写。")
         after_anomalies = set(anomalies)
         resolved = sorted(before_anomalies - after_anomalies)
         new = sorted(after_anomalies - before_anomalies)
