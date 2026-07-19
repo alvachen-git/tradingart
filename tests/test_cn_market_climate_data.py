@@ -230,7 +230,8 @@ class ClimateStorageTests(unittest.TestCase):
         self.assertIn("更强", by_code[SZ50_CSI1000_RS]["detail"])
         self.assertEqual(by_code[IM_BASIS]["value"], f"{basis_metric.percentile:.0f}/100")
         self.assertIn("贴水", by_code[IM_BASIS]["detail"])
-        self.assertIn("不取绝对值", by_code[IM_BASIS]["hint"])
+        self.assertIn("全部交易日", by_code[IM_BASIS]["hint"])
+        self.assertIn("贴水比更多历史交易日更深", by_code[IM_BASIS]["hint"])
 
     def test_relative_strength_uses_only_common_dates(self):
         rows = [
@@ -259,6 +260,25 @@ class ClimateStorageTests(unittest.TestCase):
         )
         self.assertEqual(metric.quality_status, "insufficient")
         self.assertIsNone(metric.percentile)
+
+    def test_im_basis_percentile_measures_pressure_across_all_data_points(self):
+        metric = build_im_basis_metric_row(
+            pd.DataFrame(
+                {
+                    "trade_date": ["20260714", "20260715", "20260716", "20260717"],
+                    "contract": ["IM2608"] * 4,
+                    "futures_close": [98.0, 100.0, 101.0, 99.0],
+                    "spot_close": [100.0] * 4,
+                }
+            ),
+            min_samples=4,
+        )
+
+        self.assertAlmostEqual(metric.metric_value, -1.0)
+        self.assertAlmostEqual(metric.percentile, 75.0)
+        self.assertAlmostEqual(metric.secondary_value, 50.0)
+        self.assertEqual(metric.sample_count, 4)
+        self.assertEqual(metric.payload["pressure_definition"], "negative_basis_ecdf_all_days")
 
     def test_market_amount_requires_same_date_and_converts_yi_to_yuan(self):
         result = normalize_market_amount_frames(

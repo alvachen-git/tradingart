@@ -628,17 +628,20 @@ def build_im_basis_metric_row(
     history["basis_pct"] = (history["futures_close"] / history["spot_close"] - 1) * 100
     latest = history.iloc[-1]
     window = _calendar_window(history, str(latest["trade_date"]), 1)
-    percentile, count = empirical_percentile(
+    strength_percentile, _ = empirical_percentile(
         window["basis_pct"], latest["basis_pct"], min_samples=min_samples
+    )
+    pressure_percentile, pressure_count = empirical_percentile(
+        -window["basis_pct"], -latest["basis_pct"], min_samples=min_samples
     )
     day = str(latest["trade_date"])
     return ClimateMetricRow(
         trade_date=day,
         metric_code=IM_BASIS,
         metric_value=float(latest["basis_pct"]),
-        percentile=percentile,
-        secondary_value=None,
-        sample_count=count,
+        percentile=pressure_percentile,
+        secondary_value=strength_percentile,
+        sample_count=pressure_count,
         payload={
             "contract": (
                 f"IM{str(latest['contract'])}"
@@ -646,9 +649,11 @@ def build_im_basis_metric_row(
                 else str(latest["contract"])
             ),
             "basis_pct": float(latest["basis_pct"]),
+            "basis_strength_percentile": strength_percentile,
+            "pressure_definition": "negative_basis_ecdf_all_days",
         },
         source_dates={"IM": day, "000852.SH": day},
-        quality_status="ok" if percentile is not None else "insufficient",
+        quality_status="ok" if pressure_percentile is not None else "insufficient",
     )
 
 
@@ -754,7 +759,7 @@ def _empty_card(metric_code: str) -> dict[str, Any]:
         STAR50_CHINEXT_RS: "科创/创业强弱",
         CHINEXT_CSI1000_RS: "创业/1000强弱",
         CN10Y_RATE: "中国10Y利率",
-        IM_BASIS: "IM期指基差",
+        IM_BASIS: "IM贴水压力",
     }
     return {
         "metric_code": metric_code,
@@ -879,22 +884,24 @@ def format_climate_card(row: dict[str, Any]) -> dict[str, Any]:
         contract = str(payload.get("contract") or "IM")
         if value is None:
             basis_text = "等待更新"
-            judgement = "情绪待观察"
         elif value < 0:
             basis_text = f"贴水{abs(value):.2f}%"
-            judgement = "期货偏谨慎"
         elif value > 0:
             basis_text = f"升水{value:.2f}%"
-            judgement = "期货偏强"
         else:
             basis_text = "平水"
-            judgement = "情绪中性"
+        judgement = _percentile_judgement(
+            percentile,
+            high="压力偏高",
+            middle="压力中性",
+            low="压力偏低",
+        )
         card.update(
             value=_fmt_percentile(percentile),
             detail=f"{contract} · {basis_text} · {judgement} · {date_text}",
             hint=(
-                "比较IM期货与中证1000现货的强弱。百分位越高，说明期货相对越强；"
-                "贴水通常代表期货更谨慎，升水则代表期货更强。正负值按原方向比较，不取绝对值。"
+                "观察IM期货相对中证1000现货的贴水压力。使用过去一年全部交易日，"
+                "百分位越高，代表当前贴水比更多历史交易日更深，期货情绪也更谨慎。"
             ),
         )
     card.update(

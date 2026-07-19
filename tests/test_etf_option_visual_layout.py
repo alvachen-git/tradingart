@@ -84,7 +84,7 @@ class EtfOptionVisualLayoutTests(unittest.TestCase):
             "科创/创业强弱",
             "创业/1000强弱",
             "中国10Y利率",
-            "IM期指基差",
+            "IM贴水压力",
         ):
             self.assertIn(label, self.climate_source)
         self.assertNotIn('class="etf-lab-summary"', self.source)
