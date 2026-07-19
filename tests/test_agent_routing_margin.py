@@ -112,7 +112,7 @@ def test_option_scenario_projection_recovers_strategy_route_from_monitor_only():
         ["monitor"],
         "",
     )
-    assert plan == ["analyst", "strategist"]
+    assert plan == ["analyst", "monitor", "strategist"]
     assert symbol == ""
 
 
@@ -134,13 +134,13 @@ def test_volatility_direction_policy_recovers_from_chatter_plan():
     assert symbol == "510500.SH"
 
 
-def test_volatility_direction_strategy_question_adds_strategist_without_analyst():
+def test_volatility_direction_strategy_question_uses_full_decision_pipeline():
     plan, symbol = agent_core._apply_analysis_task_policy(
         "中证500现在上涨是会升波还是降波，期权策略怎么做",
         ["chatter", "analyst"],
         "510500.SH",
     )
-    assert plan == ["monitor", "strategist"]
+    assert plan == ["analyst", "monitor", "strategist"]
     assert symbol == "510500.SH"
 
 
@@ -452,7 +452,7 @@ def test_analysis_task_policy_option_with_subject_fills_empty_plan():
         [],
         "510500",
     )
-    assert plan == ["analyst", "strategist"]
+    assert plan == ["analyst", "monitor", "strategist"]
     assert symbol == "510500"
 
 
@@ -666,7 +666,7 @@ class UnspecifiedOptionStrategyRoutingTest(unittest.TestCase):
             ["analyst", "strategist"],
             "510500",
         )
-        self.assertEqual(plan, ["analyst", "strategist"])
+        self.assertEqual(plan, ["analyst", "monitor", "strategist"])
         self.assertEqual(symbol, "510500")
 
     def test_us_option_symbol_keeps_strategy_route(self):
@@ -684,7 +684,7 @@ class UnspecifiedOptionStrategyRoutingTest(unittest.TestCase):
                     ["chatter"],
                     "",
                 )
-                self.assertEqual(plan, ["analyst", "strategist"])
+                self.assertEqual(plan, ["analyst", "monitor", "strategist"])
                 self.assertEqual(symbol, expected_symbol)
 
     def test_generic_option_concept_routes_to_chatter_not_default_underlying(self):

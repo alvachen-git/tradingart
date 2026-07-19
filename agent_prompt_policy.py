@@ -26,6 +26,23 @@ OPTION_STRATEGY_ACTION_KEYWORDS: Tuple[str, ...] = (
     "实值",
 )
 
+OPTION_DATA_SUBJECT_KEYWORDS: Tuple[str, ...] = (
+    "期权", "认购", "认沽", "波动率", "隐含波动率", "iv", "iv rank", "ivrank",
+    "delta", "gamma", "vega", "theta", "行权价", "到期日", "到期", "剩余天数",
+    "保证金", "合约乘数", "乘数", "一手多少钱", "资金占用", "持仓量", "成交量", "升波", "降波",
+)
+OPTION_DATA_INTENT_KEYWORDS: Tuple[str, ...] = (
+    "多少", "多高", "高吗", "低吗", "大吗", "小吗", "几天", "多久", "什么水平", "分位",
+    "rank", "几档", "多不多", "够不够", "贵吗", "便宜吗", "列出", "排行", "排名", "扫描",
+    "筛选", "增幅", "降幅", "升波最多", "降波最多", "回落最多", "由大到小", "由小到大", "最大", "最多", "top",
+)
+OPTION_DATA_EXCLUDED_KEYWORDS: Tuple[str, ...] = (
+    "策略", "建议", "怎么做", "怎么办", "怎么看", "适合", "能买吗", "能不能买", "买入", "卖出",
+    "开仓", "平仓", "移仓", "调仓", "对冲", "行情", "走势", "技术面", "基本面", "宏观", "新闻",
+    "影响", "利好", "利空", "如何处理", "如果", "假如", "假设", "情景", "推演", "压力测试",
+    "会到多少", "涨多少", "跌多少", "开盘跌", "开盘涨", "跳空", "大幅下跌", "大幅上涨",
+)
+
 OPTION_STRATEGY_ENGLISH_TERMS: Tuple[str, ...] = (
     "put",
     "call",
@@ -267,6 +284,7 @@ TASK_TYPE_LINK_ARTICLE_STOCK_MAPPING = "link_article_stock_mapping"
 TASK_TYPE_STOCK_SELECTION = "stock_selection"
 TASK_TYPE_SINGLE_STOCK_ANALYSIS = "single_stock_analysis"
 TASK_TYPE_TECHNICAL_CONCEPT = "technical_concept"
+TASK_TYPE_MARKET_DATA = "market_data"
 TASK_TYPE_OPTION_STRATEGY_WITH_SUBJECT = "option_strategy_with_subject"
 TASK_TYPE_OPTION_STRATEGY_NEEDS_SUBJECT = "option_strategy_needs_subject"
 TASK_TYPE_FUTURES_BROKER_SIGNAL = "futures_broker_signal"
@@ -665,6 +683,18 @@ def _contains_any(text: str, keywords: Sequence[str]) -> bool:
     return any(keyword in text for keyword in keywords)
 
 
+def is_pure_option_data_request(query: str) -> bool:
+    """Return True only when option terminology serves a narrow data lookup."""
+    text = str(query or "").strip().lower()
+    if not text:
+        return False
+    return bool(
+        _contains_any(text, OPTION_DATA_SUBJECT_KEYWORDS)
+        and _contains_any(text, OPTION_DATA_INTENT_KEYWORDS)
+        and not _contains_any(text, OPTION_DATA_EXCLUDED_KEYWORDS)
+    )
+
+
 def has_explicit_stock_pool_selection_action(query: str) -> bool:
     """识别“从/在某股票市场或股票池里找/选/筛”的自然表达。"""
     text = str(query or "").strip()
@@ -840,6 +870,15 @@ def classify_analysis_task_type(
             clear_symbol=True,
             hard_override=True,
             reason="用户要求找/选/筛/推荐一批股票",
+        )
+    if is_pure_option_data_request(text):
+        return AnalysisTaskPolicy(
+            task_type=TASK_TYPE_MARKET_DATA,
+            recommended_chat_mode=CHAT_MODE_ANALYSIS,
+            recommended_plan=("monitor",),
+            clear_symbol=False,
+            hard_override=True,
+            reason="用户只要求查询期权行情、波动率、到期或合约数值",
         )
     # Multi-symbol stock screening must take precedence over generic option
     # strategy routing when option volatility is only a screening dimension.

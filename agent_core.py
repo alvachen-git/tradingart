@@ -105,6 +105,7 @@ from simple_chat_runtime import (
 )
 from agent_prompt_policy import (
     TASK_TYPE_LINK_ARTICLE_STOCK_MAPPING,
+    TASK_TYPE_NORMAL,
     TASK_TYPE_OPTION_STRATEGY_NEEDS_SUBJECT,
     TASK_TYPE_OPTION_STRATEGY_WITH_SUBJECT,
     TASK_TYPE_FUTURES_BROKER_SIGNAL,
@@ -473,7 +474,13 @@ def _enforce_volatility_market_view_routing(query: str, plan: List[str]) -> List
     )
     enforced = ["monitor"]
     if wants_strategy:
-        enforced.append("strategist")
+        task_type = classify_analysis_task_type(query).task_type
+        if task_type == TASK_TYPE_OPTION_STRATEGY_WITH_SUBJECT:
+            enforced = ["analyst", "monitor", "strategist"]
+        elif task_type == TASK_TYPE_OPTION_STRATEGY_NEEDS_SUBJECT:
+            enforced = ["chatter"]
+        else:
+            enforced.append("strategist")
     return _dedupe_plan(enforced)
 
 
@@ -495,6 +502,9 @@ def _enforce_volatility_divergence_routing(query: str, plan: List[str]) -> List[
         STRATEGY_QUERY_KEYWORDS + ["买购", "买认购", "买沽", "买认沽", "卖购", "卖认购", "卖沽", "卖认沽", "期权策略"],
     )
     enforced = ["monitor"]
+    task_type = classify_analysis_task_type(query).task_type
+    if wants_strategy and task_type == TASK_TYPE_OPTION_STRATEGY_WITH_SUBJECT:
+        enforced.insert(0, "analyst")
     if wants_research:
         enforced.append("researcher")
     if wants_strategy:
@@ -657,26 +667,22 @@ def _apply_analysis_task_policy(
     if is_volatility_market_view_query(query):
         return _enforce_volatility_market_view_routing(query, plan), str(symbol or "").strip()
 
-    if is_market_data_query(query):
-        return ["monitor"], str(symbol or "").strip()
-
-    if _is_macro_policy_impact_query(query):
-        return ["macro_analyst"], ""
-
     policy = classify_analysis_task_type(
         query,
         symbol_hint="",
         is_followup=is_followup,
         recent_context=recent_context,
     )
+    if is_pure_option_data_query(query):
+        return ["monitor"], str(symbol or "").strip()
+    if policy.task_type in {TASK_TYPE_STOCK_SELECTION, TASK_TYPE_OPTION_STRATEGY_NEEDS_SUBJECT}:
+        return list(policy.recommended_plan), ""
+
     current_plan = list(plan or [])
     current_symbol = str(symbol or "").strip()
 
     if policy.task_type == TASK_TYPE_LINK_ARTICLE_STOCK_MAPPING:
         return list(policy.recommended_plan), "" if policy.clear_symbol else current_symbol
-
-    if policy.task_type in {TASK_TYPE_STOCK_SELECTION, TASK_TYPE_OPTION_STRATEGY_NEEDS_SUBJECT}:
-        return list(policy.recommended_plan), ""
 
     if policy.task_type == TASK_TYPE_FUTURES_BROKER_SIGNAL:
         return list(policy.recommended_plan), "" if policy.clear_symbol else current_symbol
@@ -696,13 +702,17 @@ def _apply_analysis_task_policy(
         us_option_symbol = extract_us_option_underlying_symbol(query, symbol_hint=current_symbol)
         if us_option_symbol:
             current_symbol = us_option_symbol
-        if not current_plan or set(current_plan).issubset({"monitor", "chatter"}):
-            return list(policy.recommended_plan), current_symbol
-        if "strategist" not in current_plan:
-            return list(policy.recommended_plan), current_symbol
-        if "analyst" not in current_plan:
-            return ["analyst"] + [step for step in current_plan if step != "analyst"], current_symbol
-        return current_plan, current_symbol
+        optional_experts = [
+            step for step in current_plan
+            if step in {"researcher", "macro_analyst", "portfolio_analyst"}
+        ]
+        return _dedupe_plan(["analyst", "monitor"] + optional_experts + ["strategist"]), current_symbol
+
+    if is_market_data_query(query):
+        return ["monitor"], str(symbol or "").strip()
+
+    if _is_macro_policy_impact_query(query):
+        return ["macro_analyst"], ""
 
     return current_plan, "" if policy.clear_symbol else current_symbol
 
@@ -1798,7 +1808,11 @@ def _enforce_cn_margin_monitor_routing(query: str, plan: List[str]) -> List[str]
     if not explicit and not automatic:
         return list(plan or [])
 
-    wants_strategy = _contains_any(str(query or ""), STRATEGY_QUERY_KEYWORDS + OPTION_ACTION_QUERY_KEYWORDS)
+    task_type = classify_analysis_task_type(query).task_type
+    wants_strategy = task_type in {
+        TASK_TYPE_OPTION_STRATEGY_WITH_SUBJECT,
+        TASK_TYPE_OPTION_STRATEGY_NEEDS_SUBJECT,
+    } and not is_pure_option_data_query(query)
     if explicit and not _is_cn_margin_analysis_query(query) and not wants_strategy:
         return ["monitor"]
 
@@ -1818,6 +1832,11 @@ def _enforce_option_data_monitor_routing(query: str, plan: List[str]) -> List[st
     if is_volatility_divergence_query(query):
         return plan
     if is_volatility_market_view_query(query):
+        return plan
+    if is_pure_option_data_query(query):
+        return ["monitor"]
+    task_type = classify_analysis_task_type(query).task_type
+    if task_type in {TASK_TYPE_OPTION_STRATEGY_WITH_SUBJECT, TASK_TYPE_OPTION_STRATEGY_NEEDS_SUBJECT}:
         return plan
     if not is_market_data_query(query):
         return plan
@@ -3385,9 +3404,10 @@ def supervisor_node(state: AgentState, llm):
     1.2 **升波/降波判断**：凡是问“现在/最近/当前上涨或下跌后会升波还是降波”，这是窄口径行情+IV方向判断，默认只派 `['monitor']` 查 IV/价格并直接回答；不要派 `chatter` 做知识解释，也不要派 `analyst` 展开完整K线技术分析。只有用户同时问“策略/怎么做/开仓/对冲”时，才派 `['monitor', 'strategist']`。
     2. **全套服务**: 如果用户问"全面分析"或"详细分析"，默认路径: ["analyst", "monitor", "researcher","strategist"]。
     3. **持仓相关** (仅当用户已上传持仓时): 如果用户提到"我的持仓"、"我的股票"、"仓位"、"持仓风险"、"持仓分析"、"适合我"、"个性化建议"、"我的风格"、"持仓建议"、"调仓"、"加仓"、"减仓"等关键词，**必须**派 `portfolio_analyst`。
-    4. **单品种期权问题**: "500ETF适合价差还是裸买"、"推荐白银期权策略" ->
+    4. **期权交易决策**: "500ETF适合价差还是裸买"、"推荐白银期权策略" ->
        - 只要标的明确(500ETF)，且涉及期权交易，一律走流水线。
-       - Plan: `['analyst', 'strategist']` (必须先分析再出策略)。
+       - Plan: `['analyst', 'monitor', 'strategist']`（方向与行情/IV并行核验后再出策略）。
+       - 决策表达即使同时出现价格、IV、到期日等数据词，也不得降级为纯数据查询。
     4.1 **标的上下文**: 遵守【标的上下文策略】；概念题交给 `chatter`，需要落地但缺少交易对象时也先由 `chatter` 澄清。
     5. **多品种/对比**: 问"白银和黄金谁强"、"分析一下螺纹和热卷" ->
        - symbol 填 "白银,黄金" (用逗号分隔)
@@ -3919,7 +3939,12 @@ _MONITOR_DIRECT_DATA_BLOCKERS = tuple(
 
 def _has_monitor_direct_data_blocker(query: str) -> bool:
     text = str(query or "").strip().lower()
-    return bool(text and any(keyword.lower() in text for keyword in _MONITOR_DIRECT_DATA_BLOCKERS))
+    if not text:
+        return False
+    task_type = classify_analysis_task_type(query).task_type
+    if task_type != TASK_TYPE_NORMAL and not is_pure_option_data_query(query):
+        return True
+    return any(keyword.lower() in text for keyword in _MONITOR_DIRECT_DATA_BLOCKERS)
 
 
 def _invoke_monitor_direct_tool(tool_obj: Any, payload: Dict[str, Any]) -> str:
