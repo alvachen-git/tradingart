@@ -5,6 +5,7 @@ from chat_routing import (
     CHAT_MODE_KNOWLEDGE,
     CHAT_MODE_SIMPLE,
     classify_chat_mode,
+    is_cn_margin_data_query,
     is_market_data_query,
     is_pure_option_data_query,
     is_us_option_market_profile_query,
@@ -375,6 +376,24 @@ class TestChatRouting(unittest.TestCase):
         self.assertFalse(is_market_data_query("如果创业板ETF周一-10%开盘，IV会到多少，平值认沽涨多少"))
         self.assertFalse(is_market_data_query("如果黄金跌破支撑，后面怎么看"))
         self.assertFalse(is_market_data_query("解释一下IV"))
+
+    def test_cn_margin_data_query_routes_to_analysis(self):
+        queries = (
+            "2026年7月16日融资余额和5日动能是多少？",
+            "融资融券最近数据",
+            "两融余额多少",
+        )
+        for query in queries:
+            with self.subTest(query=query):
+                self.assertTrue(is_cn_margin_data_query(query))
+                self.assertEqual(classify_chat_mode(query), CHAT_MODE_ANALYSIS)
+
+    def test_company_financing_queries_do_not_trigger_margin_data_route(self):
+        self.assertFalse(is_cn_margin_data_query("某公司再融资计划怎么样"))
+        self.assertFalse(is_cn_margin_data_query("A轮融资估值多少"))
+
+    def test_cn_market_risk_preference_query_remains_analysis(self):
+        self.assertEqual(classify_chat_mode("现在A股大盘的风险偏好怎么看？"), CHAT_MODE_ANALYSIS)
 
     def test_us_option_market_profile_routes_only_us_option_data(self):
         self.assertTrue(is_us_option_market_profile_query("SPY期权IV高吗"))

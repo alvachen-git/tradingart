@@ -84,6 +84,7 @@ from option_delta_tools import (
     DELTA_EXECUTION_COVERAGE_THRESHOLD,
 )
 from us_options_ai_tools import get_us_option_market_profile, get_us_option_strategy_candidates
+from cn_margin_ai_tools import get_cn_margin_market_signal
 from portfolio_tools import (
     get_user_portfolio_summary,
     get_user_portfolio_details,
@@ -338,6 +339,32 @@ def get_option_multiplier(symbol: str) -> str:
 
 MARGIN_QUERY_KEYWORDS = [
     "保证金", "合约乘数", "乘数", "一手多少钱", "每手多少钱", "资金占用", "开仓占用", "保证金率",
+]
+CN_MARGIN_QUERY_KEYWORDS = [
+    "融资余额", "融资买入", "融资净买入", "融资净增", "融资净减", "融资杠杆", "融资动能",
+    "融资占比", "融资资金", "融资融券", "两融", "杠杆资金",
+]
+CN_MARGIN_CONTEXT_KEYWORDS = [
+    "余额", "买入", "净买入", "净增", "净减", "杠杆", "动能", "连续增加", "连续下降",
+    "创新高", "新高", "占比", "比例", "撤退", "降温", "升温", "过热", "沪深", "A股", "a股", "大盘",
+]
+CN_MARGIN_EXCLUDED_KEYWORDS = [
+    "再融资", "融资轮", "股权融资", "债务融资", "融资计划", "融资方案", "融资用途", "融资租赁",
+    "融资成本", "定增", "增发", "发债", "配股",
+]
+CN_MARGIN_MARKET_SUBJECT_KEYWORDS = [
+    "A股", "a股", "大盘", "沪深", "上证指数", "深证成指", "沪深300", "中证500", "中证1000",
+    "创业板指", "科创50", "上证50", "300ETF", "500ETF", "1000ETF", "创业板ETF", "科创50ETF",
+    "上证50ETF", "ETF期权", "etf期权", "510050", "510300", "510500", "159915", "588000",
+    "588080", "159845", "512100",
+]
+CN_MARGIN_MARKET_INTENT_KEYWORDS = [
+    "行情", "走势", "怎么看", "分析", "风险", "市场环境", "资金面", "风险偏好", "过热", "多空",
+    "涨跌", "策略", "建议", "怎么做", "适合", "买方", "卖方", "配置",
+]
+CN_MARGIN_ANALYSIS_KEYWORDS = [
+    "怎么看", "分析", "影响", "为什么", "判断", "说明", "风险", "过热", "撤退", "行情", "走势",
+    "适合", "策略", "建议", "怎么做", "利好", "利空",
 ]
 STRATEGY_QUERY_KEYWORDS = [
     "策略", "建议", "怎么做", "怎么操作", "开仓", "平仓", "做多", "做空", "对冲", "仓位",
@@ -1720,6 +1747,69 @@ def _enforce_margin_monitor_routing(query: str, plan: List[str]) -> List[str]:
     return deduped
 
 
+def _is_cn_margin_explicit_query(query: str) -> bool:
+    text = str(query or "").strip()
+    if not text or _contains_any(text, CN_MARGIN_EXCLUDED_KEYWORDS):
+        return False
+    if _contains_any(text, CN_MARGIN_QUERY_KEYWORDS):
+        return True
+    return "融资" in text and _contains_any(text, CN_MARGIN_CONTEXT_KEYWORDS)
+
+
+def _is_cn_margin_auto_context_query(query: str) -> bool:
+    text = str(query or "").strip()
+    if not text or _contains_any(text, CN_MARGIN_EXCLUDED_KEYWORDS):
+        return False
+    return _contains_any(text, CN_MARGIN_MARKET_SUBJECT_KEYWORDS) and _contains_any(
+        text, CN_MARGIN_MARKET_INTENT_KEYWORDS
+    )
+
+
+def _is_cn_margin_analysis_query(query: str) -> bool:
+    return _contains_any(str(query or ""), CN_MARGIN_ANALYSIS_KEYWORDS)
+
+
+def _extract_cn_margin_as_of_date(query: str) -> str:
+    text = str(query or "")
+    full = re.search(r"(?<!\d)(20\d{2})[-/.年](\d{1,2})[-/.月](\d{1,2})日?(?!\d)", text)
+    if full:
+        year, month, day = (int(value) for value in full.groups())
+    else:
+        compact = re.search(r"(?<!\d)(20\d{6})(?!\d)", text)
+        if compact:
+            try:
+                return datetime.strptime(compact.group(1), "%Y%m%d").strftime("%Y%m%d")
+            except ValueError:
+                return ""
+        short = re.search(r"(?<!\d)(\d{1,2})月(\d{1,2})日?", text)
+        if not short:
+            return ""
+        year = datetime.now().year
+        month, day = (int(value) for value in short.groups())
+    try:
+        return datetime(year, month, day).strftime("%Y%m%d")
+    except ValueError:
+        return ""
+
+
+def _enforce_cn_margin_monitor_routing(query: str, plan: List[str]) -> List[str]:
+    explicit = _is_cn_margin_explicit_query(query)
+    automatic = _is_cn_margin_auto_context_query(query)
+    if not explicit and not automatic:
+        return list(plan or [])
+
+    wants_strategy = _contains_any(str(query or ""), STRATEGY_QUERY_KEYWORDS + OPTION_ACTION_QUERY_KEYWORDS)
+    if explicit and not _is_cn_margin_analysis_query(query) and not wants_strategy:
+        return ["monitor"]
+
+    tail = [step for step in list(plan or []) if step not in {"monitor", "strategist"}]
+    enforced = ["monitor"]
+    if wants_strategy:
+        enforced.append("strategist")
+    enforced.extend(tail)
+    return _dedupe_plan(enforced)
+
+
 def _enforce_option_data_monitor_routing(query: str, plan: List[str]) -> List[str]:
     """
     明确的数据查询问题只派 monitor，避免误上知识解释或宏观/技术/策略整链路。
@@ -2514,6 +2604,7 @@ def build_generalist_tools():
         get_price_statistics, check_option_expiry_status, tool_stock_hedging_analysis,
         tool_futures_correlation_check, tool_stock_correlation_check, calculate_hedging_beta,
         tool_get_retail_money_flow, draw_chart_tool, get_stock_valuation, tool_compare_stocks,
+        get_cn_margin_market_signal,
         get_futures_fund_flow, get_futures_fund_ranking, get_futures_margin_profile,
         get_futures_basis_profile, get_futures_inventory_receipt_profile, get_futures_delivery_tospot_profile,
         get_available_patterns, analyze_etf_option_sentiment, get_etf_option_strikes,
@@ -2526,6 +2617,7 @@ def build_generalist_tools():
 def build_monitor_tools():
     return [
         tool_get_retail_money_flow,  # 股票行业资金
+        get_cn_margin_market_signal,  # A股融资杠杆与风险偏好
         get_futures_fund_flow,  # 期货资金流
         get_futures_fund_ranking,  # 期货沉淀资金排名
         get_futures_margin_profile,  # 保证金/合约乘数
@@ -3310,6 +3402,7 @@ def supervisor_node(state: AgentState, llm):
     10. 只问K线或技术面分析时，只要派analyst，不要再派其他人
     11. 如果客户要画图，派 `['generalist']` 。
     12. 用户问保证金/合约乘数/一手资金占用，或基差/库存仓单/交割期转现等数据问题，优先派 `monitor`；若同时要策略建议，可派 `['monitor','strategist']`。
+    12.1 用户问A股融资余额/融资买入/两融/杠杆资金，或分析大盘、A股指数、A股ETF及ETF期权市场环境时，必须派 `monitor` 调用融资市场信号工具；涉及期权策略时再派 `strategist`。
     13. 如果【追问派工策略】给出了推荐专家，优先遵守；override_level 为 force 时必须直接采用推荐专家。
     """
 
@@ -3378,6 +3471,7 @@ def supervisor_node(state: AgentState, llm):
     final_plan = _enforce_volatility_divergence_routing(query, final_plan)
     final_plan = _enforce_volatility_market_view_routing(query, final_plan)
     final_plan = _enforce_margin_monitor_routing(query, final_plan)
+    final_plan = _enforce_cn_margin_monitor_routing(query, final_plan)
     final_plan = _enforce_option_data_monitor_routing(query, final_plan)
     if _wants_chart(query) and not any(p in final_plan for p in ("analyst", "generalist")):
         final_plan = ["generalist"] + list(final_plan)
@@ -3510,6 +3604,7 @@ def generalist_node(state: AgentState, llm):
         8. 对冲分析 -> calculate_hedging_beta
         9. 查某期货资金流动 -> get_futures_fund_flow
         10.查全部期货资金沉淀排名 -> get_futures_fund_ranking
+        10.05 查A股融资余额、融资杠杆、两融资金或大盘/ETF市场环境 -> get_cn_margin_market_signal
         10.1 查期货保证金/合约乘数/资金占用 -> get_futures_margin_profile
         10.2 查期货基差/现期结构 -> get_futures_basis_profile
         10.3 查期货库存与仓单 -> get_futures_inventory_receipt_profile
@@ -3840,7 +3935,16 @@ def _invoke_monitor_direct_tool(tool_obj: Any, payload: Dict[str, Any]) -> str:
 def _try_monitor_direct_data_query(query: str, *, symbol: str = "") -> str | None:
     text = str(query or "").strip()
     lowered = text.lower()
-    if not text or _has_monitor_direct_data_blocker(text):
+    if not text:
+        return None
+
+    if _is_cn_margin_explicit_query(text) and not _is_cn_margin_analysis_query(text):
+        return _invoke_monitor_direct_tool(
+            get_cn_margin_market_signal,
+            {"as_of_date": _extract_cn_margin_as_of_date(text)},
+        )
+
+    if _has_monitor_direct_data_blocker(text):
         return None
 
     has_margin_intent = _contains_any(text, MARGIN_QUERY_KEYWORDS)
@@ -3962,6 +4066,15 @@ def monitor_node(state: AgentState, llm):
        - 不要给交易建议；最多写 1 句“需要继续盯价格是否放量突破/IV是否反向抬升”。
        - 整段控制在 6 行以内。
         """
+    cn_margin_context_instruction = ""
+    if _is_cn_margin_explicit_query(user_q) or _is_cn_margin_auto_context_query(user_q):
+        cn_margin_context_instruction = """
+    11. 当前问题涉及A股融资资金或A股大盘/ETF/ETF期权市场环境，必须调用 `get_cn_margin_market_signal`：
+       - 只能引用工具返回的数据日、余额、分位、连续方向和市场确认，不自行补数字或更改信号阈值。
+       - “过热、去杠杆、撤退、修复”是资金状态，不得直接改写成指数必涨或必跌。
+       - 若工具标记数据陈旧或样本不足，必须明确降级，不能继续给确定性融资结论。
+       - 个股分析只有在用户明确问整体市场环境时才使用该工具，不把全市场融资状态当成个股基本面。
+        """
 
     prompt = f"""
     你是一位追求效率的市场数据监控官**。。只负责查数据给结果。
@@ -3974,6 +4087,7 @@ def monitor_node(state: AgentState, llm):
     - 查IV增幅/降幅排行、IV扫描、指定日期区间ATM IV变化排序 -> scan_iv_change_ranking
     - 查价格与IV是否出现波动率背离 -> scan_volatility_divergence
     - 查股票行业资金 -> tool_get_retail_money_flow
+    - 查A股融资余额、融资杠杆、两融资金及大盘/ETF市场环境 -> get_cn_margin_market_signal
     - 查某期货资金流动 -> get_futures_fund_flow
     - 查全部期货资金沉淀排名 -> get_futures_fund_ranking
     - 查期货保证金/合约乘数/资金占用 -> get_futures_margin_profile
@@ -4016,6 +4130,7 @@ def monitor_node(state: AgentState, llm):
     8. 东证期货、海通期货、中信期货是正指标期货商；中信建投、东方财富、方正中期是反指标期货商。反指标做多是一种利空，反指标做空是一种利多；问正/反指标组最近在哪些商品上做多/做空时，必须调用 get_futures_broker_group_position_moves；只问某期货商加多/加空时，必须先调用 get_futures_broker_indicator_profile。
     {pure_option_data_instruction}
     {volatility_market_view_instruction}
+    {cn_margin_context_instruction}
     """
 
     # 3. 创建临时 Agent (ReAct 模式)

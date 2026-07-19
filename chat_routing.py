@@ -192,6 +192,26 @@ MARKET_DATA_EXCLUDED_KEYWORDS = OPTION_DATA_EXCLUDED_KEYWORDS + (
     "隐忧", "值不值得", "该怎么做",
 )
 
+CN_MARGIN_DATA_SUBJECT_KEYWORDS = (
+    "融资余额", "融资买入", "融资净买入", "融资净增", "融资净减", "融资杠杆", "融资动能",
+    "融资占比", "融资资金", "融资融券", "两融", "杠杆资金",
+)
+
+CN_MARGIN_DATA_CONTEXT_KEYWORDS = (
+    "余额", "买入", "净买入", "净增", "净减", "杠杆", "动能", "连续增加", "连续下降",
+    "创新高", "新高", "占比", "比例", "撤退", "降温", "升温", "过热", "沪深", "a股", "大盘",
+)
+
+CN_MARGIN_DATA_INTENT_KEYWORDS = MARKET_DATA_INTENT_KEYWORDS + (
+    "数据", "最新", "最近", "当前", "今日", "今天", "昨日", "昨天", "变化", "增加", "下降",
+    "连续", "创新高", "新高", "升温", "降温", "撤退", "过热",
+)
+
+CN_MARGIN_DATA_EXCLUDED_KEYWORDS = (
+    "再融资", "融资轮", "股权融资", "债务融资", "融资计划", "融资方案", "融资用途", "融资租赁",
+    "融资成本", "定增", "增发", "发债", "配股",
+)
+
 US_OPTION_SYMBOL_HINTS = (
     "spy", "qqq", "dia", "iwm", "gld", "tlt", "slv", "xlf", "xle", "hyg",
     "tsla", "nvda", "amd", "aapl", "amzn", "msft", "meta", "goog", "googl",
@@ -576,6 +596,22 @@ def is_market_data_query(prompt_text: str) -> bool:
     return False
 
 
+def is_cn_margin_data_query(prompt_text: str) -> bool:
+    text = str(prompt_text or "").strip().lower()
+    if not text or any(keyword in text for keyword in CN_MARGIN_DATA_EXCLUDED_KEYWORDS):
+        return False
+
+    has_subject = any(keyword in text for keyword in CN_MARGIN_DATA_SUBJECT_KEYWORDS)
+    if not has_subject:
+        has_subject = "融资" in text and any(keyword in text for keyword in CN_MARGIN_DATA_CONTEXT_KEYWORDS)
+    if not has_subject:
+        return False
+
+    return any(keyword in text for keyword in CN_MARGIN_DATA_INTENT_KEYWORDS) or bool(
+        re.search(r"20\d{2}[年./-]\d{1,2}[月./-]\d{1,2}日?", text)
+    )
+
+
 def is_broker_signal_analysis_query(prompt_text: str) -> bool:
     text = str(prompt_text or "").strip().lower()
     if not text:
@@ -735,6 +771,9 @@ def classify_chat_mode(
         return CHAT_MODE_KNOWLEDGE
 
     if is_volatility_divergence_query(text):
+        return CHAT_MODE_ANALYSIS
+
+    if is_cn_margin_data_query(text):
         return CHAT_MODE_ANALYSIS
 
     if is_market_data_query(text):
