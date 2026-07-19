@@ -807,15 +807,24 @@ def _build_defense_figure(df: pd.DataFrame, target: str, *, height: int = 390):
         x='date_obj',
         y='strike',
         color='type',
-        markers=False,
+        markers=True,
+        text='oi',
         title=None,
         color_discrete_map={"认购 (压力)": "#dc2626", "认沽 (支撑)": "#16a34a"},
     )
-    fig.update_traces(line=dict(width=2.2))
+    fig.update_traces(
+        line=dict(width=2.2),
+        marker=dict(size=6, line=dict(width=1.4, color="white")),
+        texttemplate="%{text:,.0f}",
+        textfont=dict(size=10),
+        cliponaxis=False,
+    )
+    fig.update_traces(textposition="top center", selector=dict(name="认购 (压力)"))
+    fig.update_traces(textposition="bottom center", selector=dict(name="认沽 (支撑)"))
     fig.update_layout(
         plot_bgcolor='white',
         paper_bgcolor='white',
-        margin=dict(l=18, r=18, t=20, b=18),
+        margin=dict(l=18, r=18, t=30, b=30),
         xaxis_title=None,
         yaxis_title=None,
         hovermode="x unified",
@@ -842,7 +851,7 @@ def _render_defense_chart(df: pd.DataFrame, target: str, *, height: int = 390) -
             <h2>主力持仓防线移动（近20日）</h2>
             <span>压力与支撑位置变化</span>
         </div>
-        <div class="etf-lab-section-copy">观察最大持仓合约的移动：红线代表上方压力，绿线代表下方支撑。</div>
+        <div class="etf-lab-section-copy">观察最大持仓合约的移动：红线代表上方压力，绿线代表下方支撑，点旁数字为持仓量。</div>
         """,
         unsafe_allow_html=True,
     )

@@ -4,6 +4,7 @@ import unittest
 from unittest.mock import patch
 
 import pandas as pd
+import plotly.express as px
 
 ROOT = Path(__file__).resolve().parents[1]
 PAGE_PATH = ROOT / "pages" / "01_ETF期权.py"
@@ -20,13 +21,14 @@ def _load_etf_chart_helpers():
         "_line_records",
         "_build_etf_kline_dataset",
         "_build_etf_kline_payload",
+        "_build_defense_figure",
     }
     nodes = [
         node
         for node in module.body
         if isinstance(node, ast.FunctionDef) and node.name in wanted
     ]
-    namespace = {"pd": pd}
+    namespace = {"pd": pd, "px": px}
     exec(
         compile(ast.Module(body=nodes, type_ignores=[]), filename="<etf_chart_helpers>", mode="exec"),
         namespace,
@@ -69,6 +71,31 @@ class EtfOptionVisualLayoutTests(unittest.TestCase):
         self.assertEqual(self.source.count("_render_price_iv_chart("), 2)
         self.assertEqual(self.source.count("_render_defense_chart("), 2)
         self.assertNotIn("etf-lab-defense-section", self.source)
+
+    def test_defense_chart_shows_open_interest_beside_every_point(self):
+        frame = pd.DataFrame(
+            {
+                "date_obj": pd.to_datetime(["2026-07-16", "2026-07-17"] * 2),
+                "strike": [5.0, 5.1, 4.8, 4.9],
+                "oi": [12500, 13200, 9800, 10100],
+                "type": ["认购 (压力)", "认购 (压力)", "认沽 (支撑)", "认沽 (支撑)"],
+            }
+        )
+
+        figure = self.helpers["_build_defense_figure"](frame, "510300 (300ETF)")
+        traces = {trace.name: trace for trace in figure.data}
+
+        self.assertEqual(set(traces), {"认购 (压力)", "认沽 (支撑)"})
+        for trace in traces.values():
+            self.assertIn("markers", trace.mode)
+            self.assertIn("text", trace.mode)
+            self.assertEqual(trace.texttemplate, "%{text:,.0f}")
+            self.assertFalse(trace.cliponaxis)
+        self.assertEqual(list(traces["认购 (压力)"].text), [12500, 13200])
+        self.assertEqual(list(traces["认沽 (支撑)"].text), [9800, 10100])
+        self.assertEqual(traces["认购 (压力)"].textposition, "top center")
+        self.assertEqual(traces["认沽 (支撑)"].textposition, "bottom center")
+        self.assertIn("点旁数字为持仓量", self.source)
 
     def test_market_climate_strip_replaces_the_five_duplicate_metrics(self):
         self.assertIn('class="etf-lab-kpi-strip"', self.source)
