@@ -9,6 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 PAGE_PATH = ROOT / "pages" / "01_ETF期权.py"
 SHARED_CHART_PATH = ROOT / "option_kline_chart.py"
 TOOL_PATH = ROOT / "etf_option_tool.py"
+CLIMATE_PATH = ROOT / "cn_market_climate_data.py"
 
 
 def _load_etf_chart_helpers():
@@ -55,6 +56,7 @@ class EtfOptionVisualLayoutTests(unittest.TestCase):
         cls.shared_source = SHARED_CHART_PATH.read_text(encoding="utf-8")
         cls.helpers = _load_etf_chart_helpers()
         cls.tool_helpers = _load_etf_tool_helpers()
+        cls.climate_source = CLIMATE_PATH.read_text(encoding="utf-8")
 
     def test_overview_and_defense_are_the_only_views(self):
         self.assertIn('view_options = ["总览", "持仓防线"]', self.source)
@@ -68,12 +70,36 @@ class EtfOptionVisualLayoutTests(unittest.TestCase):
         self.assertEqual(self.source.count("_render_defense_chart("), 2)
         self.assertNotIn("etf-lab-defense-section", self.source)
 
-    def test_summary_strip_keeps_the_five_mockup_metrics(self):
-        self.assertIn('class="etf-lab-summary"', self.source)
-        self.assertIn('grid-template-columns: repeat(5, minmax(0, 1fr))', self.source)
-        for label in ("现价", "上方压力", "下方支撑", "IV等级", "博弈区间"):
-            self.assertIn(f">{label}<", self.source)
-        self.assertNotIn('class="metric-card"', self.source)
+    def test_market_climate_strip_replaces_the_five_duplicate_metrics(self):
+        self.assertIn('class="etf-lab-kpi-strip"', self.source)
+        self.assertIn('grid-template-columns: repeat(auto-fit, minmax(150px, 1fr))', self.source)
+        self.assertIn("load_cn_market_climate_strip", self.source)
+        self.assertIn("ttl=600", self.source)
+        self.assertEqual(self.source.count("_cached_cn_market_climate_strip()"), 2)
+        for label in (
+            "沪深融资杠杆",
+            "融资5日动能",
+            "沪深成交额",
+            "50/1000强弱",
+            "科创/创业强弱",
+            "创业/1000强弱",
+            "中国10Y利率",
+            "IM期指基差",
+        ):
+            self.assertIn(label, self.climate_source)
+        self.assertNotIn('class="etf-lab-summary"', self.source)
+        self.assertNotIn('grid-template-columns: repeat(5, minmax(0, 1fr))', self.source)
+        self.assertNotIn("_render_summary_strip", self.source)
+        self.assertNotIn("查看详细数据表", self.source)
+
+    def test_market_climate_copy_is_plain_language_and_hides_sample_counts(self):
+        self.assertNotIn("样本{sample_count}", self.climate_source)
+        self.assertIn("融资升温", self.climate_source)
+        self.assertIn("放量升温", self.climate_source)
+        self.assertIn("利率上行", self.climate_source)
+        self.assertIn("value=_fmt_percentile(percentile)", self.climate_source)
+        self.assertIn(".etf-lab-kpi:nth-child(4n) .etf-lab-kpi-tooltip", self.source)
+        self.assertIn(".etf-lab-kpi:nth-child(3n) .etf-lab-kpi-tooltip", self.source)
 
     def test_main_chart_is_full_width_shared_us_style_without_outer_header(self):
         self.assertIn("max-width: 100% !important", self.source)

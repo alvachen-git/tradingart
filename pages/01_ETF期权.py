@@ -16,6 +16,7 @@ root_dir = os.path.dirname(current_dir)
 sys.path.append(root_dir)
 from option_kline_chart import lightweight_chart_loader_html, render_option_kline_chart
 from ui_components import inject_option_page_header_style, render_option_page_title, render_option_sidebar_footer
+from cn_market_climate_data import load_cn_market_climate_strip
 
 # 1. 页面配置
 st.set_page_config(
@@ -101,6 +102,11 @@ def _cached_kline_and_iv_data(
     return de.get_kline_and_iv_data(symbol, limit=limit)
 
 
+@st.cache_data(ttl=600, show_spinner=False)
+def _cached_cn_market_climate_strip():
+    return load_cn_market_climate_strip(de.engine)
+
+
 def _inject_etf_lab_style() -> None:
     """Render the ETF option lab with the same calm hierarchy as US options."""
     st.markdown(
@@ -138,56 +144,105 @@ def _inject_etf_lab_style() -> None:
             margin: 0 !important;
         }
 
-        .etf-lab-summary {
+        .etf-lab-kpi-strip {
             display: grid;
-            grid-template-columns: repeat(5, minmax(0, 1fr));
-            align-items: stretch;
-            margin: 0 0 16px;
-            border: 1px solid #d8e0ea;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 8px;
+            margin: 8px 0 14px;
+        }
+
+        .etf-lab-kpi {
+            min-width: 0;
+            min-height: 82px;
+            padding: 13px 14px 11px;
+            border: 1px solid #e2e8f0;
             border-radius: 8px;
             background: #ffffff;
-            overflow: hidden;
+            box-shadow: 0 1px 2px rgba(15, 23, 42, .03);
         }
 
-        .etf-lab-summary-item {
-            min-width: 0;
-            padding: 14px 18px 15px;
-            border-right: 1px solid #d8e0ea;
+        .etf-lab-kpi-label-row {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+            margin-bottom: 7px;
         }
 
-        .etf-lab-summary-item:last-child {
-            border-right: 0;
-        }
-
-        .etf-lab-summary-label {
-            margin-bottom: 6px;
-            color: #64748b;
+        .etf-lab-kpi-label {
+            color: #64758b;
             font-size: 12px;
             font-weight: 600;
-            line-height: 1.25;
-        }
-
-        .etf-lab-summary-value {
-            color: #111827;
-            font-family: "SFMono-Regular", Menlo, Monaco, Consolas, monospace;
-            font-size: 21px;
-            font-weight: 760;
-            line-height: 1.15;
+            line-height: 1.2;
             white-space: nowrap;
         }
 
-        .etf-lab-summary-value.danger {
-            color: #dc2626;
+        .etf-lab-kpi-value {
+            font-size: 21px;
+            font-weight: 780;
+            line-height: 1.05;
+            white-space: nowrap;
         }
 
-        .etf-lab-summary-value.success {
-            color: #16a34a;
+        .etf-lab-kpi-detail {
+            margin-top: 6px;
+            color: #708199;
+            font-size: 11px;
+            line-height: 1.3;
+            white-space: normal;
         }
 
-        .etf-lab-summary-value .suffix {
+        .etf-lab-kpi-info {
+            position: relative;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 14px;
+            height: 14px;
+            border: 1px solid #cbd5e1;
+            border-radius: 999px;
             color: #64748b;
-            font-size: 13px;
-            font-weight: 650;
+            background: #f8fafc;
+            font-size: 10px;
+            line-height: 1;
+            font-weight: 700;
+            cursor: help;
+            flex: 0 0 auto;
+        }
+
+        .etf-lab-kpi-tooltip {
+            position: absolute;
+            z-index: 80;
+            top: 18px;
+            left: 0;
+            transform: translateX(-6px);
+            width: 340px;
+            max-width: min(340px, calc(100vw - 32px));
+            padding: 10px 12px;
+            border-radius: 8px;
+            background: #0f172a;
+            color: #f8fafc;
+            box-shadow: 0 12px 30px rgba(15, 23, 42, .22);
+            font-size: 12px;
+            line-height: 1.5;
+            font-weight: 500;
+            text-align: left;
+            white-space: normal;
+            opacity: 0;
+            visibility: hidden;
+            pointer-events: none;
+            transition: opacity .12s ease, visibility .12s ease;
+        }
+
+        .etf-lab-kpi-info:hover .etf-lab-kpi-tooltip,
+        .etf-lab-kpi-info:focus .etf-lab-kpi-tooltip {
+            opacity: 1;
+            visibility: visible;
+        }
+
+        .etf-lab-kpi:nth-child(n+6) .etf-lab-kpi-tooltip {
+            left: auto;
+            right: 0;
+            transform: translateX(6px);
         }
 
         div[data-testid="stHorizontalBlock"]:has(.etf-lab-rail) {
@@ -399,13 +454,29 @@ def _inject_etf_lab_style() -> None:
             line-height: 1.5;
         }
 
-        div[data-testid="stElementContainer"]:has(.etf-lab-summary),
+        div[data-testid="stElementContainer"]:has(.etf-lab-kpi-strip),
         div[data-testid="stElementContainer"]:has(.etf-lab-rail),
         div[data-testid="stElementContainer"]:has(.etf-lab-section) {
             margin-bottom: 0 !important;
         }
 
         @media (max-width: 1360px) {
+            .etf-lab-kpi-strip {
+                grid-template-columns: repeat(4, minmax(0, 1fr));
+            }
+
+            .etf-lab-kpi:nth-child(n+6) .etf-lab-kpi-tooltip {
+                left: 0;
+                right: auto;
+                transform: translateX(-6px);
+            }
+
+            .etf-lab-kpi:nth-child(4n) .etf-lab-kpi-tooltip {
+                left: auto;
+                right: 0;
+                transform: translateX(6px);
+            }
+
             div[data-testid="stHorizontalBlock"]:has(.etf-lab-rail) {
                 flex-direction: column !important;
             }
@@ -421,21 +492,20 @@ def _inject_etf_lab_style() -> None:
         }
 
         @media (max-width: 900px) {
-            .etf-lab-summary {
-                grid-template-columns: repeat(2, minmax(0, 1fr));
+            .etf-lab-kpi-strip {
+                grid-template-columns: repeat(3, minmax(0, 1fr));
             }
 
-            .etf-lab-summary-item {
-                border-bottom: 1px solid #d8e0ea;
+            .etf-lab-kpi:nth-child(4n) .etf-lab-kpi-tooltip {
+                left: 0;
+                right: auto;
+                transform: translateX(-6px);
             }
 
-            .etf-lab-summary-item:nth-child(2n) {
-                border-right: 0;
-            }
-
-            .etf-lab-summary-item:last-child {
-                grid-column: 1 / -1;
-                border-bottom: 0;
+            .etf-lab-kpi:nth-child(3n) .etf-lab-kpi-tooltip {
+                left: auto;
+                right: 0;
+                transform: translateX(6px);
             }
         }
 
@@ -450,17 +520,14 @@ def _inject_etf_lab_style() -> None:
                 flex: 1 1 100% !important;
             }
 
-            .etf-lab-summary {
+            .etf-lab-kpi-strip {
                 grid-template-columns: minmax(0, 1fr);
             }
 
-            .etf-lab-summary-item,
-            .etf-lab-summary-item:nth-child(2n) {
-                border-right: 0;
-            }
-
-            .etf-lab-summary-item:last-child {
-                grid-column: auto;
+            .etf-lab-kpi:nth-child(3n) .etf-lab-kpi-tooltip {
+                left: 0;
+                right: auto;
+                transform: translateX(-6px);
             }
 
             .etf-lab-rail-row {
@@ -488,40 +555,28 @@ def _iv_regime(percentile: float | None) -> tuple[str, str]:
     return "中性", "#2563eb"
 
 
-def _render_summary_strip(
-    *,
-    latest_close: float | None,
-    pressure: float,
-    support: float,
-    iv_percentile: float | None,
-) -> None:
-    close_text = f"{latest_close:.3f}" if latest_close is not None else "--"
-    iv_text = f"{iv_percentile:.0f}" if iv_percentile is not None else "--"
+def _render_market_climate_strip(cards: list[dict]) -> None:
+    def card_html(card: dict) -> str:
+        hint = str(card.get("hint") or "")
+        info = ""
+        if hint:
+            info = (
+                '<span class="etf-lab-kpi-info" tabindex="0" aria-label="数据说明">i'
+                f'<span class="etf-lab-kpi-tooltip">{escape(hint)}</span></span>'
+            )
+        return (
+            '<div class="etf-lab-kpi">'
+            '<div class="etf-lab-kpi-label-row">'
+            f'<span class="etf-lab-kpi-label">{escape(str(card.get("label") or "--"))}</span>'
+            f"{info}</div>"
+            f'<div class="etf-lab-kpi-value" style="color:{escape(str(card.get("color") or "#0f172a"))}">'
+            f'{escape(str(card.get("value") or "--"))}</div>'
+            f'<div class="etf-lab-kpi-detail">{escape(str(card.get("detail") or ""))}</div>'
+            "</div>"
+        )
+
     st.markdown(
-        f"""
-        <div class="etf-lab-summary">
-            <div class="etf-lab-summary-item">
-                <div class="etf-lab-summary-label">现价</div>
-                <div class="etf-lab-summary-value">{escape(close_text)}</div>
-            </div>
-            <div class="etf-lab-summary-item">
-                <div class="etf-lab-summary-label">上方压力</div>
-                <div class="etf-lab-summary-value danger">{pressure:.3f}</div>
-            </div>
-            <div class="etf-lab-summary-item">
-                <div class="etf-lab-summary-label">下方支撑</div>
-                <div class="etf-lab-summary-value success">{support:.3f}</div>
-            </div>
-            <div class="etf-lab-summary-item">
-                <div class="etf-lab-summary-label">IV等级</div>
-                <div class="etf-lab-summary-value">{escape(iv_text)}<span class="suffix">/100</span></div>
-            </div>
-            <div class="etf-lab-summary-item">
-                <div class="etf-lab-summary-label">博弈区间</div>
-                <div class="etf-lab-summary-value">{support:.3f}–{pressure:.3f}</div>
-            </div>
-        </div>
-        """,
+        '<div class="etf-lab-kpi-strip">' + "".join(card_html(card) for card in cards) + "</div>",
         unsafe_allow_html=True,
     )
 
@@ -922,18 +977,7 @@ _perf_page_log(
 
 
 
-latest_close = None
-if not df_kline.empty and 'close' in df_kline.columns:
-    close_values = pd.to_numeric(df_kline['close'], errors='coerce').dropna()
-    if not close_values.empty:
-        latest_close = float(close_values.iloc[-1])
-
-_render_summary_strip(
-    latest_close=latest_close,
-    pressure=pressure,
-    support=support,
-    iv_percentile=iv_percentile,
-)
+_render_market_climate_strip(_cached_cn_market_climate_strip())
 
 price_data_ready = not df_kline.empty
 main_col, rail_col = st.columns([2.55, 1.05], gap="small")
@@ -961,24 +1005,6 @@ with rail_col:
         support=support,
         support_oi=support_oi,
         iv_percentile=iv_percentile,
-    )
-
-# --- 3. 详细数据 ---
-with st.expander("查看详细数据表"):
-    # 增加一列：持仓金额估算 (价格 * 持仓 * 10000)
-    df['amt_est'] = df['price'] * df['oi'] * 10000 / 100000000  # 亿
-
-    st.dataframe(
-        df[['date_str', 'type', 'strike', 'oi', 'price', 'code']],
-        column_config={
-            "date_str": "日期",
-            "type": "类型",
-            "strike": st.column_config.NumberColumn("行权价", format="%.3f"),
-            "oi": st.column_config.NumberColumn("持仓量(张)", format="%d"),
-            "price": st.column_config.NumberColumn("期权价", format="%.4f"),
-            "code": "合约代码"
-        },
-        use_container_width=True
     )
 
 _perf_page_log(
