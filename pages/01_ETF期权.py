@@ -858,6 +858,22 @@ def _render_defense_chart(df: pd.DataFrame, target: str, *, height: int = 390) -
     st.plotly_chart(_build_defense_figure(df, target, height=height), width="stretch")
 
 
+def _render_defense_detail_table(df: pd.DataFrame) -> None:
+    with st.expander("查看详细数据表"):
+        st.dataframe(
+            df[['date_str', 'type', 'strike', 'oi', 'price', 'code']],
+            column_config={
+                "date_str": "日期",
+                "type": "类型",
+                "strike": st.column_config.NumberColumn("行权价", format="%.3f"),
+                "oi": st.column_config.NumberColumn("持仓量(张)", format="%d"),
+                "price": st.column_config.NumberColumn("期权价", format="%.4f"),
+                "code": "合约代码",
+            },
+            width="stretch",
+        )
+
+
 _inject_etf_lab_style()
 
 
@@ -1015,6 +1031,9 @@ with rail_col:
         support_oi=support_oi,
         iv_percentile=iv_percentile,
     )
+
+if active_view == "持仓防线":
+    _render_defense_detail_table(df)
 
 _perf_page_log(
     page=PAGE_NAME,

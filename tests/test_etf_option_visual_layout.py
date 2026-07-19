@@ -72,6 +72,17 @@ class EtfOptionVisualLayoutTests(unittest.TestCase):
         self.assertEqual(self.source.count("_render_defense_chart("), 2)
         self.assertNotIn("etf-lab-defense-section", self.source)
 
+    def test_defense_view_restores_detail_table_without_duplicating_overview(self):
+        self.assertEqual(self.source.count("_render_defense_detail_table("), 2)
+        self.assertIn(
+            'if active_view == "持仓防线":\n    _render_defense_detail_table(df)',
+            self.source,
+        )
+        self.assertIn('with st.expander("查看详细数据表")', self.source)
+        for field in ("date_str", "type", "strike", "oi", "price", "code"):
+            self.assertIn(f"'{field}'", self.source)
+        self.assertIn('NumberColumn("持仓量(张)", format="%d")', self.source)
+
     def test_defense_chart_shows_open_interest_beside_every_point(self):
         frame = pd.DataFrame(
             {
@@ -117,7 +128,6 @@ class EtfOptionVisualLayoutTests(unittest.TestCase):
         self.assertNotIn('class="etf-lab-summary"', self.source)
         self.assertNotIn('grid-template-columns: repeat(5, minmax(0, 1fr))', self.source)
         self.assertNotIn("_render_summary_strip", self.source)
-        self.assertNotIn("查看详细数据表", self.source)
 
     def test_market_climate_copy_is_plain_language_and_hides_sample_counts(self):
         self.assertNotIn("样本{sample_count}", self.climate_source)
