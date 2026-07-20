@@ -58,8 +58,18 @@ def compact_date(value: Any) -> str:
     return raw
 
 
+def load_runtime_env(app_dir: Path | None = None) -> Path | None:
+    current_dir = app_dir or Path(__file__).resolve().parent
+    for env_path in (current_dir.parent / ".env", current_dir / ".env"):
+        if env_path.exists():
+            load_dotenv(dotenv_path=env_path, override=True)
+            return env_path
+    load_dotenv(override=True)
+    return None
+
+
 def create_engine_from_env() -> Any:
-    load_dotenv(Path(__file__).resolve().parent / ".env", override=True)
+    load_runtime_env()
     required = {name: os.getenv(name) for name in ("DB_USER", "DB_PASSWORD", "DB_HOST", "DB_NAME")}
     missing = [name for name, value in required.items() if not value]
     if missing:
