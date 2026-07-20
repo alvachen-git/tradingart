@@ -787,18 +787,129 @@ def _is_conditional_context(context: str) -> bool:
     return any(token in context for token in ["若", "如果", "一旦", "可能", "预期", "关注", "假设"])
 
 
-def _bounded_entity_context(text_value: str, start: int, end: int, padding: int = 40) -> str:
-    """Keep direction checks inside the entity's sentence/line to avoid cross-card bleed."""
-    left = max(0, start - padding)
-    right = min(len(text_value), end + padding)
-    for delimiter in ["\n", "。", "；"]:
-        prev_pos = text_value.rfind(delimiter, left, start)
-        if prev_pos >= 0:
-            left = max(left, prev_pos + 1)
-        next_pos = text_value.find(delimiter, end, right)
-        if next_pos >= 0:
-            right = min(right, next_pos)
-    return text_value[left:right]
+def _direction_entity_pattern(alias: str) -> str:
+    """Match an index/ETF alias without letting short names consume known suffixes."""
+    pattern = re.escape(alias)
+    if not alias.endswith("ETF") and not alias.endswith("指"):
+        pattern += r"(?!ETF|指)"
+    return pattern
+
+
+def _nearest_entity_fact_claims(
+    text_value: str,
+    direction_items: list[tuple[str, list[str], dict]],
+    fact_tokens: list[str],
+    max_distance: int = 40,
+):
+    """Bind each fact token to the nearest entity in the same sentence."""
+    mentions = []
+    seen_mentions = set()
+    for label, aliases, move in direction_items:
+        for alias in sorted(set(aliases), key=len, reverse=True):
+            for mention in re.finditer(_direction_entity_pattern(alias), text_value):
+                key = (label, mention.start(), mention.end())
+                if key in seen_mentions:
+                    continue
+                seen_mentions.add(key)
+                mentions.append((mention.start(), mention.end(), label, move))
+
+    if not mentions or not fact_tokens:
+        return
+
+    mentions.sort(key=lambda item: (item[0], item[1]))
+    token_pattern = re.compile(
+        "|".join(re.escape(token) for token in sorted(fact_tokens, key=len, reverse=True))
+    )
+    for token_match in token_pattern.finditer(text_value):
+        sentence_start = max(
+            text_value.rfind("\n", 0, token_match.start()),
+            text_value.rfind("。", 0, token_match.start()),
+            text_value.rfind("；", 0, token_match.start()),
+        ) + 1
+        sentence_end_candidates = [
+            position
+            for position in (
+                text_value.find("\n", token_match.end()),
+                text_value.find("。", token_match.end()),
+                text_value.find("；", token_match.end()),
+            )
+            if position >= 0
+        ]
+        sentence_end = min(sentence_end_candidates) if sentence_end_candidates else len(text_value)
+
+        clause_start = max(
+            text_value.rfind("，", sentence_start, token_match.start()),
+            text_value.rfind(",", sentence_start, token_match.start()),
+            text_value.rfind("、", sentence_start, token_match.start()),
+        ) + 1
+        clause_end_candidates = [
+            position
+            for position in (
+                text_value.find("，", token_match.end(), sentence_end),
+                text_value.find(",", token_match.end(), sentence_end),
+                text_value.find("、", token_match.end(), sentence_end),
+            )
+            if position >= 0
+        ]
+        clause_end = min(clause_end_candidates) if clause_end_candidates else sentence_end
+
+        candidates = []
+        for start, end, label, move in mentions:
+            if start < sentence_start or end > sentence_end:
+                continue
+            if end <= token_match.start():
+                distance = token_match.start() - end
+                follows_entity = 0
+            elif start >= token_match.end():
+                distance = start - token_match.end()
+                follows_entity = 1
+            else:
+                distance = 0
+                follows_entity = 0
+            if distance <= max_distance:
+                candidates.append((distance, follows_entity, start, end, label, move))
+
+        if not candidates:
+            continue
+        clause_candidates = [
+            item for item in candidates if item[2] >= clause_start and item[3] <= clause_end
+        ]
+        if clause_candidates:
+            selected = min(clause_candidates, key=lambda item: (item[0], item[1]))
+        else:
+            preceding = [item for item in candidates if item[3] <= token_match.start()]
+            following = [item for item in candidates if item[2] >= token_match.end()]
+            selected = min(preceding or following, key=lambda item: (item[0], item[1]))
+
+        _, _, start, end, label, move = selected
+        relation = text_value[min(start, token_match.start()):max(end, token_match.end())]
+        yield label, move, token_match.group(0), relation
+
+
+def _daily_return_polarity(move: dict) -> int:
+    pct_change = float((move or {}).get("pct_change") or 0.0)
+    if pct_change > 0.05:
+        return 1
+    if pct_change < -0.05:
+        return -1
+    return 0
+
+
+def _candle_polarity(move: dict) -> int:
+    candle = str((move or {}).get("candle") or "")
+    if "阳线" in candle:
+        return 1
+    if "阴线" in candle:
+        return -1
+    candle_change = (move or {}).get("candle_change_pct")
+    if candle_change is None:
+        return 0
+    candle_change = float(candle_change or 0.0)
+    if candle_change > 0.05:
+        return 1
+    if candle_change < -0.05:
+        return -1
+    return 0
 
 
 def _validate_programmatic_stock_sector(html_content: str, snapshot: dict) -> tuple[list[str], bool]:
@@ -938,9 +1049,17 @@ def validate_a_share_report_facts(html_content: str, snapshot: dict) -> list[str
                 if expected_amount > 0 and negative_claim:
                     violations.append(f"{name}真实主力净流入 {expected_amount:+.1f}亿，但页面写成资金流出")
 
-    # Direct daily direction wording must agree with deterministic price moves.
-    bullish_tokens = ["大涨", "收涨", "上涨", "大阳线", "阳线突破", "强势突破", "放量突破", "涨停"]
-    bearish_tokens = ["大跌", "收跌", "下跌", "大阴线", "破位下跌", "放量杀跌", "跌停"]
+    # Close-vs-previous-close return and close-vs-open candle direction are
+    # independent facts. Gap moves can legitimately rise with a bearish candle
+    # or fall with a bullish candle, so validate the two vocabularies separately.
+    return_token_polarity = {
+        "涨停": 1, "大涨": 1, "收涨": 1, "上涨": 1,
+        "跌停": -1, "大跌": -1, "收跌": -1, "下跌": -1,
+    }
+    candle_token_polarity = {
+        "大阳线": 1, "阳线": 1,
+        "大阴线": -1, "阴线": -1,
+    }
     direction_items = []
     for name, move in (snapshot.get("indices") or {}).items():
         direction_items.append((name, [name], move))
@@ -948,28 +1067,39 @@ def validate_a_share_report_facts(html_content: str, snapshot: dict) -> list[str
         direction_items.append((f"{name}ETF", [f"{name}ETF", name], move))
 
     seen_direction_errors = set()
-    for label, aliases, move in direction_items:
-        pct_change = float(move.get("pct_change") or 0.0)
-        for alias in aliases:
-            # Chinese prose commonly has no delimiter (e.g. “创业板高IV叠加大阳线”).
-            # Only exclude the two known longer entity suffixes instead of requiring
-            # a generic word boundary after the alias.
-            mention_pattern = re.escape(alias)
-            if not alias.endswith("ETF") and not alias.endswith("指"):
-                mention_pattern += r"(?!ETF|指)"
-            for mention in re.finditer(mention_pattern, plain):
-                context = _bounded_entity_context(plain, mention.start(), mention.end())
-                if _is_conditional_context(context):
-                    continue
-                conflicts = bullish_tokens if pct_change < -0.05 else bearish_tokens if pct_change > 0.05 else []
-                hit = next((token for token in conflicts if token in context), "")
-                if hit:
-                    key = (label, hit)
-                    if key not in seen_direction_errors:
-                        seen_direction_errors.add(key)
-                        violations.append(
-                            f"{label}当日涨跌幅 {pct_change:+.2f}%，但页面出现相反方向表述“{hit}”"
-                        )
+    for label, move, token, relation in _nearest_entity_fact_claims(
+        plain,
+        direction_items,
+        list(return_token_polarity),
+    ):
+        if _is_conditional_context(relation):
+            continue
+        expected_polarity = _daily_return_polarity(move)
+        if expected_polarity and return_token_polarity[token] != expected_polarity:
+            key = (label, "return", token)
+            if key not in seen_direction_errors:
+                seen_direction_errors.add(key)
+                pct_change = float(move.get("pct_change") or 0.0)
+                violations.append(
+                    f"{label}当日涨跌幅 {pct_change:+.2f}%，但页面出现相反方向表述“{token}”"
+                )
+
+    for label, move, token, relation in _nearest_entity_fact_claims(
+        plain,
+        direction_items,
+        list(candle_token_polarity),
+    ):
+        if _is_conditional_context(relation):
+            continue
+        expected_polarity = _candle_polarity(move)
+        if expected_polarity and candle_token_polarity[token] != expected_polarity:
+            key = (label, "candle", token)
+            if key not in seen_direction_errors:
+                seen_direction_errors.add(key)
+                candle = str(move.get("candle") or "未知")
+                violations.append(
+                    f"{label}当日K线形态为“{candle}”，但页面出现相反K线表述“{token}”"
+                )
 
     iv_section = _extract_plain_section(plain, "期权波动率", ["每日牛股", "风险警示", "明日策略"])
     if not iv_section:
@@ -1289,7 +1419,12 @@ def _classify_repair_slots(anomalies: list, html_content: str) -> list[str]:
             targets.add("stock-sector")
         if any(token in message for token in iv_tokens):
             targets.add("option-volatility")
-        if "当日涨跌幅" in message or "相反方向" in message:
+        if (
+            "当日涨跌幅" in message
+            or "相反方向" in message
+            or "当日K线形态" in message
+            or "相反K线" in message
+        ):
             entities = [entity for entity in direction_entities if entity in message]
             located = {
                 slot_name
@@ -1895,7 +2030,8 @@ def draft_report(raw_material, a_share_snapshot: dict = None, a_share_snapshot_t
     - 股票板块只允许使用【A股/ETF/板块资金真值】中的主力净流入Top3和主力净流出Top3；
       金额统一写成“行业名(+/-X.X亿)”，必须保留正负号
     - 期权波动率进度条百分比代表252日 IV Rank，数值和等级必须逐字匹配A股程序真值
-    - 指数/ETF当日涨跌与K线阴阳必须匹配A股程序真值；下跌日严禁写“大涨/上涨/大阳线/突破”
+    - 指数/ETF当日涨跌（收盘对前收盘）与K线阴阳（收盘对开盘）必须分别匹配A股程序真值
+    - 跳空行情中允许“当日上涨但收阴线”或“当日下跌但收阳线”；不得把涨跌方向与K线阴阳混为一谈
     - 记者素材与程序真值冲突时，必须忽略记者素材，严禁融合或折中
     - 商品期货全景：必须包含 10 个商品卡片（5行2列）
     - 商品卡片第一行必须展示“形态：xxx”

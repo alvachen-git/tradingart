@@ -195,6 +195,19 @@ def test_direction_error_targets_only_slots_containing_the_entity():
     assert targets == ["tomorrow-strategy"]
 
 
+def test_candle_error_targets_only_slots_containing_the_entity():
+    slots = _slots()
+    slots["tomorrow-strategy"] = "上证50ETF大阴线后注意风险。"
+    html = drg._render_locked_report_layout(slots, "2026年07月15日", "周三")
+
+    targets = drg._classify_repair_slots(
+        ["上证50ETF当日K线形态为“大阳线”，但页面出现相反K线表述“大阴线”"],
+        html,
+    )
+
+    assert targets == ["tomorrow-strategy"]
+
+
 def test_draft_report_can_succeed_on_third_local_repair():
     initial_html = drg._render_locked_report_layout(_slots(), "2026年07月15日", "周三")
     commodity_results = [

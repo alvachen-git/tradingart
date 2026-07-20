@@ -19,10 +19,20 @@ def _snapshot():
     return {
         "report_date": "20260710",
         "indices": {
-            "创业板指": {"pct_change": -4.37},
+            "创业板指": {
+                "pct_change": -4.37,
+                "direction": "下跌",
+                "candle_change_pct": -2.10,
+                "candle": "大阴线",
+            },
         },
         "etfs": {
-            "创业板": {"pct_change": -4.41},
+            "创业板": {
+                "pct_change": -4.41,
+                "direction": "下跌",
+                "candle_change_pct": -2.20,
+                "candle": "大阴线",
+            },
         },
         "sectors": sector_rows,
         "sector_top_in": [sector_rows[x] for x in ["国防军工", "医药生物", "汽车"]],
@@ -59,7 +69,7 @@ class DailyReportAStockGuardrailTest(unittest.TestCase):
         violations = drg.validate_a_share_report_facts(html, _snapshot())
 
         self.assertTrue(any("半导体主力净额与真值不一致" in item for item in violations))
-        self.assertTrue(any("创业板ETF当日涨跌幅" in item and "大阳线" in item for item in violations))
+        self.assertTrue(any("创业板ETF当日K线形态" in item and "大阳线" in item for item in violations))
         self.assertTrue(any("创业板 IV Rank与真值不一致" in item for item in violations))
         self.assertTrue(any("主力资金Top3必选行业" in item for item in violations))
 
@@ -103,6 +113,68 @@ class DailyReportAStockGuardrailTest(unittest.TestCase):
         violations = drg.validate_a_share_report_facts(html, _snapshot())
 
         self.assertEqual(violations, [])
+
+    def test_accepts_july_20_gap_moves_and_keeps_neighbouring_entities_isolated(self):
+        snapshot = _snapshot()
+        snapshot["indices"] = {
+            "上证指数": {"pct_change": 0.8536, "direction": "上涨", "candle_change_pct": 0.1218, "candle": "阳线"},
+            "深证成指": {"pct_change": -0.7055, "direction": "下跌", "candle_change_pct": -1.8667, "candle": "大阴线"},
+            "创业板指": {"pct_change": 0.4220, "direction": "上涨", "candle_change_pct": -1.7414, "candle": "大阴线"},
+        }
+        snapshot["etfs"] = {
+            "创业板": {"pct_change": 0.4043, "direction": "上涨", "candle_change_pct": -0.9966, "candle": "阴线"},
+            "科创50": {"pct_change": 0.4427, "direction": "上涨", "candle_change_pct": -1.9449, "candle": "大阴线"},
+            "上证50": {"pct_change": 2.5930, "direction": "上涨", "candle_change_pct": 1.7253, "candle": "大阳线"},
+        }
+        html = """
+        <h2>市场头条</h2>
+        <p>上证指数上涨0.85%，深证成指下跌0.71%，创业板指上涨0.42%并收大阴线。</p>
+        <h4>股票板块</h4>
+        <p>
+          主力净流入：国防军工(+77.5亿)、医药生物(+40.8亿)、汽车(+30.4亿)；
+          主力净流出：电子(-435.1亿)、半导体(-248.8亿)、数字芯片设计(-155.9亿)。
+        </p>
+        <h4>期货商持仓</h4>
+        <h2>期权波动率</h2>
+        <div>
+          沪深300 71.7% 偏高；中证500 61.0% 偏高；创业板 82.9% 高；
+          科创50 78.9% 偏高；上证50 61.7% 偏高。
+        </div>
+        <p>创业板ETF上涨0.40%并收阴线，科创50ETF上涨0.44%并收大阴线，上证50ETF上涨2.59%并收大阳线。</p>
+        <h2>每日牛股</h2>
+        """
+
+        violations = drg.validate_a_share_report_facts(html, snapshot)
+
+        self.assertEqual(violations, [])
+
+    def test_rejects_wrong_return_and_wrong_candle_as_separate_facts(self):
+        snapshot = _snapshot()
+        snapshot["indices"] = {
+            "上证指数": {"pct_change": 0.8536, "direction": "上涨", "candle_change_pct": 0.1218, "candle": "阳线"},
+            "创业板指": {"pct_change": 0.4220, "direction": "上涨", "candle_change_pct": -1.7414, "candle": "大阴线"},
+        }
+        html = """
+        <h2>市场头条</h2>
+        <p>上证指数下跌0.85%，创业板指上涨0.42%并收大阳线。</p>
+        <h4>股票板块</h4>
+        <p>
+          主力净流入：国防军工(+77.5亿)、医药生物(+40.8亿)、汽车(+30.4亿)；
+          主力净流出：电子(-435.1亿)、半导体(-248.8亿)、数字芯片设计(-155.9亿)。
+        </p>
+        <h4>期货商持仓</h4>
+        <h2>期权波动率</h2>
+        <div>
+          沪深300 71.7% 偏高；中证500 61.0% 偏高；创业板 82.9% 高；
+          科创50 78.9% 偏高；上证50 61.7% 偏高。
+        </div>
+        <h2>每日牛股</h2>
+        """
+
+        violations = drg.validate_a_share_report_facts(html, snapshot)
+
+        self.assertTrue(any("上证指数当日涨跌幅" in item and "下跌" in item for item in violations), violations)
+        self.assertTrue(any("创业板指当日K线形态" in item and "大阳线" in item for item in violations), violations)
 
     def test_long_sector_name_does_not_match_nested_short_sector(self):
         snapshot = _snapshot()
