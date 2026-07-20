@@ -3445,15 +3445,54 @@ def supervisor_node(state: AgentState, llm):
     elif history_text:
         full_query = f"【当前问题】\n{query}"
 
-    # 使用 structured_output 强制输出 JSON
-    planner = llm.with_structured_output(PlanningOutput)
-    prompt = ChatPromptTemplate.from_messages([
-        SystemMessage(content=system_prompt),
-        ("human", "{query}")
-    ])
+    task_policy = classify_analysis_task_type(
+        query,
+        symbol_hint="",
+        is_followup=is_followup,
+        recent_context="\n".join(
+            part
+            for part in (recent_context, followup_action_context, followup_route_context)
+            if part
+        ),
+    )
 
-    chain = prompt | planner
-    result = chain.invoke({"query": full_query})
+    # 高置信任务直接使用统一分类结果，避免数据词或不稳定的工具参数输出
+    # 覆盖确定性的高层任务。其他任务仍允许主管模型补充专家组合。
+    if task_policy.hard_override and task_policy.recommended_plan:
+        result = PlanningOutput(
+            plan=list(task_policy.recommended_plan),
+            symbol="",
+            route_reason=f"统一任务分类：{task_policy.reason}",
+        )
+        print(
+            f"[supervisor-policy] bypass structured planner "
+            f"task_type={task_policy.task_type} plan={result.plan}"
+        )
+    else:
+        # 使用 structured_output 强制输出 JSON。模型偶尔会产生缺少括号等
+        # 非法工具参数；解析失败时必须回退，不能让整张分析图中止。
+        planner = llm.with_structured_output(PlanningOutput)
+        prompt = ChatPromptTemplate.from_messages([
+            SystemMessage(content=system_prompt),
+            ("human", "{query}")
+        ])
+
+        chain = prompt | planner
+        try:
+            result = chain.invoke({"query": full_query})
+        except Exception as exc:
+            fallback_plan = list(task_policy.recommended_plan) or ["chatter"]
+            result = PlanningOutput(
+                plan=fallback_plan,
+                symbol="",
+                route_reason=(
+                    f"主管结构化输出失败，回退统一任务分类：{task_policy.reason}"
+                ),
+            )
+            print(
+                f"[supervisor-fallback] task_type={task_policy.task_type} "
+                f"plan={fallback_plan} error={type(exc).__name__}: {str(exc)[:300]}"
+            )
 
     # 🔥🔥🔥 [新增防崩溃检查]
     # 如果 LLM 没有返回有效的结构化数据 (None)，默认转给 Chatter
