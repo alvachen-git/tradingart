@@ -510,7 +510,7 @@ def _render_pending_chat_task_fragment(task_info_snapshot: Dict[str, Any]) -> No
         _replace_task_placeholder_with_text(
             task_id,
             "⏱️ 这条问题处理超时了，请稍后重试，或把问题拆得更具体一些。",
-            chat_mode=chat_mode if 'chat_mode' in locals() else CHAT_MODE_ANALYSIS,
+            chat_mode=str(task_info.get("chat_mode") or CHAT_MODE_ANALYSIS),
             intent_domain=str(task_info.get("intent_domain") or "general").strip() or "general",
         )
         TaskManager().complete_user_task(current_user, task_id)
@@ -3413,6 +3413,48 @@ def process_user_input(
 ):
     """处理用户输入（无论是来自输入框还是快捷卡片）"""
     deep_mode = bool(deep_mode and ENABLE_DEEP_MODE and DeepTaskManager is not None)
+    web_smoke_env_enabled = str(os.getenv("AGENT_WEB_SMOKE_MOCK", "")).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    try:
+        web_smoke_query_value = st.query_params.get("_web_smoke_mock", "")
+        if isinstance(web_smoke_query_value, list):
+            web_smoke_query_value = web_smoke_query_value[0] if web_smoke_query_value else ""
+        web_smoke_host = str(getattr(getattr(st, "context", None), "headers", {}).get("host", "") or "")
+    except Exception:
+        web_smoke_query_value = ""
+        web_smoke_host = ""
+    web_smoke_local_query_enabled = (
+        str(web_smoke_query_value).strip() == "1"
+        and (web_smoke_host.startswith("127.0.0.1") or web_smoke_host.startswith("localhost"))
+    )
+    web_smoke_mock_enabled = web_smoke_env_enabled or web_smoke_local_query_enabled
+    if (
+        web_smoke_mock_enabled
+        and st.session_state.get("is_logged_in", False)
+        and "[web-smoke]" in str(prompt_text or "")
+    ):
+        st.session_state.setdefault("messages", [])
+        trace_id = generate_chat_trace_id()
+        answer_id = generate_chat_answer_id()
+        st.session_state.messages.append({"role": "user", "content": str(prompt_text or ""), "linked_task_id": ""})
+        st.session_state.messages.append(
+            {
+                "role": "ai",
+                "content": "WEB_SMOKE_OK",
+                "chart": "",
+                "attachments": [],
+                "trace_id": trace_id,
+                "answer_id": answer_id,
+                "feedback_allowed": False,
+                "intent_domain": "web_smoke",
+                "chat_mode": CHAT_MODE_SIMPLE,
+            }
+        )
+        return
     current_user = st.session_state.get('user_id', "访客")
 
     # 关键动作前再做严格鉴权，避免首页每次自动登录都阻塞。
@@ -4192,10 +4234,10 @@ def show_welcome_screen():
         st.session_state.pending_prompt = text
 
     with col1:
-        st.button("半导体有什么股票推荐",
+        st.button("美股有什么推荐",
                      use_container_width=True,
                      on_click=set_prompt_callback,
-                     args=("推荐有潜力的半导体股票，最好不要涨太多的",)
+                     args=("美股有哪些技术面止跌，波动率偏高，适合卖看跌期权的呢",)
          )
 
     with col2:
@@ -4206,10 +4248,10 @@ def show_welcome_screen():
          )
 
     with col3:
-        st.button("500ETF现在能卖期权吗？",
+        st.button("中证1000如何抄底？",
                      use_container_width=True,
                      on_click=set_prompt_callback,
-                     args=("500ETF卖期权如何操作",)
+                     args=("中证1000抄底用什么策略好",)
          )
 
 # ==========================================
