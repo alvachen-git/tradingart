@@ -23,7 +23,6 @@ CHART_RENDER_WINDOW = 260
 TODAY_LINE_COLOR = "#2563eb"
 PREVIOUS_LINE_COLOR = "#f97316"
 SYMBOL_DEFAULT_FAVORITES = ("NVDA", "TSLA", "SPY", "QQQ", "ARM", "COIN")
-SYMBOL_PICKER_PAGE_SIZE = 10
 SYMBOL_CATEGORY_MEMBERS = {
     "指数ETF": (
         "SPY",
@@ -105,11 +104,12 @@ from us_market_dashboard_data import (
     calculate_overview_metrics_from_market_history,
     calculate_volatility_positioning_metrics,
     dashboard_engine,
+    delta_skew_metrics_from_curve,
     format_profile_updated_at_beijing,
     load_available_option_trade_dates,
+    load_delta_volatility_curve_snapshot,
     load_iv_history,
     load_oi_defense_history,
-    load_otm_volatility_curve_snapshot,
     load_latest_option_trade_date,
     load_market_climate_strip,
     load_market_metrics_history,
@@ -372,7 +372,7 @@ def _inject_page_style() -> None:
         }
         .us-symbol-table-head {
             display: grid;
-            grid-template-columns: 2.6fr .95fr .55fr;
+            grid-template-columns: .95fr 1.55fr .95fr .55fr;
             gap: 8px;
             padding: 9px 2px 8px;
             border-top: 1px solid #e2e8f0;
@@ -1833,29 +1833,20 @@ def _switch_to_next_favorite(current_symbol: str, symbol_options: list[str] | tu
     st.session_state["us_lab_symbol"] = next_symbol
 
 
-def _symbol_picker_category_counts(
+def _category_symbol_count(
+    category: str,
     symbol_options: list[str] | tuple[str, ...],
     favorites: list[str],
-) -> dict[str, int]:
+) -> int:
+    if category == "全部":
+        return len(symbol_options)
+    if category == "我的自选":
+        return len(favorites)
     symbols = [str(item or "").upper() for item in symbol_options]
-    counts = {category: 0 for category in SYMBOL_CATEGORY_ORDER}
-    counts["全部"] = len(symbols)
-    counts["我的自选"] = len(favorites)
-    for symbol in symbols:
-        category = _underlying_category(symbol)
-        counts[category if category in counts else "其他"] += 1
-    return counts
-
-
-def _set_symbol_picker_page(page: int) -> None:
-    st.session_state["us_lab_symbol_picker_page"] = max(0, int(page))
-
-
-def _sync_symbol_picker_page_state(category: str, query: str) -> None:
-    signature = f"{category}\0{str(query or '').strip()}"
-    if st.session_state.get("us_lab_symbol_picker_filter_signature") != signature:
-        st.session_state["us_lab_symbol_picker_filter_signature"] = signature
-        st.session_state["us_lab_symbol_picker_page"] = 0
+    if category == "其他":
+        return sum(1 for item in symbols if _underlying_category(item) == "其他")
+    members = set(SYMBOL_CATEGORY_MEMBERS.get(category, ()))
+    return sum(1 for item in symbols if item in members)
 
 
 def _filter_underlying_symbols(
@@ -1896,12 +1887,10 @@ def _ensure_symbol_picker_state(current_symbol: str, symbol_options: list[str] |
     if st.session_state.get("us_lab_symbol_picker_category") not in SYMBOL_CATEGORY_ORDER:
         st.session_state["us_lab_symbol_picker_category"] = "我的自选"
     st.session_state.setdefault("us_lab_symbol_picker_query", "")
-    st.session_state.setdefault("us_lab_symbol_picker_page", 0)
 
 
 def _set_symbol_picker_category(category: str) -> None:
     st.session_state["us_lab_symbol_picker_category"] = category
-    st.session_state["us_lab_symbol_picker_page"] = 0
 
 
 @st.dialog(" ", width="large")
@@ -1936,14 +1925,12 @@ def _render_symbol_picker_dialog(symbol_options: list[str], current_symbol: str)
         label_visibility="collapsed",
     )
     active_category = str(st.session_state.get("us_lab_symbol_picker_category") or "我的自选")
-    _sync_symbol_picker_page_state(active_category, query)
-    category_counts = _symbol_picker_category_counts(symbols, favorites)
 
     rail_col, list_col = st.columns([0.34, 0.66], gap="medium")
     with rail_col:
         st.markdown('<div class="us-symbol-rail-title">分类</div>', unsafe_allow_html=True)
         for category in SYMBOL_CATEGORY_ORDER:
-            count = category_counts.get(category, 0)
+            count = _category_symbol_count(category, symbols, favorites)
             if count <= 0 and category not in ("我的自选", "其他"):
                 continue
             label = f"{category}  {count}"
@@ -1963,27 +1950,15 @@ def _render_symbol_picker_dialog(symbol_options: list[str], current_symbol: str)
             category=active_category,
             query=query,
         )
-        use_pagination = len(filtered_symbols) > SYMBOL_PICKER_PAGE_SIZE
-        page_count = max(1, math.ceil(len(filtered_symbols) / SYMBOL_PICKER_PAGE_SIZE)) if use_pagination else 1
-        page = int(st.session_state.get("us_lab_symbol_picker_page", 0) or 0)
-        page = max(0, min(page, page_count - 1))
-        st.session_state["us_lab_symbol_picker_page"] = page
-        start_idx = page * SYMBOL_PICKER_PAGE_SIZE if use_pagination else 0
-        end_idx = start_idx + SYMBOL_PICKER_PAGE_SIZE if use_pagination else len(filtered_symbols)
-        display_symbols = filtered_symbols[start_idx:end_idx]
-        range_label = (
-            f"第 {start_idx + 1}-{min(end_idx, len(filtered_symbols))} 个"
-            if use_pagination and filtered_symbols
-            else "点击标的立即切换"
-        )
+        display_symbols = filtered_symbols[:72]
         st.markdown(
             f"""
             <div class="us-symbol-table-summary">
                 <span>共 {len(filtered_symbols)} 个标的</span>
-                <span>{escape(range_label)}</span>
+                <span>点击代码或公司名立即切换</span>
             </div>
             <div class="us-symbol-table-head">
-                <span>标的</span><span>分类</span><span>自选</span>
+                <span>代码</span><span>公司名</span><span>分类</span><span>自选</span>
             </div>
             """,
             unsafe_allow_html=True,
@@ -1993,20 +1968,29 @@ def _render_symbol_picker_dialog(symbol_options: list[str], current_symbol: str)
         else:
             favorite_set = set(favorites)
             for row_symbol in display_symbols:
-                row_cols = st.columns([2.6, 0.95, 0.55], gap="small")
+                row_cols = st.columns([0.95, 1.55, 0.95, 0.55], gap="small")
                 row_type = "primary" if row_symbol == current else "secondary"
                 with row_cols[0]:
                     if st.button(
-                        _underlying_option_label(row_symbol),
-                        key=f"us_symbol_pick_{row_symbol}",
+                        row_symbol,
+                        key=f"us_symbol_pick_code_{row_symbol}",
                         type=row_type,
                         use_container_width=True,
                     ):
                         st.session_state["us_lab_symbol"] = row_symbol
                         st.rerun(scope="app")
                 with row_cols[1]:
-                    st.markdown(f'<div class="us-symbol-cell-muted">{escape(_underlying_category(row_symbol))}</div>', unsafe_allow_html=True)
+                    if st.button(
+                        _underlying_name(row_symbol),
+                        key=f"us_symbol_pick_name_{row_symbol}",
+                        type=row_type,
+                        use_container_width=True,
+                    ):
+                        st.session_state["us_lab_symbol"] = row_symbol
+                        st.rerun(scope="app")
                 with row_cols[2]:
+                    st.markdown(f'<div class="us-symbol-cell-muted">{escape(_underlying_category(row_symbol))}</div>', unsafe_allow_html=True)
+                with row_cols[3]:
                     star = "★" if row_symbol in favorite_set else "☆"
                     st.button(
                         star,
@@ -2017,31 +2001,8 @@ def _render_symbol_picker_dialog(symbol_options: list[str], current_symbol: str)
                         use_container_width=True,
                     )
 
-        if use_pagination:
-            prev_col, page_col, next_col = st.columns([0.28, 0.44, 0.28], gap="small")
-            with prev_col:
-                st.button(
-                    "‹ 上一页",
-                    key="us_symbol_picker_prev_page",
-                    disabled=page <= 0,
-                    on_click=_set_symbol_picker_page,
-                    args=(page - 1,),
-                    use_container_width=True,
-                )
-            with page_col:
-                st.markdown(
-                    f'<div class="us-symbol-cell-muted" style="justify-content:center;">{page + 1} / {page_count}</div>',
-                    unsafe_allow_html=True,
-                )
-            with next_col:
-                st.button(
-                    "下一页 ›",
-                    key="us_symbol_picker_next_page",
-                    disabled=page >= page_count - 1,
-                    on_click=_set_symbol_picker_page,
-                    args=(page + 1,),
-                    use_container_width=True,
-                )
+        if len(filtered_symbols) > len(display_symbols):
+            st.caption(f"已显示前 {len(display_symbols)} 个，继续输入关键词可缩小范围。")
         st.markdown('<div class="us-symbol-az-rail">A-Z · #</div>', unsafe_allow_html=True)
 
 
@@ -2815,9 +2776,9 @@ def _volatility_cone_subtitle(cone_df: pd.DataFrame) -> str:
 
 
 def _otm_curve_valid_points(curve_df: pd.DataFrame) -> int:
-    if curve_df is None or curve_df.empty or "moneyness_pct" not in curve_df.columns:
+    if curve_df is None or curve_df.empty or "delta_axis" not in curve_df.columns:
         return 0
-    return int(pd.to_numeric(curve_df["moneyness_pct"], errors="coerce").dropna().shape[0])
+    return int(pd.to_numeric(curve_df["delta_axis"], errors="coerce").dropna().shape[0])
 
 
 def _otm_curve_expiration_label(curve_df: pd.DataFrame) -> str | None:
@@ -2835,8 +2796,47 @@ def _otm_curve_expiration_label(curve_df: pd.DataFrame) -> str | None:
 
 def _otm_curve_subtitle(today_curve: pd.DataFrame, previous_curve: pd.DataFrame) -> str:
     expiration = _otm_curve_expiration_label(today_curve)
-    prefix = f"最近月期权 {expiration}" if expiration else "最近月期权"
-    return f"{prefix} · 今日 {_otm_curve_valid_points(today_curve)}点 / 昨日 {_otm_curve_valid_points(previous_curve)}点"
+    if today_curve is None or today_curve.empty:
+        return "该日期未保存官方 Greeks"
+    greeks = pd.to_numeric(
+        today_curve.get("greeks_rows", pd.Series(dtype=float)), errors="coerce"
+    ).dropna()
+    greeks_rows = int(greeks.max()) if not greeks.empty else 0
+    prefix = f"月结算 {expiration}" if expiration else "月结算"
+    previous_text = f"昨日 {_otm_curve_valid_points(previous_curve)}点" if previous_curve is not None and not previous_curve.empty else "昨日未保存官方 Greeks"
+    return f"{prefix} · 今日 {_otm_curve_valid_points(today_curve)}点 / {previous_text} · 有效 Greeks {greeks_rows}"
+
+
+def _render_delta_skew_summary(curve_df: pd.DataFrame) -> None:
+    metrics = delta_skew_metrics_from_curve(curve_df)
+    expiration = str(metrics.get("delta_skew_expiration") or "-")
+    items = [
+        ("25Δ Put Skew", _fmt_signed_pct(metrics.get("put_skew_25d"), 2), "下方保护"),
+        ("25Δ Call Skew", _fmt_signed_pct(metrics.get("call_skew_25d"), 2), "上方追涨"),
+        ("RR25", _fmt_signed_pct(metrics.get("risk_reversal_25d"), 2), "Call IV - Put IV"),
+        ("BF25", _fmt_signed_pct(metrics.get("butterfly_25d"), 2), "两翼均值 - ATM"),
+    ]
+    cells = "".join(
+        (
+            '<div style="min-width:0;padding:9px 12px;border-left:1px solid #e2e8f0;">'
+            f'<div style="font-size:11px;color:#64748b;">{escape(label)}</div>'
+            f'<div style="margin-top:4px;font-size:18px;font-weight:800;color:#0f172a;white-space:nowrap;">{escape(value)}</div>'
+            f'<div style="margin-top:2px;font-size:10px;color:#94a3b8;">{escape(note)}</div>'
+            "</div>"
+        )
+        for label, value, note in items
+    )
+    st.markdown(
+        (
+            '<div style="display:grid;grid-template-columns:repeat(4,minmax(0,1fr));'
+            'border-top:1px solid #e2e8f0;background:#fbfdff;">'
+            f"{cells}"
+            '<div style="grid-column:1/-1;padding:6px 12px 9px;font-size:10px;color:#94a3b8;">'
+            f"月结算到期日 {escape(expiration)} · 仅使用 Massive 官方 IV 与 Delta，区间外不外推"
+            "</div></div>"
+        ),
+        unsafe_allow_html=True,
+    )
 
 
 def _add_cone_line(fig: go.Figure, line_df: pd.DataFrame, *, name: str, color: str, dash: str = "solid") -> None:
@@ -3054,17 +3054,96 @@ def _build_otm_volatility_curve_figure(
     chart_id: str,
 ) -> go.Figure:
     fig = go.Figure()
-    _add_otm_curve(fig, previous_curve, name="昨日曲线", color=PREVIOUS_LINE_COLOR, dash="dash")
-    _add_otm_curve(fig, today_curve, name="今日曲线", color=TODAY_LINE_COLOR)
+
+    def add_delta_curve(curve_df: pd.DataFrame, *, name: str, color: str, dash: str) -> None:
+        if curve_df is None or curve_df.empty:
+            return
+        curve = curve_df.copy()
+        for col in ("delta_axis", "target_delta", "iv_pct", "point_count"):
+            curve[col] = pd.to_numeric(curve.get(col), errors="coerce")
+        curve = curve.dropna(subset=["delta_axis", "iv_pct"])
+        if curve.empty:
+            return
+        if "call_put" not in curve.columns:
+            curve["call_put"] = ""
+        if "node_type" not in curve.columns:
+            curve["node_type"] = ""
+        curve["call_put"] = curve["call_put"].fillna("").astype(str)
+        curve["node_type"] = curve["node_type"].fillna("").astype(str)
+        standard = curve[curve["node_type"] == "standard"].copy()
+        raw = curve[curve["node_type"] == "raw"].copy()
+        shown_legend = False
+        atm = standard[standard["call_put"] == "ATM"]
+        for side in ("P", "C"):
+            side_curve = standard[standard["call_put"] == side].copy()
+            if side_curve.empty:
+                continue
+            target_set = set(side_curve["target_delta"].dropna().round(4).tolist())
+            complete = {0.10, 0.25, 0.40}.issubset(target_set) and not atm.empty
+            plot_curve = pd.concat([side_curve, atm], ignore_index=True).sort_values("delta_axis") if not atm.empty else side_curve.sort_values("delta_axis")
+            custom = pd.DataFrame(
+                {
+                    "label": plot_curve.get("delta_label", pd.Series([""] * len(plot_curve))).fillna("").astype(str),
+                    "expiration": plot_curve.get("expiration_date", pd.Series([""] * len(plot_curve))).fillna("").astype(str),
+                    "quality": plot_curve.get("quality", pd.Series([""] * len(plot_curve))).fillna("").astype(str),
+                    "points": pd.to_numeric(plot_curve.get("point_count"), errors="coerce"),
+                }
+            ).to_numpy()
+            fig.add_trace(
+                go.Scatter(
+                    x=plot_curve["delta_axis"],
+                    y=plot_curve["iv_pct"],
+                    customdata=custom,
+                    mode="lines+markers" if complete else "markers",
+                    name=name,
+                    legendgroup=name,
+                    showlegend=not shown_legend,
+                    connectgaps=False,
+                    line=dict(color=color, width=2.4, dash=dash),
+                    marker=dict(size=7, color=color),
+                    hovertemplate=(
+                        "%{customdata[0]}<br>IV %{y:.2f}%<br>"
+                        "到期 %{customdata[1]}<br>%{customdata[2]} · 样本 %{customdata[3]:.0f}<extra></extra>"
+                    ),
+                )
+            )
+            shown_legend = True
+        if not raw.empty:
+            raw = raw.sort_values("delta_axis")
+            custom = pd.DataFrame(
+                {
+                    "label": raw.get("delta_label", pd.Series([""] * len(raw))).fillna("").astype(str),
+                    "expiration": raw.get("expiration_date", pd.Series([""] * len(raw))).fillna("").astype(str),
+                }
+            ).to_numpy()
+            fig.add_trace(
+                go.Scatter(
+                    x=raw["delta_axis"],
+                    y=raw["iv_pct"],
+                    customdata=custom,
+                    mode="markers",
+                    name=name,
+                    legendgroup=name,
+                    showlegend=not shown_legend,
+                    marker=dict(size=7, color=color, symbol="circle-open"),
+                    hovertemplate="%{customdata[0]}<br>IV %{y:.2f}%<br>到期 %{customdata[1]}<extra></extra>",
+                )
+            )
+
+    add_delta_curve(previous_curve, name="昨日曲线", color=PREVIOUS_LINE_COLOR, dash="dash")
+    add_delta_curve(today_curve, name="今日曲线", color=TODAY_LINE_COLOR, dash="solid")
     if (today_curve is None or today_curve.empty) and (previous_curve is None or previous_curve.empty):
-        _add_empty_chart_annotation(fig, "暂无可计算的 OTM 波动率曲线")
+        _add_empty_chart_annotation(fig, "该日期未保存官方 Greeks")
     elif previous_curve is None or previous_curve.empty:
-        _add_empty_chart_annotation(fig, "暂无昨日曲线：仅显示今日")
-    elif _otm_curve_has_sparse_side(today_curve, previous_curve):
-        _add_chart_note(fig, "最近月期权部分侧数据点不足：只显示点，不跨到期日拼线")
+        _add_empty_chart_annotation(fig, "昨日未保存官方 Greeks：仅显示今日")
+    elif any(
+        curve is not None and not curve.empty and (curve.get("node_type", pd.Series(dtype=str)).astype(str) == "raw").any()
+        for curve in (today_curve, previous_curve)
+    ):
+        _add_chart_note(fig, "标准 Delta 节点不足：仅显示官方 Greeks 原始散点，不外推、不跨到期日拼线")
     fig.add_vline(x=0, line_width=1, line_dash="dash", line_color="#94a3b8")
     fig.add_annotation(
-        text="OTM Put",
+        text="Put Delta",
         xref="paper",
         yref="paper",
         x=0.02,
@@ -3073,7 +3152,7 @@ def _build_otm_volatility_curve_figure(
         font=dict(size=11, color="#64748b"),
     )
     fig.add_annotation(
-        text="OTM Call",
+        text="Call Delta",
         xref="paper",
         yref="paper",
         x=0.98,
@@ -3087,12 +3166,19 @@ def _build_otm_volatility_curve_figure(
         meta={"chart_id": chart_id},
         margin=dict(l=12, r=12, t=22, b=34),
         yaxis_title="IV %",
-        xaxis_title="相对 ATM %",
+        xaxis_title="标准 Delta",
         legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
         paper_bgcolor="#ffffff",
         plot_bgcolor="#ffffff",
     )
-    fig.update_xaxes(showgrid=False, range=_otm_curve_x_range(today_curve, previous_curve), zeroline=False)
+    fig.update_xaxes(
+        showgrid=False,
+        range=[-45, 45],
+        zeroline=False,
+        tickmode="array",
+        tickvals=[-40, -25, -10, 0, 10, 25, 40],
+        ticktext=["10Δ Put", "25Δ Put", "40Δ Put", "ATM", "40Δ Call", "25Δ Call", "10Δ Call"],
+    )
     fig.update_yaxes(gridcolor="#edf2f7")
     return fig
 
@@ -4045,14 +4131,13 @@ def _cached_volatility_surface_payload(
         underlying_price=underlying_price,
         engine=_cached_engine(),
     )
-    today_otm_curve = load_otm_volatility_curve_snapshot(
+    today_otm_curve = load_delta_volatility_curve_snapshot(
         symbol,
         trade_date,
-        include_short_cycle=include_short_cycle,
         use_test_tables=use_test_tables,
-        underlying_price=underlying_price,
         engine=_cached_engine(),
     )
+    delta_expiration = _otm_curve_expiration_label(today_otm_curve)
     previous_cone_line = pd.DataFrame()
     previous_otm_curve = pd.DataFrame()
     if previous_trade_date:
@@ -4064,12 +4149,11 @@ def _cached_volatility_surface_payload(
             underlying_price=previous_underlying_price,
             engine=_cached_engine(),
         )
-        previous_otm_curve = load_otm_volatility_curve_snapshot(
+        previous_otm_curve = load_delta_volatility_curve_snapshot(
             symbol,
             previous_trade_date,
-            include_short_cycle=include_short_cycle,
+            expiration_date=delta_expiration,
             use_test_tables=use_test_tables,
-            underlying_price=previous_underlying_price,
             engine=_cached_engine(),
         )
     return {
@@ -4418,7 +4502,7 @@ elif active_view == "波动率曲面":
         st.markdown("</div>", unsafe_allow_html=True)
     with c2:
         st.markdown(
-            f'<div class="us-lab-panel"><div class="us-lab-panel-title"><strong>波动率曲线</strong><span>{curve_subtitle}</span></div>',
+            f'<div class="us-lab-panel"><div class="us-lab-panel-title"><strong>Delta 标准化 Skew</strong><span>{curve_subtitle}</span></div>',
             unsafe_allow_html=True,
         )
         st.plotly_chart(
@@ -4427,6 +4511,7 @@ elif active_view == "波动率曲面":
             config={"displaylogo": False},
             key=f"otm_vol_curve_{symbol}_{trade_date}_{previous_trade_date or 'none'}_{table_label}",
         )
+        _render_delta_skew_summary(today_otm_curve)
         st.markdown("</div>", unsafe_allow_html=True)
 
 elif active_view == "持仓防线":
