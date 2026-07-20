@@ -23,7 +23,7 @@ CHART_RENDER_WINDOW = 260
 TODAY_LINE_COLOR = "#2563eb"
 PREVIOUS_LINE_COLOR = "#f97316"
 SYMBOL_DEFAULT_FAVORITES = ("NVDA", "TSLA", "SPY", "QQQ", "ARM", "COIN")
-SYMBOL_PICKER_PAGE_SIZE = 24
+SYMBOL_PICKER_PAGE_SIZE = 10
 SYMBOL_CATEGORY_MEMBERS = {
     "指数ETF": (
         "SPY",
@@ -1963,7 +1963,7 @@ def _render_symbol_picker_dialog(symbol_options: list[str], current_symbol: str)
             category=active_category,
             query=query,
         )
-        use_pagination = active_category == "全部" and len(filtered_symbols) > SYMBOL_PICKER_PAGE_SIZE
+        use_pagination = len(filtered_symbols) > SYMBOL_PICKER_PAGE_SIZE
         page_count = max(1, math.ceil(len(filtered_symbols) / SYMBOL_PICKER_PAGE_SIZE)) if use_pagination else 1
         page = int(st.session_state.get("us_lab_symbol_picker_page", 0) or 0)
         page = max(0, min(page, page_count - 1))
