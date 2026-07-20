@@ -23,6 +23,7 @@ CHART_RENDER_WINDOW = 260
 TODAY_LINE_COLOR = "#2563eb"
 PREVIOUS_LINE_COLOR = "#f97316"
 SYMBOL_DEFAULT_FAVORITES = ("NVDA", "TSLA", "SPY", "QQQ", "ARM", "COIN")
+SYMBOL_PICKER_PAGE_SIZE = 24
 SYMBOL_CATEGORY_MEMBERS = {
     "指数ETF": (
         "SPY",
@@ -371,7 +372,7 @@ def _inject_page_style() -> None:
         }
         .us-symbol-table-head {
             display: grid;
-            grid-template-columns: .95fr 1.55fr .95fr .55fr;
+            grid-template-columns: 2.6fr .95fr .55fr;
             gap: 8px;
             padding: 9px 2px 8px;
             border-top: 1px solid #e2e8f0;
@@ -1832,20 +1833,29 @@ def _switch_to_next_favorite(current_symbol: str, symbol_options: list[str] | tu
     st.session_state["us_lab_symbol"] = next_symbol
 
 
-def _category_symbol_count(
-    category: str,
+def _symbol_picker_category_counts(
     symbol_options: list[str] | tuple[str, ...],
     favorites: list[str],
-) -> int:
-    if category == "全部":
-        return len(symbol_options)
-    if category == "我的自选":
-        return len(favorites)
+) -> dict[str, int]:
     symbols = [str(item or "").upper() for item in symbol_options]
-    if category == "其他":
-        return sum(1 for item in symbols if _underlying_category(item) == "其他")
-    members = set(SYMBOL_CATEGORY_MEMBERS.get(category, ()))
-    return sum(1 for item in symbols if item in members)
+    counts = {category: 0 for category in SYMBOL_CATEGORY_ORDER}
+    counts["全部"] = len(symbols)
+    counts["我的自选"] = len(favorites)
+    for symbol in symbols:
+        category = _underlying_category(symbol)
+        counts[category if category in counts else "其他"] += 1
+    return counts
+
+
+def _set_symbol_picker_page(page: int) -> None:
+    st.session_state["us_lab_symbol_picker_page"] = max(0, int(page))
+
+
+def _sync_symbol_picker_page_state(category: str, query: str) -> None:
+    signature = f"{category}\0{str(query or '').strip()}"
+    if st.session_state.get("us_lab_symbol_picker_filter_signature") != signature:
+        st.session_state["us_lab_symbol_picker_filter_signature"] = signature
+        st.session_state["us_lab_symbol_picker_page"] = 0
 
 
 def _filter_underlying_symbols(
@@ -1886,10 +1896,12 @@ def _ensure_symbol_picker_state(current_symbol: str, symbol_options: list[str] |
     if st.session_state.get("us_lab_symbol_picker_category") not in SYMBOL_CATEGORY_ORDER:
         st.session_state["us_lab_symbol_picker_category"] = "我的自选"
     st.session_state.setdefault("us_lab_symbol_picker_query", "")
+    st.session_state.setdefault("us_lab_symbol_picker_page", 0)
 
 
 def _set_symbol_picker_category(category: str) -> None:
     st.session_state["us_lab_symbol_picker_category"] = category
+    st.session_state["us_lab_symbol_picker_page"] = 0
 
 
 @st.dialog(" ", width="large")
@@ -1924,12 +1936,14 @@ def _render_symbol_picker_dialog(symbol_options: list[str], current_symbol: str)
         label_visibility="collapsed",
     )
     active_category = str(st.session_state.get("us_lab_symbol_picker_category") or "我的自选")
+    _sync_symbol_picker_page_state(active_category, query)
+    category_counts = _symbol_picker_category_counts(symbols, favorites)
 
     rail_col, list_col = st.columns([0.34, 0.66], gap="medium")
     with rail_col:
         st.markdown('<div class="us-symbol-rail-title">分类</div>', unsafe_allow_html=True)
         for category in SYMBOL_CATEGORY_ORDER:
-            count = _category_symbol_count(category, symbols, favorites)
+            count = category_counts.get(category, 0)
             if count <= 0 and category not in ("我的自选", "其他"):
                 continue
             label = f"{category}  {count}"
@@ -1949,15 +1963,27 @@ def _render_symbol_picker_dialog(symbol_options: list[str], current_symbol: str)
             category=active_category,
             query=query,
         )
-        display_symbols = filtered_symbols[:72]
+        use_pagination = active_category == "全部" and len(filtered_symbols) > SYMBOL_PICKER_PAGE_SIZE
+        page_count = max(1, math.ceil(len(filtered_symbols) / SYMBOL_PICKER_PAGE_SIZE)) if use_pagination else 1
+        page = int(st.session_state.get("us_lab_symbol_picker_page", 0) or 0)
+        page = max(0, min(page, page_count - 1))
+        st.session_state["us_lab_symbol_picker_page"] = page
+        start_idx = page * SYMBOL_PICKER_PAGE_SIZE if use_pagination else 0
+        end_idx = start_idx + SYMBOL_PICKER_PAGE_SIZE if use_pagination else len(filtered_symbols)
+        display_symbols = filtered_symbols[start_idx:end_idx]
+        range_label = (
+            f"第 {start_idx + 1}-{min(end_idx, len(filtered_symbols))} 个"
+            if use_pagination and filtered_symbols
+            else "点击标的立即切换"
+        )
         st.markdown(
             f"""
             <div class="us-symbol-table-summary">
                 <span>共 {len(filtered_symbols)} 个标的</span>
-                <span>点击代码或公司名立即切换</span>
+                <span>{escape(range_label)}</span>
             </div>
             <div class="us-symbol-table-head">
-                <span>代码</span><span>公司名</span><span>分类</span><span>自选</span>
+                <span>标的</span><span>分类</span><span>自选</span>
             </div>
             """,
             unsafe_allow_html=True,
@@ -1967,29 +1993,20 @@ def _render_symbol_picker_dialog(symbol_options: list[str], current_symbol: str)
         else:
             favorite_set = set(favorites)
             for row_symbol in display_symbols:
-                row_cols = st.columns([0.95, 1.55, 0.95, 0.55], gap="small")
+                row_cols = st.columns([2.6, 0.95, 0.55], gap="small")
                 row_type = "primary" if row_symbol == current else "secondary"
                 with row_cols[0]:
                     if st.button(
-                        row_symbol,
-                        key=f"us_symbol_pick_code_{row_symbol}",
+                        _underlying_option_label(row_symbol),
+                        key=f"us_symbol_pick_{row_symbol}",
                         type=row_type,
                         use_container_width=True,
                     ):
                         st.session_state["us_lab_symbol"] = row_symbol
                         st.rerun(scope="app")
                 with row_cols[1]:
-                    if st.button(
-                        _underlying_name(row_symbol),
-                        key=f"us_symbol_pick_name_{row_symbol}",
-                        type=row_type,
-                        use_container_width=True,
-                    ):
-                        st.session_state["us_lab_symbol"] = row_symbol
-                        st.rerun(scope="app")
-                with row_cols[2]:
                     st.markdown(f'<div class="us-symbol-cell-muted">{escape(_underlying_category(row_symbol))}</div>', unsafe_allow_html=True)
-                with row_cols[3]:
+                with row_cols[2]:
                     star = "★" if row_symbol in favorite_set else "☆"
                     st.button(
                         star,
@@ -2000,8 +2017,31 @@ def _render_symbol_picker_dialog(symbol_options: list[str], current_symbol: str)
                         use_container_width=True,
                     )
 
-        if len(filtered_symbols) > len(display_symbols):
-            st.caption(f"已显示前 {len(display_symbols)} 个，继续输入关键词可缩小范围。")
+        if use_pagination:
+            prev_col, page_col, next_col = st.columns([0.28, 0.44, 0.28], gap="small")
+            with prev_col:
+                st.button(
+                    "‹ 上一页",
+                    key="us_symbol_picker_prev_page",
+                    disabled=page <= 0,
+                    on_click=_set_symbol_picker_page,
+                    args=(page - 1,),
+                    use_container_width=True,
+                )
+            with page_col:
+                st.markdown(
+                    f'<div class="us-symbol-cell-muted" style="justify-content:center;">{page + 1} / {page_count}</div>',
+                    unsafe_allow_html=True,
+                )
+            with next_col:
+                st.button(
+                    "下一页 ›",
+                    key="us_symbol_picker_next_page",
+                    disabled=page >= page_count - 1,
+                    on_click=_set_symbol_picker_page,
+                    args=(page + 1,),
+                    use_container_width=True,
+                )
         st.markdown('<div class="us-symbol-az-rail">A-Z · #</div>', unsafe_allow_html=True)
 
 
