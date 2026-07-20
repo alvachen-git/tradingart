@@ -19,6 +19,8 @@ from pathlib import Path
 from typing import Any, Iterable, Iterator, Sequence
 from urllib.parse import urlencode
 
+from us_option_greeks_policy import select_target_monthly_expiration
+
 try:
     import pandas as pd
 except Exception:  # pragma: no cover - lets pure logic tests run in tiny envs
@@ -36,9 +38,10 @@ except Exception:  # pragma: no cover
         return False
 
 try:
-    from sqlalchemy import create_engine, text
+    from sqlalchemy import create_engine, inspect, text
 except Exception:  # pragma: no cover - DB calls will fail clearly at runtime
     create_engine = None
+    inspect = None
 
     def text(sql):
         return sql
@@ -234,6 +237,9 @@ class OptionIV:
     iv_source: str = ""
     open_interest: float | None = None
     underlying_price: float | None = None
+    delta: float | None = None
+    gamma: float | None = None
+    greeks_source: str | None = None
     source: str = SOURCE_NAME
     updated_at: str = ""
 
@@ -254,6 +260,12 @@ class OptionMarketMetricDaily:
     skew_expiration: str | None = None
     put_skew_5pct: float | None = None
     call_skew_5pct: float | None = None
+    delta_skew_expiration: str | None = None
+    put_skew_25d: float | None = None
+    call_skew_25d: float | None = None
+    risk_reversal_25d: float | None = None
+    butterfly_25d: float | None = None
+    delta_greeks_rows: int | None = None
     put_call_oi: float | None = None
     put_call_volume: float | None = None
     zero_dte_volume_share_pct: float | None = None
@@ -368,6 +380,9 @@ def ensure_us_option_tables(engine, use_test_tables: bool = False) -> None:
                 iv_source VARCHAR(30),
                 open_interest DOUBLE,
                 underlying_price DOUBLE,
+                delta DOUBLE,
+                gamma DOUBLE,
+                greeks_source VARCHAR(30),
                 source VARCHAR(30) NOT NULL,
                 updated_at VARCHAR(32),
                 PRIMARY KEY (trade_date, option_ticker),
@@ -390,6 +405,12 @@ def ensure_us_option_tables(engine, use_test_tables: bool = False) -> None:
                 skew_expiration VARCHAR(10),
                 put_skew_5pct DOUBLE,
                 call_skew_5pct DOUBLE,
+                delta_skew_expiration VARCHAR(10),
+                put_skew_25d DOUBLE,
+                call_skew_25d DOUBLE,
+                risk_reversal_25d DOUBLE,
+                butterfly_25d DOUBLE,
+                delta_greeks_rows INT,
                 put_call_oi DOUBLE,
                 put_call_volume DOUBLE,
                 zero_dte_volume_share_pct DOUBLE,
@@ -410,6 +431,37 @@ def ensure_us_option_tables(engine, use_test_tables: bool = False) -> None:
                 INDEX idx_trade_date (trade_date)
             )
         """))
+    _ensure_us_option_columns(engine, names)
+
+
+def _ensure_us_option_columns(engine, names: dict[str, str]) -> None:
+    """Add nullable rollout columns to existing production and test tables."""
+    if inspect is None:
+        return
+    additions = {
+        _validate_table_name(names["iv"]): {
+            "delta": "DOUBLE",
+            "gamma": "DOUBLE",
+            "greeks_source": "VARCHAR(30)",
+        },
+        _validate_table_name(names["metrics"]): {
+            "delta_skew_expiration": "VARCHAR(10)",
+            "put_skew_25d": "DOUBLE",
+            "call_skew_25d": "DOUBLE",
+            "risk_reversal_25d": "DOUBLE",
+            "butterfly_25d": "DOUBLE",
+            "delta_greeks_rows": "INT",
+        },
+    }
+    inspector = inspect(engine)
+    for table, columns in additions.items():
+        existing = {str(item.get("name") or "") for item in inspector.get_columns(table)}
+        missing = [(name, sql_type) for name, sql_type in columns.items() if name not in existing]
+        if not missing:
+            continue
+        with engine.begin() as conn:
+            for name, sql_type in missing:
+                conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {name} {sql_type}"))
 
 
 def parse_option_ticker(option_ticker: str) -> ParsedOptionTicker | None:
@@ -489,7 +541,7 @@ def classify_contract(
     settlement_type = "unknown"
 
     weekly_roots = {f"{underlying_norm}W", f"{underlying_norm}P"}
-    if root in weekly_roots or root.endswith("W") or root.endswith("P"):
+    if root in weekly_roots or (root != underlying_norm and root.endswith(("W", "P"))):
         exp_type = "short_cycle"
         settlement_type = "PM"
     elif underlying_norm in {"SPX", "NDX", "RUT"}:
@@ -641,8 +693,20 @@ def iv_from_snapshot(
     contract: OptionContract,
     trade_date: str,
     underlying_price: float | None,
+    *,
+    include_greeks: bool = True,
 ) -> OptionIV:
     provider_iv = normalize_iv_value(raw.get("implied_volatility"))
+    greeks = raw.get("greeks") if include_greeks and isinstance(raw.get("greeks"), dict) else {}
+    delta = _clean_float(greeks.get("delta"))
+    if contract.call_put == "C" and not (delta is not None and 0 < delta < 1):
+        delta = None
+    elif contract.call_put == "P" and not (delta is not None and -1 < delta < 0):
+        delta = None
+    gamma = _clean_float(greeks.get("gamma"))
+    if gamma is not None and gamma < 0:
+        gamma = None
+    greeks_source = "provider_snapshot" if delta is not None or gamma is not None else None
     return OptionIV(
         trade_date=compact_date(trade_date),
         option_ticker=contract.option_ticker,
@@ -652,6 +716,9 @@ def iv_from_snapshot(
         iv_source="provider_snapshot" if provider_iv is not None else "",
         open_interest=_clean_float(raw.get("open_interest")),
         underlying_price=_clean_float(underlying_price),
+        delta=delta,
+        gamma=gamma,
+        greeks_source=greeks_source,
         updated_at=_now_text(),
     )
 
@@ -915,6 +982,180 @@ def save_iv(engine, rows: Sequence[OptionIV], use_test_tables: bool = False) -> 
     )
 
 
+def _table_column_names(engine, table: str) -> set[str]:
+    if inspect is None:
+        return set()
+    try:
+        columns = inspect(engine).get_columns(_validate_table_name(table))
+    except Exception:
+        return set()
+    return {str(item.get("name") or "") for item in columns}
+
+
+def clear_legacy_theta_vega(
+    engine,
+    use_test_tables: bool = False,
+    *,
+    trade_date: str | None = None,
+    underlyings: Sequence[str] | None = None,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Clear legacy Theta/Vega values while retaining nullable compatibility columns."""
+    iv_table = _validate_table_name(table_names(use_test_tables)["iv"])
+    columns = _table_column_names(engine, iv_table)
+    legacy_columns = [name for name in ("theta", "vega") if name in columns]
+    if not legacy_columns:
+        return {"matched_rows": 0, "cleared_rows": 0, "columns": [], "dry_run": bool(dry_run)}
+
+    params: dict[str, Any] = {}
+    filters = ["(" + " OR ".join(f"{name} IS NOT NULL" for name in legacy_columns) + ")"]
+    if trade_date:
+        filters.append("trade_date = :trade_date")
+        params["trade_date"] = compact_date(trade_date)
+    normalized_underlyings = sorted({str(item).strip().upper() for item in (underlyings or []) if str(item).strip()})
+    if normalized_underlyings:
+        placeholders = []
+        for index, underlying in enumerate(normalized_underlyings):
+            key = f"underlying_{index}"
+            params[key] = underlying
+            placeholders.append(f":{key}")
+        filters.append(f"underlying IN ({', '.join(placeholders)})")
+    where_sql = " AND ".join(filters)
+    with engine.begin() as conn:
+        matched = int(conn.execute(text(f"SELECT COUNT(*) FROM {iv_table} WHERE {where_sql}"), params).scalar() or 0)
+        cleared = 0
+        if matched and not dry_run:
+            assignments = ", ".join(f"{name} = NULL" for name in legacy_columns)
+            result = conn.execute(text(f"UPDATE {iv_table} SET {assignments} WHERE {where_sql}"), params)
+            cleared = int(result.rowcount or 0)
+    return {
+        "matched_rows": matched,
+        "cleared_rows": cleared,
+        "columns": legacy_columns,
+        "dry_run": bool(dry_run),
+    }
+
+
+def prune_greeks_for_date(
+    engine,
+    trade_date: str,
+    underlyings: Sequence[str] = DEFAULT_UNDERLYINGS,
+    use_test_tables: bool = False,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Keep Delta/Gamma only for the selected monthly expiry on one trade date."""
+    ensure_us_option_tables(engine, use_test_tables)
+    names = table_names(use_test_tables)
+    contracts_table = _validate_table_name(names["contracts"])
+    iv_table = _validate_table_name(names["iv"])
+    date_key = compact_date(trade_date)
+    targets = sorted({str(item).strip().upper() for item in underlyings if str(item).strip()})
+    per_underlying: dict[str, dict[str, Any]] = {}
+    total_current = 0
+    total_keep = 0
+    total_clear = 0
+
+    with engine.begin() as conn:
+        for underlying in targets:
+            params = {"trade_date": date_key, "underlying": underlying}
+            expirations = [
+                str(row[0])
+                for row in conn.execute(
+                    text(
+                        f"""
+                        SELECT DISTINCT c.expiration_date
+                        FROM {contracts_table} c
+                        JOIN {iv_table} v ON v.option_ticker = c.option_ticker
+                        WHERE v.trade_date = :trade_date
+                          AND v.underlying = :underlying
+                          AND c.expiration_type = 'monthly'
+                        """
+                    ),
+                    params,
+                ).fetchall()
+                if row[0]
+            ]
+            target_expiration = select_target_monthly_expiration(expirations, date_key)
+            current = int(
+                conn.execute(
+                    text(
+                        f"SELECT COUNT(*) FROM {iv_table} "
+                        "WHERE trade_date = :trade_date AND underlying = :underlying "
+                        "AND (delta IS NOT NULL OR gamma IS NOT NULL OR greeks_source IS NOT NULL)"
+                    ),
+                    params,
+                ).scalar()
+                or 0
+            )
+            keep = 0
+            if target_expiration:
+                params["target_expiration"] = target_expiration
+                keep = int(
+                    conn.execute(
+                        text(
+                            f"""
+                            SELECT COUNT(*)
+                            FROM {iv_table} v
+                            JOIN {contracts_table} c ON c.option_ticker = v.option_ticker
+                            WHERE v.trade_date = :trade_date
+                              AND v.underlying = :underlying
+                              AND c.expiration_type = 'monthly'
+                              AND c.expiration_date = :target_expiration
+                              AND (v.delta IS NOT NULL OR v.gamma IS NOT NULL OR v.greeks_source IS NOT NULL)
+                            """
+                        ),
+                        params,
+                    ).scalar()
+                    or 0
+                )
+            clear_count = max(0, current - keep)
+            if clear_count and not dry_run:
+                target_filter = ""
+                if target_expiration:
+                    target_filter = (
+                        f" AND option_ticker NOT IN (SELECT option_ticker FROM {contracts_table} "
+                        "WHERE underlying = :underlying AND expiration_type = 'monthly' "
+                        "AND expiration_date = :target_expiration)"
+                    )
+                conn.execute(
+                    text(
+                        f"UPDATE {iv_table} SET delta = NULL, gamma = NULL, greeks_source = NULL "
+                        "WHERE trade_date = :trade_date AND underlying = :underlying "
+                        "AND (delta IS NOT NULL OR gamma IS NOT NULL OR greeks_source IS NOT NULL)"
+                        + target_filter
+                    ),
+                    params,
+                )
+            per_underlying[underlying] = {
+                "greeks_expiration": target_expiration,
+                "current_rows": current,
+                "keep_rows": keep,
+                "clear_rows": clear_count,
+                "status": "ok" if target_expiration else "no_eligible_monthly_expiration",
+            }
+            total_current += current
+            total_keep += keep
+            total_clear += clear_count
+
+    legacy = clear_legacy_theta_vega(
+        engine,
+        use_test_tables,
+        dry_run=dry_run,
+    )
+    return {
+        "status": "ok",
+        "mode": "greeks-prune",
+        "trade_date": date_key,
+        "current_rows": total_current,
+        "keep_rows": total_keep,
+        "clear_rows": total_clear,
+        "theta_vega": legacy,
+        "per_underlying": per_underlying,
+        "dry_run": bool(dry_run),
+        "use_test_tables": bool(use_test_tables),
+    }
+
+
 def save_market_metrics(
     engine,
     rows: Sequence[OptionMarketMetricDaily],
@@ -1054,6 +1295,7 @@ def snapshot_rows_for_underlying(
 ) -> tuple[list[OptionContract], list[OptionDaily], list[OptionIV], float | None]:
     raw_rows = client.option_chain_snapshot(underlying)
     underlying_price = _clean_float(underlying_price_hint)
+    prepared_rows: list[tuple[dict[str, Any], OptionContract]] = []
     contracts: list[OptionContract] = []
     daily_rows: list[OptionDaily] = []
     iv_rows: list[OptionIV] = []
@@ -1066,9 +1308,28 @@ def snapshot_rows_for_underlying(
             underlying_price = _clean_float(underlying_asset.get("price"))
         if not should_keep_contract_for_storage(contract, trade_date, underlying_price, short_strike_band_pct):
             continue
+        prepared_rows.append((raw, contract))
         contracts.append(contract)
+
+    greeks_expiration = select_target_monthly_expiration(
+        (contract.expiration_date for contract in contracts if contract.expiration_type == "monthly"),
+        trade_date,
+    )
+    for raw, contract in prepared_rows:
         daily_rows.append(daily_from_snapshot(raw, contract, trade_date))
-        iv_rows.append(iv_from_snapshot(raw, contract, trade_date, underlying_price))
+        iv_rows.append(
+            iv_from_snapshot(
+                raw,
+                contract,
+                trade_date,
+                underlying_price,
+                include_greeks=bool(
+                    greeks_expiration
+                    and contract.expiration_type == "monthly"
+                    and contract.expiration_date == greeks_expiration
+                ),
+            )
+        )
     return contracts, daily_rows, iv_rows, underlying_price
 
 
@@ -1412,6 +1673,13 @@ def live_update(
         open_interest_rows = sum(1 for row in daily_rows if row.open_interest is not None)
         provider_iv_rows = sum(1 for row in iv_rows if row.provider_iv is not None)
         computed_iv_rows = sum(1 for row in iv_rows if row.computed_iv is not None)
+        greeks_rows = sum(1 for row in iv_rows if row.greeks_source == "provider_snapshot")
+        delta_rows = sum(1 for row in iv_rows if row.delta is not None)
+        gamma_rows = sum(1 for row in iv_rows if row.gamma is not None)
+        greeks_expiration = select_target_monthly_expiration(
+            (contract.expiration_date for contract in contracts if contract.expiration_type == "monthly"),
+            trade_date,
+        )
         per_underlying[underlying.upper()] = {
             "underlying_price": price,
             "contracts": len(contracts),
@@ -1420,12 +1688,22 @@ def live_update(
             "open_interest_rows": open_interest_rows,
             "provider_iv_rows": provider_iv_rows,
             "computed_iv_rows": computed_iv_rows,
+            "greeks_rows": greeks_rows,
+            "delta_rows": delta_rows,
+            "gamma_rows": gamma_rows,
+            "greeks_expiration": greeks_expiration,
         }
     if not dry_run:
         ensure_us_option_tables(engine, use_test_tables)
         save_contracts(engine, all_contracts, use_test_tables)
         save_daily(engine, all_daily, use_test_tables)
         save_iv(engine, all_iv, use_test_tables)
+        clear_legacy_theta_vega(
+            engine,
+            use_test_tables,
+            trade_date=trade_date,
+            underlyings=underlyings,
+        )
     metrics_count = 0
     metric_underlyings: set[str] = set()
     if not dry_run:
@@ -1448,6 +1726,9 @@ def live_update(
         "open_interest_rows": sum(1 for row in all_daily if row.open_interest is not None),
         "provider_iv_rows": sum(1 for row in all_iv if row.provider_iv is not None),
         "computed_iv_rows": sum(1 for row in all_iv if row.computed_iv is not None),
+        "greeks_rows": sum(1 for row in all_iv if row.greeks_source == "provider_snapshot"),
+        "delta_rows": sum(1 for row in all_iv if row.delta is not None),
+        "gamma_rows": sum(1 for row in all_iv if row.gamma is not None),
         "per_underlying": per_underlying,
         "source": "snapshot",
         "dry_run": bool(dry_run),
@@ -1677,6 +1958,8 @@ def compute_market_metrics_for_underlying(
     from us_market_dashboard_data import (
         calculate_atm_iv_pct,
         calculate_volatility_positioning_metrics,
+        delta_skew_metrics_from_curve,
+        load_delta_volatility_curve_snapshot,
         load_iv_history,
         load_option_chain_daily,
         load_stock_daily,
@@ -1707,6 +1990,13 @@ def compute_market_metrics_for_underlying(
         current_iv_pct=current_iv_pct,
         iv_rank=None,
     )
+    delta_curve = load_delta_volatility_curve_snapshot(
+        underlying_norm,
+        trade_date_text,
+        use_test_tables=use_test_tables,
+        engine=engine,
+    )
+    delta_metrics = delta_skew_metrics_from_curve(delta_curve)
     summary = summarize_option_chain(chain_df)
 
     def metric_float(key: str) -> float | None:
@@ -1736,6 +2026,12 @@ def compute_market_metrics_for_underlying(
         skew_expiration=str(metrics.get("skew_expiration") or "") or None,
         put_skew_5pct=metric_float("put_skew_5pct"),
         call_skew_5pct=metric_float("call_skew_5pct"),
+        delta_skew_expiration=str(delta_metrics.get("delta_skew_expiration") or "") or None,
+        put_skew_25d=_clean_float(delta_metrics.get("put_skew_25d")),
+        call_skew_25d=_clean_float(delta_metrics.get("call_skew_25d")),
+        risk_reversal_25d=_clean_float(delta_metrics.get("risk_reversal_25d")),
+        butterfly_25d=_clean_float(delta_metrics.get("butterfly_25d")),
+        delta_greeks_rows=int(delta_metrics.get("delta_greeks_rows") or 0),
         put_call_oi=metric_float("put_call_oi"),
         put_call_volume=metric_float("put_call_volume"),
         zero_dte_volume_share_pct=metric_float("zero_dte_volume_share_pct"),
@@ -1868,7 +2164,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Update US options data from Polygon/Massive.")
     parser.add_argument(
         "--mode",
-        choices=["daily", "backfill", "live-test", "basic-probe", "metrics-backfill"],
+        choices=["daily", "backfill", "live-test", "basic-probe", "metrics-backfill", "greeks-prune"],
         required=True,
     )
     parser.add_argument("--start", help="Backfill start date, YYYYMMDD")
@@ -1890,7 +2186,7 @@ def run_cli(args: argparse.Namespace | None = None) -> dict[str, Any]:
     if args.mode == "basic-probe":
         if not args.dry_run and not args.use_test_tables:
             raise RuntimeError("basic-probe only writes with --use-test-tables; use --dry-run for read-only probing.")
-    needs_db = args.mode == "metrics-backfill" or not args.dry_run
+    needs_db = args.mode in {"metrics-backfill", "greeks-prune"} or not args.dry_run
     engine = get_db_engine() if needs_db else None
     if engine is None and needs_db:
         raise RuntimeError("Database env is incomplete. Set DB_USER/DB_PASSWORD/DB_HOST/DB_NAME or use --dry-run.")
@@ -1905,6 +2201,16 @@ def run_cli(args: argparse.Namespace | None = None) -> dict[str, Any]:
             use_test_tables=args.use_test_tables,
             dry_run=args.dry_run,
             progress=args.progress,
+        )
+    if args.mode == "greeks-prune":
+        if not args.date:
+            raise RuntimeError("--date is required for greeks-prune")
+        return prune_greeks_for_date(
+            engine,
+            args.date,
+            underlyings=underlyings,
+            use_test_tables=args.use_test_tables,
+            dry_run=args.dry_run,
         )
     client = MassiveOptionsClient()
     if args.mode == "basic-probe":

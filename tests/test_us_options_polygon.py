@@ -3,7 +3,7 @@ import types
 import unittest
 from unittest.mock import patch
 
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, inspect, text
 
 import us_options_polygon as uop
 
@@ -139,6 +139,15 @@ class TestUSOptionsPolygon(unittest.TestCase):
         self.assertEqual(smh_monthly[:2], ("monthly", "physical"))
         self.assertEqual(lly_monthly[:2], ("monthly", "physical"))
 
+    def test_classify_tickers_ending_in_w_or_p_as_regular_underlyings(self):
+        for symbol in ("APP", "SHOP", "SNOW"):
+            ticker = f"O:{symbol}260821C00100000"
+            monthly = uop.classify_contract(ticker, symbol, "2026-08-21")
+            weekly = uop.classify_contract(ticker.replace("260821", "260814"), symbol, "2026-08-14")
+
+            self.assertEqual(monthly[:2], ("monthly", "physical"))
+            self.assertEqual(weekly[:2], ("short_cycle", "physical"))
+
     def test_storage_filter_keeps_monthly_full_chain_but_short_cycle_only_band(self):
         monthly = uop.OptionContract(
             option_ticker="O:SPY260619C00650000",
@@ -205,7 +214,7 @@ class TestUSOptionsPolygon(unittest.TestCase):
 
         self.assertFalse(uop.should_keep_contract_for_storage(contract, "20260619", 600.0, 5.0))
 
-    def test_snapshot_normalization_does_not_keep_greeks(self):
+    def test_snapshot_normalization_keeps_provider_greeks(self):
         raw = {
             "details": {
                 "ticker": "O:SPY260619C00600000",
@@ -219,7 +228,7 @@ class TestUSOptionsPolygon(unittest.TestCase):
             "day": {"open": 1.0, "high": 2.0, "low": 0.5, "close": 1.5, "volume": 10, "vwap": 1.4},
             "open_interest": 123,
             "implied_volatility": 0.22,
-            "greeks": {"delta": 0.5},
+            "greeks": {"delta": 0.5, "gamma": 0.012, "theta": -0.08, "vega": 0.21},
         }
         contract = uop.contract_from_snapshot(raw, "SPY")
         daily = uop.daily_from_snapshot(raw, contract, "20260608")
@@ -228,7 +237,77 @@ class TestUSOptionsPolygon(unittest.TestCase):
         self.assertEqual(contract.call_put, "C")
         self.assertEqual(daily.close, 1.5)
         self.assertEqual(iv.provider_iv, 0.22)
-        self.assertNotIn("delta", iv.__dict__)
+        self.assertEqual(iv.delta, 0.5)
+        self.assertEqual(iv.gamma, 0.012)
+        self.assertFalse(hasattr(iv, "theta"))
+        self.assertFalse(hasattr(iv, "vega"))
+        self.assertEqual(iv.greeks_source, "provider_snapshot")
+
+    def test_snapshot_normalization_drops_invalid_greeks_safely(self):
+        raw = {
+            "details": {
+                "ticker": "O:SPY260619P00600000",
+                "underlying_ticker": "SPY",
+                "contract_type": "put",
+                "expiration_date": "2026-06-19",
+                "strike_price": 600,
+            },
+            "implied_volatility": 0.22,
+            "greeks": {"delta": 0.5, "gamma": -0.01, "theta": None, "vega": -2},
+        }
+        contract = uop.contract_from_snapshot(raw, "SPY")
+        iv = uop.iv_from_snapshot(raw, contract, "20260608", 600.0)
+
+        self.assertIsNone(iv.delta)
+        self.assertIsNone(iv.gamma)
+        self.assertIsNone(iv.greeks_source)
+
+    def test_greeks_schema_migration_is_idempotent(self):
+        engine = create_engine("sqlite:///:memory:", future=True)
+        names = uop.table_names(use_test_tables=True)
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    f"""
+                    CREATE TABLE {names['iv']} (
+                        trade_date TEXT,
+                        option_ticker TEXT,
+                        underlying TEXT,
+                        provider_iv REAL
+                    )
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    f"""
+                    CREATE TABLE {names['metrics']} (
+                        trade_date TEXT,
+                        underlying TEXT
+                    )
+                    """
+                )
+            )
+
+        uop._ensure_us_option_columns(engine, names)
+        uop._ensure_us_option_columns(engine, names)
+
+        inspector = inspect(engine)
+        iv_columns = {column["name"] for column in inspector.get_columns(names["iv"])}
+        metric_columns = {column["name"] for column in inspector.get_columns(names["metrics"])}
+        self.assertTrue({"delta", "gamma", "greeks_source"} <= iv_columns)
+        self.assertFalse({"theta", "vega"} & iv_columns)
+        self.assertTrue(
+            {
+                "delta_skew_expiration",
+                "put_skew_25d",
+                "call_skew_25d",
+                "risk_reversal_25d",
+                "butterfly_25d",
+                "delta_greeks_rows",
+            }
+            <= metric_columns
+        )
 
     def test_snapshot_rows_uses_underlying_price_hint_for_short_cycle_filter(self):
         class FakeClient:
@@ -275,6 +354,72 @@ class TestUSOptionsPolygon(unittest.TestCase):
         self.assertEqual(len(daily_rows), 1)
         self.assertEqual(iv_rows[0].provider_iv, 0.20)
         self.assertEqual(iv_rows[0].underlying_price, 600.0)
+
+    def test_snapshot_rows_keeps_full_chain_but_greeks_only_for_target_monthly_expiration(self):
+        def raw(ticker, expiration, contract_type, delta):
+            return {
+                "details": {
+                    "ticker": ticker,
+                    "underlying_ticker": "SPY",
+                    "contract_type": contract_type,
+                    "expiration_date": expiration,
+                    "strike_price": 100,
+                },
+                "day": {"close": 2.0, "volume": 10},
+                "open_interest": 25,
+                "implied_volatility": 0.25,
+                "greeks": {"delta": delta, "gamma": 0.02, "theta": -0.1, "vega": 0.3},
+            }
+
+        class FakeClient:
+            def option_chain_snapshot(self, underlying):
+                return [
+                    raw("O:SPY260821C00100000", "2026-08-21", "call", 0.5),
+                    raw("O:SPY260918P00100000", "2026-09-18", "put", -0.5),
+                    raw("O:SPY260814C00100000", "2026-08-14", "call", 0.5),
+                ]
+
+        contracts, daily_rows, iv_rows, _ = uop.snapshot_rows_for_underlying(
+            FakeClient(),
+            "SPY",
+            "20260717",
+            underlying_price_hint=100.0,
+        )
+
+        self.assertEqual(len(contracts), 3)
+        self.assertEqual(len(daily_rows), 3)
+        self.assertEqual(len(iv_rows), 3)
+        by_ticker = {row.option_ticker: row for row in iv_rows}
+        self.assertEqual(by_ticker["O:SPY260821C00100000"].delta, 0.5)
+        self.assertEqual(by_ticker["O:SPY260821C00100000"].gamma, 0.02)
+        self.assertIsNone(by_ticker["O:SPY260918P00100000"].delta)
+        self.assertIsNone(by_ticker["O:SPY260814C00100000"].delta)
+        self.assertTrue(all(row.provider_iv == 0.25 for row in iv_rows))
+
+    def test_snapshot_rows_does_not_use_weekly_as_greeks_fallback(self):
+        class FakeClient:
+            def option_chain_snapshot(self, underlying):
+                return [{
+                    "details": {
+                        "ticker": "O:SPY260814C00100000",
+                        "underlying_ticker": "SPY",
+                        "contract_type": "call",
+                        "expiration_date": "2026-08-14",
+                        "strike_price": 100,
+                    },
+                    "day": {"close": 2.0},
+                    "open_interest": 25,
+                    "implied_volatility": 0.25,
+                    "greeks": {"delta": 0.5, "gamma": 0.02},
+                }]
+
+        _, _, iv_rows, _ = uop.snapshot_rows_for_underlying(
+            FakeClient(), "SPY", "20260717", underlying_price_hint=100.0
+        )
+
+        self.assertEqual(len(iv_rows), 1)
+        self.assertIsNone(iv_rows[0].delta)
+        self.assertIsNone(iv_rows[0].gamma)
 
     def test_underlying_close_reads_stock_prices_latest_before_trade_date(self):
         engine = create_engine("sqlite:///:memory:")
@@ -432,6 +577,90 @@ class TestUSOptionsPolygon(unittest.TestCase):
 
         self.assertEqual(result["metrics"], 2)
         backfill.assert_called_once()
+
+    def test_greeks_prune_dry_run_and_execution_are_idempotent(self):
+        engine = create_engine("sqlite:///:memory:", future=True)
+        names = uop.table_names(use_test_tables=True)
+        with engine.begin() as conn:
+            conn.execute(text(f"""
+                CREATE TABLE {names['contracts']} (
+                    option_ticker TEXT PRIMARY KEY,
+                    underlying TEXT,
+                    expiration_date TEXT,
+                    expiration_type TEXT
+                )
+            """))
+            conn.execute(text(f"""
+                CREATE TABLE {names['iv']} (
+                    trade_date TEXT,
+                    option_ticker TEXT,
+                    underlying TEXT,
+                    delta REAL,
+                    gamma REAL,
+                    theta REAL,
+                    vega REAL,
+                    greeks_source TEXT,
+                    PRIMARY KEY (trade_date, option_ticker)
+                )
+            """))
+            conn.execute(text(f"""
+                INSERT INTO {names['contracts']}
+                    (option_ticker, underlying, expiration_date, expiration_type)
+                VALUES
+                    ('TARGET', 'SPY', '2026-08-21', 'monthly'),
+                    ('OTHER', 'SPY', '2026-09-18', 'monthly'),
+                    ('WEEKLY', 'SPY', '2026-08-14', 'short_cycle')
+            """))
+            conn.execute(text(f"""
+                INSERT INTO {names['iv']}
+                    (trade_date, option_ticker, underlying, delta, gamma, theta, vega, greeks_source)
+                VALUES
+                    ('20260717', 'TARGET', 'SPY', 0.5, 0.02, -0.1, 0.3, 'provider_snapshot'),
+                    ('20260717', 'OTHER', 'SPY', -0.5, 0.02, -0.1, 0.3, 'provider_snapshot'),
+                    ('20260717', 'WEEKLY', 'SPY', 0.4, 0.01, -0.1, 0.3, 'provider_snapshot')
+            """))
+
+        with patch("us_options_polygon.ensure_us_option_tables"):
+            preview = uop.prune_greeks_for_date(
+                engine, "20260717", ["SPY"], use_test_tables=True, dry_run=True
+            )
+            applied = uop.prune_greeks_for_date(
+                engine, "20260717", ["SPY"], use_test_tables=True, dry_run=False
+            )
+            repeated = uop.prune_greeks_for_date(
+                engine, "20260717", ["SPY"], use_test_tables=True, dry_run=False
+            )
+
+        self.assertEqual(preview["keep_rows"], 1)
+        self.assertEqual(preview["clear_rows"], 2)
+        self.assertEqual(applied["theta_vega"]["cleared_rows"], 3)
+        self.assertEqual(repeated["clear_rows"], 0)
+        with engine.connect() as conn:
+            rows = conn.execute(
+                text(f"SELECT option_ticker, delta, gamma, theta, vega, greeks_source FROM {names['iv']} ORDER BY option_ticker")
+            ).mappings().all()
+        by_ticker = {row["option_ticker"]: dict(row) for row in rows}
+        self.assertEqual(by_ticker["TARGET"]["delta"], 0.5)
+        self.assertIsNone(by_ticker["OTHER"]["delta"])
+        self.assertIsNone(by_ticker["WEEKLY"]["gamma"])
+        self.assertTrue(all(row["theta"] is None and row["vega"] is None for row in rows))
+
+    def test_greeks_prune_cli_does_not_instantiate_massive_client(self):
+        args = uop.build_arg_parser().parse_args(
+            [
+                "--mode", "greeks-prune",
+                "--date", "20260717",
+                "--underlyings", "SPY,QQQ",
+                "--dry-run",
+            ]
+        )
+        with patch("us_options_polygon.get_db_engine", return_value=object()), \
+             patch("us_options_polygon.prune_greeks_for_date", return_value={"clear_rows": 2}) as prune, \
+             patch("us_options_polygon.MassiveOptionsClient", side_effect=AssertionError("API client should not be used")):
+            result = uop.run_cli(args)
+
+        self.assertEqual(result["clear_rows"], 2)
+        prune.assert_called_once()
 
     def test_flatfile_credentials_require_boto3(self):
         with patch.dict("os.environ", {"MASSIVE_FLATFILES_ACCESS_KEY": "a", "MASSIVE_FLATFILES_SECRET_KEY": "s"}):

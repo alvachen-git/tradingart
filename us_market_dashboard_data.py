@@ -977,6 +977,27 @@ OTM_VOLATILITY_CURVE_COLUMNS = [
     "expiration_count",
     "quality",
 ]
+DELTA_SKEW_COLUMNS = [
+    "delta_axis",
+    "delta_label",
+    "target_delta",
+    "iv_pct",
+    "call_put",
+    "expiration_date",
+    "dte",
+    "point_count",
+    "quality",
+    "node_type",
+    "greeks_rows",
+]
+DELTA_SKEW_NODES = (
+    ("P", 0.10, -40.0, "10Δ Put"),
+    ("P", 0.25, -25.0, "25Δ Put"),
+    ("P", 0.40, -10.0, "40Δ Put"),
+    ("C", 0.40, 10.0, "40Δ Call"),
+    ("C", 0.25, 25.0, "25Δ Call"),
+    ("C", 0.10, 40.0, "10Δ Call"),
+)
 OI_DEFENSE_COLUMNS = [
     "trade_date",
     "date",
@@ -1026,6 +1047,12 @@ MARKET_METRICS_COLUMNS = [
     "skew_expiration",
     "put_skew_5pct",
     "call_skew_5pct",
+    "delta_skew_expiration",
+    "put_skew_25d",
+    "call_skew_25d",
+    "risk_reversal_25d",
+    "butterfly_25d",
+    "delta_greeks_rows",
     "put_call_oi",
     "put_call_volume",
     "zero_dte_volume_share_pct",
@@ -1123,6 +1150,11 @@ MARKET_METRIC_NUMERIC_COLUMNS = [
     "term_slope_30_60",
     "put_skew_5pct",
     "call_skew_5pct",
+    "put_skew_25d",
+    "call_skew_25d",
+    "risk_reversal_25d",
+    "butterfly_25d",
+    "delta_greeks_rows",
     "put_call_oi",
     "put_call_volume",
     "zero_dte_volume_share_pct",
@@ -4119,6 +4151,262 @@ def build_otm_volatility_curve(
     )
 
 
+def select_delta_skew_expiration(
+    chain: pd.DataFrame,
+    trade_date: str | dt.date | dt.datetime,
+    *,
+    expiration_date: str | None = None,
+) -> str | None:
+    """Select one monthly expiry for a standardized Delta skew curve."""
+    if chain is None or chain.empty or "expiration_date" not in chain.columns:
+        return None
+    trade_date_text = normalize_trade_date(trade_date)
+    work = chain.copy()
+    if "expiration_type" in work.columns:
+        work = work[work["expiration_type"].fillna("").astype(str).str.lower() == "monthly"]
+    work["expiration_date"] = work["expiration_date"].fillna("").astype(str)
+    work["dte"] = work["expiration_date"].apply(lambda value: dte_for_trade_date(value, trade_date_text))
+    work = work.dropna(subset=["dte"])
+    work = work[work["dte"].between(7, 90)]
+    if work.empty:
+        return None
+    if expiration_date:
+        wanted = str(expiration_date)
+        return wanted if bool((work["expiration_date"] == wanted).any()) else None
+
+    expirations = (
+        work.groupby("expiration_date", dropna=False)["dte"]
+        .median()
+        .reset_index()
+    )
+    primary = expirations[expirations["dte"].between(20, 60)].copy()
+    candidates = primary if not primary.empty else expirations
+    candidates["distance_30d"] = (pd.to_numeric(candidates["dte"], errors="coerce") - 30).abs()
+    candidates = candidates.sort_values(["distance_30d", "dte", "expiration_date"])
+    if candidates.empty:
+        return None
+    return str(candidates.iloc[0]["expiration_date"] or "") or None
+
+
+def _delta_interpolated_iv(side: pd.DataFrame, target_delta: float) -> tuple[float | None, str, int]:
+    if side is None or side.empty:
+        return None, "missing", 0
+    data = side.copy()
+    data["abs_delta"] = pd.to_numeric(data.get("delta"), errors="coerce").abs()
+    data["iv_pct"] = pd.to_numeric(data.get("iv_pct"), errors="coerce")
+    data["open_interest"] = pd.to_numeric(data.get("open_interest"), errors="coerce")
+    data = data.dropna(subset=["abs_delta", "iv_pct"])
+    data = data[(data["abs_delta"] > 0) & (data["abs_delta"] < 1)]
+    if data.empty:
+        return None, "missing", 0
+
+    rows: list[dict[str, float]] = []
+    for delta_value, group in data.groupby("abs_delta", dropna=False):
+        iv_value = _weighted_average(group["iv_pct"], group.get("open_interest"))
+        if iv_value is not None:
+            rows.append({"abs_delta": float(delta_value), "iv_pct": float(iv_value)})
+    points = pd.DataFrame(rows).sort_values("abs_delta").reset_index(drop=True)
+    if points.empty:
+        return None, "missing", 0
+    exact = points[(points["abs_delta"] - float(target_delta)).abs() <= 1e-8]
+    if not exact.empty:
+        return float(exact.iloc[0]["iv_pct"]), "exact", int(len(data))
+    if float(target_delta) < float(points["abs_delta"].min()) or float(target_delta) > float(points["abs_delta"].max()):
+        return None, "outside_range", int(len(data))
+    lower = points[points["abs_delta"] < float(target_delta)].tail(1)
+    upper = points[points["abs_delta"] > float(target_delta)].head(1)
+    if lower.empty or upper.empty:
+        return None, "outside_range", int(len(data))
+    x0, y0 = float(lower.iloc[0]["abs_delta"]), float(lower.iloc[0]["iv_pct"])
+    x1, y1 = float(upper.iloc[0]["abs_delta"]), float(upper.iloc[0]["iv_pct"])
+    if x1 <= x0:
+        return None, "missing", int(len(data))
+    ratio = (float(target_delta) - x0) / (x1 - x0)
+    return float(y0 + ratio * (y1 - y0)), "interpolated", int(len(data))
+
+
+def _raw_delta_scatter_rows(side: pd.DataFrame, *, expiration: str, dte: float, greeks_rows: int) -> list[dict[str, Any]]:
+    if side is None or side.empty:
+        return []
+    data = side.copy()
+    data["delta"] = pd.to_numeric(data.get("delta"), errors="coerce")
+    data["iv_pct"] = pd.to_numeric(data.get("iv_pct"), errors="coerce")
+    data = data.dropna(subset=["delta", "iv_pct"])
+    if data.empty:
+        return []
+    call_put = str(data.iloc[0].get("call_put") or "").upper()
+    data["abs_delta"] = data["delta"].abs()
+    data = data.sort_values("abs_delta")
+    if len(data) > 15:
+        positions = sorted({round(idx * (len(data) - 1) / 14) for idx in range(15)})
+        data = data.iloc[positions]
+    rows: list[dict[str, Any]] = []
+    for _, item in data.iterrows():
+        abs_delta = float(item["abs_delta"])
+        axis = -(50.0 - abs_delta * 100.0) if call_put == "P" else (50.0 - abs_delta * 100.0)
+        rows.append(
+            {
+                "delta_axis": axis,
+                "delta_label": f"{abs_delta * 100:.0f}Δ {'Put' if call_put == 'P' else 'Call'}",
+                "target_delta": abs_delta,
+                "iv_pct": float(item["iv_pct"]),
+                "call_put": call_put,
+                "expiration_date": expiration,
+                "dte": dte,
+                "point_count": 1,
+                "quality": "raw",
+                "node_type": "raw",
+                "greeks_rows": greeks_rows,
+            }
+        )
+    return rows
+
+
+def build_delta_standardized_skew(
+    chain: pd.DataFrame,
+    trade_date: str | dt.date | dt.datetime,
+    *,
+    expiration_date: str | None = None,
+) -> pd.DataFrame:
+    """Build monthly 10/25/40 Delta nodes without extrapolating missing risk points."""
+    if chain is None or chain.empty:
+        return _empty_df(DELTA_SKEW_COLUMNS)
+    data = chain.copy()
+    for col in ("call_put", "expiration_date", "expiration_type", "greeks_source"):
+        if col not in data.columns:
+            data[col] = None
+    for col in ("provider_iv", "iv_pct", "delta", "open_interest"):
+        if col not in data.columns:
+            data[col] = None
+    if "iv_pct" not in chain.columns or pd.to_numeric(data["iv_pct"], errors="coerce").notna().sum() == 0:
+        provider = pd.to_numeric(data["provider_iv"], errors="coerce")
+        data["iv_pct"] = provider.where(provider.abs() > 3, provider * 100.0)
+    else:
+        data["iv_pct"] = pd.to_numeric(data["iv_pct"], errors="coerce")
+    data["delta"] = pd.to_numeric(data["delta"], errors="coerce")
+    data["open_interest"] = pd.to_numeric(data["open_interest"], errors="coerce")
+    data["call_put"] = data["call_put"].fillna("").astype(str).str.upper()
+    if data["greeks_source"].notna().any():
+        data = data[data["greeks_source"].fillna("").astype(str) == "provider_snapshot"]
+    data = data[
+        ((data["call_put"] == "C") & data["delta"].between(0, 1, inclusive="neither"))
+        | ((data["call_put"] == "P") & data["delta"].between(-1, 0, inclusive="neither"))
+    ]
+    data = data.dropna(subset=["iv_pct", "delta", "expiration_date"])
+    selected_expiration = select_delta_skew_expiration(data, trade_date, expiration_date=expiration_date)
+    if not selected_expiration:
+        return _empty_df(DELTA_SKEW_COLUMNS)
+    data = data[data["expiration_date"].astype(str) == selected_expiration].copy()
+    if data.empty:
+        return _empty_df(DELTA_SKEW_COLUMNS)
+    dte = dte_for_trade_date(selected_expiration, normalize_trade_date(trade_date))
+    dte_value = float(dte) if dte is not None else float("nan")
+    greeks_rows = int(len(data))
+
+    rows: list[dict[str, Any]] = []
+    standard_count = {"P": 0, "C": 0}
+    for call_put, target_delta, axis, label in DELTA_SKEW_NODES:
+        side = data[data["call_put"] == call_put]
+        iv_value, quality, point_count = _delta_interpolated_iv(side, target_delta)
+        if iv_value is None:
+            continue
+        standard_count[call_put] += 1
+        rows.append(
+            {
+                "delta_axis": axis,
+                "delta_label": label,
+                "target_delta": target_delta,
+                "iv_pct": iv_value,
+                "call_put": call_put,
+                "expiration_date": selected_expiration,
+                "dte": dte_value,
+                "point_count": point_count,
+                "quality": quality,
+                "node_type": "standard",
+                "greeks_rows": greeks_rows,
+            }
+        )
+
+    put_atm, put_quality, put_points = _delta_interpolated_iv(data[data["call_put"] == "P"], 0.50)
+    call_atm, call_quality, call_points = _delta_interpolated_iv(data[data["call_put"] == "C"], 0.50)
+    if put_atm is not None and call_atm is not None:
+        rows.append(
+            {
+                "delta_axis": 0.0,
+                "delta_label": "ATM",
+                "target_delta": 0.50,
+                "iv_pct": (put_atm + call_atm) / 2.0,
+                "call_put": "ATM",
+                "expiration_date": selected_expiration,
+                "dte": dte_value,
+                "point_count": put_points + call_points,
+                "quality": "exact" if put_quality == call_quality == "exact" else "interpolated",
+                "node_type": "standard",
+                "greeks_rows": greeks_rows,
+            }
+        )
+
+    for call_put in ("P", "C"):
+        if standard_count[call_put] == 0:
+            rows.extend(
+                _raw_delta_scatter_rows(
+                    data[data["call_put"] == call_put],
+                    expiration=selected_expiration,
+                    dte=dte_value,
+                    greeks_rows=greeks_rows,
+                )
+            )
+    if not rows:
+        return _empty_df(DELTA_SKEW_COLUMNS)
+    return pd.DataFrame(rows, columns=DELTA_SKEW_COLUMNS).sort_values("delta_axis").reset_index(drop=True)
+
+
+def delta_skew_metrics_from_curve(curve: pd.DataFrame) -> dict[str, Any]:
+    result = {
+        "delta_skew_expiration": None,
+        "put_skew_25d": None,
+        "call_skew_25d": None,
+        "risk_reversal_25d": None,
+        "butterfly_25d": None,
+        "delta_greeks_rows": 0,
+    }
+    if curve is None or curve.empty:
+        return result
+    data = curve.copy()
+    for col in ("node_type", "call_put", "expiration_date", "greeks_rows"):
+        if col not in data.columns:
+            data[col] = None
+    data["iv_pct"] = pd.to_numeric(data.get("iv_pct"), errors="coerce")
+    data["target_delta"] = pd.to_numeric(data.get("target_delta"), errors="coerce")
+    data = data[data["node_type"].fillna("").astype(str) == "standard"]
+    if data.empty:
+        return result
+    expirations = [str(value) for value in data.get("expiration_date", pd.Series(dtype=str)).dropna().unique() if str(value)]
+    result["delta_skew_expiration"] = expirations[0] if len(expirations) == 1 else None
+    greeks_values = pd.to_numeric(data.get("greeks_rows"), errors="coerce").dropna()
+    result["delta_greeks_rows"] = int(greeks_values.max()) if not greeks_values.empty else 0
+
+    def node_value(call_put: str, target: float) -> float | None:
+        node = data[(data["call_put"] == call_put) & ((data["target_delta"] - target).abs() <= 1e-8)]
+        if node.empty:
+            return None
+        value = pd.to_numeric(node.iloc[0].get("iv_pct"), errors="coerce")
+        return float(value) if pd.notna(value) else None
+
+    atm = node_value("ATM", 0.50)
+    put_25 = node_value("P", 0.25)
+    call_25 = node_value("C", 0.25)
+    if atm is not None and put_25 is not None:
+        result["put_skew_25d"] = put_25 - atm
+    if atm is not None and call_25 is not None:
+        result["call_skew_25d"] = call_25 - atm
+    if put_25 is not None and call_25 is not None:
+        result["risk_reversal_25d"] = call_25 - put_25
+    if atm is not None and put_25 is not None and call_25 is not None:
+        result["butterfly_25d"] = (put_25 + call_25) / 2.0 - atm
+    return result
+
+
 def _curve_side_point_counts(curve: pd.DataFrame) -> dict[str, int]:
     if curve is None or curve.empty or "call_put" not in curve.columns:
         return {"P": 0, "C": 0}
@@ -4569,6 +4857,88 @@ def load_otm_volatility_curve_snapshot(
         dte_max=dte_max_value,
         moneyness_range=span,
         min_abs_moneyness=min_abs_moneyness,
+    )
+
+
+def load_delta_volatility_curve_snapshot(
+    underlying: str,
+    trade_date: str | dt.date | dt.datetime,
+    *,
+    expiration_date: str | None = None,
+    use_test_tables: bool = True,
+    engine=None,
+) -> pd.DataFrame:
+    """Load official provider IV/Delta and build one monthly standardized skew."""
+    engine = engine or dashboard_engine()
+    if engine is None:
+        return _empty_df(DELTA_SKEW_COLUMNS)
+    names = option_table_names(use_test_tables)
+    contracts_table = safe_table_name(names["contracts"])
+    iv_table = safe_table_name(names["iv"])
+    if not table_exists(engine, contracts_table) or not table_exists(engine, iv_table):
+        return _empty_df(DELTA_SKEW_COLUMNS)
+    iv_columns = table_columns(engine, iv_table)
+    contract_columns = table_columns(engine, contracts_table)
+    required_iv = {
+        "trade_date",
+        "option_ticker",
+        "underlying",
+        "provider_iv",
+        "delta",
+        "greeks_source",
+    }
+    required_contracts = {"option_ticker", "call_put", "expiration_date", "expiration_type"}
+    if not required_iv.issubset(iv_columns) or not required_contracts.issubset(contract_columns):
+        return _empty_df(DELTA_SKEW_COLUMNS)
+
+    underlying_text = normalize_underlying(underlying)
+    trade_date_text = normalize_trade_date(trade_date)
+    trade_dt = pd.to_datetime(trade_date_text, format="%Y%m%d", errors="coerce")
+    if not underlying_text or pd.isna(trade_dt):
+        return _empty_df(DELTA_SKEW_COLUMNS)
+    expiration_filter = "AND c.expiration_date = :expiration_date" if expiration_date else ""
+    open_interest_expr = "h.open_interest" if "open_interest" in iv_columns else "NULL"
+    sql = text(
+        f"""
+        SELECT c.call_put,
+               c.expiration_date,
+               c.expiration_type,
+               h.provider_iv,
+               h.delta,
+               h.greeks_source,
+               {open_interest_expr} AS open_interest
+        FROM {iv_table} h{_mysql_force_index(engine, "idx_underlying_date")}
+        JOIN {contracts_table} c ON h.option_ticker = c.option_ticker
+        WHERE h.underlying = :underlying
+          AND h.trade_date = :trade_date
+          AND h.provider_iv IS NOT NULL
+          AND h.delta IS NOT NULL
+          AND h.greeks_source = 'provider_snapshot'
+          AND c.expiration_type = 'monthly'
+          AND c.expiration_date >= :expiration_start
+          AND c.expiration_date <= :expiration_end
+          {expiration_filter}
+        ORDER BY c.expiration_date, c.call_put, h.delta
+        """
+    )
+    params = {
+        "underlying": underlying_text,
+        "trade_date": trade_date_text,
+        "expiration_start": (trade_dt + pd.Timedelta(days=7)).strftime("%Y-%m-%d"),
+        "expiration_end": (trade_dt + pd.Timedelta(days=90)).strftime("%Y-%m-%d"),
+    }
+    if expiration_date:
+        params["expiration_date"] = str(expiration_date)
+    try:
+        raw = pd.read_sql(sql, engine, params=params)
+    except Exception:
+        return _empty_df(DELTA_SKEW_COLUMNS)
+    if raw.empty:
+        return _empty_df(DELTA_SKEW_COLUMNS)
+    return build_delta_standardized_skew(
+        raw,
+        trade_date_text,
+        expiration_date=expiration_date,
     )
 
 

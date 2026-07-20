@@ -6,7 +6,7 @@ import sys
 import time
 from typing import Any, Sequence
 
-from sqlalchemy import text
+from sqlalchemy import inspect, text
 
 from us_options_polygon import (
     DEFAULT_UNDERLYINGS,
@@ -18,6 +18,7 @@ from us_options_polygon import (
     parse_underlyings,
     table_names,
 )
+from us_market_dashboard_data import rebuild_option_anomaly_scan_cache
 
 
 REQUIRED_METRIC_FIELDS = ("put_call_oi", "total_open_interest", "atm_iv_pct")
@@ -58,6 +59,22 @@ def _db_health_for_underlying(
     iv = names["iv"]
     metrics = names["metrics"]
     params = {"underlying": underlying.upper(), "trade_date": compact_date(trade_date)}
+    iv_columns = {str(column.get("name") or "") for column in inspect(engine).get_columns(iv)}
+    greeks_rows_expr = (
+        "SUM(CASE WHEN greeks_source = 'provider_snapshot' THEN 1 ELSE 0 END)"
+        if "greeks_source" in iv_columns
+        else "0"
+    )
+    delta_rows_expr = (
+        "SUM(CASE WHEN delta IS NOT NULL THEN 1 ELSE 0 END)"
+        if "delta" in iv_columns
+        else "0"
+    )
+    gamma_rows_expr = (
+        "SUM(CASE WHEN gamma IS NOT NULL THEN 1 ELSE 0 END)"
+        if "gamma" in iv_columns
+        else "0"
+    )
 
     daily_row = _fetch_one(
         engine,
@@ -74,7 +91,10 @@ def _db_health_for_underlying(
         f"""
         SELECT COUNT(*) AS iv_rows,
                SUM(CASE WHEN provider_iv IS NOT NULL THEN 1 ELSE 0 END) AS provider_iv_rows,
-               SUM(CASE WHEN open_interest IS NOT NULL THEN 1 ELSE 0 END) AS iv_open_interest_rows
+               SUM(CASE WHEN open_interest IS NOT NULL THEN 1 ELSE 0 END) AS iv_open_interest_rows,
+               {greeks_rows_expr} AS greeks_rows,
+               {delta_rows_expr} AS delta_rows,
+               {gamma_rows_expr} AS gamma_rows
         FROM {iv}
         WHERE underlying = :underlying AND trade_date = :trade_date
         """,
@@ -101,6 +121,9 @@ def _db_health_for_underlying(
         "open_interest_rows": _int_value(daily_row.get("open_interest_rows")),
         "iv_rows": _int_value(iv_row.get("iv_rows")),
         "provider_iv_rows": _int_value(iv_row.get("provider_iv_rows")),
+        "greeks_rows": _int_value(iv_row.get("greeks_rows")),
+        "delta_rows": _int_value(iv_row.get("delta_rows")),
+        "gamma_rows": _int_value(iv_row.get("gamma_rows")),
         "iv_open_interest_rows": _int_value(iv_row.get("iv_open_interest_rows")),
         "metrics_rows": _int_value(metrics_row.get("metrics_rows")),
         "put_call_oi": _float_or_none(metrics_row.get("put_call_oi")),
@@ -120,6 +143,10 @@ def _dry_run_health_for_underlying(result: dict[str, Any], underlying: str, trad
         "open_interest_rows": _int_value(item.get("open_interest_rows")),
         "iv_rows": _int_value(item.get("iv")),
         "provider_iv_rows": _int_value(item.get("provider_iv_rows")),
+        "greeks_rows": _int_value(item.get("greeks_rows")),
+        "delta_rows": _int_value(item.get("delta_rows")),
+        "gamma_rows": _int_value(item.get("gamma_rows")),
+        "greeks_expiration": item.get("greeks_expiration"),
         "iv_open_interest_rows": _int_value(item.get("open_interest_rows")),
         "metrics_rows": 0,
         "put_call_oi": None,
@@ -140,6 +167,12 @@ def _issues_for_item(item: dict[str, Any], dry_run: bool = False) -> list[dict[s
         issues.append({"underlying": underlying, "severity": "error", "code": "missing_open_interest"})
     if _int_value(item.get("provider_iv_rows")) <= 0:
         issues.append({"underlying": underlying, "severity": "error", "code": "missing_provider_iv"})
+    if _int_value(item.get("greeks_rows")) <= 0:
+        issues.append({"underlying": underlying, "severity": "warning", "code": "missing_provider_greeks"})
+    if _int_value(item.get("delta_rows")) <= 0:
+        issues.append({"underlying": underlying, "severity": "warning", "code": "missing_provider_delta"})
+    if _int_value(item.get("gamma_rows")) <= 0:
+        issues.append({"underlying": underlying, "severity": "warning", "code": "missing_provider_gamma"})
     if dry_run:
         return issues
     if _int_value(item.get("metrics_rows")) <= 0:
@@ -168,6 +201,8 @@ def build_health_report(
             if dry_run
             else _db_health_for_underlying(engine, underlying, trade_date, use_test_tables=use_test_tables)
         )
+        update_item = (update_result.get("per_underlying") or {}).get(underlying.upper()) or {}
+        item["greeks_expiration"] = update_item.get("greeks_expiration")
         item_issues = _issues_for_item(item, dry_run=dry_run)
         item["issues"] = item_issues
         checks.append(item)
@@ -227,6 +262,24 @@ def run_options_daily(
         use_test_tables=use_test_tables,
         dry_run=dry_run,
     )
+    anomaly_cache: dict[str, Any]
+    if dry_run or health.get("status") == "no_data_or_market_holiday":
+        anomaly_cache = {"status": "skipped", "reason": "dry_run_or_no_data", "rows": 0}
+    else:
+        try:
+            anomaly_cache = rebuild_option_anomaly_scan_cache(
+                trade_date=trade_date,
+                underlyings=target_underlyings,
+                use_test_tables=use_test_tables,
+                engine=engine,
+            )
+        except Exception as exc:
+            anomaly_cache = {
+                "status": "error",
+                "error_type": exc.__class__.__name__,
+                "error": str(exc),
+                "rows": 0,
+            }
     elapsed_seconds = round(time.time() - start, 3)
     return {
         "status": health["status"],
@@ -236,6 +289,7 @@ def run_options_daily(
         "elapsed_seconds": elapsed_seconds,
         "update": update_result,
         "health": health,
+        "anomaly_cache": anomaly_cache,
     }
 
 

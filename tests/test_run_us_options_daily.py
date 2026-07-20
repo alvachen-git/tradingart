@@ -154,6 +154,11 @@ class RunUSOptionsDailyTests(unittest.TestCase):
                         provider_iv REAL,
                         computed_iv REAL,
                         iv_source TEXT,
+                        delta REAL,
+                        gamma REAL,
+                        theta REAL,
+                        vega REAL,
+                        greeks_source TEXT,
                         open_interest REAL,
                         underlying_price REAL,
                         source TEXT NOT NULL,
@@ -204,7 +209,15 @@ class RunUSOptionsDailyTests(unittest.TestCase):
         self.assertIn(f"US_OPTIONS_BACKFILL_UNDERLYINGS=\"${{US_OPTIONS_BACKFILL_UNDERLYINGS:-{expected}}}\"", script_text)
         self.assertEqual(set(expected.split(",")), LATEST_BACKFILL_UNDERLYINGS)
 
-    def _insert_rows(self, *, open_interest=100, provider_iv=0.2, metrics=True):
+    def _insert_rows(
+        self,
+        *,
+        open_interest=100,
+        provider_iv=0.2,
+        delta=0.5,
+        greeks_source="provider_snapshot",
+        metrics=True,
+    ):
         names = uop.table_names(use_test_tables=True)
         with self.engine.begin() as conn:
             conn.execute(
@@ -237,13 +250,20 @@ class RunUSOptionsDailyTests(unittest.TestCase):
                     f"""
                     INSERT INTO {names['iv']}
                     (trade_date, option_ticker, underlying, provider_iv, computed_iv,
-                     iv_source, open_interest, underlying_price, source, updated_at)
+                     iv_source, delta, gamma, theta, vega, greeks_source,
+                     open_interest, underlying_price, source, updated_at)
                     VALUES
                     ('20260626', 'O:SPY260717C00600000', 'SPY', :provider_iv, NULL,
-                     'provider_snapshot', :open_interest, 600, 'massive', '')
+                     'provider_snapshot', :delta, 0.02, -0.04, 0.12, :greeks_source,
+                     :open_interest, 600, 'massive', '')
                     """
                 ),
-                {"provider_iv": provider_iv, "open_interest": open_interest},
+                {
+                    "provider_iv": provider_iv,
+                    "delta": delta,
+                    "greeks_source": greeks_source,
+                    "open_interest": open_interest,
+                },
             )
             if metrics:
                 conn.execute(
@@ -273,6 +293,27 @@ class RunUSOptionsDailyTests(unittest.TestCase):
         self.assertEqual(report["status"], "ok")
         self.assertEqual(report["checks"][0]["open_interest_rows"], 1)
         self.assertEqual(report["checks"][0]["provider_iv_rows"], 1)
+        self.assertEqual(report["checks"][0]["greeks_rows"], 1)
+        self.assertEqual(report["checks"][0]["delta_rows"], 1)
+        self.assertEqual(report["checks"][0]["gamma_rows"], 1)
+
+    def test_health_report_warns_but_does_not_fail_when_provider_greeks_are_missing(self):
+        self._insert_rows(delta=None, greeks_source=None)
+
+        report = job.build_health_report(
+            engine=self.engine,
+            update_result={},
+            underlyings=["SPY"],
+            trade_date="20260626",
+            use_test_tables=True,
+            dry_run=False,
+        )
+
+        self.assertEqual(report["status"], "warning")
+        self.assertEqual(
+            {issue["code"] for issue in report["issues"]},
+            {"missing_provider_greeks", "missing_provider_delta"},
+        )
 
     def test_health_report_flags_missing_open_interest(self):
         self._insert_rows(open_interest=None, metrics=False)
@@ -311,6 +352,10 @@ class RunUSOptionsDailyTests(unittest.TestCase):
                         "iv": 10,
                         "open_interest_rows": 8,
                         "provider_iv_rows": 7,
+                        "greeks_rows": 7,
+                        "delta_rows": 7,
+                        "gamma_rows": 7,
+                        "greeks_expiration": "2026-07-17",
                     }
                 }
             },
@@ -321,6 +366,7 @@ class RunUSOptionsDailyTests(unittest.TestCase):
 
         self.assertEqual(report["status"], "ok")
         self.assertEqual(report["checks"][0]["open_interest_rows"], 8)
+        self.assertEqual(report["checks"][0]["greeks_expiration"], "2026-07-17")
 
     def test_run_options_daily_calls_live_update_without_stock_update(self):
         fake_result = {
@@ -328,7 +374,18 @@ class RunUSOptionsDailyTests(unittest.TestCase):
             "daily": 1,
             "iv": 1,
             "metrics": 0,
-            "per_underlying": {"SPY": {"daily": 1, "iv": 1, "open_interest_rows": 1, "provider_iv_rows": 1}},
+            "per_underlying": {
+                "SPY": {
+                    "daily": 1,
+                    "iv": 1,
+                    "open_interest_rows": 1,
+                    "provider_iv_rows": 1,
+                    "greeks_rows": 1,
+                    "delta_rows": 1,
+                    "gamma_rows": 1,
+                    "greeks_expiration": "2026-07-17",
+                }
+            },
         }
 
         with patch("run_us_options_daily.MassiveOptionsClient", return_value=object()), \
@@ -338,6 +395,34 @@ class RunUSOptionsDailyTests(unittest.TestCase):
         self.assertEqual(result["status"], "ok")
         live_update.assert_called_once()
         self.assertEqual(live_update.call_args.kwargs["dry_run"], True)
+        self.assertEqual(result["anomaly_cache"]["status"], "skipped")
+
+    def test_run_options_daily_rebuilds_anomaly_cache_after_successful_update(self):
+        fake_result = {
+            "contracts": 1,
+            "daily": 1,
+            "iv": 1,
+            "metrics": 1,
+            "per_underlying": {"SPY": {"daily": 1, "iv": 1, "open_interest_rows": 1, "provider_iv_rows": 1}},
+        }
+
+        with patch("run_us_options_daily.get_db_engine", return_value=self.engine), \
+             patch("run_us_options_daily.MassiveOptionsClient", return_value=object()), \
+             patch("run_us_options_daily.live_update", return_value=fake_result), \
+             patch("run_us_options_daily.build_health_report", return_value={"status": "ok"}), \
+             patch(
+                 "run_us_options_daily.rebuild_option_anomaly_scan_cache",
+                 return_value={"status": "updated", "trade_date": "20260626", "rows": 7},
+             ) as rebuild_cache:
+            result = job.run_options_daily(date="20260626", underlyings=["SPY"], dry_run=False, use_test_tables=True)
+
+        rebuild_cache.assert_called_once()
+        self.assertEqual(rebuild_cache.call_args.kwargs["trade_date"], "20260626")
+        self.assertEqual(rebuild_cache.call_args.kwargs["underlyings"], ["SPY"])
+        self.assertEqual(rebuild_cache.call_args.kwargs["use_test_tables"], True)
+        self.assertIs(rebuild_cache.call_args.kwargs["engine"], self.engine)
+        self.assertEqual(result["anomaly_cache"]["status"], "updated")
+        self.assertEqual(result["anomaly_cache"]["rows"], 7)
 
     def test_live_update_reports_metrics_per_underlying(self):
         with patch.object(uop, "get_underlying_close", return_value=None), \
