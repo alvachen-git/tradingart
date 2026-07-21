@@ -1,5 +1,5 @@
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from sqlalchemy import create_engine, text
 
@@ -28,10 +28,15 @@ from cn_market_climate_data import (
     store_margin_records,
 )
 from update_cn_market_climate_daily import (
+    CORE_CURRENT_DATE_METRICS,
+    build_metric_diagnostics,
     fetch_margin_records,
     fetch_sse_margin_mirror,
     fetch_szse_margin_mirror,
+    main,
     normalize_market_amount_frames,
+    refresh_required_index_date,
+    resolve_expected_trade_date,
     validate_szse_mirror_against_official,
 )
 import pandas as pd
@@ -261,6 +266,28 @@ class ClimateStorageTests(unittest.TestCase):
         self.assertEqual(metric.quality_status, "insufficient")
         self.assertIsNone(metric.percentile)
 
+    def test_im_basis_does_not_claim_a_futures_only_date(self):
+        metric = build_im_basis_metric_row(
+            pd.DataFrame(
+                {
+                    "trade_date": ["20260717", "20260720"],
+                    "contract": ["IM2608", "IM2608"],
+                    "futures_close": [7100, 7120],
+                    "spot_close": [7150, None],
+                }
+            ),
+            min_samples=1,
+        )
+        self.assertEqual(metric.trade_date, "20260717")
+        diagnostics, failures = build_metric_diagnostics(
+            [metric],
+            expected_date="20260720",
+            trading_dates=["20260717", "20260720"],
+        )
+        self.assertIn(IM_BASIS, failures)
+        im_status = next(item for item in diagnostics if item["code"] == IM_BASIS)
+        self.assertFalse(im_status["current_date_ready"])
+
     def test_im_basis_percentile_measures_pressure_across_all_data_points(self):
         metric = build_im_basis_metric_row(
             pd.DataFrame(
@@ -297,6 +324,165 @@ class ClimateStorageTests(unittest.TestCase):
         )
         self.assertEqual(result["trade_date"].tolist(), ["20260716"])
         self.assertEqual(result.iloc[0]["amount_yuan"], 1_400_000_000_000)
+
+    def test_market_stats_convert_exchange_float_market_value_to_yuan(self):
+        result = normalize_market_amount_frames(
+            pd.DataFrame(
+                {
+                    "trade_date": ["20260720"],
+                    "amount": [6_200.0],
+                    "float_mv": [520_000.0],
+                }
+            ),
+            pd.DataFrame(
+                {
+                    "trade_date": ["20260720"],
+                    "amount": [8_100.0],
+                    "float_mv": [410_000.0],
+                }
+            ),
+        )
+        self.assertEqual(result.iloc[0]["amount_yuan"], 1_430_000_000_000)
+        self.assertEqual(result.iloc[0]["float_mv_yuan"], 93_000_000_000_000)
+
+    def test_resolves_latest_open_session_for_weekend_or_holiday(self):
+        pro = Mock()
+        pro.trade_cal.return_value = pd.DataFrame(
+            {"cal_date": ["20260716", "20260717"], "is_open": [1, 1]}
+        )
+        self.assertEqual(resolve_expected_trade_date(pro, "20260719"), "20260717")
+        pro.trade_cal.assert_called_once_with(
+            exchange="SSE",
+            start_date="20260705",
+            end_date="20260719",
+            is_open=1,
+            fields="cal_date,is_open",
+        )
+
+    def test_refreshes_only_missing_index_codes_and_is_idempotent(self):
+        engine = create_engine("sqlite:///:memory:")
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE index_price (
+                        trade_date VARCHAR(8), ts_code VARCHAR(20),
+                        open_price FLOAT, high_price FLOAT, low_price FLOAT,
+                        close_price FLOAT, pct_chg FLOAT, vol FLOAT, amount FLOAT,
+                        PRIMARY KEY (trade_date, ts_code)
+                    )
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO index_price (trade_date, ts_code, close_price) "
+                    "VALUES ('20260720', '000016.SH', 3000)"
+                )
+            )
+
+        pro = Mock()
+        pro.index_daily.side_effect = lambda ts_code, **_: pd.DataFrame(
+            {
+                "trade_date": ["20260720"],
+                "ts_code": [ts_code],
+                "open": [100.0],
+                "high": [101.0],
+                "low": [99.0],
+                "close": [100.5],
+                "pct_chg": [0.5],
+                "vol": [10.0],
+                "amount": [20.0],
+            }
+        )
+
+        rows, missing = refresh_required_index_date(engine, pro, "20260720", write=True)
+        self.assertEqual(missing, [])
+        self.assertEqual(set(rows["ts_code"]), set(["000016.SH", "000852.SH", "000688.SH", "399006.SZ"]))
+        self.assertEqual(pro.index_daily.call_count, 3)
+
+        rows_again, missing_again = refresh_required_index_date(
+            engine, pro, "20260720", write=True
+        )
+        self.assertEqual(missing_again, [])
+        self.assertEqual(len(rows_again), 4)
+        self.assertEqual(pro.index_daily.call_count, 3)
+
+    def test_core_date_diagnostics_ignore_allowed_margin_and_rate_lag(self):
+        expected = "20260720"
+        rows = []
+        for code in CARD_ORDER:
+            actual = "20260717" if code in {MARGIN_LEVERAGE, MARGIN_MOMENTUM_5D, CN10Y_RATE} else expected
+            rows.append(
+                ClimateMetricRow(
+                    trade_date=actual,
+                    metric_code=code,
+                    metric_value=1.0,
+                    percentile=50.0,
+                    secondary_value=None,
+                    sample_count=100,
+                    payload={},
+                    source_dates={"test": actual},
+                )
+            )
+        diagnostics, failures = build_metric_diagnostics(
+            rows,
+            expected_date=expected,
+            trading_dates=["20260717", "20260720"],
+        )
+        self.assertEqual(failures, [])
+        by_code = {item["code"]: item for item in diagnostics}
+        self.assertFalse(by_code[CN10Y_RATE]["current_date_ready"])
+        self.assertFalse(by_code[CN10Y_RATE]["required_current"])
+        self.assertTrue(all(by_code[code]["current_date_ready"] for code in CORE_CURRENT_DATE_METRICS))
+
+    def test_strict_main_stores_partial_rows_then_returns_nonzero(self):
+        stale_amount = ClimateMetricRow(
+            trade_date="20260717",
+            metric_code=MARKET_AMOUNT,
+            metric_value=1.0,
+            percentile=50.0,
+            secondary_value=None,
+            sample_count=100,
+            payload={},
+            source_dates={"market_amount": "20260717"},
+        )
+        empty_sources = {
+            "margin": pd.DataFrame(),
+            "float_mv": pd.DataFrame(),
+            "index": pd.DataFrame(columns=["trade_date", "ts_code", "close_price"]),
+            "cn10y": pd.DataFrame(),
+        }
+        market_stats = pd.DataFrame(
+            columns=["trade_date", "amount_yuan", "float_mv_yuan"]
+        )
+        with patch("update_cn_market_climate_daily.create_engine_from_env", return_value=object()), patch(
+            "update_cn_market_climate_daily.ensure_cn_market_climate_tables"
+        ), patch("update_cn_market_climate_daily.create_tushare_client", return_value=object()), patch(
+            "update_cn_market_climate_daily.resolve_expected_trade_date", return_value="20260720"
+        ), patch(
+            "update_cn_market_climate_daily.refresh_required_index_date",
+            return_value=(pd.DataFrame(), []),
+        ), patch(
+            "update_cn_market_climate_daily.load_trading_dates",
+            return_value=["20260717", "20260720"],
+        ), patch(
+            "update_cn_market_climate_daily.fetch_margin_records", return_value=([], [])
+        ), patch(
+            "update_cn_market_climate_daily.load_source_frames", return_value=empty_sources
+        ), patch(
+            "update_cn_market_climate_daily.fetch_market_amount_history",
+            return_value=market_stats,
+        ), patch(
+            "update_cn_market_climate_daily.build_index_basis_longterm_payload",
+            return_value={"points": []},
+        ), patch(
+            "update_cn_market_climate_daily.build_snapshot_rows", return_value=[stale_amount]
+        ), patch("update_cn_market_climate_daily.store_climate_rows") as store_rows:
+            rc = main(["--date", "20260720", "--require-core-date"])
+
+        self.assertEqual(rc, 2)
+        store_rows.assert_called_once_with(unittest.mock.ANY, [stale_amount])
 
     def test_marks_data_older_than_two_trading_sessions_stale(self):
         row = ClimateMetricRow(

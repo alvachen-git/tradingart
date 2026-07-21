@@ -107,7 +107,7 @@ def _cached_kline_and_iv_data(
     return de.get_kline_and_iv_data(symbol, limit=limit)
 
 
-@st.cache_data(ttl=600, show_spinner=False)
+@st.cache_data(ttl=120, show_spinner=False)
 def _cached_cn_market_climate_strip():
     return load_cn_market_climate_strip(de.engine)
 

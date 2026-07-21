@@ -155,7 +155,7 @@ class EtfOptionVisualLayoutTests(unittest.TestCase):
         self.assertIn('class="etf-lab-kpi-strip"', self.source)
         self.assertIn('grid-template-columns: repeat(auto-fit, minmax(150px, 1fr))', self.source)
         self.assertIn("load_cn_market_climate_strip", self.source)
-        self.assertIn("ttl=600", self.source)
+        self.assertIn("ttl=120", self.source)
         self.assertEqual(self.source.count("_cached_cn_market_climate_strip()"), 2)
         for label in (
             "沪深融资杠杆",

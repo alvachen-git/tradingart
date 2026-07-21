@@ -26,6 +26,25 @@ class RunDaily3MarketClimateTests(unittest.TestCase):
             source.index('"update_cn_market_climate_daily.py"'),
         )
 
+    def test_run_daily3_uses_project_venv_and_propagates_failures(self):
+        source = (ROOT / "run_daily3.sh").read_text(encoding="utf-8")
+        self.assertIn('${APP_DIR}/venv/bin/python', source)
+        self.assertIn('${APP_DIR}/.venv311/bin/python', source)
+        self.assertNotIn('/usr/bin/python3 "$script"', source)
+        self.assertRegex(source, r'if \[ "\$\{FAILED_STEPS\}" -gt 0 \]; then')
+        self.assertIn("exit 1", source)
+
+    def test_late_climate_job_has_lock_timeout_and_three_strict_attempts(self):
+        source = (ROOT / "run_cn_market_climate_daily.sh").read_text(encoding="utf-8")
+        self.assertIn('ATTEMPTS="${CLIMATE_UPDATE_ATTEMPTS:-3}"', source)
+        self.assertIn('RETRY_SLEEP_SECONDS="${CLIMATE_RETRY_SLEEP_SECONDS:-600}"', source)
+        self.assertIn('TIMEOUT_SECONDS="${CLIMATE_UPDATE_TIMEOUT_SECONDS:-900}"', source)
+        self.assertIn("flock -n 9", source)
+        self.assertIn("timeout --signal=TERM --kill-after=30", source)
+        self.assertIn("update_cn_market_climate_daily.py --require-core-date", source)
+        self.assertNotIn('/usr/bin/python3', source)
+        self.assertIn('exit "${last_rc}"', source)
+
 
 if __name__ == "__main__":
     unittest.main()

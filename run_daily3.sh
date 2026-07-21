@@ -1,10 +1,21 @@
 #!/bin/bash
 
-# 1. 进入项目目录 (非常重要！确保找到 .env 文件)
-cd /root/finance_app/future-app
+set -u
 
-LOG_FILE="update.log"
+APP_DIR="/root/finance_app/future-app"
+LOG_FILE="${APP_DIR}/update.log"
 FAILED_STEPS=0
+
+cd "${APP_DIR}" || exit 1
+
+if [ -x "${APP_DIR}/venv/bin/python" ]; then
+  PYTHON_BIN="${APP_DIR}/venv/bin/python"
+elif [ -x "${APP_DIR}/.venv311/bin/python" ]; then
+  PYTHON_BIN="${APP_DIR}/.venv311/bin/python"
+else
+  echo "ERROR: project Python venv not found: $(date)" >> "${LOG_FILE}"
+  exit 1
+fi
 
 log_system_state() {
   local stage="$1"
@@ -24,7 +35,7 @@ run_step() {
   echo ">>> [${idx}/${total}] 开始${title}: ${script} $*..." >> "$LOG_FILE"
   log_system_state "STEP ${idx} BEFORE ${script} $*"
 
-  /usr/bin/time -v /usr/bin/python3 "$script" "$@" >> "$LOG_FILE" 2>&1
+  /usr/bin/time -v "${PYTHON_BIN}" "$script" "$@" >> "$LOG_FILE" 2>&1
   local rc=$?
 
   log_system_state "STEP ${idx} AFTER ${script} $* (rc=${rc})"
@@ -40,6 +51,7 @@ run_step() {
 echo "" >> "$LOG_FILE"
 echo "========================================" >> "$LOG_FILE"
 echo "⏰ 任务开始: $(date)" >> "$LOG_FILE"
+echo "🐍 Python: ${PYTHON_BIN}" >> "$LOG_FILE"
 log_system_state "RUN START"
 
 
@@ -74,5 +86,10 @@ run_step 11 11 "更新ETF期权市场环境指标" "update_cn_market_climate_dai
 # 7. 结束
 log_system_state "RUN END"
 echo "⚠️ 失败步骤数: ${FAILED_STEPS}" >> "$LOG_FILE"
-echo "✅ 任务结束: $(date)" >> "$LOG_FILE"
+if [ "${FAILED_STEPS}" -gt 0 ]; then
+  echo "❌ 任务失败: $(date)" >> "$LOG_FILE"
+  echo "========================================" >> "$LOG_FILE"
+  exit 1
+fi
+echo "✅ 任务成功: $(date)" >> "$LOG_FILE"
 echo "========================================" >> "$LOG_FILE"
