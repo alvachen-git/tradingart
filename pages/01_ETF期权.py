@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import sys
 import os
 import time
@@ -17,6 +18,10 @@ sys.path.append(root_dir)
 from option_kline_chart import lightweight_chart_loader_html, render_option_kline_chart
 from ui_components import inject_option_page_header_style, render_option_page_title, render_option_sidebar_footer
 from cn_market_climate_data import load_cn_market_climate_strip
+from global_index_valuation import (
+    build_global_index_valuation_dashboard,
+    get_global_index_valuation_cache_version,
+)
 
 # 1. 页面配置
 st.set_page_config(
@@ -105,6 +110,11 @@ def _cached_kline_and_iv_data(
 @st.cache_data(ttl=600, show_spinner=False)
 def _cached_cn_market_climate_strip():
     return load_cn_market_climate_strip(de.engine)
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def _cached_global_index_valuation_dashboard(cache_version: str):
+    return build_global_index_valuation_dashboard(de.engine)
 
 
 def _inject_etf_lab_style() -> None:
@@ -454,6 +464,246 @@ def _inject_etf_lab_style() -> None:
             line-height: 1.5;
         }
 
+        .global-valuation-dashboard {
+            margin-top: 8px;
+            color: #172235;
+        }
+
+        .global-valuation-title-row {
+            display: flex;
+            align-items: flex-start;
+            justify-content: space-between;
+            gap: 24px;
+            margin-bottom: 14px;
+        }
+
+        .global-valuation-title-row h2 {
+            margin: 0;
+            color: #102039;
+            font-size: 28px;
+            font-weight: 760;
+            letter-spacing: -.02em;
+        }
+
+        .global-valuation-title-row p {
+            margin: 4px 0 0;
+            color: #63748b;
+            font-size: 13px;
+            line-height: 1.55;
+        }
+
+        .global-valuation-title-row > span {
+            padding-top: 8px;
+            color: #6b7c93;
+            font-size: 12px;
+            white-space: nowrap;
+        }
+
+        .global-valuation-summary {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            margin-bottom: 14px;
+            overflow: hidden;
+            border: 1px solid #dce4ee;
+            border-radius: 9px;
+            background: #ffffff;
+        }
+
+        .global-valuation-summary-item {
+            min-width: 0;
+            padding: 14px 18px 15px;
+        }
+
+        .global-valuation-summary-item + .global-valuation-summary-item {
+            border-left: 1px solid #e3e9f1;
+        }
+
+        .global-valuation-status {
+            display: inline-flex;
+            align-items: center;
+            padding: 2px 7px;
+            border: 1px solid color-mix(in srgb, var(--valuation-color) 20%, white);
+            border-radius: 999px;
+            color: var(--valuation-color);
+            background: color-mix(in srgb, var(--valuation-color) 8%, white);
+            font-size: 10px;
+            font-weight: 700;
+        }
+
+        .global-valuation-summary-main {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) minmax(150px, .8fr);
+            align-items: center;
+            gap: 22px;
+            margin-top: 8px;
+        }
+
+        .global-valuation-summary-main strong {
+            overflow: hidden;
+            color: #1d2b40;
+            font-size: 15px;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .global-valuation-percentile {
+            display: grid;
+            grid-template-columns: 56px minmax(86px, 1fr);
+            align-items: center;
+            gap: 10px;
+            min-width: 0;
+        }
+
+        .global-valuation-percentile > span {
+            color: var(--valuation-color);
+            font-family: "SFMono-Regular", Menlo, Monaco, Consolas, monospace;
+            font-size: 12px;
+            font-weight: 760;
+            white-space: nowrap;
+        }
+
+        .global-valuation-percentile.is-compact {
+            grid-template-columns: 62px minmax(90px, 1fr);
+        }
+
+        .global-valuation-percentile.is-compact > span {
+            font-size: 17px;
+            text-align: right;
+        }
+
+        .global-valuation-percentile progress {
+            width: 100%;
+            height: 5px;
+            overflow: hidden;
+            border: 0;
+            border-radius: 999px;
+            background: #e8edf4;
+            appearance: none;
+            -webkit-appearance: none;
+        }
+
+        .global-valuation-percentile progress::-webkit-progress-bar {
+            border-radius: 999px;
+            background: #e8edf4;
+        }
+
+        .global-valuation-percentile progress::-webkit-progress-value {
+            border-radius: 999px;
+            background: var(--valuation-color);
+        }
+
+        .global-valuation-percentile progress::-moz-progress-bar {
+            border-radius: 999px;
+            background: var(--valuation-color);
+        }
+
+        .global-valuation-table-shell {
+            overflow-x: auto;
+            border: 1px solid #dce4ee;
+            border-radius: 9px;
+            background: #ffffff;
+        }
+
+        .global-valuation-table-header {
+            display: grid;
+            grid-template-columns: 72px minmax(140px, 1.15fr) 100px minmax(230px, 1.5fr) 90px 112px;
+            align-items: center;
+            min-width: 790px;
+            padding: 10px 16px;
+            border-bottom: 1px solid #dce4ee;
+            color: #6b7c93;
+            background: #f8fafc;
+            font-size: 11px;
+            font-weight: 650;
+        }
+
+        .global-valuation-table-group {
+            display: grid;
+            grid-template-columns: 72px minmax(718px, 1fr);
+            min-width: 790px;
+            border-bottom: 1px solid #dce4ee;
+        }
+
+        .global-valuation-table-group:last-child {
+            border-bottom: 0;
+        }
+
+        .global-valuation-table-market {
+            display: flex;
+            align-items: center;
+            padding: 0 16px;
+            color: #203047;
+            font-size: 13px;
+            font-weight: 740;
+        }
+
+        .global-valuation-table-row {
+            display: grid;
+            grid-template-columns: minmax(140px, 1.15fr) 100px minmax(230px, 1.5fr) 90px 112px;
+            align-items: center;
+            min-height: 38px;
+            padding: 0 16px 0 0;
+            border-bottom: 1px solid #edf1f5;
+            color: #34445a;
+            font-size: 12px;
+        }
+
+        .global-valuation-table-row:last-child {
+            border-bottom: 0;
+        }
+
+        .global-valuation-table-row strong {
+            color: #203047;
+            font-size: 12px;
+            font-weight: 680;
+        }
+
+        .global-valuation-table-pe,
+        .global-valuation-table-date {
+            font-family: "SFMono-Regular", Menlo, Monaco, Consolas, monospace;
+            font-variant-numeric: tabular-nums;
+        }
+
+        .global-valuation-table-status {
+            font-weight: 680;
+        }
+
+        .global-valuation-table-date {
+            color: #73849a;
+            font-size: 11px;
+        }
+
+        .global-valuation-history-title {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 18px;
+            margin-top: 10px;
+            padding: 14px 16px 4px;
+            border: 1px solid #dce4ee;
+            border-bottom: 0;
+            border-radius: 9px 9px 0 0;
+            background: #ffffff;
+        }
+
+        .global-valuation-history-title strong {
+            color: #1b2a40;
+            font-size: 16px;
+        }
+
+        .global-valuation-history-title span {
+            color: #718198;
+            font-size: 11px;
+        }
+
+        div[data-testid="stElementContainer"]:has(.global-valuation-history-title) + div[data-testid="stElementContainer"] {
+            border-right: 1px solid #dce4ee;
+            border-bottom: 1px solid #dce4ee;
+            border-left: 1px solid #dce4ee;
+            border-radius: 0 0 9px 9px;
+            background: #ffffff;
+        }
+
         div[data-testid="stElementContainer"]:has(.etf-lab-kpi-strip),
         div[data-testid="stElementContainer"]:has(.etf-lab-rail),
         div[data-testid="stElementContainer"]:has(.etf-lab-section) {
@@ -507,6 +757,15 @@ def _inject_etf_lab_style() -> None:
                 right: 0;
                 transform: translateX(6px);
             }
+
+            .global-valuation-summary {
+                grid-template-columns: minmax(0, 1fr);
+            }
+
+            .global-valuation-summary-item + .global-valuation-summary-item {
+                border-top: 1px solid #e3e9f1;
+                border-left: 0;
+            }
         }
 
         @media (max-width: 640px) {
@@ -522,6 +781,25 @@ def _inject_etf_lab_style() -> None:
 
             .etf-lab-kpi-strip {
                 grid-template-columns: minmax(0, 1fr);
+            }
+
+            .global-valuation-title-row,
+            .global-valuation-history-title {
+                align-items: flex-start;
+                flex-direction: column;
+                gap: 6px;
+            }
+
+            .global-valuation-title-row h2 {
+                font-size: 24px;
+            }
+
+            .global-valuation-title-row > span {
+                padding-top: 0;
+            }
+
+            .global-valuation-summary-main {
+                grid-template-columns: minmax(0, 1fr) minmax(140px, .9fr);
             }
 
             .etf-lab-kpi:nth-child(3n) .etf-lab-kpi-tooltip {
@@ -874,13 +1152,172 @@ def _render_defense_detail_table(df: pd.DataFrame) -> None:
         )
 
 
+def _render_global_valuation_dashboard(payload: dict) -> None:
+    """Render the local-only global PE comparison dashboard."""
+    label_colors = {
+        "历史低位": "#16a34a", "偏低": "#4f9d69", "中性": "#2563eb",
+        "偏高": "#d97706", "历史高位": "#dc2626",
+        "样本不足": "#64748b", "暂无数据": "#64748b",
+    }
+    cards = payload.get("cards") or []
+    populated_cards = [card for card in cards if card.get("percentile") is not None]
+    latest_date = max(
+        (str(card.get("data_date") or "") for card in cards),
+        default="",
+    ) or str(payload.get("as_of_date") or "")
+    if latest_date and "-" not in latest_date and len(latest_date) == 8:
+        latest_date = f"{latest_date[:4]}-{latest_date[4:6]}-{latest_date[6:]}"
+
+    def percentile_html(card: dict, compact: bool = False) -> str:
+        percentile = card.get("percentile")
+        value = max(0.0, min(100.0, float(percentile))) if percentile is not None else 0.0
+        rank_text = f"{value:.0f}/100" if percentile is not None else "--/100"
+        label = str(card.get("percentile_label") or "暂无数据")
+        color = label_colors.get(label, "#64748b")
+        return (
+            f'<div class="global-valuation-percentile{" is-compact" if compact else ""}" '
+            f'style="--valuation-color:{color}">'
+            f'<span>{escape(rank_text)}</span>'
+            f'<progress value="{value:.1f}" max="100" aria-label="{escape(rank_text)}"></progress>'
+            "</div>"
+        )
+
+    ranked_cards = sorted(
+        populated_cards,
+        key=lambda card: float(card.get("percentile") or 0),
+        reverse=True,
+    )
+    summary_cards = []
+    for card in (ranked_cards[:2] + ranked_cards[-1:]):
+        if card and card not in summary_cards:
+            summary_cards.append(card)
+
+    summary_html = "".join(
+        '<div class="global-valuation-summary-item">'
+        f'<span class="global-valuation-status" style="--valuation-color:'
+        f'{label_colors.get(str(card.get("percentile_label")), "#64748b")}">'
+        f'{escape(str(card.get("percentile_label") or "暂无数据"))}</span>'
+        '<div class="global-valuation-summary-main">'
+        f'<strong>{escape(str(card.get("name") or "--"))}</strong>'
+        f'{percentile_html(card, compact=True)}</div>'
+        "</div>"
+        for card in summary_cards
+    )
+
+    group_html = []
+    for market in ("美国", "A股", "香港"):
+        market_cards = [card for card in cards if card.get("market") == market]
+        rows = []
+        for card in market_cards:
+            current_pe = card.get("current_pe")
+            pe_text = f"{float(current_pe):.2f}" if current_pe is not None else "--"
+            label = str(card.get("percentile_label") or "暂无数据")
+            color = label_colors.get(label, "#64748b")
+            rows.append(
+                '<div class="global-valuation-table-row">'
+                f'<strong>{escape(str(card.get("name") or "--"))}</strong>'
+                f'<span class="global-valuation-table-pe">{escape(pe_text)}</span>'
+                f'{percentile_html(card)}'
+                f'<span class="global-valuation-table-status" style="color:{color}">{escape(label)}</span>'
+                f'<span class="global-valuation-table-date">{escape(str(card.get("data_date") or "待更新"))}</span>'
+                "</div>"
+            )
+        group_html.append(
+            '<div class="global-valuation-table-group">'
+            f'<div class="global-valuation-table-market">{escape(market)}</div>'
+            f'<div class="global-valuation-table-rows">{"".join(rows)}</div>'
+            "</div>"
+        )
+
+    st.markdown(
+        '<div class="global-valuation-dashboard">'
+        '<div class="global-valuation-title-row">'
+        '<div><h2>股市估值</h2><p>当前市盈率（PE）在自身历史区间中的位置，分位越高表示越接近历史高位。</p></div>'
+        f'<span>数据日期：{escape(latest_date or "待更新")}</span></div>'
+        f'<div class="global-valuation-summary">{summary_html}</div>'
+        '<div class="global-valuation-table-shell">'
+        '<div class="global-valuation-table-header">'
+        '<span>区域</span><span>指数</span><span>当前PE</span><span>历史分位（0–100）</span><span>状态</span><span>数据日期</span>'
+        f'</div>{"".join(group_html)}</div></div>',
+        unsafe_allow_html=True,
+    )
+
+    if not populated_cards:
+        for note in payload.get("quality_notes") or ["暂无可用估值数据。"]:
+            st.warning(str(note))
+        return
+
+    available_cards = [
+        card for card in cards if (payload.get("series_by_code") or {}).get(card.get("code"))
+    ]
+    if not available_cards:
+        st.info("暂无可绘制的本地历史数据。")
+        return
+
+    available_names = [card["name"] for card in available_cards]
+    default_name = "科创50" if "科创50" in available_names else available_names[0]
+    selected_col, range_col = st.columns([0.62, 0.38], gap="small", vertical_alignment="bottom")
+    with selected_col:
+        selected_name = st.selectbox(
+            "选择指数", available_names, index=available_names.index(default_name),
+            key="global_valuation_index_selector",
+        )
+    range_options = ["近1年", "近3年", "近5年", "近10年", "全部"]
+    if st.session_state.get("global_valuation_history_range") not in range_options:
+        st.session_state["global_valuation_history_range"] = "近5年"
+    with range_col:
+        history_range = st.segmented_control(
+            "历史区间", range_options, key="global_valuation_history_range",
+        ) or "近5年"
+    selected = next(card for card in available_cards if card["name"] == selected_name)
+    history = pd.DataFrame(payload["series_by_code"][selected["code"]])
+    history["date"] = pd.to_datetime(history["date"], errors="coerce")
+    history["pe"] = pd.to_numeric(history["pe"], errors="coerce")
+    history = history.dropna(subset=["date", "pe"])
+    range_years = {"近1年": 1, "近3年": 3, "近5年": 5, "近10年": 10}
+    if history_range in range_years and not history.empty:
+        history = history[
+            history["date"] >= history["date"].max() - pd.DateOffset(years=range_years[history_range])
+        ]
+
+    st.markdown(
+        f'<div class="global-valuation-history-title"><strong>{escape(selected_name)} 市盈率（PE）历史走势</strong>'
+        '<span>蓝线为PE，虚线为历史中位数及20%/80%分位</span></div>',
+        unsafe_allow_html=True,
+    )
+    history_fig = go.Figure(go.Scatter(
+        x=history["date"], y=history["pe"], mode="lines",
+        line=dict(color="#2563eb", width=2.2), name="PE",
+        hovertemplate="%{x|%Y-%m}<br>PE %{y:.2f}<extra></extra>",
+    ))
+    line_specs = (
+        (selected.get("median_pe"), "历史中位数", "#475569", "dash"),
+        (selected.get("p20"), "20%分位", "#16a34a", "dot"),
+        (selected.get("p80"), "80%分位", "#dc2626", "dot"),
+    )
+    for value, label, color, dash in line_specs:
+        if value is not None:
+            history_fig.add_hline(
+                y=float(value), line_color=color, line_dash=dash, line_width=1.3,
+                annotation_text=f"{label} {float(value):.2f}", annotation_position="top left",
+            )
+    history_fig.update_layout(
+        height=410, margin=dict(l=20, r=25, t=26, b=25),
+        paper_bgcolor="white", plot_bgcolor="white", showlegend=False,
+        xaxis=dict(title=None, showgrid=False),
+        yaxis=dict(title="PE", showgrid=True, gridcolor="#e7edf4"),
+        font=dict(color="#475569", size=12),
+    )
+    st.plotly_chart(history_fig, width="stretch")
+
+
 _inject_etf_lab_style()
 
 
 # --- 页面逻辑 ---
 render_option_page_title("ETF期权")
 
-view_options = ["总览", "持仓防线"]
+view_options = ["总览", "持仓防线", "股市估值"]
 if st.session_state.get("etf_option_active_view") not in view_options:
     st.session_state["etf_option_active_view"] = "总览"
 
@@ -894,13 +1331,29 @@ with nav_col:
         key="etf_option_active_view",
     ) or "总览"
 with target_col:
-    target = st.selectbox(
-        "标的",
-        ["510300 (300ETF)", "510050 (50ETF)", "510500 (500ETF)", "588000 (科创50ETF)", "159915 (创业板ETF)"],
-        format_func=lambda value: value.replace(" (", " ").replace(")", ""),
-        label_visibility="collapsed",
-        key="etf_option_symbol",
+    if active_view == "股市估值":
+        st.caption("全球主要指数 · PE历史分位")
+    else:
+        target = st.selectbox(
+            "标的",
+            ["510300 (300ETF)", "510050 (50ETF)", "510500 (500ETF)", "588000 (科创50ETF)", "159915 (创业板ETF)"],
+            format_func=lambda value: value.replace(" (", " ").replace(")", ""),
+            label_visibility="collapsed",
+            key="etf_option_symbol",
+        )
+
+if active_view == "股市估值":
+    valuation_cache_version = get_global_index_valuation_cache_version(de.engine)
+    _render_global_valuation_dashboard(
+        _cached_global_index_valuation_dashboard(valuation_cache_version)
     )
+    _perf_page_log(
+        page=PAGE_NAME,
+        render_ms=(time.perf_counter() - _PAGE_T0) * 1000,
+        cache_hit=-1,
+        stage="global_valuation_done",
+    )
+    st.stop()
 
 # 1. 获取基础代码
 etf_code = target.split(' ')[0] # 得到 "510050"

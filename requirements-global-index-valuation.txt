@@ -1,0 +1,2 @@
+# requirements.txt is UTF-16 in this repository; keep the updater-only PDF dependency explicit.
+pypdf==6.7.0

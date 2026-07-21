@@ -60,12 +60,55 @@ class EtfOptionVisualLayoutTests(unittest.TestCase):
         cls.tool_helpers = _load_etf_tool_helpers()
         cls.climate_source = CLIMATE_PATH.read_text(encoding="utf-8")
 
-    def test_overview_and_defense_are_the_only_views(self):
-        self.assertIn('view_options = ["总览", "持仓防线"]', self.source)
+    def test_overview_defense_and_global_valuation_view_order(self):
+        self.assertIn('view_options = ["总览", "持仓防线", "股市估值"]', self.source)
         self.assertNotIn('view_options = ["总览", "价格与IV", "持仓防线"]', self.source)
         self.assertIn('st.session_state["etf_option_active_view"] = "总览"', self.source)
         self.assertIn(') or "总览"', self.source)
         self.assertIn('key="etf_option_active_view"', self.source)
+
+    def test_global_valuation_stops_before_etf_data_requests(self):
+        self.assertIn("build_global_index_valuation_dashboard", self.source)
+        self.assertIn("get_global_index_valuation_cache_version", self.source)
+        self.assertIn("_cached_global_index_valuation_dashboard", self.source)
+        self.assertIn(
+            "def _cached_global_index_valuation_dashboard(cache_version: str):",
+            self.source,
+        )
+        self.assertNotIn(
+            "def _cached_global_index_valuation_dashboard(_cache_version: str):",
+            self.source,
+        )
+        self.assertIn(
+            "_cached_global_index_valuation_dashboard(valuation_cache_version)",
+            self.source,
+        )
+        self.assertIn('if active_view == "股市估值":', self.source)
+        self.assertIn('stage="global_valuation_done"', self.source)
+        valuation_branch = self.source.rfind('if active_view == "股市估值":')
+        etf_fetch = self.source.index("df = _cached_etf_option_analysis")
+        self.assertLess(valuation_branch, etf_fetch)
+        self.assertIn("st.stop()", self.source[valuation_branch:etf_fetch])
+        self.assertIn("全球主要指数 · PE历史分位", self.source)
+
+    def test_global_valuation_uses_summary_table_and_history_without_methodology_clutter(self):
+        self.assertIn('class="global-valuation-summary"', self.source)
+        self.assertIn('class="global-valuation-table-shell"', self.source)
+        self.assertIn('class="global-valuation-table-group"', self.source)
+        self.assertIn("历史分位（0–100）", self.source)
+        self.assertIn("市盈率（PE）历史走势", self.source)
+        self.assertIn("历史中位数", self.source)
+        self.assertIn("20%分位", self.source)
+        self.assertIn("80%分位", self.source)
+        self.assertIn('default_name = "科创50"', self.source)
+        self.assertIn('range_options = ["近1年", "近3年", "近5年", "近10年", "全部"]', self.source)
+        self.assertIn("data_date", self.source)
+        self.assertNotIn("ETF代理", self.source)
+        self.assertNotIn("含官方回溯历史", self.source)
+        self.assertNotIn("创业板PE与国证指数核对偏差超过5%", self.source)
+        self.assertNotIn("source_name", self.source)
+        self.assertNotIn("quality_message", self.source)
+        self.assertNotIn('card.get("note")', self.source)
 
     def test_each_view_renders_only_its_primary_chart(self):
         self.assertEqual(self.source.count("_render_price_iv_chart("), 2)
