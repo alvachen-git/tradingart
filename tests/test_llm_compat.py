@@ -135,6 +135,49 @@ class LlmCompatTest(unittest.TestCase):
         self.assertEqual(result, "ok")
         self.assertEqual(mock_build.call_args.kwargs["model"], "qwen-plus")
 
+    def test_report_llm_fallback_handles_dashscope_request_keyerror(self):
+        class Primary:
+            model_name = "qwen3.5-plus"
+
+            def invoke(self, messages):
+                raise KeyError("request")
+
+        class Fallback:
+            model_name = "qwen-plus"
+
+            def invoke(self, messages):
+                return "ok"
+
+        with patch("llm_compat.build_report_tongyi_llm", return_value=Fallback()) as mock_build:
+            result = invoke_report_llm_with_fallback(
+                Primary(),
+                [],
+                env_prefix="EXPIRY_OPTION_REPORT",
+                temperature=0.1,
+            )
+
+        self.assertEqual(result, "ok")
+        self.assertEqual(mock_build.call_args.kwargs["model"], "qwen-plus")
+
+    def test_report_llm_does_not_fallback_on_unrelated_keyerror(self):
+        class Primary:
+            model_name = "qwen3.5-plus"
+
+            def invoke(self, messages):
+                raise KeyError("unexpected_field")
+
+        with patch("llm_compat.build_report_tongyi_llm") as mock_build:
+            with self.assertRaises(KeyError) as ctx:
+                invoke_report_llm_with_fallback(
+                    Primary(),
+                    [],
+                    env_prefix="EXPIRY_OPTION_REPORT",
+                    temperature=0.1,
+                )
+
+        self.assertEqual(ctx.exception.args, ("unexpected_field",))
+        mock_build.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()
