@@ -25,10 +25,12 @@ def _literal_assignment(source: str, variable_name: str):
     raise AssertionError(f"assignment not found: {variable_name}")
 
 
-def test_commodity_page_includes_red_date_option():
+def test_commodity_page_includes_expected_zhengzhou_options():
     source = COMMODITY_PAGE.read_text(encoding="utf-8")
     commodity_map = _literal_assignment(source, "COMMODITY_MAP")
     assert commodity_map["CJ"] == "红枣"
+    assert commodity_map["SM"] == "锰硅"
+    assert commodity_map["SF"] == "硅铁"
 
 
 def test_commodity_contract_query_keeps_indexable_predicates():
