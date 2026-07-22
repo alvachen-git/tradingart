@@ -169,6 +169,13 @@ def build_report_tongyi_llm(
 
 
 def _is_retryable_report_llm_error(exc: Exception) -> bool:
+    # langchain-community passes DashScopeResponse to requests.HTTPError for
+    # non-200 responses. DashScopeResponse.__getattr__ raises KeyError instead
+    # of AttributeError for the missing ``request`` field, masking the original
+    # provider status before our normal 429/5xx markers can inspect it.
+    if isinstance(exc, KeyError) and exc.args == ("request",):
+        return True
+
     text = f"{type(exc).__name__}: {exc}".lower()
     retryable_markers = (
         "timeout",
