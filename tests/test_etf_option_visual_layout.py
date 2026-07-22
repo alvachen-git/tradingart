@@ -89,14 +89,23 @@ class EtfOptionVisualLayoutTests(unittest.TestCase):
         etf_fetch = self.source.index("df = _cached_etf_option_analysis")
         self.assertLess(valuation_branch, etf_fetch)
         self.assertIn("st.stop()", self.source[valuation_branch:etf_fetch])
-        self.assertIn("全球主要指数 · PE历史分位", self.source)
+        self.assertNotIn("全球主要指数 · PE历史分位", self.source)
 
     def test_global_valuation_uses_summary_table_and_history_without_methodology_clutter(self):
         self.assertIn('class="global-valuation-summary"', self.source)
         self.assertIn('class="global-valuation-table-shell"', self.source)
         self.assertIn('class="global-valuation-table-group"', self.source)
         self.assertIn("历史分位（0–100）", self.source)
-        self.assertIn("市盈率（PE）历史走势", self.source)
+        self.assertIn('class="global-valuation-history-section-head">历史走势', self.source)
+        self.assertIn('class="global-valuation-controls-marker"', self.source)
+        self.assertIn('label_visibility="collapsed"', self.source)
+        self.assertIn(
+            '"历史区间", range_options, key="global_valuation_history_range",\n'
+            '            label_visibility="collapsed",',
+            self.source,
+        )
+        self.assertIn("市盈率（PE）</strong>", self.source)
+        self.assertNotIn("市盈率（PE）历史走势", self.source)
         self.assertIn("历史中位数", self.source)
         self.assertIn("20%分位", self.source)
         self.assertIn("80%分位", self.source)

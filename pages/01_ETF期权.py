@@ -673,12 +673,42 @@ def _inject_etf_lab_style() -> None:
             font-size: 11px;
         }
 
+        .global-valuation-history-section-head {
+            margin: 24px 0 10px;
+            color: #1b2a40;
+            font-size: 17px;
+            font-weight: 740;
+            line-height: 1.35;
+        }
+
+        div[data-testid="stElementContainer"]:has(.global-valuation-controls-marker) {
+            display: none;
+        }
+
+        div[data-testid="stHorizontalBlock"]:has(.global-valuation-controls-marker) {
+            align-items: flex-end !important;
+            gap: 18px !important;
+            margin-bottom: 16px;
+        }
+
+        div[data-testid="stHorizontalBlock"]:has(.global-valuation-controls-marker) > div[data-testid="stColumn"]:first-child {
+            width: min(520px, 100%) !important;
+            max-width: 520px !important;
+            flex: 0 1 520px !important;
+        }
+
+        div[data-testid="stHorizontalBlock"]:has(.global-valuation-controls-marker) > div[data-testid="stColumn"]:last-child {
+            width: auto !important;
+            flex: 0 0 auto !important;
+            margin-left: auto;
+        }
+
         .global-valuation-history-title {
             display: flex;
             align-items: center;
             justify-content: space-between;
             gap: 18px;
-            margin-top: 10px;
+            margin-top: 0;
             padding: 14px 16px 4px;
             border: 1px solid #dce4ee;
             border-bottom: 0;
@@ -788,6 +818,20 @@ def _inject_etf_lab_style() -> None:
                 align-items: flex-start;
                 flex-direction: column;
                 gap: 6px;
+            }
+
+            div[data-testid="stHorizontalBlock"]:has(.global-valuation-controls-marker) {
+                align-items: stretch !important;
+                flex-direction: column !important;
+                gap: 10px !important;
+            }
+
+            div[data-testid="stHorizontalBlock"]:has(.global-valuation-controls-marker) > div[data-testid="stColumn"]:first-child,
+            div[data-testid="stHorizontalBlock"]:has(.global-valuation-controls-marker) > div[data-testid="stColumn"]:last-child {
+                width: 100% !important;
+                max-width: none !important;
+                flex: 0 0 auto !important;
+                margin-left: 0 !important;
             }
 
             .global-valuation-title-row h2 {
@@ -1256,11 +1300,17 @@ def _render_global_valuation_dashboard(payload: dict) -> None:
 
     available_names = [card["name"] for card in available_cards]
     default_name = "科创50" if "科创50" in available_names else available_names[0]
-    selected_col, range_col = st.columns([0.62, 0.38], gap="small", vertical_alignment="bottom")
+    st.markdown(
+        '<div class="global-valuation-history-section-head">历史走势</div>',
+        unsafe_allow_html=True,
+    )
+    selected_col, range_col = st.columns([0.5, 0.5], gap="small")
     with selected_col:
+        st.markdown('<span class="global-valuation-controls-marker"></span>', unsafe_allow_html=True)
         selected_name = st.selectbox(
             "选择指数", available_names, index=available_names.index(default_name),
             key="global_valuation_index_selector",
+            label_visibility="collapsed",
         )
     range_options = ["近1年", "近3年", "近5年", "近10年", "全部"]
     if st.session_state.get("global_valuation_history_range") not in range_options:
@@ -1268,6 +1318,7 @@ def _render_global_valuation_dashboard(payload: dict) -> None:
     with range_col:
         history_range = st.segmented_control(
             "历史区间", range_options, key="global_valuation_history_range",
+            label_visibility="collapsed",
         ) or "近5年"
     selected = next(card for card in available_cards if card["name"] == selected_name)
     history = pd.DataFrame(payload["series_by_code"][selected["code"]])
@@ -1281,7 +1332,7 @@ def _render_global_valuation_dashboard(payload: dict) -> None:
         ]
 
     st.markdown(
-        f'<div class="global-valuation-history-title"><strong>{escape(selected_name)} 市盈率（PE）历史走势</strong>'
+        f'<div class="global-valuation-history-title"><strong>{escape(selected_name)} 市盈率（PE）</strong>'
         '<span>蓝线为PE，虚线为历史中位数及20%/80%分位</span></div>',
         unsafe_allow_html=True,
     )
@@ -1331,9 +1382,7 @@ with nav_col:
         key="etf_option_active_view",
     ) or "总览"
 with target_col:
-    if active_view == "股市估值":
-        st.caption("全球主要指数 · PE历史分位")
-    else:
+    if active_view != "股市估值":
         target = st.selectbox(
             "标的",
             ["510300 (300ETF)", "510050 (50ETF)", "510500 (500ETF)", "588000 (科创50ETF)", "159915 (创业板ETF)"],
