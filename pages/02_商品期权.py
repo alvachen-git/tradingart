@@ -139,8 +139,17 @@ def _cached_latest_broker_extremes(product_code: str) -> dict:
         "prefix_like_upper": f"{clean_upper}%",
     }
     if len(clean_upper) == 1:
-        prefix_sql = "ts_code REGEXP :prefix_regex"
-        params = {"prefix_regex": strict_futures_prefix_pattern(clean_upper)}
+        exact_symbol = clean_upper.lower()
+        prefix_sql = (
+            "(LOWER(ts_code) = :exact_symbol "
+            "OR LOWER(ts_code) LIKE :exact_symbol_with_exchange "
+            "OR UPPER(ts_code) REGEXP :prefix_regex)"
+        )
+        params = {
+            "exact_symbol": exact_symbol,
+            "exact_symbol_with_exchange": f"{exact_symbol}.%",
+            "prefix_regex": strict_futures_prefix_pattern(clean_upper),
+        }
 
     latest_sql = text(
         f"""
@@ -158,13 +167,14 @@ def _cached_latest_broker_extremes(product_code: str) -> dict:
             broker,
             SUM(long_vol) AS long_vol,
             SUM(short_vol) AS short_vol,
+            SUM(net_vol) AS net_vol,
             MAX(trade_date) AS trade_date
         FROM futures_holding
         WHERE trade_date = :trade_date
           AND {prefix_sql}
           AND ts_code NOT LIKE '%TAS%'
         GROUP BY broker
-        HAVING SUM(long_vol) > 0 OR SUM(short_vol) > 0
+        HAVING SUM(long_vol) > 0 OR SUM(short_vol) > 0 OR SUM(net_vol) <> 0
         """
     )
 
@@ -181,14 +191,40 @@ def _cached_latest_broker_extremes(product_code: str) -> dict:
 
     df["long_vol"] = pd.to_numeric(df["long_vol"], errors="coerce").fillna(0.0)
     df["short_vol"] = pd.to_numeric(df["short_vol"], errors="coerce").fillna(0.0)
-    long_row = df.sort_values("long_vol", ascending=False).iloc[0]
-    short_row = df.sort_values("short_vol", ascending=False).iloc[0]
+    if "net_vol" in df.columns:
+        df["net_vol"] = pd.to_numeric(df["net_vol"], errors="coerce").fillna(0.0)
+    else:
+        df["net_vol"] = df["long_vol"] - df["short_vol"]
+    df["broker"] = (
+        df["broker"]
+        .astype(str)
+        .str.replace(r"[（\(]代客[）\)]", "", regex=True)
+        .str.strip()
+    )
+    df = (
+        df[df["broker"] != ""]
+        .groupby("broker", as_index=False)
+        .agg(
+            long_vol=("long_vol", "sum"),
+            short_vol=("short_vol", "sum"),
+            net_vol=("net_vol", "sum"),
+            trade_date=("trade_date", "max"),
+        )
+    )
+    if df.empty:
+        return {}
+
+    long_candidates = df[df["net_vol"] > 0].sort_values("net_vol", ascending=False)
+    short_candidates = df[df["net_vol"] < 0].sort_values("net_vol", ascending=True)
+    long_row = long_candidates.iloc[0] if not long_candidates.empty else None
+    short_row = short_candidates.iloc[0] if not short_candidates.empty else None
+    trade_date = str(df["trade_date"].max() or "")
     return {
-        "long_broker": str(long_row.get("broker") or "--"),
-        "long_vol": float(long_row.get("long_vol") or 0.0),
-        "short_broker": str(short_row.get("broker") or "--"),
-        "short_vol": float(short_row.get("short_vol") or 0.0),
-        "trade_date": str(long_row.get("trade_date") or short_row.get("trade_date") or ""),
+        "long_broker": str(long_row.get("broker") if long_row is not None else "--"),
+        "long_net_vol": float(long_row.get("net_vol") if long_row is not None else 0.0),
+        "short_broker": str(short_row.get("broker") if short_row is not None else "--"),
+        "short_net_vol": float(short_row.get("net_vol") if short_row is not None else 0.0),
+        "trade_date": trade_date,
     }
 
 
@@ -746,6 +782,8 @@ def _render_overview_groups(iv_stats: dict, flow: dict, broker_extremes: dict | 
     recent_tone = _tone_for_signed(flow.get("recent_5d"))
     oi_tone = _tone_for_signed(flow.get("oi_change"))
     broker_date = _format_date_short(broker_extremes.get("trade_date"))
+    long_net_vol = _safe_float(broker_extremes.get("long_net_vol"))
+    short_net_vol = _safe_float(broker_extremes.get("short_net_vol"))
     tooltips = {
         "curr_iv": "当前期权市场预期的波动。价格涨且IV也升，通常说明追涨意愿强；价格跌且IV升，多半是避险和空头压力在增加。",
         "iv_rank": "把当前IV放到过去一年里看位置。分位低说明期权不算贵，行情启动时更有弹性；分位高说明情绪较满，要防冲高回落或急跌反弹。",
@@ -755,8 +793,8 @@ def _render_overview_groups(iv_stats: dict, flow: dict, broker_extremes: dict | 
         "recent_flow": "看最近5天资金有没有连续同向。持续流入对价格偏支撑，持续流出会让反弹压力变大。",
         "margin": "估算留在该品种里的保证金规模。资金沉淀越高，说明关注度越高，价格到关键位时更容易放大波动。",
         "oi_change": "今天总持仓比上一交易日的变化。上涨增仓偏多头主动，下跌增仓偏空头主动；减仓多是原方向资金离场。",
-        "long_broker": "最新日多单最多的席位。龙头席位持续加多，对价格偏支撑；如果价格不涨，说明上方卖压也不轻。",
-        "short_broker": "最新日空单最多的席位。空头集中增加，对价格偏压力；如果价格不跌，说明下方买盘承接较强。",
+        "long_broker": "最新日净持仓为多且数量最大的席位，口径是多单减空单。净多集中，对价格偏支撑；若价格不涨，说明上方卖压也不轻。",
+        "short_broker": "最新日净持仓为空且数量最大的席位，口径是多单减空单。净空集中，对价格偏压力；若价格不跌，说明下方买盘承接较强。",
     }
     option_cards = [
         _metric_tile_html(
@@ -817,17 +855,17 @@ def _render_overview_groups(iv_stats: dict, flow: dict, broker_extremes: dict | 
     ]
     broker_cards = [
         _metric_tile_html(
-            "最大多头席位",
+            "最大净多席位",
             str(broker_extremes.get("long_broker") or "--"),
-            f"多单 {_format_lots(broker_extremes.get('long_vol'))} · {broker_date}",
+            f"净多 {_format_lots(long_net_vol)} · {broker_date}",
             "positive",
             tooltip=tooltips["long_broker"],
             variant="broker",
         ),
         _metric_tile_html(
-            "最大空头席位",
+            "最大净空席位",
             str(broker_extremes.get("short_broker") or "--"),
-            f"空单 {_format_lots(broker_extremes.get('short_vol'))} · {broker_date}",
+            f"净空 {_format_lots(abs(short_net_vol or 0.0))} · {broker_date}",
             "negative",
             tooltip=tooltips["short_broker"],
             variant="broker",
