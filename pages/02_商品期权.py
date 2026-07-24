@@ -1926,19 +1926,22 @@ else:
     target_contract = selected_opt
     is_continuous = False
 
-view_options = ["总览", "资金流", "波动率结构", "持仓信号"]
-if st.session_state.get("commodity_option_active_view") not in view_options:
+visible_view_options = ["总览"]
+if st.session_state.get("commodity_option_active_view") not in visible_view_options:
     st.session_state["commodity_option_active_view"] = "总览"
 
-nav_col, _ = st.columns([0.58, 0.42], gap="small", vertical_alignment="center")
-with nav_col:
-    st.markdown('<div class="commodity-lab-page-nav"></div>', unsafe_allow_html=True)
-    active_view = st.segmented_control(
-        "页面",
-        options=view_options,
-        label_visibility="collapsed",
-        key="commodity_option_active_view",
-    ) or "总览"
+if len(visible_view_options) > 1:
+    nav_col, _ = st.columns([0.58, 0.42], gap="small", vertical_alignment="center")
+    with nav_col:
+        st.markdown('<div class="commodity-lab-page-nav"></div>', unsafe_allow_html=True)
+        active_view = st.segmented_control(
+            "页面",
+            options=visible_view_options,
+            label_visibility="collapsed",
+            key="commodity_option_active_view",
+        ) or "总览"
+else:
+    active_view = "总览"
 
 st.markdown('<div class="option-page-header-divider"></div>', unsafe_allow_html=True)
 
