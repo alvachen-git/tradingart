@@ -4669,116 +4669,37 @@ def log_token_usage(username, model_name, input_tokens, output_tokens, query_tex
 
 
 @tool
-def get_stock_valuation(symbol: str):
-    """
-    【估值分析】支持股票和指数。
-    查询当前的估值指标(PE/PB)以及在历史(过去3-10年)中的分位水平。
-    用于判断是"便宜"还是"贵"。
+def get_stock_valuation(symbol: str, as_of_date: str = ""):
+    """查询股票或指数的PE/PB及近10年月末历史分位。
 
     Args:
-        symbol: 名称或代码，如 '茅台', '600519', '沪深300', '000300.SH'
+        symbol: 名称或代码，如“茅台”、“600519”或“沪深300”。
+        as_of_date: 可选截止日期，格式 YYYYMMDD 或 YYYY-MM-DD。
+
+    历史分位只说明估值位置，不等同于内在价值，也不单独构成买卖建议。
     """
-    if engine is None: return "数据库连接失败"
-
-    # 1. 智能识别代码
-    import symbol_map
-    res = symbol_map.resolve_symbol(symbol)
-
-    # 【修复点1】增强识别逻辑，允许 index 类型通过
-    if not res:
-        return f"未找到 {symbol}，请确认名称。"
-
-    ts_code, asset_type = res
-
-    # 如果识别出来既不是 stock 也不是 index (比如是期货)，直接返回不支持
-    if asset_type not in ['stock', 'index']:
-        return f"品种 {symbol} ({asset_type}) 不支持估值分析（通常只有股票和指数有PE）。"
-
+    if engine is None:
+        return "数据库连接失败"
     try:
-        # 【修复点2】根据类型决定查哪张表
-        table_name = 'stock_valuation'
-        if asset_type == 'index':
-            table_name = 'index_valuation'
+        from valuation_ai_tools import (
+            build_global_index_valuation_context,
+            build_stock_valuation_profile,
+        )
 
-        # 2. 查询历史估值数据
-        # 限制 1250 条大约是 5 年的数据
-        sql = text(f"""
-            SELECT trade_date, pe_ttm, pb, total_mv
-            FROM {table_name} 
-            WHERE ts_code = :ts_code
-            ORDER BY trade_date DESC 
-            LIMIT 2000
-        """)
-        df = pd.read_sql(sql, engine, params={"ts_code": ts_code})
-
-        if df.empty:
-            return f"暂无 {symbol} ({ts_code}) 的估值数据。请确认是否已运行 update_{asset_type}_valuation.py 更新数据。"
-
-        # 取最新一天的数据
-        curr = df.iloc[0]
-
-        # 容错：指数表可能有时候 pe_ttm 是 0，尝试用 pe 字段（如果表里有的话，这里假设入库时已处理）
-        curr_pe = curr['pe_ttm']
-        curr_pb = curr['pb']
-
-        # --- 3. 计算历史分位 ---
-        from scipy import stats
-
-        # 过滤有效数据 (PE>0)
-        valid_pe_history = df[df['pe_ttm'] > 0]['pe_ttm']
-        valid_pb_history = df[df['pb'] > 0]['pb']
-
-        pe_rank = 0
-        pe_desc = "数据不足"
-
-        if len(valid_pe_history) > 100:
-            pe_rank = stats.percentileofscore(valid_pe_history, curr_pe)
-
-            if pe_rank < 10:
-                pe_desc = "历史极值低位 (地板价 🔥)"
-            elif pe_rank < 30:
-                pe_desc = "偏低 (低估区域 ✅)"
-            elif pe_rank < 70:
-                pe_desc = "合理区间 (中枢震荡)"
-            elif pe_rank < 90:
-                pe_desc = "偏高 (高估区域 ⚠️)"
-            else:
-                pe_desc = "历史极值高位 (泡沫风险 ❌)"
-        elif curr_pe <= 0:
-            pe_desc = "亏损/无效"
-
-        # --- 4. 生成报告 ---
-        mv_val = curr['total_mv'] / 10000.0  # 假设单位是万元 -> 亿元
-        mv_unit = "亿"
-
-        # 指数的市值通常巨大，单位调整一下
-        if asset_type == 'index' and mv_val > 10000:
-            mv_val = mv_val / 10000.0
-            mv_unit = "万亿"
-
-        report = f"📊 **{symbol} ({ts_code}) 估值分析** ({curr['trade_date']})\n"
-        report += f"- **类型**: {'指数' if asset_type == 'index' else '个股'}\n"
-        report += f"- **总市值**: {mv_val:.2f} {mv_unit}\n"
-        report += "--------------------------------\n"
-
-        # PE 部分
-        report += f"💎 **市盈率 (PE-TTM)**: {curr_pe:.2f}\n"
-        if len(valid_pe_history) > 100:
-            report += f"   - **历史分位**: {pe_rank:.1f}% ({pe_desc})\n"
-            report += f"   - **近{len(df) // 250}年最高**: {valid_pe_history.max():.2f} | **最低**: {valid_pe_history.min():.2f}\n"
-        else:
-            report += f"   - 状态: {pe_desc}\n"
-
-        # PB 部分
-        report += f"🏠 **市净率 (PB)**: {curr_pb:.2f}\n"
-        if len(valid_pb_history) > 100:
-            pb_rank = stats.percentileofscore(valid_pb_history, curr_pb)
-            report += f"   - **历史分位**: {pb_rank:.1f}%\n"
-
-        return report
-
-    except Exception as e:
-        return f"估值分析出错: {e}"
+        profile = build_stock_valuation_profile(
+            symbol=symbol,
+            as_of_date=as_of_date,
+            engine=engine,
+        )
+        if profile.get("status") == "index_subject":
+            return build_global_index_valuation_context(
+                query=symbol,
+                as_of_date=as_of_date,
+                engine=engine,
+            ).get("report", "")
+        return str(profile.get("report") or "")
+    except Exception as exc:
+        return f"估值分析出错: {exc}"
 
 
 @tool

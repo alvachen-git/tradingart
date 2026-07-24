@@ -327,6 +327,7 @@ def _resolve_a_share_code_from_symbol_map_source(terms: List[str]) -> str:
             source = handle.read()
     except Exception:
         return ""
+
     for term in terms:
         if not term:
             continue
@@ -334,6 +335,20 @@ def _resolve_a_share_code_from_symbol_map_source(terms: List[str]) -> str:
         match = re.search(pattern, source)
         if match:
             return _normalize_a_share_code(match.group(1))
+
+    aliases = re.findall(
+        r"['\"]([^'\"]{2,40})['\"]\s*:\s*['\"](\d{6}\.(?:SH|SZ|BJ))['\"]",
+        source,
+    )
+    containing_matches = [
+        (alias, code)
+        for term in terms
+        for alias, code in aliases
+        if term and alias in term
+    ]
+    if containing_matches:
+        _, code = max(containing_matches, key=lambda item: len(item[0]))
+        return _normalize_a_share_code(code)
     return ""
 
 
@@ -878,6 +893,14 @@ def _clean_cninfo_title(title: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
+def _infer_company_name_from_filing_title(title: str) -> str:
+    text = _clean_cninfo_title(title)
+    match = re.match(r"(.+?)(?=(?:19|20)\d{2}年)", text)
+    if not match:
+        return ""
+    return match.group(1).rstrip("：: -").strip()
+
+
 def _normalize_cninfo_date(value: Any) -> str:
     if value in (None, ""):
         return ""
@@ -985,7 +1008,10 @@ def _fetch_cninfo_announcements(search_key: str, *, timeout_seconds: float, max_
             break
         data = {
             "pageNum": "1",
-            "pageSize": str(max(10, min(max_results * 4, 30))),
+            # max_results limits the final report list, not the announcement
+            # search depth. Companies with frequent disclosures can otherwise
+            # push the latest periodic report beyond the first 20 notices.
+            "pageSize": "30",
             "column": column,
             "tabName": "fulltext",
             "plate": "",
@@ -1061,7 +1087,8 @@ def _official_filing_probe(query: str) -> Optional[FilingProbeResult]:
     if not reports:
         return None
 
-    return FilingProbeResult(company=company, reports=reports)
+    normalized_company = _infer_company_name_from_filing_title(reports[0].title)
+    return FilingProbeResult(company=normalized_company or company, reports=reports)
 
 
 def _should_try_official_filing_probe(query: str, answer: str) -> bool:
@@ -1259,6 +1286,154 @@ def _format_filing_probe_result(
         ])
     lines.append("仅供研究参考，不构成投资建议。")
     return "\n".join(lines)
+
+
+def _empty_filing_snapshot(status: str, message: str, *, query: str = "") -> Dict[str, Any]:
+    result = {
+        "status": status,
+        "query": str(query or "").strip(),
+        "company": "",
+        "report_period": "",
+        "report_type": "",
+        "source_title": "",
+        "source_date": "",
+        "source_url": "",
+        "metrics": {
+            "revenue": "",
+            "net_profit_parent": "",
+            "deducted_net_profit": "",
+            "operating_cashflow": "",
+            "eps": "",
+        },
+        "gaps": [message] if message else [],
+    }
+    result["report"] = (
+        "【最新官方财报】\n"
+        f"结论：证据不足。{message or '本轮未取得可核验的官方财报数据。'}\n"
+        "提示：不得使用模型记忆补充财报数字。"
+    )
+    return result
+
+
+def _render_filing_snapshot(result: Dict[str, Any]) -> str:
+    status = str(result.get("status") or "")
+    if status not in {"ok", "partial"}:
+        return str(result.get("report") or "")
+
+    metrics = result.get("metrics") or {}
+    lines = [
+        "【最新官方财报】",
+        (
+            f"结论：已核对 {result.get('company') or '该公司'} 的"
+            f"{result.get('report_period') or result.get('report_type') or '最新定期报告'}。"
+        ),
+        (
+            f"- 报告：{result.get('source_title') or '未标明标题'}；"
+            f"披露日期 {result.get('source_date') or '未标明'}。"
+        ),
+    ]
+    metric_lines = (
+        ("营业收入", metrics.get("revenue")),
+        ("归母净利润", metrics.get("net_profit_parent")),
+        ("扣非归母净利润", metrics.get("deducted_net_profit")),
+        ("经营现金流量净额", metrics.get("operating_cashflow")),
+        ("基本每股收益", metrics.get("eps")),
+    )
+    for label, value in metric_lines:
+        if str(value or "").strip():
+            lines.append(f"- {label}：{value}")
+    if result.get("source_url"):
+        lines.append(f"- 官方来源：{result['source_url']}")
+    gaps = [str(item) for item in result.get("gaps") or [] if str(item).strip()]
+    if gaps:
+        lines.append(f"- 数据缺口：{'；'.join(gaps)}")
+    lines.append("提示：以上只陈述官方报告中成功解析的字段，不据此单独给出投资结论。")
+    return "\n".join(lines)
+
+
+def build_latest_a_share_filing_snapshot(query: str) -> Dict[str, Any]:
+    """Return a structured snapshot from the latest official A-share filing.
+
+    The function queries CNINFO directly and parses only fields found in the
+    selected filing.  It never fills missing fundamentals from model memory or
+    a generic web-search answer.
+    """
+    raw_query = str(query or "").strip()
+    if not raw_query:
+        return _empty_filing_snapshot("invalid_request", "请提供A股公司名称或代码。")
+
+    filing_query = raw_query
+    if not any(keyword in filing_query for keyword in _FILING_KEYWORDS):
+        filing_query = f"{filing_query} 最新财报"
+    try:
+        probe_result = _official_filing_probe(filing_query)
+    except Exception as exc:
+        return _empty_filing_snapshot(
+            "error",
+            f"官方财报查询失败：{exc}",
+            query=raw_query,
+        )
+    if not probe_result or not probe_result.reports:
+        return _empty_filing_snapshot(
+            "no_data",
+            "未找到可核验的最新官方定期报告。",
+            query=raw_query,
+        )
+
+    report = probe_result.reports[0]
+    try:
+        metrics = _download_and_parse_filing_pdf(report)
+    except Exception as exc:
+        metrics = None
+        parse_error = f"官方报告指标解析失败：{exc}"
+    else:
+        parse_error = ""
+
+    values = {
+        "revenue": str(getattr(metrics, "revenue", "") or "").strip(),
+        "net_profit_parent": str(getattr(metrics, "net_profit_parent", "") or "").strip(),
+        "deducted_net_profit": str(getattr(metrics, "deducted_net_profit", "") or "").strip(),
+        "operating_cashflow": str(getattr(metrics, "operating_cashflow", "") or "").strip(),
+        "eps": str(getattr(metrics, "eps", "") or "").strip(),
+    }
+    missing_labels = [
+        label
+        for key, label in (
+            ("revenue", "营业收入"),
+            ("net_profit_parent", "归母净利润"),
+            ("deducted_net_profit", "扣非归母净利润"),
+            ("operating_cashflow", "经营现金流量净额"),
+            ("eps", "基本每股收益"),
+        )
+        if not values[key]
+    ]
+    gaps: List[str] = []
+    if parse_error:
+        gaps.append(parse_error)
+    if missing_labels:
+        gaps.append(f"未解析到{'、'.join(missing_labels)}")
+    gaps.append("本轮未从官方报告结构化提取品牌、渠道或竞争力证据")
+    report_period = str(getattr(metrics, "period", "") or "").strip() or _infer_period_from_title(report.title)
+    result = {
+        "status": "ok" if any(values.values()) else "partial",
+        "query": raw_query,
+        "company": probe_result.company,
+        "report_period": report_period,
+        "report_type": report.report_type,
+        "source_title": report.title,
+        "source_date": report.date,
+        "source_url": report.url,
+        "metrics": values,
+        "gaps": gaps,
+    }
+    result["report"] = _render_filing_snapshot(result)
+    return result
+
+
+@tool
+def get_latest_a_share_filing_snapshot(query: str) -> str:
+    """Read the latest official A-share filing and return parsed core metrics."""
+    return build_latest_a_share_filing_snapshot(query).get("report", "")
 
 
 def _invoke_search_once(client: ZhipuAI, *, original_query: str, search_query: str, attempt_index: int = 0) -> str:

@@ -53,6 +53,19 @@ class TestChatRouting(unittest.TestCase):
         self.assertEqual(classify_chat_mode("帮我分析我的持仓风险大吗"), CHAT_MODE_ANALYSIS)
         self.assertEqual(classify_chat_mode("中证500现在上涨是会升波还是降波呢"), CHAT_MODE_ANALYSIS)
 
+    def test_named_company_value_investing_routes_to_analysis(self):
+        for query in (
+            "贵州茅台适合长期价值投资吗",
+            "贵州茅台的盈利质量和现金流能否支撑长期持有",
+            "贵州茅台的安全边际和护城河怎么样",
+        ):
+            with self.subTest(query=query):
+                self.assertEqual(classify_chat_mode(query), CHAT_MODE_ANALYSIS)
+
+    def test_value_investing_concept_explanation_stays_knowledge(self):
+        self.assertEqual(classify_chat_mode("什么是价值投资"), CHAT_MODE_KNOWLEDGE)
+        self.assertEqual(classify_chat_mode("怎么理解安全边际"), CHAT_MODE_KNOWLEDGE)
+
     def test_volatility_direction_view_routes_to_analysis_not_knowledge(self):
         self.assertTrue(is_volatility_market_view_query("中证500现在上涨是会升波还是降波呢"))
         self.assertTrue(is_volatility_market_view_query("500ETF最近反弹后IV会升还是会降"))

@@ -285,6 +285,20 @@ class TestSearchTools(unittest.TestCase):
         self.assertTrue(result.reports[0].url.startswith("https://static.cninfo.com.cn/"))
         self.assertGreaterEqual(post.call_count, 1)
 
+    def test_cninfo_query_depth_does_not_shrink_with_output_limit(self):
+        response = Mock()
+        response.json.return_value = {"announcements": []}
+        response.raise_for_status.return_value = None
+        with patch.object(search_tools.requests, "post", return_value=response) as post:
+            search_tools._fetch_cninfo_announcements(
+                "600519",
+                timeout_seconds=4,
+                max_results=5,
+            )
+
+        self.assertGreaterEqual(post.call_count, 1)
+        self.assertEqual(post.call_args.kwargs["data"]["pageSize"], "30")
+
     def test_official_filing_probe_uses_resolved_stock_code_before_company_name(self):
         current_year = search_tools._current_year()
         payload = {
@@ -330,6 +344,32 @@ class TestSearchTools(unittest.TestCase):
             code = search_tools._resolve_a_share_code_from_symbol_map_source(["汇川技术"])
         self.assertEqual(code, "300124")
 
+    def test_symbol_source_fallback_finds_company_alias_inside_long_question(self):
+        code = search_tools._resolve_a_share_code_from_symbol_map_source(
+            ["贵州茅台适合长期价值投资"]
+        )
+        self.assertEqual(code, "600519")
+
+    def test_official_filing_probe_normalizes_company_from_long_question(self):
+        current_year = search_tools._current_year()
+        payload = [
+            {
+                "announcementTitle": f"贵州茅台{current_year}年第一季度报告",
+                "announcementTime": "2026-04-30",
+                "adjunctUrl": "finalpage/moutai-q1.pdf",
+            }
+        ]
+        with patch.dict(os.environ, _SEARCH_ENV_DEFAULTS), \
+             patch.object(search_tools, "_resolve_a_share_code", return_value="600519"), \
+             patch.object(search_tools, "_fetch_cninfo_announcements", return_value=payload):
+            result = search_tools._official_filing_probe(
+                "贵州茅台适合长期价值投资吗 最新财报"
+            )
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result.company, "贵州茅台")
+        self.assertEqual(result.reports[0].title, f"贵州茅台{current_year}年第一季度报告")
+
     def test_parse_filing_pdf_extracts_core_metrics_and_profit_conclusion(self):
         report = search_tools.FilingReport(
             title=f"中芯国际{search_tools._current_year()}年第一季度报告",
@@ -361,6 +401,65 @@ class TestSearchTools(unittest.TestCase):
         self.assertIn("是盈利的", answer)
         self.assertIn("营业收入", answer)
         self.assertIn("归母净利润", answer)
+
+    def test_structured_latest_filing_snapshot_uses_official_report_only(self):
+        report = search_tools.FilingReport(
+            title="贵州茅台2026年第一季度报告",
+            date="2026-04-30",
+            url="https://static.cninfo.com.cn/finalpage/moutai-q1.pdf",
+            report_type="一季报",
+        )
+        metrics = search_tools.FilingMetrics(
+            revenue="48,000,000,000.00",
+            net_profit_parent="25,000,000,000.00",
+            deducted_net_profit="24,900,000,000.00",
+            operating_cashflow="18,000,000,000.00",
+            eps="19.90",
+            period="2026年第一季度",
+            source_title=report.title,
+            source_date=report.date,
+        )
+        probe = search_tools.FilingProbeResult(company="贵州茅台", reports=[report])
+
+        with patch.object(search_tools, "_official_filing_probe", return_value=probe) as official, \
+             patch.object(search_tools, "_download_and_parse_filing_pdf", return_value=metrics):
+            result = search_tools.build_latest_a_share_filing_snapshot(
+                "贵州茅台适合长期价值投资吗"
+            )
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["company"], "贵州茅台")
+        self.assertEqual(result["report_period"], "2026年第一季度")
+        self.assertEqual(result["metrics"]["deducted_net_profit"], "24,900,000,000.00")
+        self.assertIn("经营现金流量净额", result["report"])
+        self.assertIn(report.url, result["report"])
+        self.assertIn("竞争力证据", result["report"])
+        official.assert_called_once_with("贵州茅台适合长期价值投资吗 最新财报")
+
+    def test_structured_latest_filing_snapshot_degrades_when_metrics_are_missing(self):
+        report = search_tools.FilingReport(
+            title="贵州茅台2026年第一季度报告",
+            date="2026-04-30",
+            url="https://static.cninfo.com.cn/finalpage/moutai-q1.pdf",
+            report_type="一季报",
+        )
+        probe = search_tools.FilingProbeResult(company="贵州茅台", reports=[report])
+        with patch.object(search_tools, "_official_filing_probe", return_value=probe), \
+             patch.object(search_tools, "_download_and_parse_filing_pdf", return_value=None):
+            result = search_tools.build_latest_a_share_filing_snapshot("贵州茅台")
+
+        self.assertEqual(result["status"], "partial")
+        self.assertIn("数据缺口", result["report"])
+        self.assertNotIn("2023", result["report"])
+        self.assertNotIn("2024", result["report"])
+
+    def test_structured_latest_filing_snapshot_handles_official_query_failure(self):
+        with patch.object(search_tools, "_official_filing_probe", side_effect=TimeoutError("timeout")):
+            result = search_tools.build_latest_a_share_filing_snapshot("贵州茅台")
+
+        self.assertEqual(result["status"], "error")
+        self.assertIn("证据不足", result["report"])
+        self.assertIn("官方财报查询失败", result["report"])
 
     def test_pdf_parse_disabled_returns_only_official_metadata(self):
         report = search_tools.FilingReport(

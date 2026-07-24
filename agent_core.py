@@ -72,7 +72,11 @@ from data_engine import (
     tool_analyze_position_change,
     tool_compare_stocks,
 )
-from search_tools import search_web, is_search_answer_acceptable
+from search_tools import (
+    build_latest_a_share_filing_snapshot,
+    is_search_answer_acceptable,
+    search_web,
+)
 from market_correlation import tool_stock_hedging_analysis, tool_futures_correlation_check,tool_stock_correlation_check
 from beta_tool import calculate_hedging_beta
 from knowledge_tools import search_investment_knowledge
@@ -85,6 +89,7 @@ from option_delta_tools import (
 )
 from us_options_ai_tools import get_us_option_market_profile, get_us_option_strategy_candidates
 from cn_margin_ai_tools import get_cn_margin_market_signal
+from valuation_ai_tools import get_global_index_valuation, match_index_codes
 from portfolio_tools import (
     get_user_portfolio_summary,
     get_user_portfolio_details,
@@ -375,6 +380,30 @@ STOCK_SELECTION_QUERY_KEYWORDS = [
     "买什么股", "有什么好股票", "找股票", "挖股票", "龙头股", "概念股有哪些", "帮我找",
     "帮我筛", "找几只", "找一下", "候选股",
 ]
+SECURITIES_VALUATION_KEYWORDS = [
+    "估值", "市盈率", "市净率", "估值分位", "历史分位", "分位", "便宜", "贵不贵",
+    "高估", "低估", "估值高", "估值低",
+]
+GLOBAL_INDEX_VALUATION_SUBJECT_KEYWORDS = [
+    "全球", "各大股市", "各市场", "美股", "美国股市", "美国市场", "a股", "A股", "沪深股市",
+    "港股", "香港股市", "香港市场", "指数", "股指", "宽基", "ETF", "etf",
+]
+VALUE_INVESTING_ANALYSIS_KEYWORDS = [
+    "价值投资", "长期持有", "长期投资", "长期价值", "安全边际", "基本面", "财报", "护城河",
+    "盈利质量", "现金流", "竞争力", "内在价值", "值不值得长期", "长期能买吗",
+]
+VALUATION_CONCEPT_KEYWORDS = [
+    "什么是", "是什么意思", "怎么计算", "如何计算", "计算公式", "概念", "教学", "原理",
+]
+VALUATION_EXCLUDED_KEYWORDS = [
+    "融资轮", "天使轮", "种子轮", "A轮", "B轮", "C轮", "D轮", "投前估值", "投后估值",
+    "再融资", "房产估值", "房地产估值", "物业估值", "期权定价", "期权估值", "DCF",
+    "dcf", "现金流折现",
+]
+VALUATION_DIRECT_ANALYSIS_BLOCKERS = [
+    "怎么看", "分析", "为什么", "影响", "适合", "值得", "长期", "价值投资", "基本面", "财报",
+    "护城河", "盈利质量", "现金流", "安全边际", "买", "卖", "建议", "策略", "风险",
+]
 OPTION_QUERY_KEYWORDS = [
     "期权", "认购", "认沽", "行权价", "波动率", "iv", "delta", "gamma", "vega", "theta",
     "升波", "降波", "牛市价差", "熊市价差", "跨式", "宽跨", "勒式",
@@ -433,6 +462,265 @@ def _dedupe_plan(plan: List[str]) -> List[str]:
         if step and step not in deduped_plan:
             deduped_plan.append(step)
     return deduped_plan
+
+
+def _contains_any_ci(text: str, keywords: list[str]) -> bool:
+    lowered = str(text or "").lower()
+    return any(str(keyword).lower() in lowered for keyword in keywords)
+
+
+def _is_excluded_valuation_query(query: str) -> bool:
+    return _contains_any_ci(query, VALUATION_EXCLUDED_KEYWORDS)
+
+
+def _has_securities_valuation_intent(query: str) -> bool:
+    text = str(query or "").strip()
+    if _contains_any_ci(text, SECURITIES_VALUATION_KEYWORDS):
+        return True
+    return bool(re.search(r"(?<![a-z0-9])(?:pe|pb)(?:-ttm)?(?![a-z0-9])", text, flags=re.I))
+
+
+def _is_valuation_concept_query(query: str) -> bool:
+    text = str(query or "").strip()
+    return _contains_any_ci(text, VALUATION_CONCEPT_KEYWORDS) and (
+        _has_securities_valuation_intent(text) or _contains_any_ci(text, ["DCF", "现金流折现"])
+    )
+
+
+def _is_global_index_valuation_query(query: str) -> bool:
+    text = str(query or "").strip()
+    if not text or _is_excluded_valuation_query(text) or _is_valuation_concept_query(text):
+        return False
+    has_index_subject = bool(match_index_codes(text)) or _contains_any_ci(
+        text, GLOBAL_INDEX_VALUATION_SUBJECT_KEYWORDS
+    )
+    return has_index_subject and _has_securities_valuation_intent(text)
+
+
+def _is_securities_valuation_query(query: str) -> bool:
+    text = str(query or "").strip()
+    if not text or _is_excluded_valuation_query(text) or _is_valuation_concept_query(text):
+        return False
+    return _has_securities_valuation_intent(text) or _contains_any_ci(
+        text, VALUE_INVESTING_ANALYSIS_KEYWORDS
+    )
+
+
+def _is_value_investing_analysis_query(query: str) -> bool:
+    text = str(query or "").strip()
+    if not _is_securities_valuation_query(text):
+        return False
+    return _contains_any_ci(text, VALUE_INVESTING_ANALYSIS_KEYWORDS)
+
+
+VALUE_INVESTING_RESPONSE_HEADINGS = (
+    "### 研究结论",
+    "### 公司质量",
+    "### 估值与安全边际",
+    "### 市场环境",
+    "### 证伪条件",
+)
+VALUE_INVESTING_RESPONSE_POSTURES = ("适合长期研究", "继续观察", "证据不足")
+VALUE_INVESTING_RESPONSE_FORBIDDEN = (
+    "Cash Secured Put", "cash secured put", "卖出认沽", "卖Put", "卖 put",
+    "期权策略", "RSI", "MACD", "KDJ", "BOLL", "布林", "具体买入价", "仓位建议",
+)
+
+
+def _is_valid_value_investing_response(text: str) -> bool:
+    content = str(text or "").strip()
+    if not content:
+        return False
+    if not all(heading in content for heading in VALUE_INVESTING_RESPONSE_HEADINGS):
+        return False
+    if not any(posture in content for posture in VALUE_INVESTING_RESPONSE_POSTURES):
+        return False
+    return not _contains_any_ci(content, list(VALUE_INVESTING_RESPONSE_FORBIDDEN))
+
+
+def _compact_report_lines(report: str, *, max_lines: int = 7) -> str:
+    lines = [
+        line.strip()
+        for line in str(report or "").splitlines()
+        if line.strip() and not line.strip().startswith("【")
+    ]
+    return "\n".join(lines[:max_lines]) or "- 当前数据源未取得可核验信息。"
+
+
+def _build_value_investing_fallback(
+    *,
+    subject: str,
+    filing_report: str,
+    stock_report: str,
+    index_report: str,
+) -> str:
+    filing_has_core_metrics = any(
+        label in str(filing_report or "")
+        for label in ("营业收入", "归母净利润", "扣非归母净利润", "经营现金流量净额")
+    )
+    valuation_is_low = "历史低位" in str(stock_report or "")
+    if not filing_has_core_metrics:
+        posture = "证据不足"
+        conclusion = "已取得估值位置，但最新盈利与现金流证据不完整，暂不能形成长期持有判断。"
+    elif valuation_is_low:
+        posture = "适合长期研究"
+        conclusion = "估值安全垫较历史明显改善，但仍需确认盈利、现金流和竞争力没有结构性恶化。"
+    else:
+        posture = "继续观察"
+        conclusion = "公司质量与当前价格尚未同时形成清晰安全边际，需要继续核对基本面和估值。"
+    display_subject = str(subject or "该公司").strip()
+    return (
+        "### 研究结论\n"
+        f"- **{posture}**：{display_subject}{conclusion}\n\n"
+        "### 公司质量\n"
+        f"{_compact_report_lines(filing_report)}\n\n"
+        "### 估值与安全边际\n"
+        f"{_compact_report_lines(stock_report, max_lines=6)}\n"
+        "- 历史低位不等于内在价值低估，还要确认低分位并非来自基本面永久恶化。\n\n"
+        "### 市场环境\n"
+        f"{_compact_report_lines(index_report, max_lines=5)}\n"
+        "- 指数仅作为风格环境参考，不替代个股判断。\n\n"
+        "### 证伪条件\n"
+        "- 收入与扣非利润持续转弱。\n"
+        "- 经营现金流明显落后于净利润。\n"
+        "- 品牌定价能力、渠道库存或股东回报政策出现结构性变化。"
+    )
+
+
+def _invoke_value_investing_tool(tool_obj: Any, payload: Dict[str, str], *, label: str) -> str:
+    try:
+        return str(tool_obj.invoke(payload) or "").strip()
+    except Exception as exc:
+        return f"【{label}】\n结论：证据不足。数据读取失败：{exc}"
+
+
+def _resolve_value_investing_subject(state: AgentState, researcher_report: str) -> str:
+    symbol_name = str(state.get("symbol_name", "") or "").strip()
+    if symbol_name:
+        return symbol_name
+
+    report = str(researcher_report or "")
+    for pattern in (
+        r"已核对\s+(.+?)\s+的(?:19|20)\d{2}年",
+        r"报告[：:]\s*(.+?)(?=(?:19|20)\d{2}年)",
+    ):
+        match = re.search(pattern, report)
+        if match:
+            candidate = match.group(1).strip(" ：:-")
+            if candidate:
+                return candidate
+
+    symbol = str(state.get("symbol", "") or "").strip()
+    return symbol or str(state.get("user_query", "") or "").strip()
+
+
+def _value_investing_benchmark_query(subject: str) -> str:
+    text = str(subject or "").upper()
+    if text.endswith(".US"):
+        return "纳斯达克100 标普500 罗素2000"
+    if text.endswith(".HK"):
+        return "恒生指数 恒生科技指数"
+    if "科创" in text or re.search(r"(?<!\d)688\d{3}(?:\.SH)?(?!\d)", text):
+        return "科创50 沪深300 中证1000"
+    if "创业" in text or re.search(r"(?<!\d)30\d{4}(?:\.SZ)?(?!\d)", text):
+        return "创业板指 沪深300 中证1000"
+    return "沪深300 中证500 中证1000"
+
+
+def _build_value_investing_answer(
+    *,
+    state: AgentState,
+    llm: Any,
+    researcher_report: str,
+) -> str:
+    query = str(state.get("user_query", "") or "").strip()
+    subject = _resolve_value_investing_subject(state, researcher_report)
+    stock_report = _invoke_value_investing_tool(
+        get_stock_valuation,
+        {"symbol": subject, "as_of_date": ""},
+        label="个股估值",
+    )
+    index_report = _invoke_value_investing_tool(
+        get_global_index_valuation,
+        {"query": _value_investing_benchmark_query(subject), "as_of_date": ""},
+        label="指数环境",
+    )
+    fallback = _build_value_investing_fallback(
+        subject=subject,
+        filing_report=researcher_report,
+        stock_report=stock_report,
+        index_report=index_report,
+    )
+    prompt = f"""
+你是一名长期价值投资研究员。请只使用下列三组已核验资料，回答客户问题。
+
+【客户问题】
+{query}
+
+【最新官方财报证据】
+{researcher_report or "证据不足：本轮未取得最新官方财报。"}
+
+【个股估值】
+{stock_report}
+
+【市场与风格指数环境】
+{index_report}
+
+【输出要求】
+1. 严格使用以下五个标题，保持简洁：
+   ### 研究结论
+   ### 公司质量
+   ### 估值与安全边际
+   ### 市场环境
+   ### 证伪条件
+2. 研究结论必须明确使用“适合长期研究”“继续观察”或“证据不足”之一，但不得直接下达买卖指令。
+3. 只有最新官方财报包含的数字才能用于公司质量判断；没有竞争力证据时明确说明缺口，不得用模型记忆补充品牌、渠道、毛利率、ROE或旧年份财务数字。
+4. 个股估值必须保留PE、PB、股息率、历史分位和数据日期；历史低位不等于绝对低估。
+5. 市场环境最多两句话，只说明宽基指数相对自身历史的位置；不得用指数原始PE直接比较高低估。
+6. 证伪条件只列收入与扣非利润、经营现金流、品牌定价能力、渠道库存和股东回报政策。
+7. 禁止加入期权、技术指标、具体买入价、仓位建议或短线交易策略。
+8. 不要输出CIO签发、Executive Summary、完整研报或重复风险免责声明。
+"""
+    try:
+        response = llm.invoke(prompt)
+        answer = str(getattr(response, "content", response) or "").strip()
+    except Exception:
+        answer = ""
+    return answer if _is_valid_value_investing_response(answer) else fallback
+
+
+def _is_open_value_stock_selection_query(query: str) -> bool:
+    text = str(query or "").strip()
+    if not text or _is_excluded_valuation_query(text):
+        return False
+    has_selection_intent = (
+        classify_analysis_task_type(text).task_type == TASK_TYPE_STOCK_SELECTION
+        or _contains_any_ci(text, STOCK_SELECTION_QUERY_KEYWORDS)
+    )
+    has_value_intent = _contains_any_ci(
+        text, ["价值股", "价值股票", "价值投资标的", "低估股票", "低估值股票"]
+    )
+    return has_selection_intent and has_value_intent
+
+
+def _is_global_index_valuation_direct_query(query: str) -> bool:
+    text = str(query or "").strip()
+    if not _is_global_index_valuation_query(text):
+        return False
+    return not _contains_any_ci(text, VALUATION_DIRECT_ANALYSIS_BLOCKERS)
+
+
+def _enforce_valuation_routing(query: str, plan: List[str]) -> List[str]:
+    """Keep valuation data deterministic and reserve research for long-term claims."""
+    if _is_open_value_stock_selection_query(query):
+        return ["generalist"]
+    if _is_value_investing_analysis_query(query):
+        return ["researcher", "generalist"]
+    if _is_global_index_valuation_direct_query(query):
+        return ["monitor"]
+    if _is_securities_valuation_query(query):
+        return ["generalist"]
+    return list(plan or [])
 
 
 def _enforce_research_analyst_routing(query: str, plan: List[str]) -> List[str]:
@@ -848,6 +1136,13 @@ FINALIZER_BYPASS_SINGLE_AGENTS = {"monitor", "screener", "macro_analyst"}
 def _can_bypass_finalizer(state: AgentState) -> bool:
     plan = [str(step) for step in (state.get("plan") or []) if str(step).strip()]
     execution_batches = state.get("execution_batches") or _build_execution_batches(plan)
+    reports = state.get("agent_reports") or {}
+    if _is_value_investing_analysis_query(str(state.get("user_query", "") or "")):
+        return (
+            plan == ["researcher", "generalist"]
+            and bool(str(reports.get("researcher", "") or "").strip())
+            and bool(str(reports.get("generalist", "") or "").strip())
+        )
     if len(plan) != 1 or len(execution_batches) != 1 or len(execution_batches[0]) != 1:
         return False
 
@@ -855,7 +1150,6 @@ def _can_bypass_finalizer(state: AgentState) -> bool:
     if step not in FINALIZER_BYPASS_SINGLE_AGENTS:
         return False
 
-    reports = state.get("agent_reports") or {}
     return bool(str(reports.get(step, "") or "").strip())
 
 
@@ -2622,7 +2916,8 @@ def build_generalist_tools():
         get_option_oi_ranking, get_option_volume_abnormal, get_option_oi_abnormal,
         get_price_statistics, check_option_expiry_status, tool_stock_hedging_analysis,
         tool_futures_correlation_check, tool_stock_correlation_check, calculate_hedging_beta,
-        tool_get_retail_money_flow, draw_chart_tool, get_stock_valuation, tool_compare_stocks,
+        tool_get_retail_money_flow, draw_chart_tool, get_stock_valuation, get_global_index_valuation,
+        tool_compare_stocks,
         get_cn_margin_market_signal,
         get_futures_fund_flow, get_futures_fund_ranking, get_futures_margin_profile,
         get_futures_basis_profile, get_futures_inventory_receipt_profile, get_futures_delivery_tospot_profile,
@@ -2637,6 +2932,7 @@ def build_monitor_tools():
     return [
         tool_get_retail_money_flow,  # 股票行业资金
         get_cn_margin_market_signal,  # A股融资杠杆与风险偏好
+        get_global_index_valuation,  # 全球主要指数PE与历史分位
         get_futures_fund_flow,  # 期货资金流
         get_futures_fund_ranking,  # 期货沉淀资金排名
         get_futures_margin_profile,  # 保证金/合约乘数
@@ -3544,6 +3840,7 @@ def supervisor_node(state: AgentState, llm):
         is_followup=is_followup,
         recent_context="\n".join(part for part in (recent_context, followup_action_context, followup_route_context) if part),
     )
+    final_plan = _enforce_valuation_routing(query, final_plan)
     final_plan = _dedupe_plan(final_plan)
     locked_symbol, locked_symbol_name = _resolve_hybrid_background_subject_lock(
         query,
@@ -3632,6 +3929,27 @@ def generalist_node(state: AgentState, llm):
     current_date = datetime.now().strftime("%Y年%m月%d日 %A")
     context_payload = _state_context_payload(state)
     followup_context_block = render_agent_context(context_payload, target="generalist")
+    researcher_report = str((state.get("agent_reports") or {}).get("researcher", "") or "").strip()
+
+    if _is_open_value_stock_selection_query(query):
+        boundary_response = (
+            "【价值投资比较】\n"
+            "结论：当前没有完整的价值股基本面筛选器，不能把技术评分候选直接称为价值股。\n"
+            "请先指定市场或给出候选名单；我可以比较个股近10年PE/PB分位、股息率与对应指数估值环境，"
+            "再结合最新财报中的盈利、现金流和竞争力证据给出判断。"
+        )
+        return {"messages": [HumanMessage(content=boundary_response)], "chart_img": ""}
+
+    if _is_value_investing_analysis_query(query):
+        answer = _build_value_investing_answer(
+            state=state,
+            llm=llm,
+            researcher_report=researcher_report,
+        )
+        return {
+            "messages": [HumanMessage(content=f"【王牌分析】\n{answer}")],
+            "chart_img": "",
+        }
 
     if is_followup and not has_agent_context(context_payload):
         return {
@@ -3650,11 +3968,14 @@ def generalist_node(state: AgentState, llm):
         【连续追问模式】：{"是" if is_followup else "否"}。
         【历史承接上下文】：
         {followup_context_block}
+        【研究员已取得的最新财报证据】：
+        {researcher_report or "本轮暂无研究员报告；不得自行编造财报、盈利或现金流数据。"}
    
         
         【工具使用表】
-        1. **估值/便宜/贵吗/抄底** -> get_stock_valuation 
-        2. **对比/PK/谁强/选哪个** -> tool_compare_stocks (多股横评)
+        1. **A股个股估值/便宜/贵吗** -> get_stock_valuation
+        1.1 **全球指数、市场分组或ETF估值环境/PE分位/排名** -> get_global_index_valuation
+        2. **对比/PK/谁强/选哪个** -> tool_compare_stocks (多股横评)；如需历史位置，再逐一调用 get_stock_valuation
         3. **对冲/相关性/联动** -> tool_stock_correlation_check
         4. **历史统计价格** -> get_price_statistics
         5. **画图/走势图** -> draw_chart_tool
@@ -3699,6 +4020,14 @@ def generalist_node(state: AgentState, llm):
         7. 用户问“波动率背离/IV背离/价格和IV背离”时，必须调用 scan_volatility_divergence；禁止用 scan_iv_change_ranking 替代背离判断。
         8. 用户问美股/美股ETF期权（如 SPY、QQQ、NVDA、TSLA、AAPL）的skew、0DTE、Put/Call、OI防线、期限结构、IV Rank时，才可调用 get_us_option_market_profile；其他期权市场禁止调用该工具。
         9. 用户问美股/美股ETF期权策略执行、行权价、权利金、双卖/铁鹰/信用价差候选时，必须调用 get_us_option_strategy_candidates；缺候选时只能给筛选条件和风险框架。
+        10. 用户问已点名公司是否适合价值投资、长期持有或安全边际时：
+            - 必须调用 get_stock_valuation 查询个股自身估值；
+            - 必须调用 get_global_index_valuation 查询对应市场和风格指数环境；
+            - 必须引用上方研究员取得的最新盈利、现金流与竞争力证据；若缺失就明确数据缺口；
+            - 回答顺序固定为“个股估值 -> 指数环境 -> 基本面证据 -> 风险边界”。
+        10.1 美股或港股个股若缺少本地个股历史估值，必须明确该数据缺口，并调用 get_global_index_valuation 提供对应市场指数环境；禁止用模型记忆补个股PE/PB。
+        11. 跨指数只能按各自历史PE分位比较，不得按原始PE直接判定哪个市场更便宜。
+        12. 历史低位不等于内在价值低估，历史高位也不单独构成卖出理由；不得只凭PE/PB给出买卖结论。
         """
 
     if wants_chart:
@@ -4008,6 +4337,12 @@ def _try_monitor_direct_data_query(query: str, *, symbol: str = "") -> str | Non
             {"as_of_date": _extract_cn_margin_as_of_date(text)},
         )
 
+    if _is_global_index_valuation_direct_query(text):
+        return _invoke_monitor_direct_tool(
+            get_global_index_valuation,
+            {"query": text, "as_of_date": _extract_cn_margin_as_of_date(text)},
+        )
+
     if _has_monitor_direct_data_blocker(text):
         return None
 
@@ -4139,6 +4474,15 @@ def monitor_node(state: AgentState, llm):
        - 若工具标记数据陈旧或样本不足，必须明确降级，不能继续给确定性融资结论。
        - 个股分析只有在用户明确问整体市场环境时才使用该工具，不把全市场融资状态当成个股基本面。
         """
+    index_valuation_context_instruction = ""
+    if _is_global_index_valuation_query(user_q):
+        index_valuation_context_instruction = """
+    12. 当前问题涉及全球股市指数PE或历史分位，必须调用 `get_global_index_valuation`：
+       - 只能引用工具返回的PE、各自历史分位、数据日期和质量状态。
+       - 跨指数按相对自身历史的PE分位排名，禁止按原始PE直接判断哪个市场更便宜。
+       - 数据陈旧的指数只作历史参考，不参与“当前最高/最低”的确定性结论。
+       - 只回答估值数据，不延伸为买卖建议。
+        """
 
     prompt = f"""
     你是一位追求效率的市场数据监控官**。。只负责查数据给结果。
@@ -4152,6 +4496,7 @@ def monitor_node(state: AgentState, llm):
     - 查价格与IV是否出现波动率背离 -> scan_volatility_divergence
     - 查股票行业资金 -> tool_get_retail_money_flow
     - 查A股融资余额、融资杠杆、两融资金及大盘/ETF市场环境 -> get_cn_margin_market_signal
+    - 查全球主要指数PE、历史分位及市场排名 -> get_global_index_valuation
     - 查某期货资金流动 -> get_futures_fund_flow
     - 查全部期货资金沉淀排名 -> get_futures_fund_ranking
     - 查期货保证金/合约乘数/资金占用 -> get_futures_margin_profile
@@ -4195,6 +4540,7 @@ def monitor_node(state: AgentState, llm):
     {pure_option_data_instruction}
     {volatility_market_view_instruction}
     {cn_margin_context_instruction}
+    {index_valuation_context_instruction}
     """
 
     # 3. 创建临时 Agent (ReAct 模式)
@@ -4734,6 +5080,16 @@ def _researcher_node_impl(state: AgentState,llm=None):
     current_date = datetime.now().strftime("%Y年%m月%d日 %A")
     if _is_link_article_stock_mapping_task(query):
         return _answer_link_article_stock_mapping(state, llm)
+
+    if _is_value_investing_analysis_query(query):
+        snapshot = build_latest_a_share_filing_snapshot(query)
+        return {
+            "messages": [
+                HumanMessage(
+                    content=f"【情报与舆情】\n{snapshot.get('report', '')}"
+                )
+            ]
+        }
 
     if _is_recent_company_news_query(query):
         subject = _extract_recent_company_subject(query, symbol=symbol, symbol_name=symbol_name)
