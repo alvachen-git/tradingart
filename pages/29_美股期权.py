@@ -2814,11 +2814,11 @@ def _format_trade_date_label(value: Any) -> str | None:
         return None
     compact = text.replace("-", "").replace("/", "")
     if len(compact) == 8 and compact.isdigit():
-        return f"{compact[:4]}/{compact[4:6]}/{compact[6:]}"
+        return f"{compact[4:6]}/{compact[6:]}"
     parsed = pd.to_datetime(text, errors="coerce")
     if pd.isna(parsed):
         return text
-    return parsed.strftime("%Y/%m/%d")
+    return parsed.strftime("%m/%d")
 
 
 def _relative_trade_date_label(prefix: str, value: Any) -> str:
@@ -2837,11 +2837,7 @@ def _volatility_cone_subtitle(
     today_trade_date: Any = None,
     previous_trade_date: Any = None,
 ) -> str:
-    sample_days = _cone_history_sample_days(cone_df)
-    comparison = _volatility_cone_comparison_label(today_trade_date, previous_trade_date)
-    if sample_days <= 0:
-        return comparison
-    return f"历史样本 {sample_days}/252 + {comparison}"
+    return _volatility_cone_comparison_label(today_trade_date, previous_trade_date)
 
 
 def _otm_curve_valid_points(curve_df: pd.DataFrame) -> int:
@@ -3016,12 +3012,8 @@ def _build_volatility_cone_figure(
                 hovertemplate="DTE %{x}<br>中位数 %{y:.2f}%<extra></extra>",
             )
         )
-        if muted_history:
-            _add_chart_note(fig, f"历史样本 {sample_days}/252：分位锥仅供参考")
-    elif sample_days > 0:
-        _add_empty_chart_annotation(fig, f"历史样本 {sample_days}/252：先显示{comparison_label}曲线")
     else:
-        _add_empty_chart_annotation(fig, f"历史样本不足：先显示{comparison_label}曲线")
+        _add_empty_chart_annotation(fig, f"显示{comparison_label}曲线")
     _add_cone_line(
         fig,
         previous_line,
