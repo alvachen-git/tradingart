@@ -2808,11 +2808,40 @@ def _cone_history_sample_days(cone_df: pd.DataFrame) -> int:
     return int(counts.min())
 
 
-def _volatility_cone_subtitle(cone_df: pd.DataFrame) -> str:
+def _format_trade_date_label(value: Any) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    compact = text.replace("-", "").replace("/", "")
+    if len(compact) == 8 and compact.isdigit():
+        return f"{compact[:4]}/{compact[4:6]}/{compact[6:]}"
+    parsed = pd.to_datetime(text, errors="coerce")
+    if pd.isna(parsed):
+        return text
+    return parsed.strftime("%Y/%m/%d")
+
+
+def _relative_trade_date_label(prefix: str, value: Any) -> str:
+    date_label = _format_trade_date_label(value)
+    return f"{prefix} {date_label}" if date_label else prefix
+
+
+def _volatility_cone_comparison_label(today_trade_date: Any = None, previous_trade_date: Any = None) -> str:
+    today_label = _relative_trade_date_label("今日", today_trade_date)
+    previous_label = _relative_trade_date_label("昨日", previous_trade_date)
+    return f"{today_label} / {previous_label}"
+
+
+def _volatility_cone_subtitle(
+    cone_df: pd.DataFrame,
+    today_trade_date: Any = None,
+    previous_trade_date: Any = None,
+) -> str:
     sample_days = _cone_history_sample_days(cone_df)
+    comparison = _volatility_cone_comparison_label(today_trade_date, previous_trade_date)
     if sample_days <= 0:
-        return "今日/昨日"
-    return f"历史样本 {sample_days}/252 + 今日/昨日"
+        return comparison
+    return f"历史样本 {sample_days}/252 + {comparison}"
 
 
 def _otm_curve_valid_points(curve_df: pd.DataFrame) -> int:
@@ -2879,7 +2908,15 @@ def _render_delta_skew_summary(curve_df: pd.DataFrame) -> None:
     )
 
 
-def _add_cone_line(fig: go.Figure, line_df: pd.DataFrame, *, name: str, color: str, dash: str = "solid") -> None:
+def _add_cone_line(
+    fig: go.Figure,
+    line_df: pd.DataFrame,
+    *,
+    name: str,
+    color: str,
+    dash: str = "solid",
+    trade_date: Any = None,
+) -> None:
     if line_df is None or line_df.empty:
         return
     line = line_df.copy()
@@ -2890,6 +2927,7 @@ def _add_cone_line(fig: go.Figure, line_df: pd.DataFrame, *, name: str, color: s
         return
     custom = pd.DataFrame(
         {
+            "trade_date": pd.Series([_format_trade_date_label(trade_date) or "-"] * len(line)),
             "expiration": line.get("expiration_date", pd.Series(["-"] * len(line))).fillna("-").astype(str),
             "actual_dte": pd.to_numeric(line.get("dte"), errors="coerce"),
         }
@@ -2904,10 +2942,11 @@ def _add_cone_line(fig: go.Figure, line_df: pd.DataFrame, *, name: str, color: s
             line=dict(color=color, width=2.4, dash=dash),
             marker=dict(size=6, color=color),
             hovertemplate=(
+                "数据日 %{customdata[0]}<br>"
                 "目标DTE %{x}<br>"
                 "IV %{y:.2f}%<br>"
-                "实际DTE %{customdata[1]:.0f}<br>"
-                "到期 %{customdata[0]}<extra></extra>"
+                "实际DTE %{customdata[2]:.0f}<br>"
+                "到期 %{customdata[1]}<extra></extra>"
             ),
         )
     )
@@ -2918,8 +2957,11 @@ def _build_volatility_cone_figure(
     today_line: pd.DataFrame,
     previous_line: pd.DataFrame,
     chart_id: str,
+    today_trade_date: Any = None,
+    previous_trade_date: Any = None,
 ) -> go.Figure:
     fig = go.Figure()
+    comparison_label = _volatility_cone_comparison_label(today_trade_date, previous_trade_date)
     cone = cone_df.copy() if cone_df is not None else pd.DataFrame()
     sample_days = _cone_history_sample_days(cone)
     show_history_bands = sample_days >= 20
@@ -2977,11 +3019,24 @@ def _build_volatility_cone_figure(
         if muted_history:
             _add_chart_note(fig, f"历史样本 {sample_days}/252：分位锥仅供参考")
     elif sample_days > 0:
-        _add_empty_chart_annotation(fig, f"历史样本 {sample_days}/252：先显示今日/昨日曲线")
+        _add_empty_chart_annotation(fig, f"历史样本 {sample_days}/252：先显示{comparison_label}曲线")
     else:
-        _add_empty_chart_annotation(fig, "历史样本不足：先显示今日/昨日曲线")
-    _add_cone_line(fig, previous_line, name="昨日", color=PREVIOUS_LINE_COLOR, dash="dash")
-    _add_cone_line(fig, today_line, name="今日", color=TODAY_LINE_COLOR)
+        _add_empty_chart_annotation(fig, f"历史样本不足：先显示{comparison_label}曲线")
+    _add_cone_line(
+        fig,
+        previous_line,
+        name=_relative_trade_date_label("昨日", previous_trade_date),
+        color=PREVIOUS_LINE_COLOR,
+        dash="dash",
+        trade_date=previous_trade_date,
+    )
+    _add_cone_line(
+        fig,
+        today_line,
+        name=_relative_trade_date_label("今日", today_trade_date),
+        color=TODAY_LINE_COLOR,
+        trade_date=today_trade_date,
+    )
     fig.update_layout(
         height=320,
         template="plotly_white",
@@ -4525,7 +4580,7 @@ elif active_view == "波动率曲面":
     previous_cone_line = surface_payload.get("previous_cone_line", pd.DataFrame())
     today_otm_curve = surface_payload.get("today_otm_curve", pd.DataFrame())
     previous_otm_curve = surface_payload.get("previous_otm_curve", pd.DataFrame())
-    cone_subtitle = escape(_volatility_cone_subtitle(cone_history))
+    cone_subtitle = escape(_volatility_cone_subtitle(cone_history, trade_date, previous_trade_date))
     curve_subtitle = escape(_otm_curve_subtitle(today_otm_curve, previous_otm_curve))
     c1, c2 = st.columns([1, 1], gap="small")
     with c1:
@@ -4534,7 +4589,14 @@ elif active_view == "波动率曲面":
             unsafe_allow_html=True,
         )
         st.plotly_chart(
-            _build_volatility_cone_figure(cone_history, today_cone_line, previous_cone_line, "vol_cone"),
+            _build_volatility_cone_figure(
+                cone_history,
+                today_cone_line,
+                previous_cone_line,
+                "vol_cone",
+                today_trade_date=trade_date,
+                previous_trade_date=previous_trade_date,
+            ),
             width="stretch",
             config={"displaylogo": False},
             key=f"vol_cone_{symbol}_{trade_date}_{previous_trade_date or 'none'}_{table_label}",
